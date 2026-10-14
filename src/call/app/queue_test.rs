@@ -2040,6 +2040,7 @@ mod tests {
     /// hook invocations for assertions.
     struct HookRecordingRegistry {
         inner: crate::call::app::agent_registry::memory::MemoryRegistry,
+        ring_timeout: Option<Duration>,
         escalation_calls: std::sync::Mutex<Vec<(String, Vec<String>, bool)>>,
         /// `include_primary` flag of each resolve_escalation_targets call
         /// (same order as `escalation_calls`).
@@ -2072,6 +2073,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
+                ring_timeout: None,
                 escalation_calls: std::sync::Mutex::new(Vec::new()),
                 escalation_include_primary: std::sync::Mutex::new(Vec::new()),
                 group_switches: std::sync::Mutex::new(Vec::new()),
@@ -2112,6 +2114,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentRegistry for HookRecordingRegistry {
+        fn agent_ring_timeout(&self) -> Option<Duration> {
+            self.ring_timeout
+        }
+
         async fn register(
             &self,
             agent_id: String,
@@ -2494,6 +2500,41 @@ mod tests {
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_escalation_grace_uses_registry_ring_timeout() {
+        for backend_timeout in [None, Some(Duration::from_millis(600))] {
+            let mut config = build_simple_queue_config();
+            config.ring_timeout = Some(Duration::from_millis(100));
+            config.max_wait_secs = 999;
+            let mut registry = HookRecordingRegistry::new();
+            registry.ring_timeout = backend_timeout;
+            let mut queue = QueueApp::new(config.to_plan(), config)
+                .with_agent_registry(Arc::new(registry));
+            queue.escalated_groups = vec!["overflow".into()];
+            let mut stack = MockCallStack::run(Box::new(queue), "caller", "support");
+            stack.enter().await;
+            stack.assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+            stack.drain_cmds();
+            stack.timeout("max_wait_timeout");
+            let started = Instant::now();
+            loop {
+                if matches!(stack.next_cmd(1500).await, Some(CallCommand::Hangup { .. })) {
+                    break;
+                }
+                assert!(started.elapsed() < Duration::from_secs(2), "grace must eventually fall back");
+            }
+            if backend_timeout.is_some() {
+                assert!(started.elapsed() >= Duration::from_millis(500),
+                    "the route timeout must not cut short the backend ring window");
+            } else {
+                assert!(started.elapsed() < Duration::from_millis(500),
+                    "a backend without a timeout must retain the route window");
+            }
+            stack.cancel();
+            let _ = stack.join().await;
+        }
     }
 
     /// `next_escalation_check_delay` clamps long thresholds to the 10s

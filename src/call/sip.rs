@@ -5,6 +5,61 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+pub(crate) const CALL_LEG_EVENT_CT: &str = "application/call-leg-event+json";
+
+/// The capability is carried in the offer, so pager events remain call-bound after CANCEL.
+pub(crate) fn ring_timeout_offer(headers: &[rsipstack::sip::Header]) -> Option<String> {
+    headers.iter().find_map(|header| {
+        if !header.name().eq_ignore_ascii_case("Call-Info") {
+            return None;
+        }
+        let (uri, purpose) = header.value().split_once(';')?;
+        let uri = uri.trim().strip_prefix('<')?.strip_suffix('>')?;
+        (purpose.trim() == "purpose=ring-timeout" && uri.starts_with("urn:uuid:"))
+            .then(|| uri.to_string())
+    })
+}
+
+pub(crate) fn send_call_leg_event(
+    dialog_layer: &DialogLayer,
+    endpoint: Arc<rsipstack::transaction::endpoint::EndpointInner>,
+    mut offer: Box<rsipstack::dialog::invitation::InviteOption>,
+    body: Vec<u8>,
+) -> anyhow::Result<()> {
+    use rsipstack::sip::{HeadersExt, ToTypedHeader};
+    use rsipstack::transaction::{
+        key::{TransactionKey, TransactionRole},
+        transaction::Transaction,
+    };
+    offer.call_id = Some(uuid::Uuid::new_v4().to_string());
+    offer.content_type = Some(CALL_LEG_EVENT_CT.into());
+    let mut request = dialog_layer.make_invite_request(&offer)?;
+    request.body = body;
+    request.method = rsipstack::sip::Method::Message;
+    let mut cseq = request.cseq_header()?.typed()?;
+    cseq.method = rsipstack::sip::Method::Message;
+    request.headers.unique_push(cseq.into());
+    let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
+    let mut tx = Transaction::new_client(key, request, endpoint, None);
+    tx.destination = offer.destination;
+    // A pager transaction still reaches the phone after CANCEL. Never delay teardown
+    // waiting for its response, and retain the stack's normal transaction retry policy.
+    crate::utils::spawn(async move {
+        if let Err(error) = tx.send().await {
+            warn!(%error, "Ring timeout notification send failed");
+            return;
+        }
+        while let Some(message) = tx.receive().await {
+            if let rsipstack::sip::SipMessage::Response(response) = message {
+                if response.status_code.code() >= 200 {
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
 pub struct DialogStateReceiverGuard {
     pub(super) dialog_layer: Arc<DialogLayer>,
     pub(super) receiver: Option<DialogStateReceiver>,

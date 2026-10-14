@@ -18,7 +18,7 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
+use super::agent_registry::{AgentRegistry, AgentRingPolicy, PresenceState, RoutingStrategy};
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
@@ -431,6 +431,7 @@ pub struct QueueApp {
     plan: QueuePlan,
     /// Extended queue configuration.
     config: QueueConfig,
+    ring_policy: Option<AgentRingPolicy>,
     /// Current state machine state.
     state: QueueState,
     /// Current hold music playback handle (if any).
@@ -545,6 +546,7 @@ impl QueueApp {
         Self {
             plan,
             config,
+            ring_policy: None,
             state: QueueState::Init,
             hold_playback: None,
             answered: false,
@@ -589,10 +591,6 @@ impl QueueApp {
 
     /// Set the AgentRegistry for dynamic routing.
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentRegistry>) -> Self {
-        if let Some(timeout) = registry.agent_ring_timeout() {
-            self.config.ring_timeout = Some(timeout);
-            self.plan.ring_timeout = Some(timeout);
-        }
         self.agent_registry = Some(registry);
         self
     }
@@ -1290,7 +1288,29 @@ impl QueueApp {
     /// Locations already enriched (plan / dynamic lists) pass through
     /// unchanged; raw-URI dials (escalation `dial_agents`, autonomous
     /// auto-select, overflow) are enriched on the fly.
-    async fn leg_headers_for(&self, uri: &str) -> Vec<rsipstack::sip::Header> {
+    async fn leg_headers_for(&mut self, uri: &str) -> Vec<rsipstack::sip::Header> {
+        if self.pending_agents.is_empty() {
+            self.ring_policy = self.agent_registry.as_ref()
+                .and_then(|registry| registry.agent_ring_policy());
+        }
+        let mut headers = self.enriched_leg_headers_for(uri).await;
+        // Only the backend's explicit client mode opts an offer into expiry events.
+        headers.retain(|header| {
+            crate::call::sip::ring_timeout_offer(std::slice::from_ref(header)).is_none()
+        });
+        if let Some(policy) = self.ring_policy.as_ref().filter(|policy| !policy.server_owned)
+            && let Some(registry) = &self.agent_registry
+            && let Some(token) = registry.prepare_client_ring_offer(uri, &self.call_id, policy).await
+        {
+            headers.push(rsipstack::sip::Header::Other(
+                "Call-Info".into(),
+                format!("<{token}>;purpose=ring-timeout"),
+            ));
+        }
+        headers
+    }
+
+    async fn enriched_leg_headers_for(&self, uri: &str) -> Vec<rsipstack::sip::Header> {
         if let Some(loc) = self
             .get_agents()
             .into_iter()
@@ -1421,10 +1441,22 @@ impl QueueApp {
         Ok(())
     }
 
+    fn effective_ring_timeout(&self) -> Duration {
+        if !self.pending_agents.is_empty() && let Some(policy) = &self.ring_policy {
+            return policy.timeout;
+        }
+        let route_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
+        // CC supplies one configured timeout in either execution mode; other backends keep the route.
+        self
+            .agent_registry
+            .as_ref()
+            .and_then(|registry| registry.agent_ring_timeout())
+            .unwrap_or(route_timeout)
+    }
+
     /// Arm the per-agent ring timeout (default 30s).
     fn arm_ring_timeout(&self, ctrl: &mut CallController) {
-        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
-        ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+        ctrl.set_timeout("agent_ring_timeout", self.effective_ring_timeout());
     }
 
     /// Announce queue position.
@@ -2961,7 +2993,7 @@ impl CallApp for QueueApp {
                         // Idle). `release_call` then only mops up an exotic
                         // phantom `Busy` (it no-ops once the agent is Idle).
                         registry
-                            .note_agent_no_answer(&agent_id, &self.call_id)
+                            .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
                             .await;
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
                     }
@@ -3031,6 +3063,12 @@ impl CallApp for QueueApp {
                     self.timed_out_legs.insert(leg_id.clone());
                 }
                 if !timed_out_legs.is_empty() {
+                    if let Some(registry) = &self.agent_registry {
+                        // Arm acknowledgement before CANCEL can deliver the expiry event.
+                        for (uri, _) in &timed_out_agents {
+                            registry.expire_client_ring_offer(uri, &self.call_id).await;
+                        }
+                    }
                     info!(
                         legs = ?timed_out_legs,
                         "Queue: cancelling agent legs after ring timeout"
@@ -3049,7 +3087,7 @@ impl CallApp for QueueApp {
                                 extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
                             });
                         let _ = registry
-                            .note_agent_no_answer(&agent_id, &self.call_id)
+                            .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
                             .await;
 
                         ctrl.notify_event(
@@ -3105,7 +3143,7 @@ impl CallApp for QueueApp {
                     // the caller mid-ring. One-shot: without the flag the
                     // handler would re-grant the grace forever.
                     self.max_wait_grace_used = true;
-                    let grace = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
+                    let grace = self.effective_ring_timeout();
                     debug!(
                         queue = %self.config.name,
                         grace = grace.as_secs(),

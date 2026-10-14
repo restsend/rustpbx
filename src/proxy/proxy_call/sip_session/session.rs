@@ -18,6 +18,9 @@ const RECORDING_STOP_ATTEMPTS: usize = 3;
 const RECORDING_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RECORDING_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Default)]
+struct RingTimeoutNotifications(HashMap<LegId, Box<rsipstack::dialog::invitation::InviteOption>>);
+
 /// Merge routed application parameters with caller-provided Step-IVR variables.
 fn merge_ivr_exec_app_params(
     base_params: Option<serde_json::Value>,
@@ -4090,6 +4093,20 @@ impl SipSession {
             );
         }
 
+        // The offer capability must survive a trusted home-proxy hop even
+        // when ordinary trunk headers are not passed through.
+        if Self::from_cluster_peer(&self.server, &self.context.cookie) {
+            if let Some(token) = crate::call::sip::ring_timeout_offer(
+                &self.context.dialplan.original.headers.0,
+            ) {
+                if crate::call::sip::ring_timeout_offer(&headers).is_none() {
+                    headers.push(rsipstack::sip::Header::Other(
+                        "Call-Info".into(),
+                        format!("<{token}>;purpose=ring-timeout"),
+                    ));
+                }
+            }
+        }
         let passthrough_rule = match self.context.dialplan.header_passthrough.clone() {
             Some(rule) => Some(rule),
             None => {
@@ -13209,6 +13226,9 @@ impl SipSession {
                 answer_sdp,
                 dialog_id,
             } => {
+                if let Some(notifications) = self.extensions.write().get_mut::<RingTimeoutNotifications>() {
+                    notifications.0.remove(&leg_id);
+                }
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
                 if !self.legs.contains_key(&leg_id) {
                     // The dial task can receive 200 OK and queue LegConnected
@@ -13540,6 +13560,9 @@ impl SipSession {
                     CallCommand::LegEnded { leg_id, reason } => (leg_id, reason, false),
                     _ => unreachable!(),
                 };
+                if let Some(notifications) = self.extensions.write().get_mut::<RingTimeoutNotifications>() {
+                    notifications.0.remove(&leg_id);
+                }
                 if failed {
                     warn!(%leg_id, %reason, "Leg failed async notification");
                 } else {
@@ -14945,6 +14968,17 @@ impl SipSession {
         leg_id: LegId,
         reason: Option<String>,
     ) -> Result<()> {
+        let notification = self.extensions.write().get_mut::<RingTimeoutNotifications>()
+            .and_then(|notifications| notifications.0.remove(&leg_id));
+        if let Some(offer) = notification {
+            if reason.as_deref() == Some("ring_timeout") && self.legs.get(&leg_id).is_some_and(|leg| {
+                matches!(leg.state, LegState::Initializing | LegState::Ringing | LegState::EarlyMedia)
+            }) {
+                if let Err(error) = self.send_ring_timeout_notification(offer) {
+                    warn!(%leg_id, %error, "Failed to send ring timeout notification");
+                }
+            }
+        }
         // Per-leg `call_hangup` for a leg that NEVER connected and is being
         // cancelled in-setup (queue ring timeout, escalation stage switch,
         // superseded parallel dial): the miss carries its own leg-scoped
@@ -15225,6 +15259,14 @@ impl SipSession {
             session_id: self.session_id_for_outgoing_leg(),
             ..Default::default()
         };
+        if crate::call::sip::ring_timeout_offer(invite_option.headers.as_deref().unwrap_or_default()).is_some() {
+            let mut notification = Box::new(invite_option.clone());
+            notification.offer = None;
+            // Keep optional metadata in the existing extension bag; normal sessions
+            // retain their layout and large async call paths do not carry an INVITE value.
+            self.extensions.write().get_or_insert_default::<RingTimeoutNotifications>()
+                .0.insert(leg_id.clone(), notification);
+        }
 
         // B-leg SIP destination for the CDR `calleePeer` field (see
         // build_target_invite_option; last dial wins). Bare `ip:port`;
@@ -16185,6 +16227,23 @@ impl SipSession {
 
     async fn handle_unmute_track(&mut self, track_id: String) -> Result<()> {
         self.set_track_muted(track_id, false).await
+    }
+
+    fn send_ring_timeout_notification(
+        &self,
+        offer: Box<rsipstack::dialog::invitation::InviteOption>,
+    ) -> Result<()> {
+        let token = crate::call::sip::ring_timeout_offer(offer.headers.as_deref().unwrap_or_default())
+            .ok_or_else(|| anyhow!("Missing ring timeout offer"))?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "event": "ring_timeout", "call_id": offer.call_id, "offer": token,
+        }))?;
+        crate::call::sip::send_call_leg_event(
+            &self.server.dialog_layer,
+            self.server.endpoint.inner.clone(),
+            offer,
+            body,
+        )
     }
 
     async fn handle_send_sip_message(&mut self, content_type: String, body: String) -> Result<()> {

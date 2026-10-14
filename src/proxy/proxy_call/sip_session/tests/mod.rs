@@ -344,6 +344,120 @@ async fn ivr_exec_test_session(
 }
 
 #[tokio::test]
+async fn peer_ring_timeout_offer_survives_terminal_invite_without_trunk_passthrough() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    for trusted in [true, false] {
+        let (mut server, _) = create_test_server().await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.44".parse().unwrap()];
+        let mut request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "example.test", None);
+        request.headers.push(rsipstack::sip::Header::Other(
+            "Call-Info".into(), "<urn:uuid:offer-a>;purpose=ring-timeout".into(),
+        ));
+        let dialplan = Dialplan::new("peer-offer".into(), request, DialDirection::Inbound)
+            .with_caller("sip:caller@example.test".parse().unwrap());
+        let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+        session.context.cookie.insert_extension(crate::call::CallerPeerContext(
+            if trusted { "192.0.2.44:5060" } else { "198.51.100.88:5060" }.into(),
+        ));
+        let target = crate::call::Location {
+            aor: "sip:agent@example.test".parse().unwrap(),
+            ..Default::default()
+        };
+        let (invite, _, _) = session.build_target_invite_option(&target, None, None).await.unwrap();
+        assert_eq!(
+            crate::call::sip::ring_timeout_offer(invite.headers.as_deref().unwrap_or_default()),
+            trusted.then(|| "urn:uuid:offer-a".to_string()),
+            "only a trusted home-proxy hop may retain the offer capability",
+        );
+    }
+}
+
+#[tokio::test]
+async fn ring_timeout_notifies_the_offered_leg_before_answer() {
+    use rsipstack::sip::{HeadersExt, Method, SipMessage};
+    use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+    let (mut session, _commands) = ivr_exec_test_session("ring-timeout-notification").await;
+    let endpoint = session.server.endpoint.inner.clone();
+    for addr in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&addr);
+    }
+    let mut local =
+        SipAddr::try_from(&"sip:127.0.0.1:5060".parse::<rsipstack::sip::Uri>().unwrap()).unwrap();
+    let mut target =
+        SipAddr::try_from(&"sip:127.0.0.1:5070".parse::<rsipstack::sip::Uri>().unwrap()).unwrap();
+    local.r#type = Some(rsipstack::sip::Transport::Udp);
+    target.r#type = Some(rsipstack::sip::Transport::Udp);
+    let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+    let channel = ChannelConnection::create_connection(incoming_rx, outgoing, local, None)
+        .await
+        .unwrap();
+    endpoint.transport_layer.add_transport(channel.into());
+    let leg = LegId::from("unanswered-agent");
+    session
+        .legs
+        .insert(leg.clone(), crate::call::domain::Leg::new(leg.clone()));
+    let location = crate::call::Location {
+        aor: "sip:agent@127.0.0.1:5070".parse().unwrap(),
+        destination: Some(target.clone()),
+        headers: Some(vec![rsipstack::sip::Header::Other(
+            "Call-Info".into(),
+            "<urn:uuid:offer-a>;purpose=ring-timeout".into(),
+        )]),
+        ..Default::default()
+    };
+    session
+        .initiate_sip_leg(&leg, location, Some(crate::call::domain::LegPurpose::Agent))
+        .await
+        .unwrap();
+    let invite = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                outgoing_rx.recv().await
+            {
+                if request.method == Method::Invite {
+                    break request;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        session.legs.get_dialog(&leg).is_none(),
+        "notification must work before a dialog is attached"
+    );
+    session
+        .handle_remove_leg(leg.clone(), Some("ring_timeout".into()))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                outgoing_rx.recv().await
+            {
+                if request.method == Method::Message {
+                    break request;
+                }
+            }
+        }
+    })
+    .await
+    .expect("ring timeout must reach the client even before answer");
+    let event: serde_json::Value = serde_json::from_slice(&message.body).unwrap();
+    assert_eq!(message.uri, invite.uri);
+    assert_ne!(
+        message.call_id_header().unwrap().value(),
+        invite.call_id_header().unwrap().value()
+    );
+    assert_eq!(event["call_id"], invite.call_id_header().unwrap().value());
+    assert_eq!(event["offer"], "urn:uuid:offer-a");
+    assert_eq!(event["event"], "ring_timeout");
+}
+
+#[tokio::test]
 async fn ivr_exec_enqueue_failure_returns_error_and_releases_invocation() {
     use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
     let (mut session, cmd_rx) = ivr_exec_test_session("ivr-exec-enqueue-failure").await;

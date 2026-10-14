@@ -120,6 +120,14 @@ impl PresenceState {
 // Agent Record
 // ===================================================================
 
+/// The policy for one offered ring; later configuration changes affect new offers.
+#[derive(Debug, Clone)]
+pub struct AgentRingPolicy {
+    pub timeout: Duration,
+    pub server_owned: bool,
+    pub no_answer_state: PresenceState,
+}
+
 /// Complete agent information stored in registry
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
@@ -206,6 +214,10 @@ pub trait AgentRegistry: Send + Sync {
         None
     }
 
+    fn agent_ring_policy(&self) -> Option<AgentRingPolicy> {
+        None
+    }
+
     /// Register a new agent
     async fn register(
         &self,
@@ -253,6 +265,23 @@ pub trait AgentRegistry: Send + Sync {
             .update_presence(agent_id, PresenceState::Idle)
             .await;
     }
+
+    async fn note_agent_no_answer_with_policy(
+        &self,
+        agent_id: &str,
+        call_id: &str,
+        _policy: Option<&AgentRingPolicy>,
+    ) {
+        self.note_agent_no_answer(agent_id, call_id).await;
+    }
+
+    async fn prepare_client_ring_offer(
+        &self, _uri: &str, _call_id: &str, _policy: &AgentRingPolicy,
+    ) -> Option<String> {
+        None
+    }
+
+    async fn expire_client_ring_offer(&self, _uri: &str, _call_id: &str) {}
 
     /// Find available agents matching criteria
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord>;
