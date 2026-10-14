@@ -507,6 +507,9 @@ impl LegInner {
             cfg.relay_ready_timeout,
             recorder_sender,
         )?;
+        if cfg.quality_stats.enabled {
+            leg.tap.enable_audio_packet_samples();
+        }
         leg.egress.set_volume_stats(
             cfg.volume_stats.enabled,
             cfg.quality_stats.clone(),
@@ -602,8 +605,10 @@ impl LegInner {
             *self.advertised_addr.lock() = Some(addr);
         }
         debug!(
+            session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id,
-            sdp = ?sdp,
+            sdp_bytes = sdp.len(),
+            transport = ?self.pc.config().transport_mode,
             "leg SDP offer created",
         );
         Ok(sdp)
@@ -615,9 +620,11 @@ impl LegInner {
     /// refreshes the egress codec + DTMF payload types.
     pub async fn apply_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<String> {
         debug!(
+            session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id,
             sdp_type = ?sdp_type,
-            sdp = ?remote,
+            sdp_bytes = remote.len(),
+            transport = ?self.pc.config().transport_mode,
             "leg SDP applied",
         );
         let desc = SessionDescription::parse(sdp_type, remote)
@@ -812,7 +819,10 @@ impl LegInner {
             EgressSource::TranscodePeer { .. } => "transcode_peer",
             EgressSource::Inject { .. } => "inject",
         };
-        tracing::debug!(leg = %self.id, source = kind, "leg egress source switch");
+        tracing::debug!(
+            session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
+            leg = %self.id, source = kind, "leg egress source switch"
+        );
         let is_relay = matches!(&source, EgressSource::RewriteRelay { .. });
         if let Some(previous) = self.relay_arm_task.lock().take() {
             previous.abort();
@@ -866,7 +876,10 @@ impl LegInner {
                         )
                         .await
                         {
-                            tracing::warn!(leg = %leg_id, %error, "fast-path relay arming failed");
+                            tracing::warn!(
+                                session_id = %pc.config().label.as_deref().unwrap_or_default(),
+                                leg = %leg_id, %error, "fast-path relay arming failed"
+                            );
                             if let Some(cb) = on_arm_failed.as_ref() {
                                 cb();
                             }
@@ -1285,6 +1298,7 @@ async fn wait_and_arm_rewrite_relay(
                 )
             })??;
         tracing::debug!(
+            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
             leg = %leg,
             wait_ms = wait_started.elapsed().as_millis() as u64,
             "fast-path relay: WebRTC leg ready"
@@ -1302,6 +1316,7 @@ async fn wait_and_arm_rewrite_relay(
         let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
         audio_source.bridge_rewrite_rules_to(audio_target, options, rules.to_vec());
         debug!(
+            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
             leg = %leg,
             video = false,
             arm_ms = arm_started.elapsed().as_millis() as u64,
@@ -1324,6 +1339,8 @@ async fn wait_and_arm_rewrite_relay(
         // non-BUNDLE destination needs the optional video dispatch target.
         let destination_is_non_bundle = !Arc::ptr_eq(&audio_target, &video_target);
         debug!(
+            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
+            leg = %leg,
             source_bundle = true,
             destination_bundle = !destination_is_non_bundle,
             video_payload_types = ?video_payload_types,
@@ -1346,6 +1363,8 @@ async fn wait_and_arm_rewrite_relay(
                     .is_some_and(|pt| video_payload_types.contains(&pt))
             });
         debug!(
+            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
+            leg = %leg,
             source_bundle = false,
             destination_bundle = Arc::ptr_eq(&audio_target, &video_target),
             audio_rules = audio_rules.len(),
@@ -1357,6 +1376,7 @@ async fn wait_and_arm_rewrite_relay(
     }
 
     debug!(
+        session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
         leg = %leg,
         video = true,
         arm_ms = arm_started.elapsed().as_millis() as u64,
@@ -1858,7 +1878,11 @@ mod tests {
         use tracing::span::{Attributes, Id, Record};
         use tracing::{Event, Metadata, Subscriber};
         #[derive(Clone, Default)]
-        struct Logs(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+        struct Logs {
+            volume: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+            relay: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+            sdp: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+        }
         impl Subscriber for Logs {
             fn enabled(&self, _: &Metadata<'_>) -> bool { true }
             fn new_span(&self, _: &Attributes<'_>) -> Id { Id::from_u64(1) }
@@ -1877,12 +1901,22 @@ mod tests {
                 let mut fields = Fields::default();
                 event.record(&mut fields);
                 if fields.0.get("message").is_some_and(|message| message == "PCM egress volume window") {
-                    self.0.lock().push(fields.0);
+                    self.volume.lock().push(fields.0);
+                } else if fields.0.get("message").is_some_and(|message|
+                    message == "leg egress source switch" || message == "fast-path relay armed")
+                {
+                    self.relay.lock().push(fields.0);
+                } else if fields.0.get("message").is_some_and(|message|
+                    message == "leg SDP offer created" || message == "leg SDP applied")
+                {
+                    self.sdp.lock().push(fields.0);
                 }
             }
         }
         let logs = Logs::default();
-        let captured = logs.0.clone();
+        let captured = logs.volume.clone();
+        let relay_logs = logs.relay.clone();
+        let sdp_logs = logs.sdp.clone();
         let _subscriber = tracing::subscriber::set_default(logs);
         // Two RTP legs bound to ephemeral ports must construct and stop
         // without panicking. Uses the loopback PC (no real network needed for
@@ -1981,6 +2015,72 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2100)).await;
         assert_eq!(serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"], partial,
             "teardown must retain the actual short PCM window after the live window expires");
+
+        // Real SDP/UDP setup followed by relay activation: the exported
+        // routing events must be searchable by the configured call identity.
+        let relay_a = LegInner::new("caller", &cfg, None).unwrap();
+        let relay_b = LegInner::new("callee", &cfg, None).unwrap();
+        let offer = relay_a.create_offer().await.unwrap();
+        let answer = relay_b.answer(&offer).await.unwrap();
+        relay_a.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        relay_a.set_egress_source(EgressSource::RewriteRelay {
+            peer_pc: relay_b.pc().clone(), options: Default::default(), rules: Vec::new(),
+            video_payload_types: Vec::new(), on_arm_failed: None,
+        }).await.unwrap();
+        let rows = relay_logs.lock();
+        for message in ["leg egress source switch", "fast-path relay armed"] {
+            let row = rows.iter().rev().find(|row| row["message"] == message)
+                .expect("successful relay activation must emit its routing evidence");
+            assert_eq!(row.get("session_id").map(String::as_str), Some("pcm-session"),
+                "routing logs must carry the full call identity, not just caller/callee");
+            assert_eq!(row["leg"], "caller");
+        }
+        drop(rows);
+        relay_a.stop();
+        relay_b.stop();
+
+        // Exercise the actual SDP-producing/applying entrypoints with both
+        // credential-bearing transports, and inspect the emitted event fields.
+        for transport in [TransportMode::WebRtc, TransportMode::Srtp] {
+            let mut secure_cfg = LegConfig::rtp_pcmu();
+            secure_cfg.transport = transport;
+            secure_cfg.call_id = Some("secure-session".into());
+            secure_cfg.bind_ip = Some("127.0.0.1".into());
+            let offerer = LegInner::new("secure-caller", &secure_cfg, None).unwrap();
+            let answerer = LegInner::new("secure-callee", &secure_cfg, None).unwrap();
+            sdp_logs.lock().clear();
+            let offer = offerer.create_offer().await.unwrap();
+            let secrets: Vec<_> = offer
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("a=ice-pwd:").or_else(|| {
+                        line.strip_prefix("a=crypto:")?
+                            .split_once("inline:")
+                            .map(|(_, value)| value.split_whitespace().next().unwrap())
+                    })
+                })
+                .collect();
+            assert!(
+                !secrets.is_empty(),
+                "secure SDP must contain its generated credentials"
+            );
+            answerer.answer(&offer).await.unwrap();
+            let rows = sdp_logs.lock();
+            for message in ["leg SDP offer created", "leg SDP applied"] {
+                let row = rows.iter().find(|row| row["message"] == message).unwrap();
+                assert!(
+                    row.values()
+                        .all(|value| secrets.iter().all(|secret| !value.contains(secret))),
+                    "SDP diagnostic events must omit ICE passwords and SRTP key material"
+                );
+                assert_eq!(row["session_id"], "secure-session");
+                assert!(row["leg"].starts_with("secure-"));
+                assert!(row["sdp_bytes"].parse::<usize>().unwrap() > 0);
+            }
+            drop(rows);
+            offerer.stop();
+            answerer.stop();
+        }
     }
 
     #[test]

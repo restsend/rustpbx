@@ -1253,6 +1253,8 @@ struct LegQualityWindow {
     counter_resets: usize,
     egress_report: crate::quality_stats::ReportSummary,
     ingress_report: Option<IngressQualityWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_packet_samples: Option<crate::ingress_tap::AudioPacketSamples>,
 }
 
 #[derive(serde::Serialize)]
@@ -1275,6 +1277,7 @@ struct IngressSample {
 /// One leg's transport/tap/RTCP counters at a single sample point.
 #[derive(Debug, Clone, Default)]
 struct LegSample {
+    audio_packet_samples: Option<crate::ingress_tap::AudioPacketSamples>,
     ingress: u64,
     egress: u64,
     transport_rx: u64,
@@ -1333,6 +1336,7 @@ async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
         }
     }
     LegSample {
+        audio_packet_samples: tap.audio_packet_samples,
         ingress_quality,
         ingress_recovery: None,
         ingress: tap.ingress_packets,
@@ -1572,6 +1576,7 @@ fn spawn_bridge_stats_task(
                             let recovering = current.and_then(|sample| sample.ingress_recovery).is_some_and(|at|
                                 now.duration_since(at) < Duration::from_millis(config.window_ms));
                             Some(LegQualityWindow {
+                                audio_packet_samples: current.and_then(|sample| sample.audio_packet_samples.clone()),
                                 leg_id: id.clone(), side: if side == 0 { "caller" } else { "callee" },
                                 window_ms: summary.window_ms, observed_ms: summary.observed_ms,
                                 rx_packets_per_second: summary.rx_packets_per_second,
@@ -2246,8 +2251,10 @@ mod tests {
                     ] {
                         let mut settings = config.clone();
                         settings.enabled = enabled;
-                        let mut bridge = MediaBridge::new_with_quality_stats(name, settings);
+                        let mut bridge =
+                            MediaBridge::new_with_quality_stats(name, settings.clone());
                         let mut leg_config = LegConfig::rtp_pcmu();
+                        leg_config.quality_stats = settings;
                         leg_config.bind_ip = Some("127.0.0.1".to_string());
                         leg_config.external_ip = Some("127.0.0.1".to_string());
                         leg_config.enable_latching = false;
@@ -2268,18 +2275,27 @@ mod tests {
                             let remote_sender = remote.pc().get_transceivers()[0].sender().unwrap();
                             let mut rtcp = remote_sender.subscribe_rtcp();
                             leg.accept();
-                            remote.accept();
+                            // Keep paced peer audio gated: only the wire fixture below
+                            // should contribute to the ingress fingerprint samples.
                             let ingress_sender = remote_sender.clone();
                             let codec = remote_sender.params();
                             reports.push(tokio::spawn(async move {
                                 let transport = ingress_sender.transport().unwrap();
                                 for (delay, sequence) in [(0, 100), (1000, 102), (1250, 101)] {
                                     tokio::time::sleep(Duration::from_millis(delay)).await;
+                                    let mut payload = if codec.clock_rate == 8000 {
+                                        vec![0xff; 160]
+                                    } else {
+                                        vec![0xf8, 0xff, 0xfe]
+                                    };
+                                    if codec.clock_rate == 8000 && sequence == 101 {
+                                        payload[80] = 0x7f;
+                                    }
                                     transport.send_rtp(rustrtc::rtp::RtpPacket::new(
                                         rustrtc::rtp::RtpHeader::new(codec.payload_type, sequence,
                                             (sequence as u32 - 100) * codec.clock_rate / 50,
                                             ingress_sender.ssrc()),
-                                        if codec.clock_rate == 8000 { vec![0xff; 160] } else { vec![0xf8, 0xff, 0xfe] },
+                                        payload,
                                     )).await.unwrap();
                                 }
                             }));
@@ -2372,6 +2388,7 @@ mod tests {
             assert_eq!(per_call.len(), 2, "each call must retain both windows");
             assert!(per_call[1].0.duration_since(per_call[0].0) < Duration::from_millis(1900),
                 "the last report must survive closing before the next periodic window");
+            let mut fingerprints = std::collections::BTreeMap::new();
             for (_, _, stats) in &per_call {
                 assert!(!stats.contains('\n'), "quality stats must stay on one line");
                 let stats: serde_json::Value = serde_json::from_str(stats)
@@ -2383,6 +2400,50 @@ mod tests {
                 assert_eq!(legs.len(), if id == "enabled-a" { 2 } else { 1 });
                 assert_eq!(legs[0]["leg_id"], id);
                 assert_eq!(legs[0]["side"], "caller");
+                let packets = &legs[0]["audio_packet_samples"];
+                let received = packets["ingress"]
+                    .as_array()
+                    .expect("enabled diagnostics must retain real ingress packet metadata");
+                assert!(!received.is_empty(), "the peer delivered audio over UDP");
+                assert!(received.len() <= 4, "packet evidence must remain bounded");
+                for packet in received {
+                    assert_eq!(
+                        packet["payload_type"],
+                        if id == "enabled-a" { 0 } else { 111 }
+                    );
+                    assert!(packet["payload_bytes"].as_u64().unwrap() > 0);
+                    assert!(packet["ssrc"].as_u64().unwrap() > 0);
+                    assert!(packet["sequence"].as_u64().is_some());
+                    assert!(packet["timestamp"].as_u64().is_some());
+                    let hash = packet["payload_hash"]
+                        .as_str()
+                        .expect("payload fingerprint");
+                    assert_eq!(hash.len(), 16);
+                    assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                    fingerprints.insert(packet["sequence"].as_u64().unwrap(), hash.to_owned());
+                    assert!(
+                        packet.get("payload").is_none(),
+                        "audio bytes must not enter logs"
+                    );
+                }
+                if id == "enabled-a" {
+                    let sent = packets["egress_attempts"]
+                        .as_array()
+                        .expect("plaintext output samples must be identified as pre-send attempts");
+                    assert!(
+                        !sent.is_empty(),
+                        "the tone reached the egress observation point"
+                    );
+                    assert!(
+                        packets.get("egress").is_none(),
+                        "samples are not wire delivery acknowledgements"
+                    );
+                    assert!(sent.len() <= 4, "packet evidence must remain bounded");
+                    assert!(
+                        sent.iter()
+                            .all(|packet| packet["payload_type"] == 0 && packet["payload_bytes"] == 160)
+                    );
+                }
                 assert_eq!(legs[0]["egress_report"]["side"], "caller");
                 assert_eq!(legs[0]["egress_report"]["direction"], "egress");
                 let ingress = &legs[0]["ingress_report"];
@@ -2399,6 +2460,19 @@ mod tests {
                     assert!(legs[1]["egress_report"]["rtt_ms"].is_null());
                 }
                 assert!(stats["reports"][1]["rtt_ms"].is_null());
+            }
+            if id == "enabled-a" {
+                let same_payload_a = fingerprints.get(&100).expect("first wire fixture packet");
+                let same_payload_b = fingerprints.get(&102).expect("second wire fixture packet");
+                let changed_payload = fingerprints.get(&101).expect("changed wire fixture packet");
+                assert_eq!(
+                    same_payload_a, same_payload_b,
+                    "changing RTP sequence/timestamp must not change the payload fingerprint"
+                );
+                assert_ne!(
+                    same_payload_a, changed_payload,
+                    "changing a payload byte must change its diagnostic fingerprint"
+                );
             }
             let initial: serde_json::Value = serde_json::from_str(&per_call[0].2).unwrap();
             assert_eq!(initial["counter_resets"], 0,

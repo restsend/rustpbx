@@ -22,6 +22,8 @@
 //! allowing DTMF tones to be synthesized into WAV recordings. Video and unknown
 //! RTP payload types are excluded.
 
+use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -85,6 +87,30 @@ pub(crate) struct TapStats {
     pub ingress_packets: u64,
     pub egress_packets: u64,
     pub recording_queue_drops: u64,
+    pub audio_packet_samples: Option<AudioPacketSamples>,
+}
+
+const AUDIO_PACKET_SAMPLES: usize = 4;
+
+/// Bounded plaintext packet evidence, without retaining audio bytes.
+/// Payload hashes are comparable only within the same process/build.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct AudioPacketSample {
+    ssrc: u32,
+    payload_type: u8,
+    sequence: u16,
+    timestamp: u32,
+    payload_bytes: usize,
+    payload_hash: String,
+    peer_addr: std::net::SocketAddr,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct AudioPacketSamples {
+    ingress: VecDeque<AudioPacketSample>,
+    // The transport observer runs before SRTP protection and socket sending.
+    // These samples cannot establish wire delivery, even when hashes match.
+    egress_attempts: VecDeque<AudioPacketSample>,
 }
 
 /// Plaintext observer for one leg: stats + DTMF detection + recording.
@@ -96,6 +122,8 @@ pub struct IngressTap {
     // ── stats (lock-free) ────────────────────────────────────────────────
     ingress_packets: AtomicU64,
     egress_packets: AtomicU64,
+    audio_packet_samples_enabled: AtomicBool,
+    audio_packet_samples: Mutex<Option<AudioPacketSamples>>,
     /// Whether to keep populating `ingress_ssrc_pts` on the hot path. The map
     /// exists only to let the RTCP relay rewrite a WebRTC receiver's PLI/NACK
     /// back onto the peer's real sender SSRC; for plain RTP↔RTP bridges (no
@@ -150,6 +178,8 @@ impl IngressTap {
         let tap = Arc::new(Self {
             ingress_packets: AtomicU64::new(0),
             egress_packets: AtomicU64::new(0),
+            audio_packet_samples_enabled: AtomicBool::new(false),
+            audio_packet_samples: Mutex::new(None),
             track_ingress_ssrc_pts: AtomicBool::new(true),
             last_ingress_ssrc_pt: AtomicU64::new(u64::MAX),
             ingress_ssrc_pts: DashMap::new(),
@@ -161,6 +191,15 @@ impl IngressTap {
         });
         tap.set_audio_payload_types(audio_payload_types);
         tap
+    }
+
+    pub(crate) fn enable_audio_packet_samples(&self) {
+        *self.audio_packet_samples.lock() = Some(AudioPacketSamples {
+            ingress: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
+            egress_attempts: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
+        });
+        self.audio_packet_samples_enabled
+            .store(true, Ordering::Release);
     }
 
     /// Enable/disable hot-path SSRC→PT tracking (see `track_ingress_ssrc_pts`).
@@ -213,6 +252,7 @@ impl IngressTap {
                 .as_ref()
                 .map(|sender| sender.dropped_packets())
                 .unwrap_or(0),
+            audio_packet_samples: self.audio_packet_samples.lock().clone(),
         }
     }
 
@@ -273,6 +313,33 @@ impl IngressTap {
         // the destination leg and could poison this tap's deduplication state.
         // Raw telephone-event RTP in both directions still reaches the recorder.
         let pt = packet.header.payload_type;
+        if self.audio_packet_samples_enabled.load(Ordering::Acquire)
+            && self.is_audio_payload_type(pt)
+        {
+            // Compare payloads across this instance's ingress/egress boundaries;
+            // RTP headers legitimately change during relay. No decode or raw audio log.
+            let mut hash = DefaultHasher::new();
+            hash.write(&packet.payload);
+            let sample = AudioPacketSample {
+                ssrc: packet.header.ssrc,
+                payload_type: pt,
+                sequence: packet.header.sequence_number,
+                timestamp: packet.header.timestamp,
+                payload_bytes: packet.payload.len(),
+                payload_hash: format!("{:016x}", hash.finish()),
+                peer_addr,
+            };
+            if let Some(samples) = self.audio_packet_samples.lock().as_mut() {
+                let samples = match direction {
+                    PacketDirection::Ingress => &mut samples.ingress,
+                    PacketDirection::Egress => &mut samples.egress_attempts,
+                };
+                if samples.len() == AUDIO_PACKET_SAMPLES {
+                    samples.pop_front();
+                }
+                samples.push_back(sample);
+            }
+        }
         if direction == PacketDirection::Ingress && self.is_dtmf_payload_type(pt) {
             let payload_len = packet.payload.len();
             trace!(pt, len = payload_len, "tap: telephone-event packet");
