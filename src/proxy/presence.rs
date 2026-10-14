@@ -1636,26 +1636,11 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
                     _ if detail.is_empty() => Some("away".to_string()),
                     _ => Some(format!("away:{detail}")),
                 },
-                PresenceStatus::Offline => match state.offline_reason.as_deref() {
-                    // A stamped cause rides the note so subscribers — and
-                    // SIP captures — can tell WHY a user went offline.
-                    // Transport-closed IS the plain "offline" (its wire
-                    // reason is literally "offline"), so only the other
-                    // causes get a suffix: `offline:expired` (REGISTER TTL
-                    // lapsed), `offline:unregistered` (explicit expires=0).
-                    // Unstamped (client PUBLISH expires=0) keeps the
-                    // historical bare "offline" as well.
-                    Some(reason)
-                        if !reason.trim().is_empty() && reason.trim() != "offline" =>
-                    {
-                        Some(format!("offline:{reason}"))
-                    }
-                    _ => state
-                        .note
-                        .clone()
-                        .filter(|n| !n.trim().is_empty())
-                        .or_else(|| Some("offline".to_string())),
-                },
+                PresenceStatus::Offline => state
+                    .note
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .or_else(|| Some("offline".to_string())),
                 _ => state
                     .note
                     .clone()
@@ -2245,6 +2230,26 @@ mod tests {
         );
         assert!(body.contains("<basic>closed</basic>"));
         assert!(body.contains("<note>offline</note>"));
+    }
+
+    /// The PIDF note vocabulary is a CLOSED contract with soft-phone
+    /// reconcilers (restsend-call matches `note == "offline"` exactly to
+    /// align-and-toast a server-forced logout). A stamped
+    /// `offline_reason` must ride `reason_code` / webhooks / the status
+    /// history only — never suffixed into the note (`offline:expired`
+    /// would fall through the client's match arm and desync its state).
+    #[test]
+    fn test_build_pidf_body_offline_note_stays_in_closed_vocabulary() {
+        for reason in ["expired", "unregistered", "offline"] {
+            let mut state = make_state(PresenceStatus::Offline);
+            state.offline_reason = Some(reason.to_string());
+            let body = build_pidf_body("1001", "pbx.example.com", &state);
+            assert!(
+                body.contains("<note>offline</note>"),
+                "reason {reason:?} must not leak into the note: {body}"
+            );
+            assert!(!body.contains("offline:"), "body: {body}");
+        }
     }
 
     #[test]

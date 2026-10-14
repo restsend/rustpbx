@@ -244,3 +244,48 @@ async def test_publish_ttl_lapse_keeps_registered_agent_online(
     assert status == "idle", (
         f"connected agent must stay schedulable, got {status!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_notify_note_vocabulary_stays_closed(pbx, api, event_checker,
+                                                   restsend_agent):
+    """Every client-visible presence note stays inside the CLOSED vocabulary.
+
+    The PIDF note is a cross-component contract: restsend-call's brain
+    matches ``note == "offline"`` (et al.) EXACTLY to follow a
+    server-forced logout and toast it. Reason detail must ride
+    ``reason_code`` (webhook / status history), never suffixed into the
+    note — ``offline:expired`` would fall through the client's match arm
+    and silently desync its state (found in review 2026-10-14).
+    """
+    CLOSED = {"idle", "offline", "away", "dnd", "busy", "ringing", "wrapup"}
+
+    def _in_vocabulary(note) -> bool:
+        return note in CLOSED or (note or "").startswith("away:")
+
+    # Lifecycle exercises every offline CAUSE: explicit unregister
+    # ("unregistered"), re-login, manual REST offline ("manual") — notes
+    # observed client-side must stay bare regardless of the reason.
+    await _bring_online(restsend_agent, api, transport="udp")
+    assert await restsend_agent.unregister(), "sip_unregister did not complete"
+    assert await restsend_agent.register(transport="udp"), "re-REGISTER failed"
+    status = await _wait_agent_status(api, AGENT, "idle", 20.0)
+    assert status == "idle", f"re-login must flip the agent idle, got {status!r}"
+
+    await api.update_agent_status(AGENT, "offline")
+    status = await _wait_agent_status(api, AGENT, "offline", 10.0)
+    assert status == "offline", f"manual offline must apply, got {status!r}"
+
+    notes = [
+        (e.get("note") or "")
+        for e in restsend_agent.events
+        if e.get("evt") == "presence_notify"
+    ]
+    assert notes, "client received no presence NOTIFY events at all"
+    offenders = sorted({n for n in notes if not _in_vocabulary(n)})
+    assert not offenders, (
+        f"presence notes outside the closed vocabulary: {offenders} "
+        f"(all notes seen: {sorted(set(notes))}) — the PIDF note is an "
+        "exact-match contract with soft-phone reconcilers; reason detail "
+        "belongs in reason_code, not the note"
+    )
