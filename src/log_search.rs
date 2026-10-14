@@ -503,7 +503,7 @@ fn search(
             .map_err(|_| SearchError(StatusCode::BAD_REQUEST, "Invalid log cursor"))?;
         let cursor: Cursor = serde_json::from_slice(&bytes)
             .map_err(|_| SearchError(StatusCode::BAD_REQUEST, "Invalid log cursor"))?;
-        if cursor.node != crate::utils::self_hostname()
+        if cursor.node != crate::utils::instance_id()
             || cursor.start != query.start
             || cursor.end != query.end
             || cursor.call_ids != query.call_ids
@@ -513,7 +513,7 @@ fn search(
         cursor
     } else {
         Cursor {
-            node: crate::utils::self_hostname().to_string(),
+            node: crate::utils::instance_id(),
             start: query.start,
             end: query.end,
             call_ids: query.call_ids.clone(),

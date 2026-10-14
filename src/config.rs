@@ -635,6 +635,29 @@ impl Default for ClusterConfig {
     }
 }
 
+/// The `[cluster].peers` entry that IS this node, matched by exact
+/// `addr:sip_port` against concrete (non-wildcard) listener addresses.
+pub fn match_self_peer_by_listeners<'a>(
+    peers: &'a [ClusterPeer],
+    local_addr_strs: &[String],
+) -> Option<&'a ClusterPeer> {
+    peers.iter().find(|p| {
+        let peer_sip_addr = format!("{}:{}", p.addr, p.sip_port);
+        local_addr_strs.iter().any(|la| la == &peer_sip_addr)
+    })
+}
+
+/// The `[cluster].peers` entry whose `addr` is one of the host's network
+/// interface IPs. Used when listeners are wildcard-bound (`0.0.0.0`/`::`) and
+/// report no concrete address, and at early startup before any listener
+/// exists (node-identity resolution — see `utils::init_instance_identity`).
+pub fn match_self_peer_by_interfaces<'a>(
+    peers: &'a [ClusterPeer],
+    interface_ips: &std::collections::HashSet<String>,
+) -> Option<&'a ClusterPeer> {
+    peers.iter().find(|p| interface_ips.contains(&p.addr))
+}
+
 fn default_session_registry_backend() -> String {
     "db".to_string()
 }
@@ -3555,6 +3578,46 @@ bucket = "default-recordings"
         assert_eq!(parsed.peers.len(), 2);
         assert_eq!(parsed.peers[0].addr, "10.0.0.2");
         assert_eq!(parsed.peers[1].addr, "10.0.0.3");
+    }
+
+    #[test]
+    fn test_match_self_peer_by_listeners() {
+        let peers = vec![
+            ClusterPeer {
+                addr: "10.0.0.2".to_string(),
+                sip_port: 5060,
+                ami_port: 8080,
+            },
+            ClusterPeer {
+                addr: "10.0.0.3".to_string(),
+                sip_port: 5061,
+                ami_port: 8081,
+            },
+        ];
+        let listeners = vec!["10.0.0.3:5061".to_string()];
+        assert_eq!(
+            match_self_peer_by_listeners(&peers, &listeners)
+                .map(|p| p.addr.as_str()),
+            Some("10.0.0.3")
+        );
+        assert!(match_self_peer_by_listeners(&peers, &[]).is_none());
+    }
+
+    #[test]
+    fn test_match_self_peer_by_interfaces() {
+        let peers = vec![ClusterPeer {
+            addr: "10.0.0.2".to_string(),
+            sip_port: 5060,
+            ami_port: 8080,
+        }];
+        let ips: std::collections::HashSet<String> =
+            ["10.0.0.2".to_string(), "127.0.0.1".to_string()].into();
+        assert_eq!(
+            match_self_peer_by_interfaces(&peers, &ips).map(|p| p.addr.as_str()),
+            Some("10.0.0.2")
+        );
+        let empty: std::collections::HashSet<String> = Default::default();
+        assert!(match_self_peer_by_interfaces(&peers, &empty).is_none());
     }
 
     #[cfg(feature = "commerce")]

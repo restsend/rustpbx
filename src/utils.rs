@@ -1,22 +1,121 @@
 use sea_orm::sea_query::{Func, IntoCondition, SimpleExpr};
+use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::runtime::Handle;
+use tracing::warn;
 
+use crate::config::Config;
 use dashmap::DashMap;
 
-/// Stable instance identity for CDR/diagnostics metadata. Precedence:
-/// `RUSTPBX_INSTANCE_ID` -> `HOSTNAME` -> `HOST` -> `"unknown"` (same
-/// precedence as the CC stats writer's `get_instance_id`).
-pub fn self_hostname() -> &'static str {
-    static HOSTNAME: OnceLock<String> = OnceLock::new();
-    HOSTNAME.get_or_init(|| {
-        std::env::var("RUSTPBX_INSTANCE_ID")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .or_else(|_| std::env::var("HOST"))
-            .unwrap_or_else(|_| "unknown".to_string())
-    })
+// ─── Node identity ──────────────────────────────────────────────────────────
+
+/// Pinned node identity — fixed by [`init_instance_identity`] at startup, or
+/// frozen lazily by [`instance_id`].
+static INSTANCE_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// Fix this node's identity for the process lifetime. Called once at startup,
+/// before any cluster/CC code runs: the identity keys CC presence ownership,
+/// cluster_sync dedup, the monitor merge, and the log_search/callrecord
+/// "node" fields.
+///
+/// Resolution order (first match wins):
+/// 1. `RUSTPBX_INSTANCE_ID` env — explicit operator override;
+/// 2. the `[cluster].peers` entry that IS this node, matched against the
+///    host's interface IPs — yields `"addr:sip_port"`, the same string other
+///    peers see in `cluster_self_addr` and `"node"` fields;
+/// 3. `HOSTNAME`/`HOST` env, then the system hostname;
+/// 4. `"unknown"`.
+pub fn init_instance_identity(config: &Config) {
+    let mut guard = INSTANCE_ID.lock().unwrap();
+    if guard.is_some() {
+        return;
+    }
+    let env_override = std::env::var("RUSTPBX_INSTANCE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let hostname_env = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .ok()
+        .filter(|h| !h.is_empty());
+    *guard = Some(resolve_identity_from_parts(
+        env_override,
+        config.cluster.as_ref(),
+        hostname_env,
+        config.proxy.udp_port,
+        &local_ips(),
+    ));
+}
+
+/// This node's stable identity string. Freezes lazily on first use when
+/// [`init_instance_identity`] was not called (single-node processes, tests) —
+/// which skips the `[cluster].peers` self-match, since there is no config at
+/// hand. Cluster deployments must init early to get the peer-derived identity.
+pub fn instance_id() -> String {
+    let mut guard = INSTANCE_ID.lock().unwrap();
+    guard
+        .get_or_insert_with(|| {
+            let env_override = std::env::var("RUSTPBX_INSTANCE_ID")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let hostname_env = std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("HOST"))
+                .ok()
+                .filter(|h| !h.is_empty());
+            resolve_identity_from_parts(env_override, None, hostname_env, None, &local_ips())
+        })
+        .clone()
+}
+
+/// Test hook: drop the pinned identity so a later call re-resolves.
+pub fn reset_instance_identity_for_test() {
+    *INSTANCE_ID.lock().unwrap() = None;
+}
+
+/// Pure identity resolution — env reads happen at the call sites so tests can
+/// exercise every branch without touching (and racing over) process env.
+///
+/// `sip_port` is this node's configured SIP listen port: on a shared host
+/// several peers may share one interface IP (two containers both declaring
+/// `addr = host.ip` with different ports), and the port is what disambiguates
+/// which peer entry IS this node.
+fn resolve_identity_from_parts(
+    env_override: Option<String>,
+    cluster: Option<&crate::config::ClusterConfig>,
+    hostname_env: Option<String>,
+    sip_port: Option<u16>,
+    interface_ips: &HashSet<String>,
+) -> String {
+    if let Some(id) = env_override {
+        return id;
+    }
+    if let Some(cluster) = cluster
+        && !cluster.peers.is_empty()
+    {
+        match cluster.peers.iter().find(|p| {
+            interface_ips.contains(&p.addr) && sip_port.map_or(true, |port| port == p.sip_port)
+        }) {
+            Some(peer) => return format!("{}:{}", peer.addr, peer.sip_port),
+            None => warn!(
+                "cluster peers configured but none matched a local interface IP \
+                 (with the sip_port filter); falling back to hostname for the node identity"
+            ),
+        }
+    }
+    if let Some(h) = hostname_env {
+        return h;
+    }
+    // `HOSTNAME`/`HOST` are shell conventions — a systemd service often has
+    // neither set, so consult the kernel before giving up.
+    if let Ok(os) = hostname::get()
+        && let Some(s) = os.into_string().ok()
+        && !s.is_empty()
+    {
+        return s;
+    }
+    "unknown".to_string()
 }
 
 /// IPs of the local network interfaces — used to skip fan-out targets that
@@ -460,6 +559,7 @@ fn is_mp3_bytes(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ClusterConfig, ClusterPeer};
 
     #[test]
     fn test_sanitize_id() {
@@ -474,8 +574,118 @@ mod tests {
     }
 
     #[test]
-    fn test_self_hostname_non_empty() {
-        assert!(!self_hostname().is_empty());
+    fn test_instance_id_non_empty() {
+        assert!(!instance_id().is_empty());
+    }
+
+    fn identity_peer(addr: &str, sip_port: u16) -> ClusterPeer {
+        ClusterPeer {
+            addr: addr.to_string(),
+            sip_port,
+            ami_port: 8088,
+        }
+    }
+
+    fn identity_config(peers: Vec<ClusterPeer>) -> ClusterConfig {
+        ClusterConfig {
+            peers,
+            ..Default::default()
+        }
+    }
+
+    fn ips(entries: &[&str]) -> HashSet<String> {
+        entries.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Cluster peers configured and one matches a local interface IP → the
+    /// identity is that peer entry as `addr:sip_port` (what other nodes see).
+    #[test]
+    fn test_instance_identity_prefers_cluster_self_peer() {
+        let cluster = identity_config(vec![
+            identity_peer("192.168.1.10", 5060),
+            identity_peer("10.0.0.6", 5060),
+        ]);
+        let id = resolve_identity_from_parts(None, Some(&cluster), None, None, &ips(&["10.0.0.6"]));
+        assert_eq!(id, "10.0.0.6:5060");
+    }
+
+    /// Shared host: BOTH peer entries use the same interface IP and only the
+    /// SIP port differs (two containers on one machine). The configured
+    /// listen port must disambiguate — without it every node resolves to the
+    /// first entry and the identities collide (prd 2026-10-14).
+    #[test]
+    fn test_instance_identity_shared_host_disambiguates_by_sip_port() {
+        let cluster = identity_config(vec![
+            identity_peer("192.168.3.9", 35060),
+            identity_peer("192.168.3.9", 35061),
+        ]);
+        let host_ips = ips(&["192.168.3.9"]);
+        let id_a = resolve_identity_from_parts(
+            None,
+            Some(&cluster),
+            None,
+            Some(35060),
+            &host_ips,
+        );
+        let id_b = resolve_identity_from_parts(
+            None,
+            Some(&cluster),
+            None,
+            Some(35061),
+            &host_ips,
+        );
+        assert_eq!(id_a, "192.168.3.9:35060");
+        assert_eq!(id_b, "192.168.3.9:35061");
+        // No configured port (WS-only node) keeps the historic IP-only match.
+        let id_any = resolve_identity_from_parts(None, Some(&cluster), None, None, &host_ips);
+        assert_eq!(id_any, "192.168.3.9:35060");
+        // A port that matches NO peer falls back to the hostname chain.
+        let id_miss = resolve_identity_from_parts(
+            None,
+            Some(&cluster),
+            Some("fallback-node".to_string()),
+            Some(40000),
+            &host_ips,
+        );
+        assert_eq!(id_miss, "fallback-node");
+    }
+
+    /// `RUSTPBX_INSTANCE_ID` is an explicit operator override — it beats the
+    /// cluster self-match.
+    #[test]
+    fn test_instance_identity_env_overrides_cluster() {
+        let cluster = identity_config(vec![identity_peer("10.0.0.6", 5060)]);
+        let id = resolve_identity_from_parts(
+            Some("explicit-node".to_string()),
+            Some(&cluster),
+            None,
+            None,
+            &ips(&["10.0.0.6"]),
+        );
+        assert_eq!(id, "explicit-node");
+    }
+
+    /// No peer matches any interface → fall back through the hostname chain
+    /// instead of inventing a non-local identity.
+    #[test]
+    fn test_instance_identity_cluster_miss_falls_back_to_hostname() {
+        let cluster = identity_config(vec![identity_peer("10.9.9.9", 5060)]);
+        let id = resolve_identity_from_parts(
+            None,
+            Some(&cluster),
+            Some("sip-node-7".to_string()),
+            None,
+            &ips(&["10.0.0.6"]),
+        );
+        assert_eq!(id, "sip-node-7");
+    }
+
+    /// No env override, no cluster, no `HOSTNAME`/`HOST` (systemd services
+    /// often have neither) → the kernel hostname, never an empty identity.
+    #[test]
+    fn test_instance_identity_last_resort_non_empty() {
+        let id = resolve_identity_from_parts(None, None, None, None, &HashSet::new());
+        assert!(!id.is_empty());
     }
 
     /// The canonical outbound timestamp is always a fully-qualified RFC 3339

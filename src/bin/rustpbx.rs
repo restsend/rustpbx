@@ -329,11 +329,12 @@ fn main() -> Result<()> {
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
 
-    // Cluster instance identity must be fixed before any CC code runs — it
-    // keys presence ownership, cluster_sync dedup and the monitor merge.
-    // (Gated: `addons::cc` is feature-gated; identity is meaningless without it.)
-    #[cfg(feature = "addon-cc")]
-    rustpbx::addons::cc::stats_writer::init_instance_id_from(&config);
+    // Node identity must be fixed before any cluster/CC code runs — it keys
+    // CC presence ownership, cluster_sync dedup, the monitor merge, and the
+    // log_search/callrecord "node" fields. With `[cluster].peers` configured
+    // it resolves to this node's peer entry ("addr:sip_port"), identical to
+    // `cluster_self_addr` and to the node string other peers report.
+    rustpbx::utils::init_instance_identity(&config);
 
     // ---- Dual tokio runtime setup -----------------------------------------
     // SIP runtime: few threads (signalling is lightweight).

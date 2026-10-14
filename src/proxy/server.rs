@@ -2354,11 +2354,7 @@ fn resolve_cluster_self_addr_with_interfaces(
     local_addr_strs: &[String],
     interface_ips: &std::collections::HashSet<String>,
 ) -> Option<SipAddr> {
-    let matched = peers.iter().find(|p| {
-        let peer_sip_addr = format!("{}:{}", p.addr, p.sip_port);
-        local_addr_strs.iter().any(|la| la == &peer_sip_addr)
-    });
-    let matched = match matched {
+    let matched = match crate::config::match_self_peer_by_listeners(peers, local_addr_strs) {
         Some(peer) => peer,
         None => {
             let wildcard = local_addr_strs.iter().any(|la| {
@@ -2368,7 +2364,7 @@ fn resolve_cluster_self_addr_with_interfaces(
             if !wildcard {
                 return None;
             }
-            peers.iter().find(|p| interface_ips.contains(&p.addr))?
+            crate::config::match_self_peer_by_interfaces(peers, interface_ips)?
         }
     };
     let peer_sip_addr = format!("{}:{}", matched.addr, matched.sip_port);

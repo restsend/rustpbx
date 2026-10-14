@@ -1557,9 +1557,7 @@ impl CallRecordManager {
                             .or_insert_with(|| serde_json::Value::String(self_ip.clone()));
                         metadata
                             .entry("hostname".to_string())
-                            .or_insert_with(|| {
-                                serde_json::Value::String(crate::utils::self_hostname().to_string())
-                            });
+                            .or_insert_with(|| serde_json::Value::String(crate::utils::instance_id()));
                     }
                     for hook in hooks {
                         if let Err(e) = hook.on_record_enrich(&mut records).await {
