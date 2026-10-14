@@ -416,17 +416,24 @@ class RestsendAgent:
                                    timeout=10)
         return ev is not None
 
-    async def publish_idle(self, expires: Optional[int] = None) -> None:
+    async def publish_idle(self, expires: Optional[int] = None,
+                           refresh: bool = True) -> None:
         """PUBLISH presence ready=true (note=idle).
 
         expires: PUBLISH TTL in seconds (rides the SIP Expires header). The
         PBX only arms its presence-TTL sweeper for identities that actually
         published — pass a short value in tests that verify the
         "stopped refreshing presence" offline path.
+        refresh: the engine re-publishes at expires/2 (production shape).
+        Pass False for the single-shot publication shape (publish once,
+        let it go stale while the REGISTER stays alive) used by the
+        presence-TTL sweeper regression tests.
         """
         cmd: dict[str, Any] = {"cmd": "sip_publish", "ready": True}
         if expires is not None:
             cmd["expires"] = int(expires)
+        if not refresh:
+            cmd["refresh"] = False
         await self.cmd(cmd)
 
     async def unregister(self, timeout: float = 8.0) -> bool:

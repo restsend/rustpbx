@@ -13,9 +13,11 @@ Scenarios (restsend-cli = the real production client, not a mock):
         reason_code == "expired"
   3. Explicit REGISTER expires=0 (sip_unregister):
         reason_code == "unregistered"   (historical behaviour, guarded)
-  4. PUBLISH presence TTL lapses while the REGISTER stays alive (agent went
-     home without logging out) — presence sweeper flips the agent offline:
-        agent_state_changed.reason_code == "expired"
+  4. PUBLISH presence TTL lapses while the REGISTER stays alive (the
+     restsend-call shape: publishes once at login, never re-publishes) —
+     the agent MUST STAY ONLINE; the locator's live binding is
+     authoritative (regression 2026-10-14: the sweeper used to log out
+     every connected agent ~5 minutes after login).
 """
 
 from __future__ import annotations
@@ -199,31 +201,46 @@ async def test_explicit_unregister_reason(pbx, api, event_checker,
 
 
 @pytest.mark.asyncio
-async def test_publish_ttl_expired_reason(pbx, api, event_checker,
-                                          restsend_agent):
-    """PUBLISH TTL lapses while REGISTER stays alive → agent_state_changed
-    carries reason_code = "expired" (presence sweeper path)."""
+async def test_publish_ttl_lapse_keeps_registered_agent_online(
+    pbx, api, event_checker, restsend_agent
+):
+    """PUBLISH TTL lapses while REGISTER stays alive → agent MUST stay online.
+
+    Regression 2026-10-14 (production: restsend-call publishes presence ONCE
+    at login with Expires=300 and never re-publishes; the presence-TTL
+    sweeper then logged out EVERY connected agent ~5 minutes after login —
+    "莫名 offline notify 但没踢下线").
+
+    The old e2e asserted the buggy behaviour (it expected the agent to go
+    offline with reason_code="expired" while the registration was alive),
+    which is why the regression shipped green. The correct contract:
+    the locator's live binding is authoritative — a stale soft-state
+    publication is not a logout. A lapsed PUBLISH with a truly GONE client
+    is covered by test_register_expiry_expired_reason (locator sweep,
+    same "expired" reason).
+    """
     await _bring_online(restsend_agent, api, transport="udp")
-    # Publish with a short TTL; the REGISTER refresher keeps the binding
-    # alive but nothing re-publishes — exactly the "went home without
-    # logging out" production case.
-    await restsend_agent.publish_idle(expires=10)
+    # Single-shot publication (refresh=False): the publication is left to
+    # go stale while the client's REGISTER refresher keeps the binding
+    # alive — the exact pre-fix restsend shape. The server guard must keep
+    # the agent online (locator liveness beats the stale soft state).
+    await restsend_agent.publish_idle(expires=10, refresh=False)
     event_checker.webhook.clear()
 
+    # Outlive the publication TTL + the 60s presence-sweep cadence.
+    await asyncio.sleep(PUBLISH_TTL_DEADLINE)
+
     webhook = event_checker.webhook
-    ev = await webhook.wait_for_event(
+    offline = await webhook.wait_for_event(
         "agent_state_changed",
-        match={
-            "payload.agent_id": AGENT,
-            "payload.to_status": "offline",
-            "payload.reason_code": "expired",
-        },
-        timeout=PUBLISH_TTL_DEADLINE,
+        match={"payload.agent_id": AGENT, "payload.to_status": "offline"},
+        timeout=1,
     )
-    assert ev is not None, (
-        "presence-TTL expiry never produced agent_state_changed("
-        "to=offline, reason_code=expired); got "
-        f"{webhook.event_types()}"
+    assert offline is None, (
+        "a lapsed PUBLISH with a LIVE registration must not log the agent "
+        f"offline; got {offline} among {webhook.event_types()}"
     )
-    status = await _wait_agent_status(api, AGENT, "offline", 15.0)
-    assert status == "offline", f"panel must show offline, got {status!r}"
+    status = await _wait_agent_status(api, AGENT, "idle", 1.0)
+    assert status == "idle", (
+        f"connected agent must stay schedulable, got {status!r}"
+    )

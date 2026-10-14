@@ -164,6 +164,12 @@ pub struct ClusterPresenceMessage {
     note: Option<String>,
     activity: Option<String>,
     last_updated: i64,
+    /// Why the state went offline (`"offline"` / `"expired"` /
+    /// `"unregistered"`), stamped by the origin node. `#[default]` keeps
+    /// older peers without the field deserializable; they simply report a
+    /// reason-free offline.
+    #[serde(default)]
+    offline_reason: Option<String>,
 }
 
 impl ClusterPresenceMessage {
@@ -181,7 +187,7 @@ impl ClusterPresenceMessage {
             // Peer-mirrored states carry no local PUBLISH TTL; the origin
             // node owns the expiry decision.
             expires_at: None,
-            offline_reason: None,
+            offline_reason: self.offline_reason.clone(),
         })
     }
 }
@@ -232,6 +238,7 @@ impl From<(&str, &PresenceState)> for ClusterPresenceMessage {
             note: state.note.clone(),
             activity: state.activity.clone(),
             last_updated: state.last_updated,
+            offline_reason: state.offline_reason.clone(),
         }
     }
 }
@@ -757,6 +764,7 @@ mod tests {
             note: Some("On line".to_string()),
             activity: None,
             last_updated: 1714000000,
+            offline_reason: None,
         };
 
         let body = ClusterMessageBody::Presence(msg);
@@ -783,6 +791,7 @@ mod tests {
             note: Some("In a meeting".to_string()),
             activity: Some("on-the-phone".to_string()),
             last_updated: 1714000100,
+            offline_reason: None,
         };
 
         let body = ClusterMessageBody::Presence(msg);
@@ -809,6 +818,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let json = serde_json::to_string(&ClusterMessageBody::Presence(msg)).unwrap();
         assert!(json.contains("\"type\":\"presence\""));
@@ -824,6 +834,7 @@ mod tests {
             note: Some("hello".to_string()),
             activity: None,
             last_updated: 100,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Idle);
@@ -840,6 +851,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Idle);
@@ -853,6 +865,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         assert_eq!(ringing.to_state().unwrap().status, PresenceStatus::Ringing);
 
@@ -862,6 +875,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         assert_eq!(wrapup.to_state().unwrap().status, PresenceStatus::Wrapup);
     }
@@ -874,6 +888,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Busy);
@@ -887,6 +902,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Away(String::new()));
@@ -900,6 +916,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Offline);
@@ -913,6 +930,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Away("lunch".to_string()));
@@ -926,6 +944,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Away("lunch".to_string()));
@@ -1071,6 +1090,7 @@ mod tests {
             note: Some("online".to_string()),
             activity: Some("idle".to_string()),
             last_updated: 1714001000,
+            offline_reason: None,
             ..Default::default()
         };
         let msg = ClusterPresenceMessage::from(("1001", &state));
@@ -1088,6 +1108,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
             ..Default::default()
         };
         let msg = ClusterPresenceMessage::from(("2001", &state));
@@ -1431,6 +1452,7 @@ mod tests {
             note: Some("Lunch".to_string()),
             activity: Some("meal".to_string()),
             last_updated: 1715000000,
+            offline_reason: None,
             ..Default::default()
         };
 
@@ -1486,6 +1508,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            offline_reason: None,
         };
         let state = msg.to_state().unwrap();
         assert_eq!(state.status, PresenceStatus::Offline); // unknown -> offline

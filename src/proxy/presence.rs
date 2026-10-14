@@ -5,7 +5,7 @@ use crate::config::ProxyConfig;
 use crate::models::presence;
 use crate::proxy::cluster_event::{EventSource, event_etags};
 use crate::proxy::cluster_sync::ClusterSync;
-use crate::proxy::locator::LocatorEvent;
+use crate::proxy::locator::{Locator, LocatorEvent};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::dialog::DialogId;
@@ -515,12 +515,23 @@ impl PresenceManager {
     /// untouched. Callers must notify addon handlers afterwards (the
     /// manager itself only owns the state + cluster mirror).
     pub async fn expire_stale_publishes(&self) -> Vec<String> {
-        self.expire_stale_publishes_via_hub(None).await
+        self.expire_stale_publishes_via_hub(None, None).await
     }
 
+    /// `locator` is the registration-liveness authority. A lapsed PUBLISH
+    /// alone must NOT log an agent out: restsend-call publishes once at
+    /// login and never re-publishes, so its soft state goes stale after
+    /// ~5 minutes while the REGISTER keeps refreshing every ~25s. When the
+    /// extension still has a live binding the stale publication is treated
+    /// as expired-but-superseded: the last published status stands, the TTL
+    /// is dropped, and nothing is broadcast (no NOTIFY, no CC transition).
+    /// Only a truly gone client (no binding) flips offline with
+    /// `offline_reason = "expired"`. A failed lookup skips the identity for
+    /// this round (fail-open — the CC offline watchdog reconciles later).
     pub(crate) async fn expire_stale_publishes_via_hub(
         &self,
         hub: Option<&crate::proxy::cluster_event::ClusterEventHub>,
+        locator: Option<&dyn Locator>,
     ) -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         let stale: Vec<(String, PresenceState)> = {
@@ -536,6 +547,38 @@ impl PresenceManager {
         };
         let mut expired = Vec::with_capacity(stale.len());
         for (identity, mut state) in stale {
+            if let Some(locator) = locator {
+                match locator.has_active_binding_for_user(&identity).await {
+                    Ok(true) => {
+                        // Still registered: keep the published status, just
+                        // retire the dead soft-state timer. Silent on purpose
+                        // — a status change here would be the very false
+                        // "offline while connected" NOTIFY this guard exists
+                        // to prevent.
+                        let mut fresh = state.clone();
+                        fresh.expires_at = None;
+                        fresh.offline_reason = None;
+                        {
+                            let mut states = self.states.write();
+                            states.insert(identity.clone(), fresh);
+                        }
+                        debug!(
+                            identity = %identity,
+                            "PUBLISH TTL lapsed but registration is alive; keeping published presence"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(
+                            identity = %identity,
+                            error = %e,
+                            "PUBLISH TTL sweep: binding lookup failed, skipping this round"
+                        );
+                        continue;
+                    }
+                }
+            }
             state.status = PresenceStatus::Offline;
             state.note = None;
             state.activity = None;
@@ -780,6 +823,11 @@ impl PresenceManager {
                         PresenceState {
                             status: PresenceStatus::Offline,
                             last_updated: chrono::Utc::now().timestamp(),
+                            // Explicit REGISTER expires=0 — the client said
+                            // goodbye; stamp the cause so NOTIFY bodies and
+                            // downstream consumers can tell it apart from a
+                            // transport drop or a TTL sweep.
+                            offline_reason: Some("unregistered".to_string()),
                             ..Default::default()
                         },
                         source,
@@ -787,7 +835,8 @@ impl PresenceManager {
                     .await;
                 }
             }
-            LocatorEvent::Offline(locs, _) => {
+            LocatorEvent::Offline(locs, reason) => {
+                let reason = reason.as_str().to_string();
                 for loc in locs {
                     if let Some(user) = Self::get_user(&loc) {
                         pruned.extend(self.prune_watcher_subscriptions(&user));
@@ -796,6 +845,11 @@ impl PresenceManager {
                             PresenceState {
                                 status: PresenceStatus::Offline,
                                 last_updated: chrono::Utc::now().timestamp(),
+                                // `"offline"` (transport closed) or
+                                // `"expired"` (REGISTER TTL lapsed) — rides
+                                // into the NOTIFY PIDF note and the CC
+                                // registrar bridge's `reason_code`.
+                                offline_reason: Some(reason.clone()),
                                 ..Default::default()
                             },
                             source,
@@ -926,6 +980,10 @@ impl ProxyModule for PresenceModule {
         let manager_cleanup = self.manager.clone();
         let manager_ttl = self.manager.clone();
         let ttl_hub = self.server.cluster_event_hub.clone();
+        // The TTL sweep consults the locator before flipping an identity
+        // offline: a lapsed PUBLISH with a live REGISTER is a stale soft
+        // state, not a logout (restsend-call publishes once, never refreshes).
+        let ttl_locator = self.server.locator.clone();
         let cancel_cleanup = cancel.clone();
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -936,7 +994,12 @@ impl ProxyModule for PresenceModule {
                     _ = interval.tick() => {
                         manager_cleanup.cleanup_expired();
                         manager_cleanup.cleanup_expired_mwi();
-                        manager_ttl.expire_stale_publishes_via_hub(ttl_hub.as_deref()).await;
+                        manager_ttl
+                            .expire_stale_publishes_via_hub(
+                                ttl_hub.as_deref(),
+                                Some(ttl_locator.as_ref().as_ref()),
+                            )
+                            .await;
                     }
                 }
             }
@@ -1573,6 +1636,26 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
                     _ if detail.is_empty() => Some("away".to_string()),
                     _ => Some(format!("away:{detail}")),
                 },
+                PresenceStatus::Offline => match state.offline_reason.as_deref() {
+                    // A stamped cause rides the note so subscribers — and
+                    // SIP captures — can tell WHY a user went offline.
+                    // Transport-closed IS the plain "offline" (its wire
+                    // reason is literally "offline"), so only the other
+                    // causes get a suffix: `offline:expired` (REGISTER TTL
+                    // lapsed), `offline:unregistered` (explicit expires=0).
+                    // Unstamped (client PUBLISH expires=0) keeps the
+                    // historical bare "offline" as well.
+                    Some(reason)
+                        if !reason.trim().is_empty() && reason.trim() != "offline" =>
+                    {
+                        Some(format!("offline:{reason}"))
+                    }
+                    _ => state
+                        .note
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .or_else(|| Some("offline".to_string())),
+                },
                 _ => state
                     .note
                     .clone()
@@ -1711,6 +1794,86 @@ mod tests {
         assert_eq!(manager.get_state("agent-1002").status, PresenceStatus::Idle);
         assert_eq!(manager.get_state("ata-2001").status, PresenceStatus::Idle);
         assert_eq!(manager.get_state("agent-1003").status, PresenceStatus::Offline);
+    }
+
+    /// P1.0 guard: a lapsed PUBLISH with a LIVE registration must NOT flip
+    /// the identity offline — restsend-call publishes once at login and
+    /// never re-publishes, so its soft state goes stale while the REGISTER
+    /// keeps refreshing. The published status stands, the TTL is dropped,
+    /// and the identity is not reported as expired. A lapsed PUBLISH with
+    /// NO binding still flips offline with `offline_reason = "expired"`.
+    #[tokio::test]
+    async fn expire_stale_publishes_keeps_registered_clients_online() {
+        use crate::proxy::locator::{Locator, MemoryLocator};
+
+        let manager = PresenceManager::new(None);
+        let locator = MemoryLocator::new();
+        let now = chrono::Utc::now().timestamp();
+
+        // Live registration for agent-live (the client that never
+        // re-publishes but keeps its REGISTER fresh).
+        locator
+            .register(
+                "agent-live",
+                Some("localhost"),
+                Location {
+                    aor: "sip:agent-live@192.168.1.10".try_into().unwrap(),
+                    expires: 50,
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Lapsed PUBLISH for the live client → must be kept as-is.
+        let mut live = PresenceState {
+            status: PresenceStatus::Away("break".into()),
+            note: Some("away:break".into()),
+            last_updated: now - 600,
+            expires_at: Some(now - 60),
+            ..Default::default()
+        };
+        manager
+            .update_state("agent-live", live.clone(), &EventSource::Local)
+            .await;
+
+        // Lapsed PUBLISH for a vanished client → flipped offline.
+        let mut gone = PresenceState {
+            status: PresenceStatus::Idle,
+            last_updated: now - 600,
+            expires_at: Some(now - 60),
+            ..Default::default()
+        };
+        manager
+            .update_state("agent-gone", gone.clone(), &EventSource::Local)
+            .await;
+
+        let expired = manager
+            .expire_stale_publishes_via_hub(None, Some(&locator))
+            .await;
+        assert_eq!(expired, vec!["agent-gone".to_string()]);
+
+        let kept = manager.get_state("agent-live");
+        assert_eq!(kept.status, PresenceStatus::Away("break".into()));
+        assert_eq!(kept.note.as_deref(), Some("away:break"));
+        assert_eq!(kept.expires_at, None, "dead soft-state timer retired");
+        assert_eq!(kept.offline_reason, None, "no offline stamp");
+
+        let flipped = manager.get_state("agent-gone");
+        assert_eq!(flipped.status, PresenceStatus::Offline);
+        assert_eq!(flipped.offline_reason.as_deref(), Some("expired"));
+
+        // A no-locator sweep (legacy callers/tests) still flips the live
+        // client — the guard is only as good as the locator it is given.
+        live.expires_at = Some(now - 60);
+        live.status = PresenceStatus::Idle;
+        manager
+            .update_state("agent-live", live, &EventSource::Local)
+            .await;
+        let expired = manager.expire_stale_publishes().await;
+        assert_eq!(expired, vec!["agent-live".to_string()]);
+        assert_eq!(manager.get_state("agent-live").status, PresenceStatus::Offline);
     }
 
     #[tokio::test]
