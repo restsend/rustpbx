@@ -9,8 +9,11 @@
 //! 2. `PresenceModule` SUBSCRIBE + NOTIFY-fail prune + locator Offline
 //! 3. `ClusterEventHub` remote Offline prune + dialog_layer remove
 
-use super::common::{create_test_request, create_test_server, create_transaction};
+use super::common::{
+    create_test_request, create_test_server, create_test_server_with_config, create_transaction,
+};
 use crate::call::{Location, TransactionCookie};
+use crate::config::ProxyConfig;
 use crate::proxy::ProxyAction;
 use crate::proxy::cluster_event::{ClusterEventHub, EventSource};
 use crate::proxy::locator::LocatorEvent;
@@ -379,6 +382,124 @@ async fn module_initial_subscribe_sends_ok_for_created_dialog() {
     let subscription = manager.get_subscribers("bob");
     assert_eq!(subscription.len(), 1);
     assert_eq!(response_dialog, subscription[0].dialog_id);
+}
+
+/// The 200 OK must echo the granted expiry so clients that only parse the
+/// response `Expires` header (instead of the NOTIFY `Subscription-State`)
+/// schedule refreshes at the right cadence.
+#[tokio::test]
+async fn module_subscribe_200_ok_echoes_granted_expires() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+    let (mut tx, endpoint) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
+    let key = tx.key.clone();
+
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    let finished = endpoint
+        .finished_transactions
+        .get(&key)
+        .expect("initial SUBSCRIBE must finish with a response");
+    let response = match finished.value().as_ref() {
+        Some(SipMessage::Response(response)) => response,
+        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
+    };
+    assert_eq!(response.status_code, StatusCode::OK);
+    let echoed = response
+        .headers
+        .iter()
+        .find_map(|h| match h {
+            rsipstack::sip::Header::Expires(e) => Some(e.value().to_string()),
+            _ => None,
+        })
+        .expect("SUBSCRIBE 200 OK must carry an Expires header");
+    assert_eq!(echoed, "3600");
+
+    // The stored subscription lifetime matches the advertised value, so the
+    // NOTIFY `Subscription-State: active;expires=` stays consistent.
+    let subs = manager.get_subscribers("bob");
+    assert_eq!(subs.len(), 1);
+    let left = subs[0]
+        .expires
+        .checked_duration_since(std::time::Instant::now())
+        .unwrap_or_default();
+    assert!(
+        left > Duration::from_secs(3500),
+        "subscriber expiry should track the granted 3600s, got {left:?}"
+    );
+}
+
+/// Requested expiries above `max_subscription_expires` are clamped and the
+/// clamped value is what gets advertised.
+#[tokio::test]
+async fn module_subscribe_expires_capped_by_max_subscription_expires() {
+    let mut cfg = ProxyConfig::default();
+    cfg.max_subscription_expires = Some(120);
+    let (server, config) = create_test_server_with_config(cfg).await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+    let (mut tx, endpoint) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(99999),
+        "presence",
+    ))
+    .await;
+    let key = tx.key.clone();
+
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    let finished = endpoint
+        .finished_transactions
+        .get(&key)
+        .expect("initial SUBSCRIBE must finish with a response");
+    let response = match finished.value().as_ref() {
+        Some(SipMessage::Response(response)) => response,
+        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
+    };
+    assert_eq!(response.status_code, StatusCode::OK);
+    let echoed = response
+        .headers
+        .iter()
+        .find_map(|h| match h {
+            rsipstack::sip::Header::Expires(e) => Some(e.value().to_string()),
+            _ => None,
+        })
+        .expect("SUBSCRIBE 200 OK must carry an Expires header");
+    assert_eq!(echoed, "120");
+    let subs = manager.get_subscribers("bob");
+    assert_eq!(subs.len(), 1);
+    let left = subs[0]
+        .expires
+        .checked_duration_since(std::time::Instant::now())
+        .unwrap_or_default();
+    assert!(
+        left > Duration::from_secs(100) && left <= Duration::from_secs(120),
+        "subscriber expiry should track the clamped 120s, got {left:?}"
+    );
 }
 
 #[tokio::test]

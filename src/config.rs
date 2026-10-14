@@ -1500,6 +1500,12 @@ pub struct ProxyConfig {
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
+    /// Upper bound (seconds) granted on SIP event-package subscriptions
+    /// (presence / MWI SUBSCRIBE). The granted value is echoed in the 200 OK
+    /// `Expires` header and the NOTIFY `Subscription-State` so clients that
+    /// only read the 200 OK schedule refreshes correctly. Default 3600.
+    #[serde(default)]
+    pub max_subscription_expires: Option<u32>,
     /// Presence-state TTL sweep cadence (seconds): the background task that
     /// flips PUBLISHed states whose `Expires` lapsed back to Offline
     /// (subject to the registration-liveness guard). Default 60s; tests
@@ -2104,6 +2110,13 @@ impl ProxyConfig {
         self.locator_sweep_secs.unwrap_or(15).clamp(5, 300)
     }
 
+    /// Subscription expiry ceiling (seconds) for presence/MWI SUBSCRIBE,
+    /// floored so a typo'd near-zero value cannot thrash clients with
+    /// immediate refresh loops.
+    pub fn clamped_max_subscription_expires(&self) -> u32 {
+        self.max_subscription_expires.unwrap_or(3600).max(60)
+    }
+
     pub fn session_timer_mode(&self) -> SessionTimerMode {
         if !self.session_timer {
             SessionTimerMode::Off
@@ -2274,6 +2287,7 @@ impl Default for ProxyConfig {
             max_concurrency: None,
             registrar_expires: Some(30),
             max_registrar_expires: Some(50),
+            max_subscription_expires: Some(3600),
             ensure_user: Some(true),
             enable_latching: true,
             latching_probation_max_packets: default_latching_probation_max_packets(),
