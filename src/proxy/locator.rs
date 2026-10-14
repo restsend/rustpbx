@@ -23,13 +23,52 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
+/// Why a set of bindings went offline. Distinguishes a transport-level
+/// disconnect from a registration that silently expired — downstream
+/// consumers (CC agent bridge, RWI events) surface this as the
+/// `reason_code` on `agent_unregistered` / `agent_state_changed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocatorOfflineReason {
+    /// The client's transport closed (WebSocket close frame / TCP FIN):
+    /// an ungraceful-but-immediate goodbye detected at the connection layer.
+    TransportClosed,
+    /// The REGISTER binding expired without an explicit unregister (browser
+    /// crash, network loss, laptop sleep) and was reclaimed by the expiry
+    /// sweeper or an opportunistic GC.
+    Expired,
+}
+
+impl LocatorOfflineReason {
+    /// Canonical wire string used by cluster messages, webhooks and the
+    /// `reason_code` field of RWI agent events.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TransportClosed => "offline",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Parse a wire string. `None`/unknown ⇒ `None`, so a message without
+    /// a reason (explicit unregistration, or an older peer) stays a plain
+    /// `Unregistered` instead of being misread as an offline transition.
+    pub fn parse_wire(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("expired") => Some(Self::Expired),
+            Some("offline") => Some(Self::TransportClosed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum LocatorEvent {
     Registered(Location),
     /// An already registered identity renewed or added a live binding.
     Refreshed(Location),
     Unregistered(Location),
-    Offline(Vec<Location>),
+    /// One or more bindings disappeared without an explicit REGISTER
+    /// expires=0. The reason tells transport-close apart from TTL expiry.
+    Offline(Vec<Location>, LocatorOfflineReason),
 }
 
 /// Snapshot of currently online (registered, non-expired) locations.
@@ -548,7 +587,10 @@ impl TransportEventInspector for TransportInspectorLocator {
                             .await;
                     if !offline.is_empty() {
                         self.locator_events
-                            .send(LocatorEvent::Offline(offline))
+                            .send(LocatorEvent::Offline(
+                                offline,
+                                LocatorOfflineReason::TransportClosed,
+                            ))
                             .ok();
                     }
                 }

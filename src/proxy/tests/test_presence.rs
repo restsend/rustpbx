@@ -120,6 +120,7 @@ async fn test_presence_notify_body_generation() {
                 note: None,
                 activity: None,
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &crate::proxy::cluster_event::EventSource::Local,
         )
@@ -145,6 +146,7 @@ async fn test_presence_notify_body_generation() {
                 note: None,
                 activity: None,
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &crate::proxy::cluster_event::EventSource::Local,
         )
@@ -166,6 +168,7 @@ async fn test_presence_notify_body_generation() {
                 note: None,
                 activity: None,
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &crate::proxy::cluster_event::EventSource::Local,
         )
@@ -187,6 +190,7 @@ async fn test_presence_notify_body_generation() {
                 note: None,
                 activity: None,
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &crate::proxy::cluster_event::EventSource::Local,
         )

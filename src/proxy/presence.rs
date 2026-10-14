@@ -186,6 +186,18 @@ pub struct PresenceState {
     pub note: Option<String>,
     pub activity: Option<String>,
     pub last_updated: i64,
+    /// PUBLISH TTL deadline (epoch secs). `None` = no TTL enforced — states
+    /// set outside a SIP PUBLISH (REGISTER header, REST, locator events)
+    /// never lapse on their own. This keeps ordinary phones that never
+    /// publish presence completely unaffected: only an identity that has
+    /// actually PUBLISHed can be flipped offline by the TTL sweeper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Why the state went offline — set by the PUBLISH-TTL sweeper
+    /// (`"expired"`) and read by the CC registrar bridge to stamp
+    /// `reason_code` on agent events. Always `None` on live states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_reason: Option<String>,
 }
 
 impl Default for PresenceState {
@@ -195,6 +207,8 @@ impl Default for PresenceState {
             note: None,
             activity: None,
             last_updated: chrono::Utc::now().timestamp(),
+            expires_at: None,
+            offline_reason: None,
         }
     }
 }
@@ -291,6 +305,7 @@ impl PresenceManager {
                         note: s.note,
                         activity: s.activity,
                         last_updated: s.last_updated,
+                        ..Default::default()
                     },
                 );
             }
@@ -479,6 +494,45 @@ impl PresenceManager {
             subs.retain(|s| s.expires > now);
             !subs.is_empty()
         });
+    }
+
+    /// Flip published-presence states whose PUBLISH TTL lapsed to Offline.
+    ///
+    /// Long-absence detection for softphones: a client that PUBLISHed a
+    /// status with an `Expires` but then vanished (tab frozen, network
+    /// changed) stops refreshing; once the deadline passes the presence
+    /// returns to Offline so CC agents do not stay schedulable forever.
+    ///
+    /// Only identities that actually PUBLISHed participate (`expires_at`
+    /// set) — a REGISTER-only phone never gets a presence TTL and is
+    /// untouched. Callers must notify addon handlers afterwards (the
+    /// manager itself only owns the state + cluster mirror).
+    pub async fn expire_stale_publishes(&self) -> Vec<String> {
+        let now = chrono::Utc::now().timestamp();
+        let stale: Vec<(String, PresenceState)> = {
+            let states = self.states.read();
+            states
+                .iter()
+                .filter(|(_, s)| {
+                    s.status != PresenceStatus::Offline
+                        && s.expires_at.is_some_and(|exp| exp <= now)
+                })
+                .map(|(id, s)| (id.clone(), s.clone()))
+                .collect()
+        };
+        let mut expired = Vec::with_capacity(stale.len());
+        for (identity, mut state) in stale {
+            state.status = PresenceStatus::Offline;
+            state.note = None;
+            state.activity = None;
+            state.last_updated = now;
+            state.expires_at = None;
+            state.offline_reason = Some("expired".to_string());
+            self.update_state(&identity, state, &EventSource::Local)
+                .await;
+            expired.push(identity);
+        }
+        expired
     }
 
     fn watcher_key(uri: &rsipstack::sip::Uri) -> String {
@@ -685,6 +739,11 @@ impl PresenceManager {
                         PresenceState {
                             status: new_status,
                             last_updated: chrono::Utc::now().timestamp(),
+                            // A fresh REGISTER proves the client is alive: a
+                            // PUBLISH TTL armed by an earlier publication
+                            // must not later flip this user offline.
+                            expires_at: None,
+                            offline_reason: None,
                             ..current
                         },
                         source,
@@ -709,7 +768,7 @@ impl PresenceManager {
                     .await;
                 }
             }
-            LocatorEvent::Offline(locs) => {
+            LocatorEvent::Offline(locs, _) => {
                 for loc in locs {
                     if let Some(user) = Self::get_user(&loc) {
                         pruned.extend(self.prune_watcher_subscriptions(&user));
@@ -842,7 +901,12 @@ impl ProxyModule for PresenceModule {
         }
 
         // Spawn background cleanup for expired subscriptions (presence + MWI)
+        // and for lapsed PUBLISH presence TTLs. The TTL sweep must notify
+        // addon handlers afterwards (CC registrar bridge → agent offline +
+        // RWI events), which the manager alone cannot do.
         let manager_cleanup = self.manager.clone();
+        let manager_ttl = self.manager.clone();
+        let ttl_hub = self.server.cluster_event_hub.clone();
         let cancel_cleanup = cancel.clone();
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -853,6 +917,13 @@ impl ProxyModule for PresenceModule {
                     _ = interval.tick() => {
                         manager_cleanup.cleanup_expired();
                         manager_cleanup.cleanup_expired_mwi();
+                        let expired = manager_ttl.expire_stale_publishes().await;
+                        for identity in expired {
+                            if let Some(ref hub) = ttl_hub {
+                                let state = manager_ttl.get_state(&identity);
+                                hub.emit_presence_change(&identity, None, &state).await;
+                            }
+                        }
                     }
                 }
             }
@@ -1102,6 +1173,14 @@ impl PresenceModule {
 
         let mut current = self.manager.get_state(&identity);
         current.last_updated = chrono::Utc::now().timestamp();
+        // Every successful PUBLISH rearms the presence TTL and clears any
+        // stale offline-reason stamp. expires=0 closes the publication.
+        current.offline_reason = None;
+        current.expires_at = if expires == 0 {
+            None
+        } else {
+            Some(chrono::Utc::now().timestamp() + expires as i64)
+        };
 
         if expires == 0 {
             current.status = PresenceStatus::Offline;
@@ -1550,6 +1629,77 @@ mod tests {
         assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
     }
 
+    /// PUBLISH-TTL sweeper: an identity that published with an `Expires` but
+    /// stopped refreshing is flipped offline with `offline_reason = "expired"`
+    /// so the CC bridge stamps `reason_code=expired` on the agent events.
+    /// Identities that never published (no `expires_at`) — ordinary phones —
+    /// must be untouched, and already-offline states are not re-broadcast.
+    #[tokio::test]
+    async fn expire_stale_publishes_flips_only_expired_publishers() {
+        let manager = PresenceManager::new(None);
+        let now = chrono::Utc::now().timestamp();
+
+        // 1) Published, TTL lapsed → must flip offline with the reason stamp.
+        let mut publisher = PresenceState {
+            status: PresenceStatus::Away("lunch".into()),
+            note: Some("away:lunch".into()),
+            last_updated: now - 600,
+            expires_at: Some(now - 60),
+            ..Default::default()
+        };
+        manager
+            .update_state("agent-1001", publisher.clone(), &EventSource::Local)
+            .await;
+
+        // 2) Published, TTL still in the future → untouched.
+        publisher.status = PresenceStatus::Idle;
+        publisher.expires_at = Some(now + 3600);
+        manager
+            .update_state("agent-1002", publisher, &EventSource::Local)
+            .await;
+
+        // 3) Never published (REGISTER-only phone) → untouched even though
+        //    its last_updated is ancient.
+        let mut register_only = PresenceState {
+            status: PresenceStatus::Idle,
+            last_updated: now - 86_400,
+            ..Default::default()
+        };
+        register_only.expires_at = None;
+        manager
+            .update_state("ata-2001", register_only, &EventSource::Local)
+            .await;
+
+        // 4) Already offline with an expired TTL → not re-broadcast.
+        let mut gone = PresenceState {
+            status: PresenceStatus::Offline,
+            last_updated: now - 600,
+            expires_at: Some(now - 60),
+            ..Default::default()
+        };
+        gone.offline_reason = Some("expired".to_string());
+        manager
+            .update_state("agent-1003", gone, &EventSource::Local)
+            .await;
+
+        let expired = manager.expire_stale_publishes().await;
+        assert_eq!(
+            expired,
+            vec!["agent-1001".to_string()],
+            "exactly the lapsed publisher is reported"
+        );
+
+        let flipped = manager.get_state("agent-1001");
+        assert_eq!(flipped.status, PresenceStatus::Offline);
+        assert_eq!(flipped.offline_reason.as_deref(), Some("expired"));
+        assert_eq!(flipped.expires_at, None, "TTL consumed");
+        assert_eq!(flipped.note, None, "break note cleared");
+
+        assert_eq!(manager.get_state("agent-1002").status, PresenceStatus::Idle);
+        assert_eq!(manager.get_state("ata-2001").status, PresenceStatus::Idle);
+        assert_eq!(manager.get_state("agent-1003").status, PresenceStatus::Offline);
+    }
+
     #[tokio::test]
     async fn test_presence_manager_state() {
         let manager = PresenceManager::new(None);
@@ -1764,7 +1914,10 @@ mod tests {
             home_proxy: None,
         };
         let pruned = manager
-            .handle_locator_event(LocatorEvent::Offline(vec![loc]), &EventSource::Local)
+            .handle_locator_event(
+                LocatorEvent::Offline(vec![loc], crate::proxy::locator::LocatorOfflineReason::TransportClosed),
+                &EventSource::Local,
+            )
             .await;
         assert_eq!(pruned.len(), 1);
         assert_eq!(manager.subscriber_bindings_len(), 0);
@@ -1779,6 +1932,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            ..Default::default()
         }
     }
 

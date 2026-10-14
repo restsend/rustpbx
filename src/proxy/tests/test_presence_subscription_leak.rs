@@ -232,7 +232,10 @@ async fn manager_webrtc_offline_uses_registered_aor_not_contact_user() {
 
     let pruned = manager
         .handle_locator_event(
-            LocatorEvent::Offline(vec![webrtc_location("1001", "vsfbt0co")]),
+            LocatorEvent::Offline(
+                vec![webrtc_location("1001", "vsfbt0co")],
+                crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+            ),
             &EventSource::Local,
         )
         .await;
@@ -318,11 +321,14 @@ async fn manager_offline_also_prunes_mwi_for_watcher() {
 
     let pruned = manager
         .handle_locator_event(
-            LocatorEvent::Offline(vec![Location {
-                aor: alice.clone(),
-                registered_aor: Some(alice),
-                ..Default::default()
-            }]),
+            LocatorEvent::Offline(
+                vec![Location {
+                    aor: alice.clone(),
+                    registered_aor: Some(alice),
+                    ..Default::default()
+                }],
+                crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+            ),
             &EventSource::Local,
         )
         .await;
@@ -545,11 +551,14 @@ async fn module_locator_offline_clears_subscription_and_dialog() {
 
     let events = server.locator_events.as_ref().expect("locator_events");
     events
-        .send(LocatorEvent::Offline(vec![Location {
-            aor: watcher("alice", "rustpbx.com"),
-            registered_aor: Some(watcher("alice", "rustpbx.com")),
-            ..Default::default()
-        }]))
+        .send(LocatorEvent::Offline(
+            vec![Location {
+                aor: watcher("alice", "rustpbx.com"),
+                registered_aor: Some(watcher("alice", "rustpbx.com")),
+                ..Default::default()
+            }],
+            crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+        ))
         .unwrap();
 
     assert!(
@@ -689,11 +698,14 @@ async fn cluster_remote_offline_removes_dialog_when_layer_attached() {
     hub.set_dialog_layer(server.dialog_layer.clone());
 
     hub.on_remote_locator_event(
-        LocatorEvent::Offline(vec![Location {
-            aor: watcher("alice", "rustpbx.com"),
-            registered_aor: Some(watcher("alice", "rustpbx.com")),
-            ..Default::default()
-        }]),
+        LocatorEvent::Offline(
+            vec![Location {
+                aor: watcher("alice", "rustpbx.com"),
+                registered_aor: Some(watcher("alice", "rustpbx.com")),
+                ..Default::default()
+            }],
+            crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+        ),
         EventSource::Remote(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
             5060,
@@ -748,9 +760,10 @@ async fn reconnect_storm_never_grows_bindings_linearly() {
                 .locator_events
                 .as_ref()
                 .unwrap()
-                .send(LocatorEvent::Offline(vec![webrtc_location(
-                    "1001", "vsfbt0co",
-                )]))
+                .send(LocatorEvent::Offline(
+                    vec![webrtc_location("1001", "vsfbt0co")],
+                    crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+                ))
                 .unwrap();
             assert!(
                 wait_until(Duration::from_secs(2), || {

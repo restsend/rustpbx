@@ -3,7 +3,7 @@
 //! not by SIP MESSAGE.
 
 use crate::call::Location;
-use crate::proxy::locator::LocatorEvent;
+use crate::proxy::locator::{LocatorEvent, LocatorOfflineReason};
 use crate::proxy::presence::{PresenceManager, PresenceState, PresenceStatus};
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
@@ -108,6 +108,13 @@ pub struct ClusterLocatorMessage {
     contact_raw: Option<String>,
     expires: u32,
     destination: Option<String>,
+    /// Why the binding disappeared — `"offline"` (transport closed) or
+    /// `"expired"` (REGISTER TTL lapsed). Only meaningful for
+    /// unregistered/offline events; absent on older peers and on explicit
+    /// REGISTER expires=0 relays (deserialized as a plain `Unregistered`),
+    /// and never set for registered/refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 impl ClusterLocatorMessage {
@@ -132,7 +139,14 @@ impl ClusterLocatorMessage {
         match self.event.as_str() {
             "registered" => Some(LocatorEvent::Registered(loc)),
             "refreshed" => Some(LocatorEvent::Refreshed(loc)),
-            "unregistered" => Some(LocatorEvent::Unregistered(loc)),
+            "unregistered" => match LocatorOfflineReason::parse_wire(self.reason.as_deref()) {
+                // A peer relayed a transport-close / TTL-expiry batch —
+                // reconstruct it with the original reason so downstream
+                // agent events carry the same reason_code as the origin node.
+                Some(reason) => Some(LocatorEvent::Offline(vec![loc], reason)),
+                // A plain explicit unregistration (REGISTER expires=0).
+                None => Some(LocatorEvent::Unregistered(loc)),
+            },
             _ => None,
         }
     }
@@ -159,6 +173,10 @@ impl ClusterPresenceMessage {
             note: self.note.clone(),
             activity: self.activity.clone(),
             last_updated: self.last_updated,
+            // Peer-mirrored states carry no local PUBLISH TTL; the origin
+            // node owns the expiry decision.
+            expires_at: None,
+            offline_reason: None,
         })
     }
 }
@@ -179,17 +197,22 @@ impl From<&LocatorEvent> for ClusterLocatorMessage {
                     contact_raw: loc.contact_raw.clone(),
                     expires: loc.expires,
                     destination: loc.destination.as_ref().map(|d| d.to_string()),
+                    reason: None,
                 }
             }
-            LocatorEvent::Offline(locs) => {
+            LocatorEvent::Offline(locs, reason) => {
                 let loc = &locs[0];
                 ClusterLocatorMessage {
+                    // Wire name stays "unregistered" for backward compatibility
+                    // with peers that predate the reason field; the reason
+                    // carries the offline/expired distinction.
                     event: "unregistered".to_string(),
                     aor: loc.aor.to_string(),
                     registered_aor: loc.registered_aor.as_ref().map(|aor| aor.to_string()),
                     contact_raw: loc.contact_raw.clone(),
                     expires: loc.expires,
                     destination: loc.destination.as_ref().map(|d| d.to_string()),
+                    reason: Some(reason.as_str().to_string()),
                 }
             }
         }
@@ -366,14 +389,16 @@ impl ClusterEventHub {
         // Forward to peers and notify addon handlers.
         //
         // For Offline events (batch of locations), split into individual
-        // Unregistered events so that handlers and peers each process every
-        // location exactly once.  Previously the full Offline batch was sent
-        // to handlers *and* then each location again as Unregistered, causing
-        // double-processing.
-        if let LocatorEvent::Offline(locs) = &event {
+        // single-location Offline events (same reason) so that handlers and
+        // peers each process every location exactly once.  Previously the
+        // full Offline batch was sent to handlers *and* then each location
+        // again as Unregistered, causing double-processing. The batch keeps
+        // its LocatorOfflineReason so agent events can tell a transport
+        // close apart from a TTL expiry.
+        if let LocatorEvent::Offline(locs, reason) = &event {
             if !locs.is_empty() {
                 for loc in locs.iter() {
-                    let single = LocatorEvent::Unregistered(loc.clone());
+                    let single = LocatorEvent::Offline(vec![loc.clone()], *reason);
                     self.notify_locator_handlers(&single, &source).await;
                     self.send_locator_to_peers(&single).await;
                 }
@@ -579,7 +604,9 @@ mod tests {
             contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
             expires: 3600,
             destination: Some("10.0.0.1:5060".to_string()),
+            reason: None,
         };
+
 
         let body = ClusterMessageBody::Locator(msg);
         let json = serde_json::to_string(&body).unwrap();
@@ -608,7 +635,9 @@ mod tests {
             contact_raw: None,
             expires: 0,
             destination: None,
+            reason: None,
         };
+
 
         let body = ClusterMessageBody::Locator(msg);
         let json = serde_json::to_string(&body).unwrap();
@@ -636,7 +665,9 @@ mod tests {
             contact_raw: None,
             expires: 60,
             destination: None,
+            reason: None,
         };
+
         let json = serde_json::to_string(&ClusterMessageBody::Locator(msg)).unwrap();
         assert!(json.contains("\"type\":\"locator\""));
     }
@@ -652,7 +683,9 @@ mod tests {
             contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
             expires: 3600,
             destination: None,
+            reason: None,
         };
+
         let event = msg.to_event().unwrap();
         match event {
             LocatorEvent::Registered(loc) => {
@@ -680,7 +713,9 @@ mod tests {
             contact_raw: None,
             expires: 0,
             destination: None,
+            reason: None,
         };
+
         let event = msg.to_event().unwrap();
         assert!(matches!(event, LocatorEvent::Unregistered(_)));
     }
@@ -694,7 +729,9 @@ mod tests {
             contact_raw: None,
             expires: 0,
             destination: None,
+            reason: None,
         };
+
         assert!(msg.to_event().is_none());
     }
 
@@ -935,11 +972,82 @@ mod tests {
             destination: None,
             ..Default::default()
         };
-        let event = LocatorEvent::Offline(vec![loc]);
+        let event = LocatorEvent::Offline(vec![loc], LocatorOfflineReason::TransportClosed);
         let msg = ClusterLocatorMessage::from(&event);
         assert_eq!(msg.event, "unregistered");
         assert_eq!(msg.registered_aor.as_deref(), Some("sip:3001@example.com"));
         assert_eq!(msg.contact_raw.as_deref(), Some("sip:3001@10.0.0.3"));
+    }
+
+    /// An Offline event relayed through the cluster wire must reconstruct
+    /// with its original reason, so peer-node agent events carry the same
+    /// `reason_code` as the origin node.
+    #[test]
+    fn locator_offline_reason_survives_cluster_round_trip() {
+        for (reason, wire) in [
+            (LocatorOfflineReason::TransportClosed, "offline"),
+            (LocatorOfflineReason::Expired, "expired"),
+        ] {
+            let loc = Location {
+                aor: "sip:4001@pbx.local".parse().unwrap(),
+                ..Default::default()
+            };
+            let event = LocatorEvent::Offline(vec![loc], reason);
+            let msg = ClusterLocatorMessage::from(&event);
+            assert_eq!(msg.event, "unregistered");
+            assert_eq!(msg.reason.as_deref(), Some(wire));
+
+            // JSON round-trip keeps the reason field.
+            let body = ClusterMessageBody::Locator(msg);
+            let json = serde_json::to_string(&body).unwrap();
+            let parsed: ClusterMessageBody = serde_json::from_str(&json).unwrap();
+            let ClusterMessageBody::Locator(m) = parsed else {
+                panic!("expected Locator variant");
+            };
+            match m.to_event().unwrap() {
+                LocatorEvent::Offline(locs, got) => {
+                    assert_eq!(got, reason);
+                    assert_eq!(locs.len(), 1);
+                    assert_eq!(locs[0].aor.to_string(), "sip:4001@pbx.local");
+                }
+                other => panic!("expected Offline, got {other:?}"),
+            }
+        }
+    }
+
+    /// A legacy peer (or an explicit REGISTER expires=0 relay) sends
+    /// "unregistered" WITHOUT a reason — it must deserialize back to a plain
+    /// `Unregistered`, never be misread as an offline transition.
+    #[test]
+    fn locator_message_without_reason_stays_unregistered() {
+        let json = serde_json::json!({
+            "type": "locator",
+            "event": "unregistered",
+            "aor": "sip:5001@pbx.local",
+            "expires": 0,
+        });
+        let parsed: ClusterMessageBody = serde_json::from_value(json).unwrap();
+        let ClusterMessageBody::Locator(m) = parsed else {
+            panic!("expected Locator variant");
+        };
+        assert!(matches!(m.to_event().unwrap(), LocatorEvent::Unregistered(_)));
+    }
+
+    /// Unknown reason spellings must not fabricate an offline reason either.
+    #[test]
+    fn locator_message_unknown_reason_stays_unregistered() {
+        let json = serde_json::json!({
+            "type": "locator",
+            "event": "unregistered",
+            "aor": "sip:5002@pbx.local",
+            "expires": 0,
+            "reason": "banished",
+        });
+        let parsed: ClusterMessageBody = serde_json::from_value(json).unwrap();
+        let ClusterMessageBody::Locator(m) = parsed else {
+            panic!("expected Locator variant");
+        };
+        assert!(matches!(m.to_event().unwrap(), LocatorEvent::Unregistered(_)));
     }
 
     // ── PresenceState → ClusterPresenceMessage conversion ───────────────────
@@ -951,6 +1059,7 @@ mod tests {
             note: Some("online".to_string()),
             activity: Some("idle".to_string()),
             last_updated: 1714001000,
+            ..Default::default()
         };
         let msg = ClusterPresenceMessage::from(("1001", &state));
         assert_eq!(msg.identity, "1001");
@@ -967,6 +1076,7 @@ mod tests {
             note: None,
             activity: None,
             last_updated: 0,
+            ..Default::default()
         };
         let msg = ClusterPresenceMessage::from(("2001", &state));
         assert_eq!(msg.status, "busy");
@@ -1235,7 +1345,10 @@ mod tests {
             aor: "sip:5002@pbx.local".parse().unwrap(),
             ..Default::default()
         };
-        let _ = locator_tx.send(LocatorEvent::Offline(vec![loc1, loc2]));
+        let _ = locator_tx.send(LocatorEvent::Offline(
+            vec![loc1, loc2],
+            LocatorOfflineReason::TransportClosed,
+        ));
 
         // Give the async dispatch loop time to process.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1306,6 +1419,7 @@ mod tests {
             note: Some("Lunch".to_string()),
             activity: Some("meal".to_string()),
             last_updated: 1715000000,
+            ..Default::default()
         };
 
         // Serialize
@@ -1346,7 +1460,9 @@ mod tests {
             contact_raw: Some(String::new()),
             expires: 0,
             destination: None,
+            reason: None,
         };
+
         assert!(msg.to_event().is_none()); // empty aor is not valid
     }
 

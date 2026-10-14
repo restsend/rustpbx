@@ -923,7 +923,7 @@ class ConfigBuilder:
             'addons = ["' + '", "'.join(self.addons) + '"]',
             "registrar_expires = 3600",
             'codec_strategy = "quality"',
-            f"modules = {_toml_value(self.proxy_modules or ['acl', 'auth', 'registrar', 'call'])}",
+            f"modules = {_toml_value(self.proxy_modules or ['acl', 'auth', 'registrar', 'call', 'presence'])}",
             "# File sources for routes/trunks/queues/ivr — WITHOUT these the proxy",
             "# reloads 0 entries and no route/trunk/queue/ivr file is ever read.",
             "# Use GLOB patterns: a non-glob path makes the proxy's generated-",

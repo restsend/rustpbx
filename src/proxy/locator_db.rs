@@ -996,7 +996,10 @@ impl Locator for DbLocator {
                     if !offline.is_empty()
                         && let Some(sender) = self.event_sender.lock().await.clone().as_ref()
                     {
-                        let _ = sender.send(LocatorEvent::Offline(offline));
+                        let _ = sender.send(LocatorEvent::Offline(
+                            offline,
+                            crate::proxy::locator::LocatorOfflineReason::Expired,
+                        ));
                     }
                 }
                 Ok(_) => {}
@@ -1660,7 +1663,8 @@ mod tests {
             .try_recv()
             .expect("lookup must emit Offline for expired rows");
         match event {
-            LocatorEvent::Offline(removed) => {
+            LocatorEvent::Offline(removed, reason) => {
+                assert_eq!(reason, crate::proxy::locator::LocatorOfflineReason::Expired);
                 assert_eq!(removed.len(), 1);
                 assert_eq!(removed[0].aor, aor);
             }

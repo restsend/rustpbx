@@ -39,6 +39,7 @@ async fn test_presence_state_transition_offline_to_busy() -> Result<()> {
                 note: Some("in a call".to_string()),
                 activity: Some("busy".to_string()),
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &EventSource::Local,
         )
@@ -72,6 +73,7 @@ async fn test_presence_away_with_note() -> Result<()> {
                 note: Some("away:meeting".to_string()),
                 activity: Some("away".to_string()),
                 last_updated: chrono::Utc::now().timestamp(),
+                ..Default::default()
             },
             &EventSource::Local,
         )

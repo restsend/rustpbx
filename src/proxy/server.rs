@@ -1108,8 +1108,12 @@ impl SipServerBuilder {
                                         count = removed.len(),
                                         "locator swept expired registrations"
                                     );
-                                    let _ = locator_events_for_sweep
-                                        .send(LocatorEvent::Offline(removed));
+                                    let _ = locator_events_for_sweep.send(
+                                        LocatorEvent::Offline(
+                                            removed,
+                                            crate::proxy::locator::LocatorOfflineReason::Expired,
+                                        ),
+                                    );
                                 }
                                 Ok(_) => {}
                                 Err(e) => warn!(error = %e, "locator sweep failed"),

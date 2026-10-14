@@ -119,6 +119,56 @@ def validate_event(ev, *, expect_type: Optional[str] = None, expect_call_id: Opt
     return ev
 
 
+# Canonical unregistration causes carried in `reason_code` on agent lifecycle
+# events (agent_unregistered / agent_state_changed → offline):
+#   offline       — transport dropped (WebSocket/TCP closed)
+#   expired       — REGISTER or PUBLISH TTL lapsed without an explicit goodbye
+#   unregistered  — explicit REGISTER expires=0
+AGENT_OFFLINE_REASONS = ("offline", "expired", "unregistered")
+
+
+def _event_payload(ev) -> dict:
+    """Normalize webhook (WebhookEvent) / RWI WS (dict) events to a payload dict."""
+    if isinstance(ev, dict):
+        p = ev.get("payload", ev)
+    else:
+        et = getattr(ev, "event_type", "")
+        p = getattr(ev, "payload", None)
+        if not isinstance(p, dict):
+            p = getattr(ev, "raw", {})
+        ev = {"event_type": et, "payload": p}
+    if hasattr(p, "payload"):  # nested WebhookEvent
+        p = p.payload
+    return ev, (p if isinstance(p, dict) else {})
+
+
+def assert_reason_code(ev, expected: Optional[str] = None) -> str:
+    """Assert an agent lifecycle event carries a sane `reason_code`.
+
+    expected=None only checks membership in AGENT_OFFLINE_REASONS; a string
+    requires an exact match. Accepts webhook `WebhookEvent` objects and raw
+    RWI WS dicts.
+    """
+    ev, payload = _event_payload(ev)
+    etype = event_type(ev)
+    reason = payload.get("reason_code")
+    if reason is None or reason == "":
+        raise AssertionError(
+            f"[event] {etype} must carry reason_code when going offline "
+            f"(expected {expected or AGENT_OFFLINE_REASONS}); payload: {payload}"
+        )
+    if reason not in AGENT_OFFLINE_REASONS:
+        raise AssertionError(
+            f"[event] {etype} reason_code {reason!r} not one of "
+            f"{AGENT_OFFLINE_REASONS}"
+        )
+    if expected is not None and reason != expected:
+        raise AssertionError(
+            f"[event] {etype} reason_code {reason!r} != expected {expected!r}"
+        )
+    return reason
+
+
 def assert_event_flow(
     events,
     expected_flow,

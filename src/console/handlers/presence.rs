@@ -58,6 +58,10 @@ pub async fn set_presence(
             note: payload.note,
             activity: payload.activity,
             last_updated: chrono::Utc::now().timestamp(),
+            // REST-set states carry no PUBLISH TTL and clear any stale
+            // offline-reason stamp.
+            expires_at: None,
+            offline_reason: None,
         };
         sip_server
             .presence_manager

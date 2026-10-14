@@ -66,6 +66,10 @@ pub struct LocatorEventDto {
     pub location: Option<LocationDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<LocationDto>>,
+    /// Why the bindings went offline — `"offline"` (transport closed) or
+    /// `"expired"` (REGISTER TTL lapsed). Only present on offline events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// RFC 3339 timestamp in the server's local timezone (see
     /// [`crate::utils::rfc3339_local`]).
     pub timestamp: String,
@@ -94,6 +98,7 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
                     event: "registered".to_string(),
                     location: Some(LocationDto::from(&loc)),
                     locations: None,
+                    reason: None,
                     timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
@@ -103,15 +108,17 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
                     event: "unregistered".to_string(),
                     location: Some(LocationDto::from(&loc)),
                     locations: None,
+                    reason: None,
                     timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
-            LocatorEvent::Offline(locs) => (
+            LocatorEvent::Offline(locs, reason) => (
                 "offline",
                 LocatorEventDto {
                     event: "offline".to_string(),
                     location: None,
                     locations: Some(locs.iter().map(LocationDto::from).collect()),
+                    reason: Some(reason.as_str().to_string()),
                     timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
@@ -166,6 +173,7 @@ mod tests {
             event: "registered".to_string(),
             location: None,
             locations: None,
+            reason: None,
             timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
         };
         let payload = serde_json::to_value(&dto).expect("serialize locator event");

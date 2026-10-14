@@ -385,16 +385,30 @@ class RestsendAgent:
                     f"stderr tail: {self.stderr_text()[-400:]}")
 
     # ── high-level ops ───────────────────────────────────────────────────
-    async def register(self, expires: int = 120) -> bool:
+    async def register(self, expires: int = 120, transport: Optional[str] = None) -> bool:
+        """init → bind → REGISTER.
+
+        transport=None (default): classic UDP bind + ``host:sip_port`` registrar.
+        transport="ws": SIP over WebSocket — ``sip_bind_ws`` to
+        ``ws://host:http_port/ws`` and a ``ws://`` registrar, the production
+        cc-phone / restsend-pc path. Killing the process then drops the WS
+        link, which rustpbx treats as a transport-close offline.
+        """
         init_cmd: dict[str, Any] = {"cmd": "init"}
         if self.enable_video is not None:
             init_cmd["enable_video"] = self.enable_video
         await self.cmd(init_cmd)
-        await self.cmd({"cmd": "sip_bind",
-                        "local_uri": f"sip:{self.user}@127.0.0.1:{self.local_port}"})
+        if transport == "ws":
+            registrar = f"ws://{self.pbx.host}:{self.pbx.http_port}/ws"
+            await self.cmd({"cmd": "sip_bind_ws", "registrar": registrar,
+                            "user": self.user})
+        else:
+            registrar = f"{self.pbx.host}:{self.pbx.sip_port}"
+            await self.cmd({"cmd": "sip_bind",
+                            "local_uri": f"sip:{self.user}@127.0.0.1:{self.local_port}"})
         await self.wait_event("sip_bound", timeout=8)
         await self.cmd({"cmd": "sip_register",
-                        "registrar": f"{self.pbx.host}:{self.pbx.sip_port}",
+                        "registrar": registrar,
                         "user": self.user, "password": self.password,
                         "expires": expires})
         ev = await self.wait_event("sip_reg_state",
@@ -402,8 +416,32 @@ class RestsendAgent:
                                    timeout=10)
         return ev is not None
 
-    async def publish_idle(self) -> None:
-        await self.cmd({"cmd": "sip_publish", "ready": True})
+    async def publish_idle(self, expires: Optional[int] = None) -> None:
+        """PUBLISH presence ready=true (note=idle).
+
+        expires: PUBLISH TTL in seconds (rides the SIP Expires header). The
+        PBX only arms its presence-TTL sweeper for identities that actually
+        published — pass a short value in tests that verify the
+        "stopped refreshing presence" offline path.
+        """
+        cmd: dict[str, Any] = {"cmd": "sip_publish", "ready": True}
+        if expires is not None:
+            cmd["expires"] = int(expires)
+        await self.cmd(cmd)
+
+    async def unregister(self, timeout: float = 8.0) -> bool:
+        """sip_unregister (REGISTER expires=0) — the explicit goodbye.
+
+        The terminal ``sip_reg_state`` must say "unregistered" (periodic
+        REGISTER refreshes may land in the window and are skipped).
+        """
+        await self.cmd({"cmd": "sip_unregister"})
+        ev = await self.wait_event(
+            "sip_reg_state",
+            predicate=lambda e: e.get("reason") == "unregistered",
+            timeout=timeout,
+        )
+        return ev is not None
 
     async def answer(self, timeout: float = 20.0,
                      since: Optional[int] = None) -> bool:
