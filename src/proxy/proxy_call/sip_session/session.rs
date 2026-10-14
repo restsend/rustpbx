@@ -4537,7 +4537,11 @@ impl SipSession {
                 // branch used by the classic inbound shape). Guard on both legs
                 // being live so an app-initiated hangup (which marks the caller
                 // Ended first) still tears the session down normally.
-                if self.app_media_leg.read().is_some()
+                // API SIP transfers also retire the caller/agent before its
+                // BYE completes; the surviving customer must keep the session.
+                if (self.app_media_leg.read().is_some()
+                    || (self.meta.transferred
+                        && !self.legs.contains_key(&LegId::from("caller"))))
                     && self
                         .legs
                         .get(&LegId::from("callee"))
@@ -6051,7 +6055,12 @@ impl SipSession {
         if self.conference.is_some() {
             return false;
         }
-        if self.bridge.legs.len() == 2 && self.bridge.contains_leg(&LegId::from("caller")) {
+        // After an outbound hand-off, the customer/target pair has no caller
+        // leg. A live caller outside the pair still belongs to a consultation.
+        if self.bridge.legs.len() == 2
+            && (self.bridge.contains_leg(&LegId::from("caller"))
+                || !self.legs.contains_key(&LegId::from("caller")))
+        {
             return leg_id.as_str() != "caller" && self.bridge.contains_leg(leg_id);
         }
         self.meta
@@ -6273,7 +6282,17 @@ impl SipSession {
 
                     // Run the unified post-disconnect handler directly (CSAT
                     // hooks first, then return_app, then hangup).
-                    if !self
+                    if self.meta.transferred
+                        && !self.legs.contains_key(&LegId::from("caller"))
+                    {
+                        // The customer owns the session after the transferor
+                        // leaves, even while the transferor's BYE is in flight.
+                        self.handle_hangup(&HangupCommand::all(
+                            self.meta.hangup_reason.clone(),
+                            None,
+                        ))
+                        .await;
+                    } else if !self
                         .caller_dialog
                         .as_ref()
                         .is_none_or(|d| d.state().is_terminated())
@@ -13627,13 +13646,12 @@ impl SipSession {
                 }
                 self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                 let result = {
-                    // Bridge-based trigger (legacy): the failed leg was paired
-                    // with the caller inside an armed media bridge.
+                    // The selected peer may be customer-anchored after the
+                    // transferor leaves, even while the target is ringing.
                     let bridge_paired_leg = self.legs.get(&leg_id).is_some_and(|leg| {
                         leg.state == LegState::Connected || leg.source_leg.is_some()
                     }) && self.bridge.active
-                        && self.bridge.contains_leg(&LegId::from("caller"))
-                        && self.bridge.contains_leg(&leg_id);
+                        && self.is_caller_peer(&leg_id);
                     // B-leg trigger: the failed leg IS the session's current
                     // B-leg toward the caller even when the media bridge never
                     // armed (e.g. ICE never completed on the agent leg). This
@@ -13761,11 +13779,15 @@ impl SipSession {
                         .legs
                         .values()
                         .any(|leg| leg.source_leg.as_ref() == Some(&leg_id));
+                    // A retired transferor can already be terminated while
+                    // its event is queued; it cannot veto customer cleanup.
                     if (connected_bridge_leg || dial_source_ended)
-                        && self
+                        && (self
                             .caller_dialog
                             .as_ref()
                             .is_none_or(|d| !d.state().is_terminated())
+                            || (self.meta.transferred
+                                && !self.legs.contains_key(&LegId::from("caller"))))
                     {
                         // Defer to the unified post-disconnect handler (CSAT first,
                         // then return_app, then hangup).  Call directly since we
@@ -13919,12 +13941,22 @@ impl SipSession {
     /// 2. `meta.transfer_return_app` — start the stored return app.
     /// 3. Neither — queue a normal hangup.
     async fn handle_start_return_app(&mut self) -> CommandResult {
-        let caller_alive = !self
-            .caller_dialog
-            .as_ref()
-            .is_none_or(|d| d.state().is_terminated());
+        let caller_alive = self.legs.contains_key(&LegId::from("caller"))
+            && !self
+                .caller_dialog
+                .as_ref()
+                .is_none_or(|d| d.state().is_terminated());
 
         if !caller_alive {
+            // An outbound transfer retired the caller/agent, not the customer;
+            // the surviving primary dialog still needs the target's hangup.
+            if self.meta.transferred && !self.legs.contains_key(&LegId::from("caller")) {
+                // The transferor's BYE may still be in flight, so its dialog
+                // cannot identify the surviving customer yet.
+                if let Some(dialog_id) = self.meta.connected_callee_dialog_id.clone() {
+                    self.pending_hangup.insert(dialog_id);
+                }
+            }
             // Caller died while the flow was suspended on a bridge/queue —
             // the suspended IVR will never resume, so emit the compensating
             // session_end trace it suppressed at hand-off time.

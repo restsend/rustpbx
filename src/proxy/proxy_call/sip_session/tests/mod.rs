@@ -3333,6 +3333,379 @@ async fn test_customer_blind_transfer_route_to_queue() {
     );
 }
 
+struct OutboundTransferFixture {
+    session: SipSession,
+    agent_states: mpsc::UnboundedReceiver<DialogState>,
+    callee_states: mpsc::UnboundedReceiver<DialogState>,
+    target: LegId,
+    customer_dialog: DialogId,
+}
+
+async fn outbound_transfer_fixture() -> OutboundTransferFixture {
+    use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "agent",
+        None,
+        "127.0.0.1",
+        None,
+    );
+    let (server, _) = create_test_server().await;
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (agent_tx, agent_states) = mpsc::unbounded_channel();
+    let dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, agent_tx, None, None)
+        .unwrap();
+    dialog.accept(None, None).unwrap();
+    let dialplan = Dialplan::new("outbound-transfer".into(), request, DialDirection::Outbound)
+        .with_caller("sip:agent@127.0.0.1".try_into().unwrap())
+        .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+    let context = CallContext {
+        session_id: "outbound-transfer".into(),
+        dialplan: Arc::new(dialplan),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:agent@127.0.0.1".into(),
+        original_callee: "sip:customer@127.0.0.1".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        dialog,
+        true,
+    );
+    let caller = LegId::from("caller");
+    let customer = LegId::from("callee");
+    session.legs.get_mut(&caller).unwrap().agent_id = Some("agent".into());
+    session.update_leg_state(&caller, LegState::Connected);
+    let mut customer_leg = Leg::new(customer.clone());
+    customer_leg.state = LegState::Connected;
+    session.legs.insert(customer.clone(), customer_leg);
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "customer",
+        None,
+        "127.0.0.1",
+        None,
+    );
+    let (tx, _) = create_transaction(request).await;
+    let (callee_tx, mut callee_states) = mpsc::unbounded_channel();
+    let dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, callee_tx.clone(), None, None)
+        .unwrap();
+    dialog.accept(None, None).unwrap();
+    let customer_dialog = dialog.id();
+    session
+        .legs
+        .set_dialog(customer.clone(), Dialog::Invite(dialog));
+    session.meta.connected_callee_dialog_id = Some(customer_dialog.clone());
+    session.callee_dialogs.insert(customer_dialog.clone(), ());
+    let customer_peer = LegInner::new("callee", &LegConfig::rtp_pcmu(), None).unwrap();
+    let remote = LegInner::new("customer", &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = remote.create_offer().await.unwrap();
+    let answer = customer_peer
+        .apply_sdp(&offer, rustrtc::SdpType::Offer)
+        .await
+        .unwrap();
+    remote
+        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    customer_peer.accept();
+    remote.accept();
+    session.legs.set_media_leg(&customer, customer_peer);
+    session.callee_event_tx = Some(callee_tx);
+    let result = session
+        .execute_command(
+            CallCommand::BlindTransferCustomer {
+                target: "sip:target@127.0.0.1:5099".into(),
+                headers: HashMap::new(),
+                application_only: false,
+                completion: None,
+            },
+            Some(&mut callee_states),
+        )
+        .await;
+    assert!(result.success, "{:?}", result.message);
+    let target = session
+        .legs
+        .iter()
+        .find(|(_, leg)| leg.source_leg.as_ref() == Some(&customer))
+        .map(|(id, _)| id.clone())
+        .expect("transfer target must be customer-anchored");
+    OutboundTransferFixture {
+        session,
+        agent_states,
+        callee_states,
+        target,
+        customer_dialog,
+    }
+}
+
+async fn receive_transfer_bye(
+    mut dialog: rsipstack::dialog::invite_dialog::InviteDialog,
+    states: &mut mpsc::UnboundedReceiver<DialogState>,
+) -> DialogState {
+    use crate::proxy::tests::common::create_transaction;
+    let mut request = dialog.initial_request();
+    request.method = rsipstack::sip::Method::Bye;
+    // The fixture INVITE uses CSeq 1; BYE is the next in-dialog request.
+    for header in request.headers.iter_mut() {
+        match header {
+            rsipstack::sip::Header::CSeq(value) => *value = "2 BYE".into(),
+            rsipstack::sip::Header::To(value) => *value = dialog.snapshot().to.to_string().into(),
+            _ => {}
+        }
+    }
+    let (mut tx, _) = create_transaction(request).await;
+    dialog.handle(&mut tx).await.unwrap();
+    assert!(dialog.state().is_terminated());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let state = states
+                .recv()
+                .await
+                .expect("dialog state channel must remain open");
+            if matches!(&state, DialogState::Terminated(id, _) if *id == dialog.id()) {
+                return state;
+            }
+        }
+    })
+    .await
+    .expect("SIP BYE must emit termination")
+}
+
+#[tokio::test]
+async fn customer_blind_transfer_outbound_target_ends_before_agent_event() {
+    for ended in [false, true] {
+        let mut fixture = outbound_transfer_fixture().await;
+        let _guard = fixture.session.cancel_token.clone().drop_guard();
+        let dialog = fixture.session.caller_dialog.clone().unwrap();
+        // The SIP stack updates the shared dialog before the session consumes its event.
+        let state = receive_transfer_bye(dialog, &mut fixture.agent_states).await;
+        let command = if ended {
+            fixture
+                .session
+                .update_leg_state(&fixture.target, LegState::Connected);
+            CallCommand::LegEnded {
+                leg_id: fixture.target.clone(),
+                reason: "Remote BYE".into(),
+            }
+        } else {
+            CallCommand::LegFailed {
+                leg_id: fixture.target.clone(),
+                reason: "Rejected with 486".into(),
+            }
+        };
+        fixture.session.execute_command(command, None).await;
+        fixture.session.handle_dialog_state(state).await.unwrap();
+        assert!(
+            fixture
+                .session
+                .pending_hangup
+                .contains(&fixture.customer_dialog),
+            "target termination before the agent event must release the customer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn customer_blind_transfer_outbound_customer_bye_before_agent_reply() {
+    let mut fixture = outbound_transfer_fixture().await;
+    let _guard = fixture.session.cancel_token.clone().drop_guard();
+    let dialog = fixture
+        .session
+        .legs
+        .get_dialog(&LegId::from("callee"))
+        .unwrap()
+        .clone();
+    let Dialog::Invite(dialog) = dialog else {
+        panic!("customer must have an INVITE dialog")
+    };
+    let state = receive_transfer_bye(dialog, &mut fixture.callee_states).await;
+    fixture.session.handle_callee_state(state).await.unwrap();
+    assert!(
+        fixture.session.cancel_token.is_cancelled(),
+        "customer BYE must end the session without waiting for the retired agent"
+    );
+    assert_eq!(
+        fixture.session.legs.get(&fixture.target).unwrap().state,
+        LegState::Ended
+    );
+}
+
+#[tokio::test]
+async fn customer_blind_transfer_outbound_survives_agent_bye() {
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_transaction};
+    use rsipstack::dialog::dialog::TerminatedReason;
+
+    for outcome in [
+        "target_bye",
+        "answer",
+        "reject",
+        "reject_before_agent_bye",
+        "customer_bye",
+    ] {
+        let OutboundTransferFixture {
+            mut session,
+            target,
+            customer_dialog,
+            agent_states: _agent_states,
+            callee_states: _callee_states,
+        } = outbound_transfer_fixture().await;
+        let _guard = session.cancel_token.clone().drop_guard();
+        let caller = LegId::from("caller");
+        let customer = LegId::from("callee");
+        let agent_dialog = session.caller_dialog_id();
+        let customer_peer = session.media_leg(&customer).unwrap();
+        assert!(!session.legs.contains_key(&caller));
+        assert!(session.pending_hangup.contains(&agent_dialog));
+        assert!(session.app_media_leg.read().is_none());
+
+        // The server's BYE completion arrives after the transfer command retires the agent.
+        if outcome != "reject_before_agent_bye" {
+            session
+                .handle_dialog_state(DialogState::Terminated(
+                    agent_dialog.clone(),
+                    TerminatedReason::UasBye,
+                ))
+                .await
+                .unwrap();
+        }
+        assert!(
+            !session.cancel_token.is_cancelled(),
+            "agent BYE must not end the customer call"
+        );
+        assert!(
+            !session.pending_hangup.contains(&customer_dialog),
+            "customer must not receive a cascading BYE"
+        );
+        assert!(session.meta.hangup_reason.is_none());
+        assert!(session.legs.contains_key(&target));
+        assert!(Arc::ptr_eq(
+            &customer_peer,
+            &session.media_leg(&customer).unwrap()
+        ));
+
+        if matches!(outcome, "reject" | "reject_before_agent_bye") {
+            let result = session
+                .execute_command(
+                    CallCommand::LegFailed {
+                        leg_id: target.clone(),
+                        reason: "Rejected with 486".into(),
+                    },
+                    None,
+                )
+                .await;
+            assert!(!result.success);
+            assert!(
+                session.pending_hangup.contains(&customer_dialog),
+                "failed transfer must release the customer"
+            );
+            if outcome == "reject_before_agent_bye" {
+                session
+                    .handle_dialog_state(DialogState::Terminated(
+                        agent_dialog,
+                        TerminatedReason::UasBye,
+                    ))
+                    .await
+                    .unwrap();
+                assert!(session.pending_hangup.contains(&customer_dialog));
+            }
+        } else if matches!(outcome, "answer" | "target_bye") {
+            let target_peer = session.media_leg(&target).unwrap();
+            let target_remote = LegInner::new("target", &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = target_peer
+                .pc()
+                .local_description()
+                .unwrap()
+                .to_sdp_string();
+            let answer = target_remote
+                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .await
+                .unwrap();
+            target_remote.accept();
+            let result = session
+                .execute_command(
+                    CallCommand::LegConnected {
+                        leg_id: target.clone(),
+                        answer_sdp: Some(answer),
+                        dialog_id: None,
+                    },
+                    None,
+                )
+                .await;
+            assert!(result.success, "{:?}", result.message);
+            assert!(
+                session.bridge().unwrap().is_bridged(),
+                "customer and target media must connect"
+            );
+            assert!(!session.cancel_token.is_cancelled());
+        }
+
+        if outcome == "target_bye" {
+            let request = create_test_request(
+                rsipstack::sip::Method::Invite,
+                "target",
+                None,
+                "example.com",
+                None,
+            );
+            let (tx, _) = create_transaction(request).await;
+            let (state_tx, _state_rx) = mpsc::unbounded_channel();
+            let dialog = session
+                .server
+                .dialog_layer
+                .get_or_create_server_invite(&tx, state_tx, None, None)
+                .unwrap();
+            session
+                .legs
+                .set_dialog(target.clone(), Dialog::Invite(dialog));
+            let result = session
+                .execute_command(
+                    CallCommand::LegEnded {
+                        leg_id: target.clone(),
+                        reason: "Remote BYE".into(),
+                    },
+                    None,
+                )
+                .await;
+            assert!(result.success, "{:?}", result.message);
+            assert!(
+                session.pending_hangup.contains(&customer_dialog),
+                "answered target BYE must release the customer"
+            );
+        } else if !matches!(outcome, "reject" | "reject_before_agent_bye") {
+            session
+                .handle_callee_state(DialogState::Terminated(
+                    customer_dialog,
+                    TerminatedReason::UasBye,
+                ))
+                .await
+                .unwrap();
+            assert!(
+                session.cancel_token.is_cancelled(),
+                "customer BYE must end the transferred session"
+            );
+            assert_eq!(session.legs.get(&target).unwrap().state, LegState::Ended);
+        }
+    }
+}
+
 /// Same hand-off with the QUEUE-DISPATCHED agent shape: the agent dials into
 /// a DYNAMIC leg (`LegPurpose::Agent`, stamped with the agent id) bridged to
 /// the caller — previously `resolve_cc_customer_leg` only knew the
