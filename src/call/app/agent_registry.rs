@@ -261,9 +261,7 @@ pub trait AgentRegistry: Send + Sync {
     /// override to add a cooldown window (e.g. `no_answer_cooldown_secs`)
     /// or stats/webhooks.
     async fn note_agent_no_answer(&self, agent_id: &str, _call_id: &str) {
-        let _ = self
-            .update_presence(agent_id, PresenceState::Idle)
-            .await;
+        let _ = self.update_presence(agent_id, PresenceState::Idle).await;
     }
 
     async fn note_agent_no_answer_with_policy(
@@ -276,7 +274,10 @@ pub trait AgentRegistry: Send + Sync {
     }
 
     async fn prepare_client_ring_offer(
-        &self, _uri: &str, _call_id: &str, _policy: &AgentRingPolicy,
+        &self,
+        _uri: &str,
+        _call_id: &str,
+        _policy: &AgentRingPolicy,
     ) -> Option<String> {
         None
     }

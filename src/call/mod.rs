@@ -478,9 +478,7 @@ pub fn apply_queue_hold_music_default(plan: &mut QueuePlan, global: Option<Strin
         None => true,
         Some(hold) => hold.audio_file.is_none(),
     };
-    if needs_file
-        && let Some(file) = global
-    {
+    if needs_file && let Some(file) = global {
         let base = plan.hold.take().unwrap_or_default();
         plan.hold = Some(base.with_audio_file(file));
     }
@@ -1200,16 +1198,20 @@ impl Dialplan {
             );
         }
         if let Some(secs) = self.rtp_timeout {
-            obj.insert("rtp_timeout_secs".to_string(), serde_json::json!(secs.as_secs()));
+            obj.insert(
+                "rtp_timeout_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
         }
         if !self.allow_codecs.is_empty() {
             obj.insert(
                 "allow_codecs".to_string(),
-                serde_json::json!(self
-                    .allow_codecs
-                    .iter()
-                    .map(|c| format!("{c:?}").to_lowercase())
-                    .collect::<Vec<_>>()),
+                serde_json::json!(
+                    self.allow_codecs
+                        .iter()
+                        .map(|c| format!("{c:?}").to_lowercase())
+                        .collect::<Vec<_>>()
+                ),
             );
         }
         // Media optional fields.
@@ -1233,13 +1235,19 @@ impl Dialplan {
                 media_obj.insert("webrtc_port_end".to_string(), serde_json::json!(port));
             }
             if let Some(packets) = media.probation_max_packets {
-                media_obj.insert("probation_max_packets".to_string(), serde_json::json!(packets));
+                media_obj.insert(
+                    "probation_max_packets".to_string(),
+                    serde_json::json!(packets),
+                );
             }
             if let Some(policy) = media.video_policy.as_ref() {
                 media_obj.insert("video_policy".to_string(), serde_json::json!(policy));
             }
             if let Some(secs) = media.relay_ready_timeout_secs {
-                media_obj.insert("relay_ready_timeout_secs".to_string(), serde_json::json!(secs));
+                media_obj.insert(
+                    "relay_ready_timeout_secs".to_string(),
+                    serde_json::json!(secs),
+                );
             }
             if let Some(secs) = media.stall_detect_secs {
                 media_obj.insert("stall_detect_secs".to_string(), serde_json::json!(secs));
@@ -1247,17 +1255,22 @@ impl Dialplan {
             if let Some(servers) = media.ice_servers.as_ref().filter(|s| !s.is_empty()) {
                 media_obj.insert(
                     "ice_servers".to_string(),
-                    serde_json::json!(servers
-                        .iter()
-                        .flat_map(|s| s.urls.iter())
-                        .collect::<Vec<_>>()),
+                    serde_json::json!(
+                        servers
+                            .iter()
+                            .flat_map(|s| s.urls.iter())
+                            .collect::<Vec<_>>()
+                    ),
                 );
             }
         }
         // Recording optional fields.
         if let Some(rec_obj) = obj.get_mut("recording").and_then(|r| r.as_object_mut()) {
             if let Some(mode) = recording.stereo_mode.as_ref() {
-                rec_obj.insert("stereo_mode".to_string(), serde_json::json!(format!("{mode:?}")));
+                rec_obj.insert(
+                    "stereo_mode".to_string(),
+                    serde_json::json!(format!("{mode:?}")),
+                );
             }
         }
         snapshot
@@ -2095,15 +2108,26 @@ mod tests {
         assert!(rule.allows("X-Aid"));
         assert!(rule.allows("x-callright"));
         assert!(!rule.allows("P-Asserted-Identity"));
-        assert!(!rule.allows("XToken"), "bare X without dash is not x- prefixed");
+        assert!(
+            !rule.allows("XToken"),
+            "bare X without dash is not x- prefixed"
+        );
 
         let sel = Dialplan::select_passthrough_headers(&original, &[], &rule);
         let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
-        assert_eq!(names.len(), 3, "exactly the three x- headers ride: {names:?}");
+        assert_eq!(
+            names.len(),
+            3,
+            "exactly the three x- headers ride: {names:?}"
+        );
         assert!(names.contains(&"X-Aid".to_string()));
         assert!(names.contains(&"x-callright".to_string()));
         assert!(names.contains(&"X-taskid".to_string()));
-        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("p-asserted-identity")));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case("p-asserted-identity"))
+        );
         assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("xtoken")));
     }
 
@@ -2212,7 +2236,10 @@ mod tests {
     fn queue_hold_default_no_global_leaves_plan_unchanged() {
         let mut empty = queue_plan_with_hold(None);
         apply_queue_hold_music_default(&mut empty, None);
-        assert!(empty.hold.is_none(), "no global -> stays unset (route queues stay silent)");
+        assert!(
+            empty.hold.is_none(),
+            "no global -> stays unset (route queues stay silent)"
+        );
 
         let mut builtin = queue_plan_with_hold(Some(
             QueueHoldConfig::default().with_audio_file("sounds/phone-calling.wav".into()),

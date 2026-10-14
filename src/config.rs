@@ -3311,10 +3311,9 @@ bucket = "default-recordings"
 
     #[test]
     fn test_recording_http_upload_defaults_preserve_wire_format() {
-        let policy: RecordingPolicy = toml::from_str(
-            "enabled = true\ntype = \"http\"\nurl = \"http://host/recording\"\n",
-        )
-        .expect("recording policy should parse");
+        let policy: RecordingPolicy =
+            toml::from_str("enabled = true\ntype = \"http\"\nurl = \"http://host/recording\"\n")
+                .expect("recording policy should parse");
         let http = policy.http_upload_config().expect("http upload config");
         assert_eq!(http.file_field.as_deref(), Some("recording"));
         assert_eq!(http.content_type.as_deref(), Some("audio/wav"));
@@ -3636,8 +3635,7 @@ bucket = "default-recordings"
         ];
         let listeners = vec!["10.0.0.3:5061".to_string()];
         assert_eq!(
-            match_self_peer_by_listeners(&peers, &listeners)
-                .map(|p| p.addr.as_str()),
+            match_self_peer_by_listeners(&peers, &listeners).map(|p| p.addr.as_str()),
             Some("10.0.0.3")
         );
         assert!(match_self_peer_by_listeners(&peers, &[]).is_none());

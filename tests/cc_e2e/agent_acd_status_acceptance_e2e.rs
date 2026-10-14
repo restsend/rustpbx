@@ -400,7 +400,9 @@ async fn acceptance_auto_offline_on_ringing_to_idle() {
         .unwrap();
     assert!(registry.try_reserve_agent("ao", "c1".into()).await);
     registry
-        .set_auto_offline_after_wrapup("ao", true)
+        // auto_offline_after_wrapup 被持久化的 defer_offline 意图取代
+        // （cc_entity_extras，重启/跨节点不丢）。
+        .defer_offline("ao", Some("unregistered".to_string()))
         .await
         .unwrap();
     registry

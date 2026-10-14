@@ -1332,11 +1332,7 @@ impl SipSession {
         }
     }
 
-    pub(super) async fn fail_suspended_ivr_handoff(
-        &mut self,
-        reason: &str,
-        detail: String,
-    ) {
+    pub(super) async fn fail_suspended_ivr_handoff(&mut self, reason: &str, detail: String) {
         if self.meta.ivr_flow_suspended {
             self.meta.ivr_flow_suspended = false;
             self.emit_suspended_flow_session_end(
@@ -1441,10 +1437,13 @@ impl SipSession {
                 let request = server_dialog.initial_request();
                 let cc_uui = crate::call::uui::extract_cc_uui(&request.headers);
                 let root = crate::call::session_id::extract_inherited(&request).or_else(|| {
-                    cc_uui.as_ref().filter(|uui| {
-                        uui.leg.is_none()
-                            || crate::call::session_id::is_uuid_like(&uui.session_id)
-                    }).map(|uui| uui.session_id.clone())
+                    cc_uui
+                        .as_ref()
+                        .filter(|uui| {
+                            uui.leg.is_none()
+                                || crate::call::session_id::is_uuid_like(&uui.session_id)
+                        })
+                        .map(|uui| uui.session_id.clone())
                 });
                 let declared = cc_uui
                     .as_ref()
@@ -1761,7 +1760,10 @@ impl SipSession {
             .filter(|s| !s.trim().is_empty());
 
         let mut candidates: Vec<String> = Vec::new();
-        for c in [auth_user.clone(), from_user, contact_user].into_iter().flatten() {
+        for c in [auth_user.clone(), from_user, contact_user]
+            .into_iter()
+            .flatten()
+        {
             let c = c.trim().to_string();
             if !c.is_empty() && !candidates.contains(&c) {
                 candidates.push(c);
@@ -2902,10 +2904,12 @@ impl SipSession {
         // pressed in that window (bounded, with a TTL) and replay in order
         // once the app is running. Sessions that never run an app keep the
         // drop-on-no-app behaviour.
-        let app_expected = self.app_media_leg.read().is_some() || matches!(
-            self.context.dialplan.flow,
-            crate::call::DialplanFlow::Application { .. } | crate::call::DialplanFlow::Queue { .. }
-        );
+        let app_expected = self.app_media_leg.read().is_some()
+            || matches!(
+                self.context.dialplan.flow,
+                crate::call::DialplanFlow::Application { .. }
+                    | crate::call::DialplanFlow::Queue { .. }
+            );
         // Preserve the physical input leg's attribution after an application handoff.
         let caller_leg_role = self.leg_role_of(&leg_id);
         Some(crate::utils::spawn(async move {
@@ -3217,8 +3221,7 @@ impl SipSession {
             let peer = self.resolve_transfer_leg();
             return self.is_caller_peer(&peer).then_some(peer);
         }
-        self.is_caller_peer(leg_id)
-            .then(|| LegId::from("caller"))
+        self.is_caller_peer(leg_id).then(|| LegId::from("caller"))
     }
 
     /// Publish CC agent attribution into the RWI `CallMetaStore` so every
@@ -3308,7 +3311,10 @@ impl SipSession {
         // Use entry() to avoid overwriting keys already set by addons (e.g.
         // CcCallSessionHook writes agent_id/agent_name here).
         for m in self.context.metadata.iter().chain(
-            self.context.dialplan.extensions.get::<std::collections::HashMap<String, String>>(),
+            self.context
+                .dialplan
+                .extensions
+                .get::<std::collections::HashMap<String, String>>(),
         ) {
             if !m.is_empty() {
                 let mut ext = self.extensions.write();
@@ -3434,11 +3440,7 @@ impl SipSession {
             Self::uri_user_part(&callee_uri.to_string()),
             self.server.agent_registry.as_ref(),
         ) {
-            (Some(user), Some(registry)) => registry
-                .get_agent(&user)
-                .await
-                .is_some()
-                .then(|| user),
+            (Some(user), Some(registry)) => registry.get_agent(&user).await.is_some().then(|| user),
             _ => None,
         };
         if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
@@ -3532,7 +3534,8 @@ impl SipSession {
 
     /// True while a queue app is driving this session — used to gate
     /// queue-specific extension bookkeeping.
-    fn in_queue_context(&self) -> bool {        self.app_runtime
+    fn in_queue_context(&self) -> bool {
+        self.app_runtime
             .current_app()
             .as_deref()
             .is_some_and(|app| app == "queue")
@@ -3725,17 +3728,17 @@ impl SipSession {
         body: Option<Vec<u8>>,
     ) -> Result<Option<rsipstack::sip::Response>> {
         let mut dialog = if leg_id.as_str() == "caller" {
-                    self.caller_dialog.clone().map(Dialog::Invite)
-                } else {
+            self.caller_dialog.clone().map(Dialog::Invite)
+        } else {
             self.legs.get_dialog(leg_id).cloned()
-                }
+        }
         .or_else(|| {
             (leg_id.as_str() == "callee")
                 .then(|| {
                     self.callee_dialogs
                         .iter()
                         .find_map(|entry| self.server.dialog_layer.get_dialog(entry.key()))
-            })
+                })
                 .flatten()
         })
         .ok_or_else(|| anyhow!("No dialog found for leg {}", leg_id))?;
@@ -4168,9 +4171,9 @@ impl SipSession {
         // The offer capability must survive a trusted home-proxy hop even
         // when ordinary trunk headers are not passed through.
         if Self::from_cluster_peer(&self.server, &self.context.cookie) {
-            if let Some(token) = crate::call::sip::ring_timeout_offer(
-                &self.context.dialplan.original.headers.0,
-            ) {
+            if let Some(token) =
+                crate::call::sip::ring_timeout_offer(&self.context.dialplan.original.headers.0)
+            {
                 if crate::call::sip::ring_timeout_offer(&headers).is_none() {
                     headers.push(rsipstack::sip::Header::Other(
                         "Call-Info".into(),
@@ -4693,11 +4696,9 @@ impl SipSession {
                                 == crate::call::DialDirection::Outbound
                             {
                                 if self.pinned_agent_id().is_some() {
-                                    self.meta.hangup_by_side =
-                                        Some("callee_remote".to_string());
+                                    self.meta.hangup_by_side = Some("callee_remote".to_string());
                                 } else {
-                                    self.meta.hangup_by_side =
-                                        Some("caller_remote".to_string());
+                                    self.meta.hangup_by_side = Some("caller_remote".to_string());
                                 }
                             }
                         }
@@ -4728,9 +4729,13 @@ impl SipSession {
                             CallRecordHangupReason::ByCaller
                             | CallRecordHangupReason::ByCallee
                             | CallRecordHangupReason::Canceled,
-                        ) => crate::call::app::ExitReason::RemoteHangup(self.meta.hangup_reason.clone()),
+                        ) => crate::call::app::ExitReason::RemoteHangup(
+                            self.meta.hangup_reason.clone(),
+                        ),
                         None if matches!(reason, TerminatedReason::UacCancel) => {
-                            crate::call::app::ExitReason::RemoteHangup(Some(CallRecordHangupReason::Canceled))
+                            crate::call::app::ExitReason::RemoteHangup(Some(
+                                CallRecordHangupReason::Canceled,
+                            ))
                         }
                         _ => crate::call::app::ExitReason::Hangup,
                     };
@@ -5407,13 +5412,20 @@ impl SipSession {
     async fn fail_ivr_exec_start(&mut self, reason: String) {
         {
             let mut extensions = self.extensions.write();
-            if extensions.get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>().is_none() {
+            if extensions
+                .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+                .is_none()
+            {
                 return;
             }
             extensions.insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
                 app_execution_id: None,
-                status: "failed".to_string(), reason, routing_target: None,
-                collected: Default::default(), trace: Vec::new(), duration_ms: 0,
+                status: "failed".to_string(),
+                reason,
+                routing_target: None,
+                collected: Default::default(),
+                trace: Vec::new(),
+                duration_ms: 0,
                 completion_time: chrono::Utc::now().to_rfc3339(),
             });
         }
@@ -5517,10 +5529,16 @@ impl SipSession {
                 .ok();
             return Ok(());
         }
-        if self.extensions.read()
-            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>().is_some()
+        if self
+            .extensions
+            .read()
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
+            .is_some()
         {
-            tx_handle.respond(rsipstack::sip::StatusCode::BusyHere, None, None).await.ok();
+            tx_handle
+                .respond(rsipstack::sip::StatusCode::BusyHere, None, None)
+                .await
+                .ok();
             return Ok(());
         }
         let mut base_params = None;
@@ -5599,7 +5617,10 @@ impl SipSession {
                 _ => {
                     warn!(session_id = %self.id, route_point,
                         "ivr.exec route point did not resolve to an application");
-                    tx_handle.respond(rsipstack::sip::StatusCode::NotFound, None, None).await.ok();
+                    tx_handle
+                        .respond(rsipstack::sip::StatusCode::NotFound, None, None)
+                        .await
+                        .ok();
                     return Ok(());
                 }
             }
@@ -5686,9 +5707,9 @@ impl SipSession {
         // 3. Start the app on the caller leg.
         let cmd = match route_context {
             Some(route_context) => CallCommand::StartAppWithRouteContext {
-            app_name,
+                app_name,
                 params: Some(app_params),
-            auto_answer: false,
+                auto_answer: false,
                 route_context,
             },
             None => CallCommand::StartApp {
@@ -5697,11 +5718,18 @@ impl SipSession {
                 auto_answer: false,
             },
         };
-        let enqueued = self.cmd_tx.as_ref().is_some_and(|tx| tx.try_send(cmd).is_ok());
+        let enqueued = self
+            .cmd_tx
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(cmd).is_ok());
         if !enqueued {
             warn!(session_id = %self.id, "ivr.exec command could not be enqueued");
-            self.fail_ivr_exec_start("app_enqueue_failed".to_string()).await;
-            tx_handle.respond(rsipstack::sip::StatusCode::ServerInternalError, None, None).await.ok();
+            self.fail_ivr_exec_start("app_enqueue_failed".to_string())
+                .await;
+            tx_handle
+                .respond(rsipstack::sip::StatusCode::ServerInternalError, None, None)
+                .await
+                .ok();
             return Ok(());
         }
         info!(session_id = %session_id, action = "ivr.exec", "SIP INFO rustpbx command accepted");
@@ -5955,11 +5983,10 @@ impl SipSession {
         // `target` is consumed by the hand-off below; keep copies for the
         // transferred-leg timeline stamped on success.
         let refer_target = target.clone();
-        let refer_kind = transfer::transfer_target_type_str(
-            &transfer::parse_transfer_target(&refer_target),
-        )
-        .unwrap_or("sip")
-        .to_string();
+        let refer_kind =
+            transfer::transfer_target_type_str(&transfer::parse_transfer_target(&refer_target))
+                .unwrap_or("sip")
+                .to_string();
         let result = if let Some(ref leg_id) = transferor {
             self.handle_transfer(
                 leg_id.clone(),
@@ -6014,9 +6041,12 @@ impl SipSession {
                 .map(|e| e.code)
                 .unwrap_or(500),
         };
-        if let Err(error) =
-            Self::notify_refer_bounded(&dialog, StatusCode::from(status), "terminated;reason=noresource")
-                .await
+        if let Err(error) = Self::notify_refer_bounded(
+            &dialog,
+            StatusCode::from(status),
+            "terminated;reason=noresource",
+        )
+        .await
         {
             warn!(session_id = %self.id, %error, status, "Failed to send final REFER NOTIFY");
         } else {
@@ -6405,9 +6435,7 @@ impl SipSession {
 
                     // Run the unified post-disconnect handler directly (CSAT
                     // hooks first, then return_app, then hangup).
-                    if self.meta.transferred
-                        && !self.legs.contains_key(&LegId::from("caller"))
-                    {
+                    if self.meta.transferred && !self.legs.contains_key(&LegId::from("caller")) {
                         // The customer owns the session after the transferor
                         // leaves, even while the transferor's BYE is in flight.
                         self.handle_hangup(&HangupCommand::all(
@@ -6668,8 +6696,7 @@ impl SipSession {
             &caller_headers,
             &["X-CRM-Ticket-Id", "X-Ticket-Id", "X-CRM-Ticket"],
         );
-        let customer_id =
-            other_header_ci(&caller_headers, &["X-CRM-Customer-Id", "X-Customer-Id"]);
+        let customer_id = other_header_ci(&caller_headers, &["X-CRM-Customer-Id", "X-Customer-Id"]);
         let session_id_owned = self.context.session_id.to_string();
         // Queue entry stamp: wait-clock base for the monitor's meta-fallback
         // queued rows (shared `cc_acd_queue` row missing / reaped).
@@ -9772,10 +9799,7 @@ impl SipSession {
                 if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&hold_sdp).await? {
                     self.media.callee_answer_sdp = Some(response_sdp);
                 }
-            } else if let Err(e) = self
-                .send_reinvite_to_leg(leg_id, hold_sdp)
-                .await
-            {
+            } else if let Err(e) = self.send_reinvite_to_leg(leg_id, hold_sdp).await {
                 warn!(session_id = %self.context.session_id, %leg_id, error = %e, "Failed to send hold re-INVITE to peer");
             }
         }
@@ -9818,10 +9842,7 @@ impl SipSession {
                 {
                     self.media.callee_answer_sdp = Some(response_sdp);
                 }
-            } else if let Err(e) = self
-                .send_reinvite_to_leg(leg_id, unhold_sdp)
-                .await
-            {
+            } else if let Err(e) = self.send_reinvite_to_leg(leg_id, unhold_sdp).await {
                 warn!(session_id = %self.context.session_id, %leg_id, error = %e, "Failed to send unhold re-INVITE to peer");
             }
         }
@@ -9924,20 +9945,20 @@ impl SipSession {
         }
 
         let Some(peer_leg_id) = self.bridged_peer_leg_id(leg_id) else {
-                    return;
+            return;
         };
         let peer_transition = match (self.leg_prev_state(&peer_leg_id), new_state) {
-                    (Some(LegState::Hold), LegState::Connected) => Some(false),
-                    (Some(LegState::Connected), LegState::Hold) => Some(true),
-                    _ => None,
-                };
+            (Some(LegState::Hold), LegState::Connected) => Some(false),
+            (Some(LegState::Connected), LegState::Hold) => Some(true),
+            _ => None,
+        };
         if let Some(is_hold) = peer_transition {
             let result = if is_hold {
                 self.propagate_hold_to_leg(&peer_leg_id, request_headers, None)
-                            .await
+                    .await
             } else {
                 self.propagate_unhold_to_leg(&peer_leg_id).await
-                };
+            };
             if let Err(error) = result {
                 warn!(session_id = %self.id, %peer_leg_id, %error, "Failed to propagate hold state to bridged peer");
             }
@@ -12201,7 +12222,10 @@ impl SipSession {
         self.teardown_realtime_bridge("app replaced");
         // Command-path queue start: RWI `app.start` / outbound `on_answer: enqueue`
         // carry the queue target in params instead of a dialplan-resolved plan.
-        if app_name == "queue" && params.as_ref().is_some_and(|value| value.get("queue").is_some())
+        if app_name == "queue"
+            && params
+                .as_ref()
+                .is_some_and(|value| value.get("queue").is_some())
         {
             return match self.start_queue_app_from_params(params.as_ref()).await {
                 Ok(()) => {
@@ -12216,7 +12240,9 @@ impl SipSession {
                 .start_app_with_route_context(&app_name, params, auto_answer, context)
                 .await
         } else {
-            self.app_runtime.start_app(&app_name, params, auto_answer).await
+            self.app_runtime
+                .start_app(&app_name, params, auto_answer)
+                .await
         };
         match result {
             Ok(()) => {
@@ -12386,18 +12412,20 @@ impl SipSession {
                 app_name,
                 params,
                 auto_answer,
-            } => self
-                .process_start_app_command(app_name, params, auto_answer, None)
-                .await,
+            } => {
+                self.process_start_app_command(app_name, params, auto_answer, None)
+                    .await
+            }
 
             CallCommand::StartAppWithRouteContext {
                 app_name,
                 params,
                 auto_answer,
                 route_context,
-            } => self
-                .process_start_app_command(app_name, params, auto_answer, Some(route_context))
-                .await,
+            } => {
+                self.process_start_app_command(app_name, params, auto_answer, Some(route_context))
+                    .await
+            }
 
             CallCommand::StopApp { reason } => {
                 self.teardown_realtime_bridge("app stopped");
@@ -12513,7 +12541,9 @@ impl SipSession {
                         let mut file_session_id = self.root_session_id_str();
                         // Separate nodes cannot detect each other's files; supplied
                         // recording identities must also distinguish their artifacts.
-                        if let Some(id) = config.unique_id.as_ref().filter(|id| !id.trim().is_empty()) {
+                        if let Some(id) =
+                            config.unique_id.as_ref().filter(|id| !id.trim().is_empty())
+                        {
                             file_session_id.push('_');
                             file_session_id.push_str(id);
                         }
@@ -12986,10 +13016,7 @@ impl SipSession {
                     if user.is_empty() {
                         target
                     } else if let Some(resolver) = self.server.quick_route_resolver.as_ref() {
-                        resolver
-                            .resolve_quick_target(&user)
-                            .await
-                            .unwrap_or(target)
+                        resolver.resolve_quick_target(&user).await.unwrap_or(target)
                     } else {
                         target
                     }
@@ -13479,7 +13506,11 @@ impl SipSession {
                 answer_sdp,
                 dialog_id,
             } => {
-                if let Some(notifications) = self.extensions.write().get_mut::<RingTimeoutNotifications>() {
+                if let Some(notifications) = self
+                    .extensions
+                    .write()
+                    .get_mut::<RingTimeoutNotifications>()
+                {
                     notifications.0.remove(&leg_id);
                 }
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
@@ -13789,7 +13820,11 @@ impl SipSession {
                     CallCommand::LegEnded { leg_id, reason } => (leg_id, reason, false),
                     _ => unreachable!(),
                 };
-                if let Some(notifications) = self.extensions.write().get_mut::<RingTimeoutNotifications>() {
+                if let Some(notifications) = self
+                    .extensions
+                    .write()
+                    .get_mut::<RingTimeoutNotifications>()
+                {
                     notifications.0.remove(&leg_id);
                 }
                 if failed {
@@ -15197,12 +15232,20 @@ impl SipSession {
         leg_id: LegId,
         reason: Option<String>,
     ) -> Result<()> {
-        let notification = self.extensions.write().get_mut::<RingTimeoutNotifications>()
+        let notification = self
+            .extensions
+            .write()
+            .get_mut::<RingTimeoutNotifications>()
             .and_then(|notifications| notifications.0.remove(&leg_id));
         if let Some(offer) = notification {
-            if reason.as_deref() == Some("ring_timeout") && self.legs.get(&leg_id).is_some_and(|leg| {
-                matches!(leg.state, LegState::Initializing | LegState::Ringing | LegState::EarlyMedia)
-            }) {
+            if reason.as_deref() == Some("ring_timeout")
+                && self.legs.get(&leg_id).is_some_and(|leg| {
+                    matches!(
+                        leg.state,
+                        LegState::Initializing | LegState::Ringing | LegState::EarlyMedia
+                    )
+                })
+            {
                 if let Err(error) = self.send_ring_timeout_notification(offer) {
                     warn!(%leg_id, %error, "Failed to send ring timeout notification");
                 }
@@ -15375,7 +15418,8 @@ impl SipSession {
         leg_id: &LegId,
         location: crate::call::Location,
         purpose: Option<crate::call::domain::LegPurpose>,
-    ) -> Result<()> {        let callee_is_webrtc = Self::callee_supports_webrtc(&location);
+    ) -> Result<()> {
+        let callee_is_webrtc = Self::callee_supports_webrtc(&location);
         let transport_mode = self.callee_transport_mode(callee_is_webrtc);
         // Dialing owns a transport; bridge membership is selected only when
         // connecting. No queue/RWI distinction and no reserved B slot.
@@ -15488,13 +15532,20 @@ impl SipSession {
             session_id: self.session_id_for_outgoing_leg(),
             ..Default::default()
         };
-        if crate::call::sip::ring_timeout_offer(invite_option.headers.as_deref().unwrap_or_default()).is_some() {
+        if crate::call::sip::ring_timeout_offer(
+            invite_option.headers.as_deref().unwrap_or_default(),
+        )
+        .is_some()
+        {
             let mut notification = Box::new(invite_option.clone());
             notification.offer = None;
             // Keep optional metadata in the existing extension bag; normal sessions
             // retain their layout and large async call paths do not carry an INVITE value.
-            self.extensions.write().get_or_insert_default::<RingTimeoutNotifications>()
-                .0.insert(leg_id.clone(), notification);
+            self.extensions
+                .write()
+                .get_or_insert_default::<RingTimeoutNotifications>()
+                .0
+                .insert(leg_id.clone(), notification);
         }
 
         // B-leg SIP destination for the CDR `calleePeer` field (see
@@ -16462,8 +16513,9 @@ impl SipSession {
         &self,
         offer: Box<rsipstack::dialog::invitation::InviteOption>,
     ) -> Result<()> {
-        let token = crate::call::sip::ring_timeout_offer(offer.headers.as_deref().unwrap_or_default())
-            .ok_or_else(|| anyhow!("Missing ring timeout offer"))?;
+        let token =
+            crate::call::sip::ring_timeout_offer(offer.headers.as_deref().unwrap_or_default())
+                .ok_or_else(|| anyhow!("Missing ring timeout offer"))?;
         let body = serde_json::to_vec(&serde_json::json!({
             "event": "ring_timeout", "call_id": offer.call_id, "offer": token,
         }))?;

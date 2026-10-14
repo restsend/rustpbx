@@ -1033,6 +1033,7 @@ async fn test_skill_group_with_level_requirement_filters_agents() {
         .register("junior".to_string(), vec!["support".to_string()], 1)
         .await
         .unwrap();
+    persist_agent_levels(&db, "junior", &[("support", 3)]).await;
     cc_registry
         .set_agent_skill_levels("junior", [("support".to_string(), 3)].into())
         .await
@@ -1047,6 +1048,7 @@ async fn test_skill_group_with_level_requirement_filters_agents() {
         .register("senior".to_string(), vec!["support".to_string()], 1)
         .await
         .unwrap();
+    persist_agent_levels(&db, "senior", &[("support", 8)]).await;
     cc_registry
         .set_agent_skill_levels("senior", [("support".to_string(), 8)].into())
         .await
@@ -1126,6 +1128,7 @@ async fn test_skill_group_policy_min_level_filters_agents() {
         .register("junior".to_string(), vec!["support".to_string()], 1)
         .await
         .unwrap();
+    persist_agent_levels(&db, "junior", &[("support", 3)]).await;
     cc_registry
         .set_agent_skill_levels("junior", [("support".to_string(), 3)].into())
         .await
@@ -1140,6 +1143,7 @@ async fn test_skill_group_policy_min_level_filters_agents() {
         .register("senior".to_string(), vec!["support".to_string()], 1)
         .await
         .unwrap();
+    persist_agent_levels(&db, "senior", &[("support", 8)]).await;
     cc_registry
         .set_agent_skill_levels("senior", [("support".to_string(), 8)].into())
         .await
@@ -2105,6 +2109,38 @@ async fn sg_db() -> sea_orm::DatabaseConnection {
     db
 }
 
+/// 将坐席技能等级写入 `cc_agent.skills`（DB 权威源）并同步内存镜像。
+///
+/// `cc_agent` 行是等级的权威源：presence reconcile（resolve 候选前的
+/// `reconcile_shared_presence`）会用 DB 行覆盖内存值
+/// （`load_agent_snapshot` → `skill_levels = payload.levels`），所以只改
+/// 内存的 `set_agent_skill_levels` 会在下一次 resolve 时被还原。必须先
+/// 落库再镜像 —— 与 console 坐席更新路径（先 `cc_agent.update` 后内存
+/// 镜像）一致。
+async fn persist_agent_levels(
+    db: &sea_orm::DatabaseConnection,
+    agent_id: &str,
+    levels: &[(&str, i32)],
+) {
+    use rustpbx::addons::cc::agent_payload::AgentSkillsPayload;
+    use rustpbx::addons::cc::models::cc_agent;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let model = cc_agent::Entity::find()
+        .filter(cc_agent::Column::AgentId.eq(agent_id))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("cc_agent row for {agent_id} must exist (register persists it)"));
+    let mut payload = AgentSkillsPayload::parse(&model.skills);
+    for (skill, level) in levels {
+        payload.levels.insert((*skill).to_string(), *level);
+    }
+    let mut active: cc_agent::ActiveModel = model.into();
+    active.skills = Set(payload.to_json());
+    active.update(db).await.unwrap();
+}
+
 async fn create_sg(db: &sea_orm::DatabaseConnection, id: &str, skills: &[&str], policy: &str) {
     rustpbx::addons::cc::skill_group::create_skill_group(
         db,
@@ -2407,7 +2443,7 @@ async fn malformed_level_expression_excludes_everyone() {
 async fn level_requirement_excludes_agents_without_levels() {
     let db = sg_db().await;
     create_sg(&db, "sg-level", &["support>=5"], "open").await;
-    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    let cc_registry = Arc::new(AgentRegistry::with_db(db.clone()));
     cc_registry
         .register("a-lvl".to_string(), vec!["support".to_string()], 1)
         .await
@@ -2432,6 +2468,7 @@ async fn level_requirement_excludes_agents_without_levels() {
     // Configure the level → dispatchable.
     let mut levels = HashMap::new();
     levels.insert("support".to_string(), 7);
+    persist_agent_levels(&db, "a-lvl", &[("support", 7)]).await;
     cc_registry
         .set_agent_skill_levels("a-lvl", levels)
         .await

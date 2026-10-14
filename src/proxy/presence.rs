@@ -649,7 +649,8 @@ impl PresenceManager {
             if let Some(hub) = hub {
                 hub.emit_presence_change_locked(&identity, None, &state).await;
             } else {
-                self.update_state(&identity, state, &EventSource::Local).await;
+                self.update_state(&identity, state, &EventSource::Local)
+                    .await;
             }
             expired.push(identity);
         }
@@ -853,7 +854,9 @@ impl PresenceManager {
 
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
-                        None if !is_refresh && current.status == PresenceStatus::Offline => PresenceStatus::Idle,
+                        None if !is_refresh && current.status == PresenceStatus::Offline => {
+                            PresenceStatus::Idle
+                        }
                         None => return pruned,
                     };
 
@@ -1048,7 +1051,10 @@ impl ProxyModule for PresenceModule {
         // Cadence is config-driven (default 60s); e2e shrinks it to bound
         // TTL-related waits.
         let ttl_interval = std::time::Duration::from_secs(
-            self.server.proxy_config.load().clamped_presence_sweep_secs() as u64,
+            self.server
+                .proxy_config
+                .load()
+                .clamped_presence_sweep_secs() as u64,
         );
         let cancel_cleanup = cancel.clone();
         crate::utils::spawn(async move {
@@ -1903,7 +1909,10 @@ mod tests {
 
         assert_eq!(manager.get_state("agent-1002").status, PresenceStatus::Idle);
         assert_eq!(manager.get_state("ata-2001").status, PresenceStatus::Idle);
-        assert_eq!(manager.get_state("agent-1003").status, PresenceStatus::Offline);
+        assert_eq!(
+            manager.get_state("agent-1003").status,
+            PresenceStatus::Offline
+        );
     }
 
     /// P1.0 guard: a lapsed PUBLISH with a LIVE registration must NOT flip
@@ -2235,7 +2244,10 @@ mod tests {
         };
         let pruned = manager
             .handle_locator_event(
-                LocatorEvent::Offline(vec![loc], crate::proxy::locator::LocatorOfflineReason::TransportClosed),
+                LocatorEvent::Offline(
+                    vec![loc],
+                    crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+                ),
                 &EventSource::Local,
             )
             .await;

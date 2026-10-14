@@ -1653,13 +1653,16 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
                 None
             }
         }).unwrap_or_default();
-        let hangup_reason = val.hangup_reason.as_deref().and_then(|reason| match reason.parse() {
-            Ok(reason) => Some(reason),
-            Err(err) => {
-                warn!(call_id = %val.call_id, error = %err, "invalid persisted hangup reason");
-                None
-            }
-        });
+        let hangup_reason = val
+            .hangup_reason
+            .as_deref()
+            .and_then(|reason| match reason.parse() {
+                Ok(reason) => Some(reason),
+                Err(err) => {
+                    warn!(call_id = %val.call_id, error = %err, "invalid persisted hangup reason");
+                    None
+                }
+            });
         let details = CallDetails {
             direction: val.direction,
             status: val.status,

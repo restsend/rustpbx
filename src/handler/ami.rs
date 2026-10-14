@@ -63,36 +63,37 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
     };
 
     #[cfg(feature = "commerce")]
-    let r = {
-        let r = r
-            .route("/cluster/ping", post(cluster_ping_handler))
-            .route("/cluster/reload_config", get(cluster_reload_config_handler))
-            .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
-            .route(
-                "/cluster/evaluate_route",
-                post(cluster_evaluate_route_handler),
-            )
-            .route(
-                "/cluster/dispatch_command",
-                post(cluster_dispatch_command_handler),
-            )
-            .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
-            .route(
-                "/cluster/show_session/{session_id}",
-                get(cluster_show_session_handler),
-            )
-            .route(
-                "/cluster/session_owner/{call_id}",
-                get(cluster_session_owner_handler),
-            )
-            .route("/cluster/list_calls", get(cluster_list_calls_handler))
-            .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
-            .route("/cluster/logs/follow", get(cluster_logs_follow_handler))
-            .route("/cluster/logs/search", get(cluster_logs_search_handler));
-        // Addon-owned AMI routes (e.g. CC `/cluster/cc_owner_op`) — core stays
-        // free of addon path knowledge.
-        r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()))
-    };
+    let r = r
+        .route("/cluster/ping", post(cluster_ping_handler))
+        .route("/cluster/reload_config", get(cluster_reload_config_handler))
+        .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
+        .route(
+            "/cluster/evaluate_route",
+            post(cluster_evaluate_route_handler),
+        )
+        .route(
+            "/cluster/dispatch_command",
+            post(cluster_dispatch_command_handler),
+        )
+        .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
+        .route(
+            "/cluster/show_session/{session_id}",
+            get(cluster_show_session_handler),
+        )
+        .route(
+            "/cluster/session_owner/{call_id}",
+            get(cluster_session_owner_handler),
+        )
+        .route("/cluster/list_calls", get(cluster_list_calls_handler))
+        .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
+        .route("/cluster/logs/follow", get(cluster_logs_follow_handler))
+        .route("/cluster/logs/search", get(cluster_logs_search_handler));
+    // Addon-owned AMI routes (e.g. CC `/cc/admin_cmd` collect-logs/screenshot,
+    // `/cluster/cc_owner_op`) — core stays free of addon path knowledge.
+    // NOT commerce-gated: any enabled addon may contribute routes (the trait
+    // default contributes none), and the cc console needs them in plain
+    // `contact-center` builds too.
+    let r = r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()));
 
     // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE).
     // NOT commerce-gated: the broadcast side initializes for ANY build with
