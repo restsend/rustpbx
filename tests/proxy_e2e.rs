@@ -57,3 +57,6 @@ mod test_security_bans_e2e;
 
 #[path = "proxy_e2e/test_identity_passthrough_e2e.rs"]
 mod test_identity_passthrough_e2e;
+
+#[path = "proxy_e2e/test_voicemail_fallback_e2e.rs"]
+mod test_voicemail_fallback_e2e;

@@ -1808,30 +1808,38 @@ impl CallModule {
             }
         }
 
-        // After dialplan inspectors have had a chance to fill in routes,
-        // if the callee was deemed offline at resolution time and no
-        // inspector provided targets, reject with 480.
-        if dialplan.extensions.get::<CalleeOfflineMarker>().is_some() && dialplan.is_empty() {
-            return Err(RouteError::from((
-                anyhow!("target user is offline"),
-                Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
-            ))
-            .with_code(&crate::proxy::error_catalog::CALLEE_OFFLINE));
-        }
-
-        match self.resolve_callee_user(&tx.original).await {
-            Ok(Some(callee)) => {
-                if dialplan.call_forwarding.is_none()
-                    && let Some(config) = callee.forwarding_config()
-                {
-                    dialplan = dialplan.with_call_forwarding(Some(config));
-                }
-                dialplan.voicemail_enabled = !callee.voicemail_disabled;
-            }
-            Ok(None) => {}
+        let callee = match self.resolve_callee_user(&tx.original).await {
+            Ok(callee) => callee,
             Err(err) => {
                 error!(error = %err, "failed to resolve callee user for forwarding/voicemail");
+                None
             }
+        };
+        if let Some(callee) = callee.as_ref()
+            && dialplan.call_forwarding.is_none()
+            && let Some(config) = callee.forwarding_config()
+        {
+            dialplan = dialplan.with_call_forwarding(Some(config));
+        }
+        dialplan.voicemail_enabled = callee.as_ref().is_some_and(|callee| !callee.voicemail_disabled);
+
+        // After dialplan inspectors have had a chance to fill in routes,
+        // if the callee was deemed offline at resolution time and no
+        // inspector provided targets, go to its voicemail or reject with 480.
+        if dialplan.extensions.get::<CalleeOfflineMarker>().is_some() && dialplan.is_empty() {
+            let Some(callee) = callee.filter(|_| dialplan.voicemail_enabled) else {
+                return Err(RouteError::from((
+                    anyhow!("target user is offline"),
+                    Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+                ))
+                .with_code(&crate::proxy::error_catalog::CALLEE_OFFLINE));
+            };
+            info!(extension = %callee.username, "callee offline, routing to voicemail");
+            dialplan = dialplan.with_application(
+                "voicemail".to_string(),
+                Some(serde_json::json!({ "extension": callee.username })),
+                true,
+            );
         }
 
         let dialplan = self.apply_recording_policy(dialplan, caller);
@@ -3898,6 +3906,67 @@ mod tests {
                 assert!(!strategy.is_empty(), "external callee should be in targets");
             }
             _ => panic!("expected Targets flow for external callee"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_dialplan_sends_offline_callee_to_voicemail_unless_opted_out() {
+        // (user exists, voicemail_disabled)
+        for (exists, disabled) in [(true, false), (true, true), (false, false)] {
+            let (server, config) = create_test_server().await;
+            if exists {
+                server
+                    .user_backend
+                    .create_user(SipUser {
+                        id: 99,
+                        username: "vm-offline".to_string(),
+                        enabled: true,
+                        realm: Some("rustpbx.com".to_string()),
+                        voicemail_disabled: disabled,
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("create callee");
+            }
+            let module = CallModule::new(config, server);
+            let mut request = crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "bp",
+                None,
+                "rustpbx.com",
+                None,
+            );
+            let callee_uri = rsipstack::sip::Uri::try_from("sip:vm-offline@rustpbx.com").unwrap();
+            request.uri = callee_uri.clone();
+            replace_to_header(&mut request, callee_uri);
+            let (mut tx, _endpoint) =
+                crate::proxy::tests::common::create_transaction(request).await;
+            let caller = SipUser {
+                username: "bp".to_string(),
+                realm: Some("rustpbx.com".to_string()),
+                ..Default::default()
+            };
+
+            let result = module
+                .build_dialplan(&mut tx, TransactionCookie::default(), &caller)
+                .await;
+            if exists && !disabled {
+                let plan = result.expect("offline callee should reach voicemail");
+                let DialplanFlow::Application { app_name, app_params, .. } = plan.flow else {
+                    panic!("offline callee must go straight to the voicemail app");
+                };
+                assert_eq!(app_name, "voicemail");
+                assert_eq!(
+                    app_params,
+                    Some(serde_json::json!({ "extension": "vm-offline" }))
+                );
+            } else {
+                let err = result.expect_err("unknown or opted-out callee must not reach voicemail");
+                assert_eq!(
+                    err.status,
+                    Some(rsipstack::sip::StatusCode::TemporarilyUnavailable)
+                );
+            }
         }
     }
 

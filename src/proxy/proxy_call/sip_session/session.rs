@@ -2465,6 +2465,38 @@ impl SipSession {
             }
         }
 
+        // If the callee extension has voicemail enabled, chain to voicemail
+        // instead of passing the dial failure (busy, decline, unreachable, ring
+        // timeout) to the caller. Offline callees are routed to voicemail
+        // directly. Dropping the dial attempts already CANCELled any target
+        // still ringing.
+        if let Some((status_code, _, _)) = setup_error.as_ref()
+            && self.context.dialplan.voicemail_enabled
+            && !self
+                .caller_dialog
+                .as_ref()
+                .is_none_or(|d| d.state().is_terminated())
+            && let Some(ext) = extract_sip_username(&self.context.original_callee)
+        {
+            info!(session_id = %self.id,
+                session_id = %self.context.session_id,
+                extension = %ext,
+                status = %status_code,
+                "Voicemail enabled for callee, starting voicemail app instead of rejecting"
+            );
+            if self.start_voicemail_app(&ext).await.is_ok() {
+                // Voicemail app took over — don't reject the caller.
+                self.meta.error_code = None;
+                setup_error = None;
+            } else {
+                warn!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    extension = %ext,
+                    "Voicemail app failed to start, falling back to rejection"
+                );
+            }
+        }
+
         if let Some((status_code, text, reason)) = setup_error {
             if let Err(e) = self
                 .reject_with_tone(status_code, text.clone(), reason.clone())
@@ -5640,34 +5672,6 @@ impl SipSession {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason =
                                 Some(sip_status_to_hangup_reason(code.code()));
-                        }
-
-                        // If the callee extension has voicemail enabled, chain to
-                        // voicemail instead of passing the rejection to the caller.
-                        // This covers busy, no-answer, offline, decline, etc.
-                        if self.context.dialplan.voicemail_enabled
-                            && !self
-                                .caller_dialog
-                                .as_ref()
-                                .is_none_or(|d| d.state().is_terminated())
-                        {
-                            if let Some(ext) = extract_sip_username(&self.context.original_callee) {
-                                info!(session_id = %self.id,
-                                    session_id = %self.context.session_id,
-                                    extension = %ext,
-                                    status = %code.code(),
-                                    "Voicemail enabled for callee, starting voicemail app instead of rejecting"
-                                );
-                                if self.start_voicemail_app(&ext).await.is_ok() {
-                                    // Voicemail app took over — don't reject the caller.
-                                    return Ok(());
-                                }
-                                warn!(session_id = %self.id,
-                                    session_id = %self.context.session_id,
-                                    extension = %ext,
-                                    "Voicemail app failed to start, falling back to rejection"
-                                );
-                            }
                         }
 
                         if matches!(code.code(), 408 | 480 | 486 | 487) {}

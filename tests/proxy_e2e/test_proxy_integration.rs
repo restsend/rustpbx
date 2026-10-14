@@ -36,6 +36,8 @@ fn create_test_users() -> Vec<SipUser> {
             password: Some("password456".to_string()),
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
+            // Rejections reach the caller instead of bob's voicemail.
+            voicemail_disabled: true,
             ..Default::default()
         },
         SipUser {
