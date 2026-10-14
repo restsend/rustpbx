@@ -2335,6 +2335,45 @@ impl CallModule {
         });
 
         info!(content_type = ?content_type, body = %body, "Received SIP MESSAGE");
+        if content_type.as_deref() == Some(crate::call::sip::ADMIN_CMD_RELAY_CT) {
+            // 节点间管理指令中继：peer 节点把 console 指令转给本坐席的
+            // home 节点。信任边界与 CALL_LEG_EVENT_CT 相同（cluster peer）。
+            let server = &self.inner.server;
+            let trusted = tx.connection.as_ref()
+                .and_then(|connection| connection.get_remote_addr())
+                .and_then(|source| source.addr.host.clone().try_into().ok())
+                .is_some_and(|ip: std::net::IpAddr| server.cluster_peer_ips.contains(&ip));
+            if !trusted {
+                tx.reply(rsipstack::sip::StatusCode::Forbidden).await?;
+                return Ok(());
+            }
+            // 中继信封自带 `agent`（创建节点注入），按它在本节点终端投递。
+            // 只做终端（home==self）：locator 中途漂移 → 404（创建侧长轮询
+            // 超时收场），中继消息不再二次转发。
+            let relay_agent = serde_json::from_slice::<serde_json::Value>(tx.original.body())
+                .ok()
+                .and_then(|v| v.get("agent").and_then(|a| a.as_str()).map(str::to_string));
+            match match relay_agent {
+                Some(agent) => {
+                    crate::call::sip::deliver_admin_cmd_relayed(server, &agent, tx.original.body())
+                        .await
+                }
+                None => Err(anyhow::anyhow!("admin relay body missing agent")),
+            } {
+                Ok(true) => {
+                    tx.reply(rsipstack::sip::StatusCode::OK).await?;
+                }
+                Ok(false) => {
+                    // 目标坐席在本节点无本地注册（stale locator / 已注销）。
+                    tx.reply(rsipstack::sip::StatusCode::NotFound).await?;
+                }
+                Err(error) => {
+                    warn!(%error, "admin cmd relay terminal delivery failed");
+                    tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await?;
+                }
+            }
+            return Ok(());
+        }
         if content_type.as_deref() == Some(crate::call::sip::CALL_LEG_EVENT_CT) {
             use rsipstack::sip::ToTypedHeader;
             let server = &self.inner.server;
@@ -2631,6 +2670,164 @@ mod tests {
                     },
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_admin_cmd_message_reaches_only_the_home_registered_phone() {
+        use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use rsipstack::sip::{Method, SipMessage};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+        for (trusted, local_home) in [(true, true), (false, true), (true, false)] {
+            let (mut server, config) = create_test_server().await;
+            let mut local: SipAddr = "sip:127.0.0.1:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut remote: SipAddr = "sip:192.0.2.44:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut destination: SipAddr = "sip:127.0.0.1:5070"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            local.r#type = Some(rsipstack::sip::Transport::Udp);
+            remote.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let inner = Arc::get_mut(&mut server).unwrap();
+            inner.cluster_peer_ips = if trusted {
+                vec!["192.0.2.44".parse().unwrap()]
+            } else {
+                vec![]
+            };
+            inner.cluster_self_addr = Some(local.clone());
+            for addr in server.endpoint.inner.transport_layer.get_addrs() {
+                server.endpoint.inner.transport_layer.del_transport(&addr);
+            }
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transport = ChannelConnection::create_connection(
+                incoming_rx, outgoing, local.clone(), None,
+            ).await.unwrap();
+            server.endpoint.inner.transport_layer.add_transport(transport.into());
+            let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
+            server.locator.register("agent", Some("127.0.0.1"), Location {
+                aor: contact.clone(),
+                registered_aor: Some(canonical),
+                home_proxy: Some(if local_home { local.clone() } else { remote.clone() }),
+                destination: Some(destination),
+                expires: 3600,
+                last_modified: Some(std::time::Instant::now()),
+                ..Default::default()
+            }).await.unwrap();
+            let mut request = create_test_request(Method::Message, "caller", None, "example.test", None);
+            request.uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            request.headers.push(rsipstack::sip::Header::ContentType(
+                crate::call::sip::ADMIN_CMD_RELAY_CT.into()));
+            request.body = br#"{"v":1,"cmd":"shot","trans_id":"tx-1","agent":"agent","offer":"v=0"}"#.to_vec();
+            let body = request.body.clone();
+            let (mut transaction, _) = create_transaction(request).await;
+            let (_source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+            transaction.connection = Some(ChannelConnection::create_connection(
+                source_rx, response_tx, remote, None,
+            ).await.unwrap().into());
+            let module = CallModule::new(config, server);
+            module.handle_message(&mut transaction, &TransactionCookie::default())
+                .await.unwrap();
+            let Some(TransportEvent::Incoming(SipMessage::Response(response), _, _)) =
+                response_rx.recv().await
+            else { panic!("the peer transaction must receive a response"); };
+            if trusted && local_home {
+                assert_eq!(response.status_code, rsipstack::sip::StatusCode::OK);
+                let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                            outgoing_rx.recv().await
+                        {
+                            if request.method == Method::Message {
+                                break request;
+                            }
+                        }
+                    }
+                }).await.expect("the home proxy must deliver the admin cmd to its registered phone");
+                assert_eq!(received.uri, contact);
+                assert_eq!(received.body, body);
+                // 终端投递用客户端信封 CT（不再带 RELAY 标记）。
+                assert!(received.headers.iter().any(|h| matches!(h,
+                    rsipstack::sip::Header::ContentType(ct)
+                        if ct.value() == crate::call::sip::ADMIN_CMD_CT)));
+            } else {
+                assert!(outgoing_rx.try_recv().is_err(),
+                    "untrusted or remote-home admin cmds must not deliver");
+                assert_eq!(
+                    response.status_code,
+                    if trusted {
+                        rsipstack::sip::StatusCode::NotFound
+                    } else {
+                        rsipstack::sip::StatusCode::Forbidden
+                    },
+                );
+            }
+        }
+    }
+
+    /// AMI 创建入口的跨节点分支：home 在对端 → RELAY CT pager 到对端
+    /// destination（不是终端 CT）；home 在本节点 → 终端 CT 直达坐席。
+    #[tokio::test]
+    async fn admin_cmd_entry_relays_only_when_home_is_remote() {
+        use crate::proxy::tests::common::create_test_server;
+        use rsipstack::sip::{Method, SipMessage};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+        for (home_is_remote, want_ct) in [(true, crate::call::sip::ADMIN_CMD_RELAY_CT), (false, crate::call::sip::ADMIN_CMD_CT)] {
+            let (mut server, _config) = create_test_server().await;
+            let mut local: SipAddr = "sip:127.0.0.1:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut remote: SipAddr = "sip:192.0.2.44:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut destination: SipAddr = "sip:127.0.0.1:5070"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            local.r#type = Some(rsipstack::sip::Transport::Udp);
+            remote.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let inner = Arc::get_mut(&mut server).unwrap();
+            inner.cluster_self_addr = Some(local.clone());
+            for addr in server.endpoint.inner.transport_layer.get_addrs() {
+                server.endpoint.inner.transport_layer.del_transport(&addr);
+            }
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transport = ChannelConnection::create_connection(
+                incoming_rx, outgoing, local.clone(), None,
+            ).await.unwrap();
+            server.endpoint.inner.transport_layer.add_transport(transport.into());
+            let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
+            server.locator.register("agent", Some("127.0.0.1"), Location {
+                aor: contact.clone(),
+                registered_aor: Some(canonical),
+                home_proxy: Some(if home_is_remote { remote.clone() } else { local.clone() }),
+                destination: Some(destination),
+                expires: 3600,
+                last_modified: Some(std::time::Instant::now()),
+                ..Default::default()
+            }).await.unwrap();
+            let body = br#"{"v":1,"cmd":"log","trans_id":"tx-2","agent":"agent","days":1}"#.to_vec();
+            let delivered = crate::call::sip::deliver_admin_cmd(&server, "agent", &body)
+                .await.expect("delivery attempt must not error");
+            assert!(delivered, "the registered agent must be found");
+            let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                        outgoing_rx.recv().await
+                    {
+                        if request.method == Method::Message {
+                            break request;
+                        }
+                    }
+                }
+            }).await.expect("a pager MESSAGE must go out");
+            assert_eq!(received.uri, contact);
+            assert_eq!(received.body, body);
+            assert!(received.headers.iter().any(|h| matches!(h,
+                rsipstack::sip::Header::ContentType(ct) if ct.value() == want_ct)),
+                "expected CT {want_ct}");
         }
     }
 
