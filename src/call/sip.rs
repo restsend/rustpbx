@@ -121,6 +121,11 @@ pub(crate) async fn deliver_admin_cmd(
     let home_is_self = location.home_proxy.as_ref().is_none_or(|home| {
         server
             .cluster_self_addr
+            .clone()
+            // Single-node registrations use the listener Contact as their home.
+            .or_else(|| {
+                server.default_contact_uri().and_then(|uri| uri.try_into().ok())
+            })
             .as_ref()
             .is_some_and(|self_addr| home.addr == self_addr.addr)
     });
@@ -146,6 +151,10 @@ pub(crate) async fn deliver_admin_cmd_relayed(
     let home_is_self = location.home_proxy.as_ref().is_none_or(|home| {
         server
             .cluster_self_addr
+            .clone()
+            .or_else(|| {
+                server.default_contact_uri().and_then(|uri| uri.try_into().ok())
+            })
             .as_ref()
             .is_some_and(|self_addr| home.addr == self_addr.addr)
     });

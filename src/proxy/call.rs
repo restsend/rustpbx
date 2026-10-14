@@ -2797,11 +2797,17 @@ mod tests {
     /// destination（不是终端 CT）；home 在本节点 → 终端 CT 直达坐席。
     #[tokio::test]
     async fn admin_cmd_entry_relays_only_when_home_is_remote() {
-        use crate::proxy::tests::common::create_test_server;
+        use crate::proxy::tests::common::{
+            create_register_request, create_test_server, create_transaction,
+        };
         use rsipstack::sip::{Method, SipMessage};
         use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
-        for (home_is_remote, want_ct) in [(true, crate::call::sip::ADMIN_CMD_RELAY_CT), (false, crate::call::sip::ADMIN_CMD_CT)] {
-            let (mut server, _config) = create_test_server().await;
+        for (clustered, home_is_remote, want_ct) in [
+            (true, true, crate::call::sip::ADMIN_CMD_RELAY_CT),
+            (true, false, crate::call::sip::ADMIN_CMD_CT),
+            (false, false, crate::call::sip::ADMIN_CMD_CT),
+        ] {
+            let (mut server, config) = create_test_server().await;
             let mut local: SipAddr = "sip:127.0.0.1:5060"
                 .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
             let mut remote: SipAddr = "sip:192.0.2.44:5060"
@@ -2812,7 +2818,7 @@ mod tests {
             remote.r#type = Some(rsipstack::sip::Transport::Udp);
             destination.r#type = Some(rsipstack::sip::Transport::Udp);
             let inner = Arc::get_mut(&mut server).unwrap();
-            inner.cluster_self_addr = Some(local.clone());
+            inner.cluster_self_addr = clustered.then(|| local.clone());
             for addr in server.endpoint.inner.transport_layer.get_addrs() {
                 server.endpoint.inner.transport_layer.del_transport(&addr);
             }
@@ -2824,15 +2830,34 @@ mod tests {
             server.endpoint.inner.transport_layer.add_transport(transport.into());
             let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
             let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
-            server.locator.register("agent", Some("127.0.0.1"), Location {
-                aor: contact.clone(),
-                registered_aor: Some(canonical),
-                home_proxy: Some(if home_is_remote { remote.clone() } else { local.clone() }),
-                destination: Some(destination),
-                expires: 3600,
-                last_modified: Some(std::time::Instant::now()),
-                ..Default::default()
-            }).await.unwrap();
+            if !clustered {
+                // Exercise the registrar's real single-node home_proxy fallback.
+                let mut request = create_register_request("agent", "127.0.0.1", Some(3600));
+                request.headers.unique_push(rsipstack::sip::Header::Contact(
+                    "<sip:agent@phone.invalid>".into(),
+                ));
+                let (mut transaction, _) = create_transaction(request).await;
+                crate::proxy::registrar::RegistrarModule::new(server.clone(), config)
+                    .on_transaction_begin(
+                        CancellationToken::new(),
+                        &mut transaction,
+                        TransactionCookie::default(),
+                    )
+                    .await.unwrap();
+                let locations = server.locator.lookup(&canonical).await.unwrap();
+                assert_eq!(locations.len(), 1);
+                assert!(locations[0].home_proxy.is_some());
+            } else {
+                server.locator.register("agent", Some("127.0.0.1"), Location {
+                    aor: contact.clone(),
+                    registered_aor: Some(canonical),
+                    home_proxy: Some(if home_is_remote { remote.clone() } else { local.clone() }),
+                    destination: Some(destination),
+                    expires: 3600,
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                }).await.unwrap();
+            }
             let body = br#"{"v":1,"cmd":"log","trans_id":"tx-2","agent":"agent","days":1}"#.to_vec();
             let delivered = crate::call::sip::deliver_admin_cmd(&server, "agent", &body)
                 .await.expect("delivery attempt must not error");

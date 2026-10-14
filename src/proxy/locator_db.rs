@@ -885,6 +885,8 @@ impl Locator for DbLocator {
     /// `last_modified + expires > now - grace` so the cutoff is computed
     /// on the application clock (never the DB server's `NOW()`).
     async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
+        use sea_orm::sea_query::{ExprTrait, Func, LikeExpr};
+
         let user = username.trim().to_ascii_lowercase();
         if user.is_empty() {
             return Ok(false);
@@ -893,27 +895,56 @@ impl Locator for DbLocator {
         let cutoff = now_epoch - LOCATOR_EXPIRE_GRACE_SECS;
         // Escape LIKE metacharacters so extensions containing `_` or `%`
         // stay literal inside the AoR prefix pattern.
-        let escaped = user
+        let encoded_user = rsipstack::sip::Auth {
+            user: user.clone(),
+            password: None,
+        }
+        .to_string()
+        .to_ascii_lowercase();
+        let escaped = encoded_user
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
-        let aor_pattern = format!("sip:{escaped}@%");
+        // Canonical AoRs live in metadata, not the ephemeral WebRTC Contact column.
+        // SQL narrows candidates; decoded URI users below enforce exact identity matching.
+        let aor_pattern = LikeExpr::new(format!("%:{escaped}@%")).escape('\\');
+        let metadata_pattern =
+            LikeExpr::new(format!("%{REGISTERED_AOR_MARKER}%:{escaped}@%")).escape('\\');
         let active = Entity::find()
+            .select_only()
+            .columns([Column::Username, Column::Aor, Column::UserAgent])
             .filter(Column::Expires.gt(0))
             .filter(
                 sea_orm::Condition::any()
                     .add(Column::Username.eq(user.as_str()))
-                    .add(Column::Aor.like(aor_pattern.as_str())),
+                    .add(Func::lower(Expr::col(Column::Aor)).like(aor_pattern))
+                    .add(Func::lower(Expr::col(Column::UserAgent)).like(metadata_pattern)),
             )
             .filter(
                 sea_orm::sea_query::Expr::col((Entity, Column::LastModified))
                     .add(sea_orm::sea_query::Expr::col((Entity, Column::Expires)))
                     .gt(cutoff),
             )
-            .count(&self.db)
+            .into_tuple::<(String, String, Option<String>)>()
+            .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on has_active_binding_for_user: {}", e))?;
-        Ok(active > 0)
+        // Persistence serializes URI users, while the SIP parser retains percent escapes.
+        // Decode only stored AoRs once; authenticated usernames are already raw identities.
+        let matches_stored_aor = |aor: rsipstack::sip::Uri| {
+            aor.user()
+                .and_then(|value| urlencoding::decode(value).ok())
+                .is_some_and(|value| value.eq_ignore_ascii_case(&user))
+        };
+        Ok(active.into_iter().any(|(username, aor, metadata)| {
+            username.eq_ignore_ascii_case(&user)
+                || aor.parse::<rsipstack::sip::Uri>()
+                    .ok()
+                    .is_some_and(matches_stored_aor)
+                || decode_location_metadata(metadata.as_deref())
+                    .2
+                    .is_some_and(matches_stored_aor)
+        }))
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
@@ -1106,6 +1137,63 @@ mod tests {
             .register("alice", Some("pbx.example.com"), location)
             .await
             .expect("successful insert must complete registration");
+    }
+
+    #[tokio::test]
+    async fn binding_lookup_matches_registered_aor_with_ephemeral_contact() {
+        use crate::proxy::tests::common::{
+            create_register_request, create_test_server_with_config_and_locator, create_transaction,
+        };
+        use crate::proxy::{ProxyModule, registrar::RegistrarModule};
+        use rsipstack::sip::{HeadersExt, ToTypedHeader};
+
+        for (extension, query, unknown, stored_canonical) in [
+            ("7001", "7001", "7002", "|ra=sip:7001@127.0.0.1"),
+            (
+                "Agent_%", "agent_%", "agent_xy", "|ra=sip:Agent_%25@127.0.0.1",
+            ),
+        ] {
+            let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+                .await
+                .unwrap();
+            let db = locator.test_connection().clone();
+            let locator = std::sync::Arc::new(Box::new(locator) as Box<dyn Locator>);
+            let (server, config) = create_test_server_with_config_and_locator(
+                crate::config::ProxyConfig::default(),
+                locator.clone(),
+            )
+            .await;
+            let registrar = RegistrarModule::new(server, config);
+            let mut request = create_register_request("alice", "127.0.0.1", Some(600));
+            // The authenticated account, registered extension and WebRTC Contact are distinct.
+            request.headers.unique_push(rsipstack::sip::Header::To(
+                format!("<sip:{extension}@127.0.0.1>").into(),
+            ));
+            request.headers.unique_push(rsipstack::sip::Header::Contact(
+                "<sip:hvd34mgb@phone.invalid;transport=ws>".into(),
+            ));
+            assert_eq!(
+                request.to_header().unwrap().typed().unwrap().uri.user(),
+                Some(extension)
+            );
+            let (mut transaction, _) = create_transaction(request).await;
+            registrar
+                .on_transaction_begin(
+                    tokio_util::sync::CancellationToken::new(),
+                    &mut transaction,
+                    crate::call::TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+            let stored = Entity::find().one(&db).await.unwrap().unwrap();
+            assert!(stored.user_agent.as_deref().unwrap().ends_with(stored_canonical));
+            assert!(locator.has_active_binding_for_user("alice").await.unwrap());
+            assert!(
+                locator.has_active_binding_for_user(query).await.unwrap(),
+                "registered extension {extension} must remain alive despite an ephemeral Contact"
+            );
+            assert!(!locator.has_active_binding_for_user(unknown).await.unwrap());
+        }
     }
 
     #[tokio::test]
