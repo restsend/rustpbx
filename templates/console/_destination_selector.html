@@ -46,7 +46,7 @@
     <label x-show="allowedTypes.includes('realtime')"
       class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
       :class="targetType === 'realtime' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : (realtimeAvailable ? 'border-slate-200 hover:border-slate-300 cursor-pointer' : 'opacity-40 cursor-not-allowed border-slate-200')"
-      :title="realtimeAvailable ? '' : {{ 'destination_selector.realtime_not_configured' | t | tojson }}">
+      :title='realtimeAvailable ? "" : {{ "destination_selector.realtime_not_configured" | t | tojson }}'>
       <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
         :checked="targetType === 'realtime'" :disabled="!realtimeAvailable"
         @change="setType('realtime')">

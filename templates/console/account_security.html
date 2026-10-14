@@ -87,7 +87,7 @@
 <script>
     window.accountSecurity = function () {
         return {
-            enabled: {{ mfa_enabled }},
+            enabled: {{ mfa_enabled | tojson }},
             setup: null,
             code: '',
             password: '',
