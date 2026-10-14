@@ -7943,6 +7943,7 @@ impl SipSession {
         )
     }
 
+    #[cfg(test)]
     async fn resolve_custom_targets(
         &mut self,
         locations: Vec<crate::call::Location>,
@@ -7951,7 +7952,7 @@ impl SipSession {
             .await
     }
 
-    /// Like [`Self::resolve_custom_targets`] but carries the queue caller's
+    /// Resolve custom targets while carrying the queue caller's
     /// ACD priority into the registry resolution (inline-ACD enqueue + FIFO
     /// gate ordering).
     async fn resolve_custom_targets_with_priority(

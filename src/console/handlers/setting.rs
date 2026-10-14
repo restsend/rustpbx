@@ -4383,7 +4383,6 @@ mod tests {
 
     #[tokio::test]
     async fn historical_log_search_accepts_bare_relative_path() {
-        use tower::ServiceExt;
         let file = tempfile::NamedTempFile::new_in(".").unwrap();
         let path = file.path().file_name().unwrap().to_str().unwrap().to_owned();
         let line = "2026-10-04T10:00:01+00:00 INFO call_id=call-abcdef relative";

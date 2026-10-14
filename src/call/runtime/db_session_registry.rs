@@ -151,7 +151,8 @@ impl SessionRegistry for DbSessionRegistry {
                     ])
                     .to_owned(),
             )
-            .exec(&self.db)
+            // Registering an unchanged session is successful even when MySQL changes no rows.
+            .exec_without_returning(&self.db)
             .await
             .map_err(|e| RegistryError::Unavailable(e.to_string()))?;
         Ok(())
@@ -377,6 +378,37 @@ mod tests {
         i.callee = "1002".into();
         i.direction = "inbound".into();
         i
+    }
+
+    #[tokio::test]
+    async fn register_accepts_mysql_noop_and_propagates_sql_errors() {
+        use sea_orm::{DbBackend, DbErr, MockDatabase, MockExecResult};
+
+        // SQLite RETURNING cannot reproduce MySQL's successful zero-row upsert.
+        for (rows, sql_error) in [(0, false), (1, false), (2, false), (0, true)] {
+            let sql = MockDatabase::new(DbBackend::MySql);
+            let db = if sql_error {
+                sql.append_exec_errors([DbErr::Custom("registry storage unavailable".into())])
+            } else {
+                sql.append_exec_results([MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: rows,
+                }])
+            }
+            .into_connection();
+            let registry = DbSessionRegistry::new(
+                db,
+                Duration::from_secs(3600),
+                Duration::from_secs(crate::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+            );
+            registry.sweeper_cancel.cancel();
+            let result = registry.register(&info("call-test", "node-test")).await;
+            assert_eq!(result.is_err(), sql_error, "rows={rows}: {result:?}");
+            if sql_error {
+                assert!(matches!(result, Err(RegistryError::Unavailable(message))
+                    if message.contains("registry storage unavailable")));
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

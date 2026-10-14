@@ -2645,6 +2645,7 @@ impl SipSession {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn start_ivr_app(
         &self,
         ivr_name: &str,
