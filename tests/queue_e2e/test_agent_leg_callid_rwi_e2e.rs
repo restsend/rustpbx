@@ -827,3 +827,140 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
     harness.server.stop();
     Ok(())
 }
+
+/// ── Scenario ④: plain (non-agent) extension → registered agent ─────────────
+///
+/// `alice` is an ordinary extension (NOT a registered CC agent); `bob` IS a
+/// registered CC agent. alice dials bob directly — a plain dialplan B-leg,
+/// NOT a queue dispatch and NOT a consult. The RWI webhook must show:
+///   * the caller leg (alice) as `leg_role: "caller"`, and
+///   * the callee leg (bob, the called agent) as `leg_role: "callee"` —
+///     a plain dial never gets `LegPurpose::Agent`, so it is NOT an agent leg.
+/// The hard invariant: **no** webhook event may carry `leg_role: "agent"`.
+#[tokio::test]
+async fn test_non_agent_extension_calling_agent_has_no_agent_leg_role() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+
+    let capture = WebhookCapture::start().await;
+    let harness = start_harness(&capture).await?;
+    let proxy_addr = harness.server.proxy_addr;
+
+    // bob is the CALLED agent — answer pump so the call actually connects.
+    let mut bob = make_ua(proxy_addr, "bob");
+    bob.start().await?;
+    bob.register().await?;
+    let bob_call_ids: SeenCallIds = Arc::new(Mutex::new(Vec::new()));
+    let bob_pump = spawn_answer_pump(bob.clone(), bob_call_ids.clone());
+    sleep(Duration::from_millis(300)).await;
+
+    // alice is a plain extension (NOT a registered agent).
+    let mut alice = make_ua(proxy_addr, "alice");
+    alice.start().await?;
+    alice.register().await?;
+    let alice_offer = create_test_sdp(
+        "127.0.0.1",
+        portpicker::pick_unused_port().unwrap_or(30240),
+        false,
+    );
+    let alice_call = {
+        let ua = alice.clone();
+        tokio::spawn(async move { ua.make_call("bob", Some(alice_offer)).await })
+    };
+    let dialog = tokio::time::timeout(Duration::from_secs(15), alice_call)
+        .await
+        .map_err(|_| anyhow!("alice's call did not settle within 15s"))?
+        .map_err(|e| anyhow!("alice's call task failed: {e}"))?
+        .expect("alice→bob call established");
+
+    let session_id = harness
+        .server
+        .wait_for_active_call(Duration::from_secs(5))
+        .await
+        .expect("internal call must be active");
+
+    // The called agent's leg rings as a plain "callee" (purpose=None).
+    let callee_ringing = wait_webhook_matching(
+        &capture,
+        "call_ringing",
+        |v| v["event"]["leg_id"].as_str() == Some("callee"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the callee-leg call_ringing");
+    assert_eq!(
+        callee_ringing["event"]["leg_role"].as_str(),
+        Some("callee"),
+        "plain internal B-leg must report leg_role=callee: {callee_ringing}"
+    );
+    assert_ne!(
+        callee_ringing["event"]["leg_role"].as_str(),
+        Some("agent"),
+        "the called agent's plain B-leg must NOT be attributed as agent"
+    );
+
+    // Confirm the answer before holding the caller leg.
+    wait_webhook_event(&capture, "call_answered", Duration::from_secs(10))
+        .await
+        .expect("webhook must receive call_answered");
+    sleep(Duration::from_millis(500)).await;
+
+    // Hold the CALLER leg (alice) → `call_held` must report leg_role "caller".
+    let handle = harness
+        .server
+        .registry
+        .get_handle(&session_id)
+        .expect("session handle must be registered");
+    let mut held = None;
+    for _ in 0..5 {
+        let _ = handle.send_command(CallCommand::Hold {
+            leg_id: LegId::from("caller"),
+            music: None,
+        });
+        if let Some(ev) = wait_webhook_matching(
+            &capture,
+            "call_held",
+            |v| v["event"]["leg_id"].as_str() == Some("caller"),
+            Duration::from_secs(3),
+        )
+        .await
+        {
+            held = Some(ev);
+            break;
+        }
+        sleep(Duration::from_millis(400)).await;
+    }
+    let held = held.expect("webhook must receive call_held for the caller leg");
+    assert_eq!(
+        held["event"]["leg_role"].as_str(),
+        Some("caller"),
+        "non-agent caller leg must report leg_role=caller: {held}"
+    );
+
+    // ── THE invariant: a plain non-agent → agent call has NO agent leg ─────
+    {
+        let events = capture.received.lock().unwrap();
+        let agent_events: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|v| v["event"]["leg_role"].as_str() == Some("agent"))
+            .collect();
+        assert!(
+            agent_events.is_empty(),
+            "no webhook event may carry leg_role=agent for a plain non-agent→agent call, \
+             got {agent_events:#?}.\n timeline:\n{}",
+            render_timeline(&capture, &session_id)
+        );
+    }
+
+    // Show the real captured webhook data (run with --nocapture).
+    eprintln!(
+        "RWI webhook timeline for session {session_id}:\n{}",
+        render_timeline(&capture, &session_id)
+    );
+
+    let _ = alice.hangup(&dialog).await;
+    bob_pump.abort();
+    let _ = bob.stop();
+    let _ = alice.stop();
+    harness.server.stop();
+    Ok(())
+}

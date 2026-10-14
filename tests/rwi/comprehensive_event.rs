@@ -273,6 +273,7 @@ async fn test_comprehensive_core_event_structs() {
                 queue_id: "support".into(),
                 skill_groups: Some(vec!["support".into()]),
                 priority: None,
+                attempt: None,
             },
         );
         gw.fan_out(
@@ -405,6 +406,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::CallHangup {
                 leg_id: None,
                 call_id: call_id.into(),
+                scope: rustpbx::rwi::CallHangupScope::Call,
                 reason: Some("normal".into()),
                 hangup_by: None,
                 sip_status: Some(200),
@@ -525,6 +527,7 @@ async fn test_new_api_event_structs() {
         gw.broadcast(&rustpbx::rwi::CallHangup {
             leg_id: None,
             call_id: call_id.into(),
+            scope: rustpbx::rwi::CallHangupScope::Call,
             reason: Some("normal".into()),
             hangup_by: None,
             sip_status: Some(200),
@@ -647,6 +650,7 @@ async fn test_new_cc_event_structs() {
         queue_id: "q1".into(),
         skill_groups: Some(vec!["q1".into()]),
         priority: None,
+        attempt: None,
     });
     gw.broadcast(&rustpbx::addons::cc::cc_events::AgentRegistered {
         agent_id: "a2".into(),

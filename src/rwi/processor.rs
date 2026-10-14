@@ -1137,41 +1137,134 @@ impl RwiCommandProcessor {
                         // record.start) so the CDR carries recording_url and the
                         // call-record hooks can emit recording_metadata_available /
                         // record_end.
-                        let recorder: Vec<crate::callrecord::CallRecordMedia> = recorder_file
-                            .map(|path| {
-                                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                                crate::callrecord::CallRecordMedia {
-                                    track_id: "mixed".to_string(),
-                                    path,
-                                    size,
-                                    // Originate-option recordings have no in-session
-                                    // segment bookkeeping; mint the id here so the
-                                    // CDR entry and `recording_metadata_available`
-                                    // still carry a `unique_id`.
-                                    unique_id: Some(uuid::Uuid::new_v4().to_string()),
-                                    extra: None,
-                                }
-                            })
-                            .into_iter()
-                            .collect();
-                        // Session user data (set via RWI/REST on this
-                        // originate) rides into the outbound CDR under a
-                        // namespaced `user_data` key — same as the
-                        // session-path CDR (`record_snapshot`). Safe to read:
-                        // the guard only MOVES into the record below (and on
-                        // a full channel drops after this read).
-                        let user_data_meta = {
+                        //
+                        // In-session recording SEGMENTS (e.g. the cc agent
+                        // segment armed by `[recording] record_on_agent_connect`
+                        // on agent-attributed originates) are mirrored into the
+                        // gateway user_data by the session (it has no reporter
+                        // of its own) — map them into `recorder[]` +
+                        // `recording_segments` exactly like the session-path
+                        // reporter's `collect_recording_artifacts`. Segments win
+                        // over the legacy single-file entry when both exist, so
+                        // a call never reports the same wav twice.
+                        let (segment_media, recording_segments_meta, user_data_meta) = {
                             let gw = cdr_gateway.read();
-                            let ud = gw.get_user_data(&cdr_call_id);
-                            (!ud.is_empty()).then(|| {
+                            let mut ud = gw.get_user_data(&cdr_call_id);
+                            let segments_meta = ud.remove("completed_recording_segments");
+                            let media = segments_meta
+                                .as_ref()
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|seg| {
+                                            let segment: crate::callrecord::RecordingSegment =
+                                                serde_json::from_value(seg.clone()).ok()?;
+                                            let size = if segment.size > 0 {
+                                                segment.size
+                                            } else {
+                                                std::fs::metadata(&segment.path)
+                                                    .ok()
+                                                    .filter(|m| m.is_file())
+                                                    .map(|m| m.len())
+                                                    .unwrap_or(0)
+                                            };
+                                            if size == 0 {
+                                                return None;
+                                            }
+                                            let mut extra = std::collections::HashMap::new();
+                                            extra.insert(
+                                                "session_id".to_string(),
+                                                serde_json::Value::String(cdr_call_id.clone()),
+                                            );
+                                            extra.insert(
+                                                "segment_type".to_string(),
+                                                serde_json::Value::String(
+                                                    segment.segment_type.clone(),
+                                                ),
+                                            );
+                                            extra.insert(
+                                                "segment_id".to_string(),
+                                                serde_json::Value::String(
+                                                    segment.segment_id.clone(),
+                                                ),
+                                            );
+                                            if segment.seq > 0 {
+                                                extra.insert(
+                                                    "seq".to_string(),
+                                                    serde_json::Value::from(segment.seq),
+                                                );
+                                            }
+                                            if !segment.label.is_empty() {
+                                                extra.insert(
+                                                    "label".to_string(),
+                                                    serde_json::Value::String(segment.label.clone()),
+                                                );
+                                            }
+                                            if let Some(ref started) = segment.started_at {
+                                                extra.insert(
+                                                    "started_at".to_string(),
+                                                    serde_json::Value::String(started.clone()),
+                                                );
+                                            }
+                                            if let Some(ref ended) = segment.ended_at {
+                                                extra.insert(
+                                                    "ended_at".to_string(),
+                                                    serde_json::Value::String(ended.clone()),
+                                                );
+                                            }
+                                            Some(crate::callrecord::CallRecordMedia {
+                                                track_id: format!(
+                                                    "segment:{}:{}",
+                                                    segment.segment_type, segment.segment_id
+                                                ),
+                                                path: segment.path,
+                                                size,
+                                                unique_id: segment.unique_id,
+                                                extra: Some(extra),
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            // Session user data (set via RWI/REST on this
+                            // originate) rides into the outbound CDR under a
+                            // namespaced `user_data` key — same as the
+                            // session-path CDR (`record_snapshot`). Safe to read:
+                            // the guard only MOVES into the record below (and on
+                            // a full channel drops after this read).
+                            let user_data_meta = (!ud.is_empty()).then(|| {
                                 let mut meta = std::collections::HashMap::new();
                                 meta.insert(
                                     "user_data".to_string(),
                                     serde_json::Value::Object(ud),
                                 );
                                 meta
-                            })
+                            });
+                            (media, segments_meta, user_data_meta)
                         };
+                        let recorder: Vec<crate::callrecord::CallRecordMedia> =
+                            if !segment_media.is_empty() {
+                                segment_media
+                            } else {
+                                recorder_file
+                                    .map(|path| {
+                                        let size =
+                                            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                        vec![crate::callrecord::CallRecordMedia {
+                                            track_id: "mixed".to_string(),
+                                            path,
+                                            size,
+                                            // Originate-option recordings have no in-session
+                                            // segment bookkeeping; mint the id here so the
+                                            // CDR entry and `recording_metadata_available`
+                                            // still carry a `unique_id`.
+                                            unique_id: Some(uuid::Uuid::new_v4().to_string()),
+                                            extra: None,
+                                        }]
+                                    })
+                                    .unwrap_or_default()
+                            };
+                        let recording_segments_meta = recording_segments_meta.filter(|v| !v.is_null());
                         let mut record = crate::callrecord::CallRecord {
                             call_id: cdr_call_id.clone(),
                             // Originates are root sessions: session_id == call_id.
@@ -1201,7 +1294,16 @@ impl RwiCommandProcessor {
                                 },
                                 from_number: Some(cdr_caller.clone()),
                                 to_number: Some(cdr_callee.clone()),
-                                metadata: user_data_meta,
+                                metadata: {
+                                    let mut meta = user_data_meta;
+                                    if let Some(segments) = recording_segments_meta {
+                                        meta.get_or_insert_with(Default::default).insert(
+                                            "recording_segments".to_string(),
+                                            segments,
+                                        );
+                                    }
+                                    meta
+                                },
                                 ..Default::default()
                             },
                             extensions: http::Extensions::new(),

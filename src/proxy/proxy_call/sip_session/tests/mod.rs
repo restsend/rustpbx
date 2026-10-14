@@ -9641,6 +9641,71 @@ async fn agent_consultation_uses_active_call_without_headers() {
     }
 }
 
+/// A non-agent extension's leg must never be attributed as the agent leg:
+/// `stamp_caller_agent_identity` only stamps when the caller's user-part
+/// resolves to a registered agent. Covers an ordinary extension dialing an
+/// external number and an ordinary extension calling an agent extension
+/// (internal call), plus a positive control for the agent's own extension.
+#[tokio::test]
+async fn caller_leg_not_agent_for_non_agent_extension() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+    let (mut server, _) = create_test_server().await;
+    let agents = Arc::new(MemoryRegistry::new());
+    // Only 1001 is a registered agent (agent_id == its extension).
+    agents
+        .register(
+            "1001".into(),
+            "Alice".into(),
+            "sip:1001@rustpbx.com".into(),
+            vec![],
+            2,
+        )
+        .await
+        .unwrap();
+    Arc::get_mut(&mut server).unwrap().agent_registry = Some(agents.clone());
+
+    for (name, caller, callee, expect_agent) in [
+        ("ext-outbound", "1002", "13800000000", false), // ordinary extension → external number
+        ("ext-internal", "1002", "1001", false),        // ordinary extension → agent extension
+        ("agent-outbound", "1001", "13800000000", true), // control: agent's own extension
+    ] {
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            caller,
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let context = CallContext {
+            session_id: name.into(),
+            dialplan: Arc::new(Dialplan::new(name.into(), request, DialDirection::Outbound)),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: format!("sip:{caller}@rustpbx.com"),
+            original_callee: format!("sip:{callee}@rustpbx.com"),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, handle, _rx) =
+            SipSession::new_uac(server.clone(), CancellationToken::new(), None, context, false);
+        server.active_call_registry.register_handle(name.into(), handle);
+
+        session.stamp_caller_agent_identity().await;
+
+        let caller_leg = session.legs.get(&LegId::from("caller")).unwrap();
+        assert_eq!(caller_leg.agent_id.is_some(), expect_agent, "{name}");
+        assert_eq!(
+            caller_leg.leg_role(),
+            if expect_agent { "agent" } else { "caller" },
+            "{name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn sip_consult_switch_events_follow_only_b_reinvite_transitions() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
@@ -10161,7 +10226,7 @@ fn queue_dispatch_leg_gets_purpose_and_leg_role() {
     assert_eq!(leg.leg_role(), "agent");
 }
 
-// ── Teardown-cascade leg hangups (restore leg_role on post-connect hangup) ──
+// ── Teardown-cascade leg hangups (外呼接通后挂机，leg_role 归位) ─────────────
 
 /// Harness for teardown tests: an OUTBOUND UAC session (the CTI click-to-dial
 /// shape) with the given legs pre-registered, a pinned agent, and the
@@ -10228,13 +10293,11 @@ fn drain_call_hangups(
     hangups
 }
 
-/// The reported defect scenario — agent outbound call, connected, then the
-/// CUSTOMER hangs up first: at session teardown the still-connected agent
-/// bridge leg must emit its leg-scoped `call_hangup` (`leg_role: "agent"`)
-/// BEFORE the session-scoped event, carrying the same reason / hangup_by /
-/// duration. Plain caller/callee legs stay silent, and the outbound
-/// `hangup_by` must normalize to "callee" (the customer hung up — not the
-/// CC-centric "agent" mislabel).
+/// 外呼接通后客户先挂机（报告的缺陷场景）：会话拆除时，仍连接着的坐席桥接腿
+/// 必须在 session 级事件之前补发 leg 级 `call_hangup`（`leg_role: "agent"`，
+/// 与 session 事件同 reason/hangup_by/duration），普通 caller/callee 腿保持
+/// 静默；外呼方向的 `hangup_by` 归一为 "callee"（客户挂断，而非 CC 中心的
+/// "agent" 错标）。
 #[tokio::test]
 async fn teardown_emits_leg_scoped_hangup_for_connected_cc_legs() {
     let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));
@@ -10268,9 +10331,8 @@ async fn teardown_emits_leg_scoped_hangup_for_connected_cc_legs() {
     assert_eq!(hangups[1]["reason"], "callee");
 }
 
-/// A plain two-leg call with no agent/consult legs (including a plain trunk
-/// outbound): teardown adds NO leg-level events — still exactly one
-/// session-scoped `call_hangup`.
+/// 没有坐席/consult 腿的普通两腿呼叫（含纯中继外呼）：teardown 不新增 leg 级
+/// 事件，仍然只有 session 级一条 `call_hangup`。
 #[tokio::test]
 async fn teardown_plain_two_leg_call_stays_single_session_hangup() {
     let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
@@ -10292,9 +10354,8 @@ async fn teardown_plain_two_leg_call_stays_single_session_hangup() {
     assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
 }
 
-/// Cluster child-leg sessions: their session event already stamps the
-/// dispatcher-declared `leg_role`, so teardown must NOT add a leg-level
-/// event (the same teardown would be double-reported).
+/// Cluster 子腿会话：session 事件已带 dispatcher 声明的 `leg_role`，teardown
+/// 不再补发 leg 级事件（避免同一拆除被双重上报）。
 #[tokio::test]
 async fn teardown_child_leg_session_skips_leg_scoped_hangup() {
     let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));
@@ -10316,10 +10377,9 @@ async fn teardown_child_leg_session_skips_leg_scoped_hangup() {
     );
 }
 
-/// A setup-failed / never-connected CC leg does NOT participate in the
-/// teardown emission: miss semantics (`ring_timeout` / `superseded`) belong
-/// to the in-setup `handle_remove_leg` path; cleanup only covers
-/// established legs.
+/// Setup 失败/从未连接的 CC 腿不参与 teardown 补发：miss 语义（ring_timeout /
+/// superseded）由 `handle_remove_leg` 的 in-setup 路径负责，cleanup 只管
+/// established 腿。
 #[tokio::test]
 async fn teardown_ignores_never_connected_cc_legs() {
     let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));

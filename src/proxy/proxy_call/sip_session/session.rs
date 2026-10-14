@@ -928,6 +928,18 @@ impl SipSession {
                     routed_app = routed_app.unwrap_or("(none)"),
                     "auto recorder skipped: routed app exempted by [recording].auto_start_except"
                 );
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Recording,
+                        format!(
+                            "Auto recording skipped (app '{}' exempted by [recording].auto_start_except)",
+                            routed_app.unwrap_or("(none)")
+                        ),
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Info)
+                    .code(crate::callrecord::recording_upload::recording_trace_codes::AUTOSTART_SKIPPED)
+                    .detail(serde_json::json!({ "routed_app": routed_app })),
+                );
                 return Ok(());
             }
         }
@@ -963,6 +975,20 @@ impl SipSession {
                 discard: false,
             });
             debug!(session_id = %self.id, backend = "file", "auto recorder installed");
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Recording,
+                    "Recording started (auto, full call)",
+                )
+                .severity(crate::call_errors::ErrSeverity::Info)
+                .code(crate::callrecord::recording_upload::recording_trace_codes::STARTED)
+                .detail(serde_json::json!({
+                    "backend": "file",
+                    "path": self.active_recording.as_ref().map(|r| r.path.clone()),
+                    "segment_type": "full",
+                    "recording_type": format!("{:?}", recording.recording_type),
+                })),
+            );
             return Ok(());
         }
 
@@ -992,7 +1018,44 @@ impl SipSession {
             .set_recorder(Box::new(recorder), None)
             .await?;
         debug!(session_id = %self.id, backend = "sipflow", "auto recorder installed");
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Recording,
+                "Recording started (auto, sipflow capture)",
+            )
+            .severity(crate::call_errors::ErrSeverity::Info)
+            .code(crate::callrecord::recording_upload::recording_trace_codes::STARTED)
+            .detail(serde_json::json!({
+                "backend": "sipflow",
+                "recording_type": format!("{:?}", recording.recording_type),
+            })),
+        );
         Ok(())
+    }
+
+    /// Install the auto recorder when the dialplan asks for `stage`, tracing
+    /// the outcome into the call trace: `recording.start_failed` (kind error,
+    /// severity warn) when installation fails — previously this path only
+    /// logged and the CDR could not explain a call without its recording.
+    pub(crate) async fn set_auto_recorder_traced(
+        &mut self,
+        stage: Option<crate::config::RecordingAutoStartAt>,
+    ) {
+        if !self.should_auto_start_recording(stage) {
+            return;
+        }
+        if let Err(error) = self.set_auto_recorder().await {
+            warn!(session_id = %self.id, %error, "Auto recorder installation failed");
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Error,
+                    format!("Recording failed to start: {error}"),
+                )
+                .severity(crate::call_errors::ErrSeverity::Warn)
+                .code(crate::callrecord::recording_upload::recording_trace_codes::START_FAILED)
+                .detail(serde_json::json!({ "error": error.to_string() })),
+            );
+        }
     }
 
     fn root_session_id_str(&self) -> String {
@@ -1573,6 +1636,19 @@ impl SipSession {
             recording_seq: 0,
             primary_leg_uac,
         };
+
+        // Seed the call trace with the resolved dialplan snapshot (ts≈0):
+        // routing summary plus the effective media/recording parameters. The
+        // full parameter block is persisted separately as
+        // `metadata["dialplan"]` when the CDR snapshot is built.
+        let mut session = session;
+        session.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Dialplan,
+                session.context.dialplan.summary_line(),
+            )
+            .detail(session.context.dialplan.snapshot_json()),
+        );
 
         (session, sip_handle, cmd_rx)
     }
@@ -3011,11 +3087,7 @@ impl SipSession {
         let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
-        if self.should_auto_start_recording(None)
-            && let Err(error) = self.set_auto_recorder().await
-        {
-            warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
-        }
+        self.set_auto_recorder_traced(None).await;
         self.maybe_autostart_live_transcription("originate_answer")
             .await;
         // The caller dialog is already answered when it is attached. Its
@@ -7791,11 +7863,8 @@ impl SipSession {
         // caller" guess.
         self.legs.set_transport(LegId::from("caller"), transport);
 
-        if self.should_auto_start_recording(Some(crate::config::RecordingAutoStartAt::Media))
-            && let Err(error) = self.set_auto_recorder().await
-        {
-            warn!(session_id = %self.id, %error, "Auto recorder installation after caller media setup failed");
-        }
+        self.set_auto_recorder_traced(Some(crate::config::RecordingAutoStartAt::Media))
+            .await;
 
         Ok(())
     }
@@ -9101,11 +9170,8 @@ impl SipSession {
 
         // Caller media setup is complete and the final response is ready.
         // The answer timing installs its recorder immediately before 200 OK.
-        if self.should_auto_start_recording(Some(crate::config::RecordingAutoStartAt::Answer))
-            && let Err(error) = self.set_auto_recorder().await
-        {
-            warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
-        }
+        self.set_auto_recorder_traced(Some(crate::config::RecordingAutoStartAt::Answer))
+            .await;
         self.maybe_autostart_live_transcription("call_answer").await;
 
         if let Some(answer_sdp) = answer_sdp {
@@ -10149,7 +10215,21 @@ impl SipSession {
                 Ok(Some(path))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(e),
+            Err(e) => {
+                // The CDR timeline must explain a missing/incomplete
+                // recording — a failed stop often means the segment was not
+                // finalized (no file, no upload, no CDR entry).
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Error,
+                        format!("Recording failed to stop: {e}"),
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Warn)
+                    .code(crate::callrecord::recording_upload::recording_trace_codes::STOP_FAILED)
+                    .detail(serde_json::json!({ "error": e.to_string() })),
+                );
+                Err(e)
+            }
         }
     }
 
@@ -10175,6 +10255,27 @@ impl SipSession {
         let duration = Duration::from_secs_f64(result.duration_secs);
         let file_size = result.file_size;
         info!(session_id = %self.id, path = %path, unique_id = ?unique_id, duration = ?duration, file_size, "Recording stopped");
+        // Trace the finalized segment so the CDR timeline shows captured
+        // media even when the upload pipeline fails later (missing
+        // `recording.uploaded` next to this entry = upload-side problem).
+        if let Some(segment) = self.completed_recording_segments.last() {
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Recording,
+                    format!("Recording stopped ({})", segment.segment_type),
+                )
+                .severity(crate::call_errors::ErrSeverity::Info)
+                .code(crate::callrecord::recording_upload::recording_trace_codes::STOPPED)
+                .duration((result.duration_secs * 1000.0) as i64)
+                .detail(serde_json::json!({
+                    "path": path,
+                    "duration_secs": result.duration_secs,
+                    "size_bytes": file_size,
+                    "segment_type": segment.segment_type,
+                    "unique_id": unique_id,
+                })),
+            );
+        }
         let info = crate::call::app::RecordingInfo {
             path,
             duration,
@@ -10184,6 +10285,45 @@ impl SipSession {
             let _ = self.app_event_bridge.send_app_event(
                 crate::call::app::ControllerEvent::RecordingComplete(info.clone()),
             );
+        }
+        // UAC sessions (RWI originates) produce no session-path CDR — the
+        // originate task builds the call record from the gateway state. Mirror
+        // the completed segment into the call's user_data so that CDR carries
+        // `recorder[]` + `recording_segments` exactly like every session-path
+        // call (docs contract: every completed segment is written to the CDR).
+        // Session-path calls are excluded: their reporter already consumes
+        // `completed_recording_segments`.
+        if self.reporter.is_none()
+            && let Some(segment) = self.completed_recording_segments.last()
+            && let Some(gateway) = self.server.rwi_gateway.as_ref()
+        {
+            let call_id = self.context.session_id.clone();
+            match serde_json::to_value(segment) {
+                Ok(entry) if !entry.is_null() => {
+                    let mut data = gateway.read().get_user_data(&call_id);
+                    let slots = data
+                        .entry("completed_recording_segments".to_string())
+                        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                    if let serde_json::Value::Array(slots) = slots {
+                        slots.push(entry);
+                    }
+                    if let Err(error) = gateway.write().set_user_data(&call_id, data) {
+                        warn!(
+                            session_id = %self.id,
+                            path = %info.path,
+                            %error,
+                            "Failed to publish recording segment for the originate CDR"
+                        );
+                    }
+                }
+                _ => {
+                    warn!(
+                        session_id = %self.id,
+                        path = %info.path,
+                        "Failed to serialize recording segment for the originate CDR"
+                    );
+                }
+            }
         }
         if let Some(gateway) = self.server.rwi_gateway.as_ref() {
             let call_id = self.context.session_id.clone();
@@ -10268,8 +10408,20 @@ impl SipSession {
                 .load(std::sync::atomic::Ordering::Relaxed)
             && !self.app_runtime.has_started_app()
         {
+            // Diagnostic shape fields: the reproduce requires knowing WHICH
+            // flow reached Connected without the session-level emit — current
+            // app, leg states and transfer progress narrow it down.
+            let legs_summary = self
+                .legs
+                .iter()
+                .map(|(id, leg)| format!("{}:{}", id, leg.state))
+                .collect::<Vec<_>>()
+                .join(",");
             warn!(
                 session_id = %self.context.session_id,
+                app = ?self.app_runtime.current_app(),
+                transfer_in_progress = self.meta.transfer_in_progress,
+                legs = %legs_summary,
                 "session reached Connected but never emitted the session-level call_answered; \
                  a call shape may be missing its session-level emit site"
             );
@@ -10399,11 +10551,21 @@ impl SipSession {
         // clone the guard cleanup (user_data / CallMeta / ownership wipe)
         // would run right here, BEFORE the `call_hangup` below is dispatched,
         // silently stripping `user_data` and call context from it.
-        let rwi_state_guard = self
-            .server
-            .rwi_gateway
-            .as_ref()
-            .map(|gw| crate::rwi::RwiCallRecordGuard::new(gw, self.context.session_id.clone()));
+        //
+        // UAC (reporter-less) sessions must NOT hold this guard: their CDR is
+        // built by the originate task AFTER this cleanup, using the gateway
+        // state (user_data incl. the completed-recording-segment mirror,
+        // CallMeta). A session-side guard would drop here and wipe that state
+        // before the originate CDR could read it — the originate task's own
+        // `RwiCallRecordGuard` owns the gateway lifecycle for UAC sessions.
+        let rwi_state_guard = if self.reporter.is_some() {
+            self.server
+                .rwi_gateway
+                .as_ref()
+                .map(|gw| crate::rwi::RwiCallRecordGuard::new(gw, self.context.session_id.clone()))
+        } else {
+            None
+        };
 
         // Flush actor-owned partial PCM before the synchronous CDR snapshot.
         // Missing media evidence must never prevent hangup or CDR publication.
@@ -11618,6 +11780,14 @@ impl SipSession {
                     meta.insert("trace".to_string(), arr);
                 }
             }
+            // Effective dialplan parameters (media/RTP/WebRTC/recording
+            // config) so the CDR explains which setup governed the call.
+            // Complements the `dialplan` timeline entry seeded at session
+            // construction.
+            meta.insert(
+                "dialplan".to_string(),
+                self.context.dialplan.snapshot_json(),
+            );
             // Transfer marker: lets consumers (CSAT suppression, reports)
             // spot transferred calls without parsing the leg timeline.
             if self.meta.transferred {
@@ -12394,14 +12564,43 @@ impl SipSession {
                 .await;
                 let result: anyhow::Result<String> = result;
                 match result {
-                    Ok(unique_id) => CommandResult {
-                        success: true,
-                        message: None,
-                        affected_leg: None,
-                        data: Some(serde_json::json!({ "unique_id": unique_id })),
-                        failure_kind: None,
-                    },
-                    Err(e) => CommandResult::failure(e.to_string()),
+                    Ok(unique_id) => {
+                        if let Some(active) = self.active_recording.as_ref() {
+                            self.record_trace(
+                                crate::call_errors::TraceEvent::new(
+                                    crate::call_errors::TraceKind::Recording,
+                                    format!("Recording started ({})", active.segment_type),
+                                )
+                                .severity(crate::call_errors::ErrSeverity::Info)
+                                .code(crate::callrecord::recording_upload::recording_trace_codes::STARTED)
+                                .detail(serde_json::json!({
+                                    "backend": "file",
+                                    "path": active.path,
+                                    "segment_type": active.segment_type,
+                                    "unique_id": active.unique_id,
+                                })),
+                            );
+                        }
+                        CommandResult {
+                            success: true,
+                            message: None,
+                            affected_leg: None,
+                            data: Some(serde_json::json!({ "unique_id": unique_id })),
+                            failure_kind: None,
+                        }
+                    }
+                    Err(e) => {
+                        self.record_trace(
+                            crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Error,
+                                format!("Recording failed to start: {e}"),
+                            )
+                            .severity(crate::call_errors::ErrSeverity::Warn)
+                            .code(crate::callrecord::recording_upload::recording_trace_codes::START_FAILED)
+                            .detail(serde_json::json!({ "error": e.to_string() })),
+                        );
+                        CommandResult::failure(e.to_string())
+                    }
                 }
             }
 

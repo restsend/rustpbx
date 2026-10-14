@@ -393,6 +393,8 @@ fn transfer_command(target: &str) -> CallCommand {
     CallCommand::BlindTransferCustomer {
         target: target.to_string(),
         headers: Default::default(),
+        application_only: false,
+        completion: None,
     }
 }
 

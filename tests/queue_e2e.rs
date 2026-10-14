@@ -39,6 +39,14 @@ mod test_queue_rejected_rwi_e2e;
 #[cfg(feature = "addon-cc")]
 mod test_queue_agent_hangup_recording_e2e;
 
+#[path = "queue_e2e/test_ivr_agent_refer_back_ivr_recording_e2e.rs"]
+#[cfg(feature = "addon-cc")]
+mod test_ivr_agent_refer_back_ivr_recording_e2e;
+
+#[path = "queue_e2e/test_agent_outbound_recording_e2e.rs"]
+#[cfg(feature = "addon-cc")]
+mod test_agent_outbound_recording_e2e;
+
 #[path = "queue_e2e/test_queue_overflow_uri_override_e2e.rs"]
 #[cfg(feature = "addon-cc")]
 mod test_queue_overflow_uri_override_e2e;
