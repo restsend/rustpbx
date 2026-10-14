@@ -340,6 +340,13 @@ impl PresenceManager {
         map.get(identity).cloned().unwrap_or_default()
     }
 
+    /// Rearm an accepted publication without replacing its authoritative status.
+    pub(crate) fn update_publication_expiry(&self, identity: &str, expires_at: Option<i64>) {
+        if let Some(state) = self.states.write().get_mut(identity) {
+            state.expires_at = expires_at;
+        }
+    }
+
     /// Update the presence state for an identity.
     ///
     /// Returns the previous state (if any). When `source.is_local()` the new
@@ -508,6 +515,13 @@ impl PresenceManager {
     /// untouched. Callers must notify addon handlers afterwards (the
     /// manager itself only owns the state + cluster mirror).
     pub async fn expire_stale_publishes(&self) -> Vec<String> {
+        self.expire_stale_publishes_via_hub(None).await
+    }
+
+    pub(crate) async fn expire_stale_publishes_via_hub(
+        &self,
+        hub: Option<&crate::proxy::cluster_event::ClusterEventHub>,
+    ) -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         let stale: Vec<(String, PresenceState)> = {
             let states = self.states.read();
@@ -528,8 +542,13 @@ impl PresenceManager {
             state.last_updated = now;
             state.expires_at = None;
             state.offline_reason = Some("expired".to_string());
-            self.update_state(&identity, state, &EventSource::Local)
-                .await;
+            // An addon may defer logout or reject the write. Admit expiry
+            // before notifying subscribers, just like a client PUBLISH.
+            if let Some(hub) = hub {
+                hub.emit_presence_change(&identity, None, &state).await;
+            } else {
+                self.update_state(&identity, state, &EventSource::Local).await;
+            }
             expired.push(identity);
         }
         expired
@@ -917,13 +936,7 @@ impl ProxyModule for PresenceModule {
                     _ = interval.tick() => {
                         manager_cleanup.cleanup_expired();
                         manager_cleanup.cleanup_expired_mwi();
-                        let expired = manager_ttl.expire_stale_publishes().await;
-                        for identity in expired {
-                            if let Some(ref hub) = ttl_hub {
-                                let state = manager_ttl.get_state(&identity);
-                                hub.emit_presence_change(&identity, None, &state).await;
-                            }
-                        }
+                        manager_ttl.expire_stale_publishes_via_hub(ttl_hub.as_deref()).await;
                     }
                 }
             }

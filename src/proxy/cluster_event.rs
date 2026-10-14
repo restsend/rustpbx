@@ -57,6 +57,11 @@ pub trait ClusterEventHandler: Send + Sync {
         true
     }
 
+    /// Admit a peer mirror before it can replace state or notify SIP subscribers.
+    async fn accepts_remote_presence(&self, _identity: &str, _state: &PresenceState) -> bool {
+        true
+    }
+
     async fn on_locator_event(&self, _event: &LocatorEvent, _source: &EventSource) {}
     async fn on_presence_event(
         &self,
@@ -428,6 +433,13 @@ impl ClusterEventHub {
         state: &PresenceState,
         source: &EventSource,
     ) {
+        let handlers: Vec<Arc<dyn ClusterEventHandler>> =
+            self.handlers.read().iter().cloned().collect();
+        for handler in handlers {
+            if !handler.accepts_remote_presence(identity, state).await {
+                return;
+            }
+        }
         let old_state = self
             .presence_manager
             .update_state(identity, state.clone(), source)
