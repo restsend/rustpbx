@@ -329,3 +329,137 @@ async fn test_presence_publish_away_custom_detail_legacy() {
     );
     assert_eq!(state.note.as_deref(), Some("training"));
 }
+
+// A bodyless PUBLISH is a lease refresh, never a manual business-state request.
+#[tokio::test]
+async fn test_presence_publish_bodyless_renewal() {
+    use crate::proxy::cluster_event::EventSource;
+    use crate::proxy::presence::PresenceState;
+    use rsipstack::sip::{SipMessage, StatusCode};
+
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let (notify_tx, mut notifications) = tokio::sync::mpsc::channel(16);
+    manager.set_notify_tx(notify_tx);
+
+    for status in [
+        PresenceStatus::Away("meeting".into()),
+        PresenceStatus::Ringing,
+        PresenceStatus::Busy,
+        PresenceStatus::Wrapup,
+        PresenceStatus::Idle,
+    ] {
+        manager
+            .update_state(
+                "bob",
+                PresenceState {
+                    status: PresenceStatus::Idle,
+                    expires_at: Some(now + 30),
+                    ..Default::default()
+                },
+                &EventSource::Local,
+            )
+            .await;
+        // Exercise the same projection boundary as CC REST/call transitions.
+        manager
+            .update_projected_state(
+                "bob",
+                PresenceState {
+                    status: status.clone(),
+                    note: Some("authoritative state".into()),
+                    activity: Some("business activity".into()),
+                    last_updated: now - 20,
+                    ..Default::default()
+                },
+                &EventSource::Local,
+            )
+            .await;
+        while notifications.try_recv().is_ok() {}
+        let before = manager.get_state("bob");
+        let request = create_test_request(
+            rsipstack::sip::Method::Publish,
+            "bob",
+            None,
+            "rustpbx.com",
+            Some(300),
+        );
+        let (mut tx, endpoint) = create_transaction(request).await;
+        let key = tx.key.clone();
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default(),
+            )
+            .await
+            .unwrap();
+        let finished = endpoint.finished_transactions.get(&key).unwrap();
+        assert!(
+            matches!(finished.value().as_ref(), Some(SipMessage::Response(r))
+            if r.status_code == StatusCode::OK)
+        );
+        let after = manager.get_state("bob");
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.note, before.note);
+        assert_eq!(after.activity, before.activity);
+        assert_eq!(after.last_updated, before.last_updated);
+        assert_eq!(after.offline_reason, before.offline_reason);
+        assert!(after.expires_at.unwrap() >= now + 300);
+        assert!(
+            notifications.try_recv().is_err(),
+            "renewal emitted a state NOTIFY"
+        );
+    }
+
+    // Expired, unleased and explicitly logged-out publications cannot resurrect.
+    for (status, expiry) in [
+        (PresenceStatus::Away("meeting".into()), Some(now - 1)),
+        (PresenceStatus::Idle, None),
+        (PresenceStatus::Offline, Some(now + 300)),
+    ] {
+        manager
+            .update_state(
+                "bob",
+                PresenceState {
+                    status: status.clone(),
+                    expires_at: expiry,
+                    last_updated: now - 20,
+                    offline_reason: Some("expired".into()),
+                    ..Default::default()
+                },
+                &EventSource::Local,
+            )
+            .await;
+        while notifications.try_recv().is_ok() {}
+        let request = create_test_request(
+            rsipstack::sip::Method::Publish,
+            "bob",
+            None,
+            "rustpbx.com",
+            Some(300),
+        );
+        let (mut tx, endpoint) = create_transaction(request).await;
+        let key = tx.key.clone();
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default(),
+            )
+            .await
+            .unwrap();
+        let finished = endpoint.finished_transactions.get(&key).unwrap();
+        assert!(
+            matches!(finished.value().as_ref(), Some(SipMessage::Response(r))
+            if r.status_code == StatusCode::ConditionalRequestFailed)
+        );
+        let after = manager.get_state("bob");
+        assert_eq!(after.status, status);
+        assert_eq!(after.expires_at, expiry);
+        assert_eq!(after.last_updated, now - 20);
+        assert_eq!(after.offline_reason.as_deref(), Some("expired"));
+        assert!(notifications.try_recv().is_err());
+    }
+}

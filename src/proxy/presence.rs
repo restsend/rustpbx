@@ -354,6 +354,22 @@ impl PresenceManager {
         }
     }
 
+    /// Refresh only a live publication, preserving the latest business projection.
+    fn renew_publication(&self, identity: &str, expires: u32) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        let mut states = self.states.write();
+        let Some(current) = states.get_mut(identity) else {
+            return false;
+        };
+        if current.status == PresenceStatus::Offline
+            || !current.expires_at.is_some_and(|deadline| deadline > now)
+        {
+            return false;
+        }
+        current.expires_at = Some(now + i64::from(expires));
+        true
+    }
+
     /// Update the presence state for an identity.
     ///
     /// Returns the previous state (if any). When `source.is_local()` the new
@@ -1296,6 +1312,19 @@ impl PresenceModule {
             .expires_header()
             .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
+
+        if expires > 0 && tx.original.body.is_empty() {
+            // Share expiry/logout ordering without entering manual CC admission.
+            let publication_lock = self.manager.publication_lock(&identity);
+            let _publication = publication_lock.lock().await;
+            let status = if self.manager.renew_publication(&identity, expires) {
+                rsipstack::sip::StatusCode::OK
+            } else {
+                rsipstack::sip::StatusCode::ConditionalRequestFailed
+            };
+            tx.reply(status).await.ok();
+            return Ok(());
+        }
 
         let mut current = self.manager.get_state(&identity);
         current.last_updated = chrono::Utc::now().timestamp();
