@@ -1,17 +1,13 @@
 use crate::config::LocatorWebhookConfig;
 use crate::rwi::gateway::EventCacheEntry;
 use anyhow::anyhow;
-use chrono::{DateTime, Utc};
 use serde_json::json;
-use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 /// Default buffer size for the broadcast channel between gateway and webhook
 /// handler. Overridable via [proxy] rwi_webhook_channel_size.
 pub const WEBHOOK_CHANNEL_SIZE: usize = 512;
-/// Max number of recent (call_id, timestamp) pairs kept for dedup.
-const DEDUP_CACHE_SIZE: usize = 4096;
 
 struct RwiWebhookSender {
     url: String,
@@ -184,20 +180,6 @@ pub fn restart_rwi_webhook_handler(
     }
 }
 
-/// Dedup identity for webhook delivery retries/redeliveries.
-///
-/// Includes the event TYPE: `cached_at` has microsecond resolution, so two
-/// DISTINCT events for the same call can legitimately share one timestamp
-/// (observed in e2e: `call_created` vs `queue_joined` at session start) —
-/// a key without the type silently dropped one of them.
-fn webhook_dedup_key(entry: &EventCacheEntry) -> (String, DateTime<Utc>, String) {
-    (
-        entry.call_id.clone(),
-        entry.cached_at,
-        entry.event.event_type.to_string(),
-    )
-}
-
 /// Periodically export RWI webhook queue depth gauges: the channel's
 /// capacity and the number of events currently queued (produced but not
 /// yet seen by the handler). Slow-router backpressure shows up here as
@@ -222,11 +204,6 @@ async fn run_rwi_webhook_handler(
     let sender = RwiWebhookSender::new(config);
     debug!("RWI webhook handler started for {}", sender.url);
 
-    // Dedup cache: ring buffer of (call_id, cached_at) to skip duplicates
-    // when the same event is forwarded from multiple call owners.
-    let mut dedup: VecDeque<(String, DateTime<Utc>, String)> =
-        VecDeque::with_capacity(DEDUP_CACHE_SIZE + 1);
-    let mut seen: HashSet<(String, DateTime<Utc>, String)> = HashSet::new();
     // Consecutive transport-failure counter — used only to log a single
     // "recovered" line when delivery succeeds again after an outage.
     let mut consecutive_send_failures: u32 = 0;
@@ -258,30 +235,13 @@ async fn run_rwi_webhook_handler(
             }
         };
 
-        // Dedup: skip event if the same (call_id, timestamp, event_type) was
-        // already sent. The timestamp has microsecond resolution, so distinct
-        // events for the same call CAN share one — the event type keeps the
-        // key from collapsing them (e.g. call_created vs queue_joined emitted
-        // back-to-back at session start). Events with empty call_id
-        // (broadcast events like agent state changes) are not deduped since
-        // they have no call context.
-        if !entry.call_id.is_empty() {
-            let dedup_key = webhook_dedup_key(&entry);
-            if seen.contains(&dedup_key) {
-                debug!(
-                    "RWI webhook: skipping duplicate event at {}",
-                    entry.cached_at
-                );
-                continue;
-            }
-            seen.insert(dedup_key.clone());
-            dedup.push_back(dedup_key);
-            while dedup.len() > DEDUP_CACHE_SIZE {
-                if let Some(old) = dedup.pop_front() {
-                    seen.remove(&old);
-                }
-            }
-        }
+        // No sender-side dedup: every produced event is delivered, including
+        // same-type bursts emitted back-to-back (e.g. the flow-end
+        // `ivr_step_trace` sequence: terminal step + `session_end`). A
+        // microsecond-resolution `(call_id, cached_at, event_type)` key used
+        // to collapse such bursts and silently drop the tail — the flow's
+        // `end` marker never reached webhook consumers. Receivers dedupe
+        // redeliveries via the envelope's `event_id` idempotency key.
 
         // Determine the RWI event type name and flat value from the enum variant.
         // The nested `event` object carries the flat RWI payload without its
@@ -560,12 +520,15 @@ mod tests {
         );
     }
 
-    /// Regression canary for the same-microsecond dedup collapse: two
-    /// DISTINCT event types for the same call sharing one `cached_at` must
-    /// BOTH be delivered. The pre-fix key `(call_id, cached_at)` dropped the
-    /// second one — e2e saw ~1/3 of `call_created` bindings lost this way.
+    /// Regression canary (2026-10: sender-side dedup REMOVED): a same-type
+    /// burst sharing one microsecond `cached_at` — exactly what the step-IVR
+    /// executor emits at flow end (terminal step trace + `session_end` trace,
+    /// back-to-back with no await) — must ALL be delivered. The former
+    /// `(call_id, cached_at, event_type)` dedup key collapsed such bursts and
+    /// silently dropped every event after the first, so webhook consumers
+    /// never saw the flow's `end` marker.
     #[tokio::test]
-    async fn test_webhook_dedup_same_timestamp_different_type_both_delivered() {
+    async fn test_webhook_same_type_burst_all_delivered() {
         let server = TestHttpServer::start().await;
         let config = LocatorWebhookConfig {
             url: server.url(),
@@ -579,61 +542,51 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let ts = chrono::Utc::now();
-        let mk = |event: crate::rwi::event::RwiEvent| EventCacheEntry {
+        // Three `ivr_step_trace` events for one call, same microsecond,
+        // differing only in payload (as real flow-end traces do).
+        let mk_trace = |trigger: &str| EventCacheEntry {
             cached_at: ts,
-            call_id: "dedup-call".into(),
-            event,
-        };
-        let ringing = mk(crate::rwi::event::to_legacy_event(
-            &crate::rwi::CallRinging {
-                leg_id: None,
-                call_id: "dedup-call".into(),
-                early_media: false,
-                    agent_id: None,
-                    agent_name: None,
-                leg_role: None,
-},
-            None,
-        ));
-        let created = mk(crate::rwi::event::to_legacy_event(
-            &crate::rwi::CallCreated {
-                leg_id: None,
-                leg_role: None,
-                call_id: "dedup-call".into(),
-                context: "default".into(),
-                caller: "sip:1001@localhost".into(),
-                callee: "sip:8888@localhost".into(),
-                trunk: None,
-                sip_headers: Default::default(),
-                caller_name: None,
-                callee_name: None,
-                called_phone: None,
-                app_id: None,
-                routing_target: None,
-                uuid: None,
-                routing_path: None,
+            call_id: "burst-call".into(),
+            event: crate::rwi::event::RwiEvent {
+                event_type: "ivr_step_trace",
+                call_id: Some("burst-call".into()),
+                payload: serde_json::json!({
+                    "event_type": "ivr_step_trace",
+                    "call_id": "burst-call",
+                    "trigger": { "type": trigger },
+                    "step_end_time": "2026-10-14T00:00:00+00:00",
+                }),
             },
-            None,
-        ));
-        tx.send(ringing).ok();
-        tx.send(created).ok();
+        };
+        tx.send(mk_trace("session_start")).ok();
+        tx.send(mk_trace("audio_complete")).ok();
+        tx.send(mk_trace("session_end")).ok();
 
-        wait_for_events(&server.received, 2, 2000).await;
+        wait_for_events(&server.received, 3, 2000).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let received = server.received.lock().unwrap();
-        let types: Vec<&str> = received
+        let triggers: Vec<&str> = received
             .iter()
-            .map(|b| b["event_type"].as_str().unwrap_or(""))
+            .map(|b| b["event"]["trigger"]["type"].as_str().unwrap_or(""))
             .collect();
-        assert!(
-            types.contains(&"call_ringing") && types.contains(&"call_created"),
-            "same-timestamp distinct-type events must both be delivered, got {types:?}"
+        assert_eq!(
+            triggers.len(),
+            3,
+            "same-type same-microsecond burst must be fully delivered"
         );
+        for expected in ["session_start", "audio_complete", "session_end"] {
+            assert!(
+                triggers.contains(&expected),
+                "burst member trigger={expected} must be delivered, got {triggers:?}"
+            );
+        }
     }
 
-    /// True redeliveries (identical identity incl. event type) are still
-    /// deduplicated exactly once.
+    /// No sender-side dedup at all: even a byte-identical redelivery is
+    /// delivered again. Receivers own dedup via the `event_id` idempotency
+    /// key — the sender must never silently drop produced events.
     #[tokio::test]
-    async fn test_webhook_dedup_identical_event_dropped_once() {
+    async fn test_webhook_identical_redelivery_still_delivered() {
         let server = TestHttpServer::start().await;
         let config = LocatorWebhookConfig {
             url: server.url(),
@@ -649,26 +602,28 @@ mod tests {
         let ts = chrono::Utc::now();
         let mk = || EventCacheEntry {
             cached_at: ts,
-            call_id: "dedup-once".into(),
+            call_id: "redelivery-call".into(),
             event: crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallRinging {
                     leg_id: None,
-                    call_id: "dedup-once".into(),
+                    call_id: "redelivery-call".into(),
                     early_media: false,
-                        agent_id: None,
-                        agent_name: None,
+                    agent_id: None,
+                    agent_name: None,
                     leg_role: None,
-},
+                },
                 None,
             ),
         };
         tx.send(mk()).ok();
         tx.send(mk()).ok();
 
-        wait_for_events(&server.received, 1, 2000).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_for_events(&server.received, 2, 2000).await;
         let count = server.received.lock().unwrap().len();
-        assert_eq!(count, 1, "identical redelivery must be deduped to one");
+        assert_eq!(
+            count, 2,
+            "identical redelivery must NOT be dropped sender-side"
+        );
     }
 
     /// Regression: agent status, recording metadata, and recording finalization
@@ -690,8 +645,7 @@ mod tests {
 
         let now = chrono::Utc::now();
 
-        // agent_state_changed: broadcast-style event (empty call_id,
-        // intentionally NOT deduped by the handler).
+        // agent_state_changed: broadcast-style event (empty call_id).
         let agent_entry = EventCacheEntry {
             cached_at: now,
             call_id: String::new(),

@@ -253,9 +253,16 @@ reconnection, all cached events are replayed (`call.resume` with a `call_id`
 replays just that call's events). Clients dedupe on `call_id` + `event_type`
 as needed.
 
-### Webhook Deduplication
+### Webhook Delivery Semantics (no sender-side dedup since 2026-10)
 
-The webhook handler deduplicates using `(call_id, timestamp)` tuples in a 4096-entry ring buffer. Duplicate events are silently dropped.
+The webhook handler performs NO sender-side deduplication: every event the
+gateway produces is delivered, including same-type bursts emitted
+back-to-back at flow end (the `ivr_step_trace` terminal entry + the
+`session_end` entry). The former `(call_id, timestamp, event_type)` key
+silently dropped the tail of a same-microsecond burst, so consumers lost the
+flow's `end` marker — it has been removed. Duplicate deliveries (cluster
+multi-owner forwarding, retry redelivery) are the receiver's job, keyed on
+the envelope's `event_id` idempotency key.
 
 ---
 

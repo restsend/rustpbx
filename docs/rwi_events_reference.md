@@ -246,9 +246,9 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 
 服务端缓存最近 1000 条事件（保留 60 秒），重连后自动回放全部缓存事件（`call.resume` 携带 `call_id` 时只回放该呼叫的事件）。客户端可按 `call_id` + `event_type` 自行幂等去重。
 
-### Webhook 去重
+### Webhook 投递语义（2026-10 起无发送侧去重）
 
-Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 条。重复事件自动丢弃。
+Webhook **不做发送侧去重**：网关产出的每一条事件都会被投递，包括同一流程收尾时背靠背发出的同类型多条事件（如 `ivr_step_trace` 的终态条目 + `session_end` 条目）。此前 `(call_id, timestamp, event_type)` 去重会在同微秒 burst 下静默丢弃尾部事件，导致消费方丢失流程的 `end` 标识——已移除。重复投递（集群多 owner 转发、重试重发）由接收方按信封 `event_id` 幂等键自行去重。
 
 ---
 

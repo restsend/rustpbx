@@ -260,6 +260,9 @@ name = "e2e_core"
 name = "e2e_addons"
 
 [[test]]
+name = "step_ivr_trace_e2e"
+
+[[test]]
 name = "cc_openapi_contract_test"
 
 [dev-dependencies]

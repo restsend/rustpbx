@@ -7788,6 +7788,110 @@ mod tests {
         );
     }
 
+    /// Consumer contract for the [prompt → hangup] natural-completion flow:
+    /// the FULL trace sequence must reach BOTH the CDR collector and the RWI
+    /// gateway — prompt step (`session_start`), hangup step (`audio_complete`,
+    /// `end=true`), and the `session_end` entry (`end=true`, `end_reason`).
+    /// These three are emitted back-to-back in one burst; the webhook's
+    /// former same-type same-microsecond dedup collapsed such bursts and
+    /// silently dropped the flow's end marker, so the exact COUNT is
+    /// asserted here as the regression guard.
+    #[tokio::test]
+    async fn test_prompt_natural_completion_emits_full_trace_sequence() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+        use crate::rwi::gateway::RwiGateway;
+
+        let trace = IvrTraceCollector::new();
+        let gateway = RwiGateway::new();
+        let mut rwi_events = gateway.subscribe_events();
+
+        let prompt = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+            delay_before_ms: 0,
+            delay_after_ms: 0,
+        });
+        let mut app = mock_app(vec![prompt, ActionNode::new(EntryAction::hangup_none())]);
+        app.trace = Some(trace.clone());
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| play_file_cmd(c, "hello.wav"))
+            .await;
+
+        // Prompt finishes naturally → the provider's next node (hangup) runs.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .await;
+        // on_exit records the session_end entry; give the spawned collector
+        // write a moment to land.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Expected (trigger, end-marker) pairs in emission order.
+        let expected: [(&str, Option<bool>); 3] = [
+            ("session_start", None),    // prompt step — flow continues
+            ("audio_complete", Some(true)), // hangup step — terminal
+            ("session_end", Some(true)),    // session close — end_reason carrier
+        ];
+
+        // ── CDR collector side ──
+        let entries = trace.query_by_session("test-session").await;
+        assert_eq!(
+            entries.len(),
+            3,
+            "exactly three trace entries must be recorded, got: {:?}",
+            entries.iter().map(|e| e.trigger.r#type.clone()).collect::<Vec<_>>()
+        );
+        for (entry, (trigger, end)) in entries.iter().zip(expected) {
+            assert_eq!(entry.trigger.r#type, trigger, "trace order mismatch");
+            assert_eq!(entry.end, end, "end-marker mismatch on trigger={trigger}");
+            assert!(
+                entry.step_end_time.is_some(),
+                "trigger={trigger} must carry step_end_time (completion marker)"
+            );
+        }
+        let session_end = &entries[2];
+        assert_eq!(
+            session_end.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::Hangup),
+            "session_end entry must carry the end reason"
+        );
+
+        // ── RWI fan-out side: the same burst must arrive uncollapsed ──
+        let mut rwi_traces: Vec<serde_json::Value> = Vec::new();
+        while let Ok(ev) = rwi_events.try_recv() {
+            if ev.event.event_type == "ivr_step_trace" {
+                rwi_traces.push(ev.event.payload);
+            }
+        }
+        assert_eq!(
+            rwi_traces.len(),
+            3,
+            "all three ivr_step_trace events must be fanned out, got: {rwi_traces:?}"
+        );
+        for (payload, (trigger, end)) in rwi_traces.iter().zip(expected) {
+            assert_eq!(payload["trigger"]["type"], trigger, "fan-out order mismatch");
+            assert_eq!(
+                payload["end"].as_bool(),
+                end,
+                "fan-out end-marker mismatch on trigger={trigger}"
+            );
+        }
+        assert!(
+            rwi_traces[2]["end_reason"].is_string(),
+            "fan-out session_end must carry end_reason"
+        );
+    }
+
     #[tokio::test]
     async fn test_step_trace_events_are_enqueued_in_record_order() {
         use crate::rwi::gateway::RwiGateway;
