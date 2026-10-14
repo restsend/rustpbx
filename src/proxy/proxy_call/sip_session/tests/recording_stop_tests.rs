@@ -484,3 +484,28 @@ async fn recording_stop_retries_real_sip_failures_and_requires_owner_confirmatio
         serving.abort();
     }
 }
+
+/// A `record.stop_segment` for an identity this node never recorded must
+/// answer 404 AND surface the miss in the call trace — the 404 is the
+/// smoking gun for "the promised agent recording never started upstream"
+/// (2026-10-14 incident) and used to be completely silent, on the wire and
+/// in the CDR.
+#[tokio::test]
+async fn recording_stop_unknown_identity_answers_404_and_traces_it() {
+    let (mut owner, _handle, _commands) = session().await;
+    let body = serde_json::json!({
+        "action": "record.stop_segment",
+        "params": {"label": AGENT, "unique_id": "00000000-0000-4000-8000-000000000000"}
+    })
+    .to_string();
+    let (status, body) = receive_stop(&mut owner, &body).await;
+    assert_eq!(status, StatusCode::NotFound);
+    assert!(body.is_none(), "a 404 carries no ack body");
+    assert!(
+        owner.meta.trace.iter().any(|event| {
+            event.code.as_deref()
+                == Some(crate::callrecord::recording_upload::recording_trace_codes::PEER_SEGMENT_STOP_NOT_FOUND)
+        }),
+        "the unknown-identity stop must be visible in the call trace"
+    );
+}

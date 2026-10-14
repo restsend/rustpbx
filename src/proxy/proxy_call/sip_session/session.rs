@@ -5276,6 +5276,19 @@ impl SipSession {
                     anyhow!("recording finalization did not publish the requested segment")
                 });
                 warn!(session_id = %self.id, %unique_id, %error, "Recording segment stop failed");
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Recording,
+                        "Recording segment stop failed to finalize the recorder",
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Warn)
+                    .code(crate::callrecord::recording_upload::recording_trace_codes::STOP_FAILED)
+                    .detail(serde_json::json!({
+                        "label": label,
+                        "unique_id": unique_id,
+                        "error": error.to_string(),
+                    })),
+                );
                 transaction
                     .respond(StatusCode::ServerInternalError, None, None)
                     .await?;
@@ -5314,6 +5327,27 @@ impl SipSession {
                 return Ok(());
             }
             // A missing recorder is not proof that this identity was finalized.
+            // This 404 is the smoking gun for "the promised agent recording
+            // never started upstream" — log it and surface it in the CDR
+            // timeline (it used to be completely silent).
+            warn!(session_id = %self.id,
+                session_id = %self.context.session_id,
+                label = %label,
+                unique_id = %unique_id,
+                "record.stop_segment: no active or completed agent segment matches this identity"
+            );
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Recording,
+                    "Peer record.stop_segment matched no segment on this node",
+                )
+                .severity(crate::call_errors::ErrSeverity::Warn)
+                .code(crate::callrecord::recording_upload::recording_trace_codes::PEER_SEGMENT_STOP_NOT_FOUND)
+                .detail(serde_json::json!({
+                    "label": label,
+                    "unique_id": unique_id,
+                })),
+            );
             transaction
                 .respond(StatusCode::NotFound, None, None)
                 .await?;
@@ -12641,6 +12675,10 @@ impl SipSession {
                 };
                 let cancel = self.cancel_token.clone();
                 let session_id = self.context.session_id.clone();
+                // Trace failures back into this session's CDR timeline: the
+                // loop is not serviceable from the spawned task, so route the
+                // event through the command channel instead.
+                let cmd_tx = self.cmd_tx.clone();
                 // SIP response processing needs this loop; never await the peer here.
                 tokio::spawn(async move {
                     tokio::select! {
@@ -12649,6 +12687,21 @@ impl SipSession {
                             if let Err(error) = result {
                                 warn!(%session_id, %unique_id, %error,
                                     "Upstream recording segment stop failed");
+                                if let Some(tx) = cmd_tx {
+                                    let _ = tx.try_send(CallCommand::Trace {
+                                        event: crate::call_errors::TraceEvent::new(
+                                            crate::call_errors::TraceKind::Recording,
+                                            "Upstream recording segment stop failed",
+                                        )
+                                        .severity(crate::call_errors::ErrSeverity::Warn)
+                                        .code(crate::callrecord::recording_upload::recording_trace_codes::PEER_SEGMENT_STOP_FAILED)
+                                        .detail(serde_json::json!({
+                                            "label": label,
+                                            "unique_id": unique_id,
+                                            "error": error.to_string(),
+                                        })),
+                                    });
+                                }
                             }
                         }
                     }

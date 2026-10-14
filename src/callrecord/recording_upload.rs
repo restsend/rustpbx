@@ -65,6 +65,26 @@ pub mod recording_trace_codes {
     /// Auto recording was skipped for this call (e.g. routed app exempted by
     /// `[recording].auto_start_except`).
     pub const AUTOSTART_SKIPPED: &str = "recording.autostart_skipped";
+    /// The agent-connect hook skipped its work because the global agent status
+    /// no longer looked like this call's ringing state (ring-timeout release or
+    /// a duplicate connect). Explains a CDR whose agent stage has no segment.
+    pub const AGENT_CONNECT_SKIPPED: &str = "recording.agent_connect_skipped";
+    /// The agent-connect hook recognized its own answer even though a
+    /// client-reported busy (cluster/presence sync) had overwritten the
+    /// dispatch-bound ringing state, and preserved the agent recording start.
+    pub const AGENT_CONNECT_RACE_RESCUED: &str = "recording.agent_connect_race_rescued";
+    /// The on-demand agent segment start was skipped (recording disabled,
+    /// policy full-call recording active, segment owned by an upstream peer,
+    /// live session handle unavailable, ...). `detail.reason` says which.
+    pub const AGENT_SEGMENT_SKIPPED: &str = "recording.agent_segment_skipped";
+    /// A peer's `record.stop_segment` matched no active or completed agent
+    /// segment on this node — the promised recording never started here (or
+    /// the identity diverged). The 404 answer is deliberate; the trace makes
+    /// it visible in the CDR timeline.
+    pub const PEER_SEGMENT_STOP_NOT_FOUND: &str = "recording.peer_segment_stop_not_found";
+    /// Forwarding a `record.stop_segment` to the upstream peer failed after
+    /// all retries — the segment boundary (and possibly the artifact) is lost.
+    pub const PEER_SEGMENT_STOP_FAILED: &str = "recording.peer_segment_stop_failed";
 }
 
 /// Shared handle to the `[recording]` policy. The SIP server swaps the inner
