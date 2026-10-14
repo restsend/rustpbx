@@ -45,3 +45,11 @@ mod queue_alert_e2e;
 #[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/outbound_policy_e2e.rs"]
 mod outbound_policy_e2e;
+
+#[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/break_records_e2e.rs"]
+mod break_records_e2e;
+
+#[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/monitor_status_e2e.rs"]
+mod monitor_status_e2e;
