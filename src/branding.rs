@@ -13,6 +13,9 @@ pub struct BrandContext {
     pub primary_color: String,
     pub footer_text: String,
     pub login_background_url: String,
+    /// Heading on the login page; empty shows the site name.
+    #[serde(default)]
+    pub login_title: String,
     pub custom_css: String,
 }
 
@@ -26,6 +29,7 @@ impl Default for BrandContext {
             primary_color: DEFAULT_PRIMARY_COLOR.to_string(),
             footer_text: String::new(),
             login_background_url: String::new(),
+            login_title: String::new(),
             custom_css: String::new(),
         }
     }

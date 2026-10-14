@@ -13,6 +13,8 @@
     <script type="application/json" id="__locales">{{ available_locales | json | safe }}</script>
     <script src="{{ api_prefix }}/locales/{{ locale }}.js"></script>
     <link rel="stylesheet" href="{{ static_path | default('/static') }}/css/console.css">
+    {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
+    {% include "console/_brand_style.html" %}
     {% block js_head %}
     <script>
         window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');
@@ -553,9 +555,18 @@
             <div class="flex h-full flex-col">
                 <div class="flex h-16 items-center justify-between gap-2 border-b border-slate-100 px-6">
                     <div class="flex items-center gap-2">
-                        <div class="h-8 w-8 rounded-lg bg-sky-600 text-white grid place-content-center font-bold">R
+                        {% if site_logo %}
+                        <img src="{{ site_logo }}" alt="{{ site_name|default('RustPBX') }}" x-show="!sidebarCollapsed"
+                            x-cloak style="height: 2rem; max-width: 10rem; object-fit: contain;" />
+                        <img src="{{ site_logo_mini }}" alt="{{ site_name|default('RustPBX') }}" x-show="sidebarCollapsed"
+                            x-cloak style="height: 2rem; width: 2rem; object-fit: contain;" />
+                        {% else %}
+                        <div class="h-8 w-8 rounded-lg bg-sky-600 text-white grid place-content-center font-bold">
+                            {{ (site_name|default('RustPBX'))[:1] | upper }}
                         </div>
-                        <div class="font-semibold" x-show="!sidebarCollapsed" x-transition.opacity x-cloak>RustPBX</div>
+                        <div class="font-semibold" x-show="!sidebarCollapsed" x-transition.opacity x-cloak>
+                            {{ site_name|default('RustPBX') }}</div>
+                        {% endif %}
                     </div>
                     <button class="hidden rounded-lg p-2 hover:bg-slate-100 lg:inline-flex"
                         @click="toggleSidebarCollapse()" aria-label="Toggle sidebar">

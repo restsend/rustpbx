@@ -7,7 +7,7 @@
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
     <meta name="author" content="RustPBX" />
     <meta name="locale" content="{{ locale | default('en') }}" />
-    <link rel="icon" href="{{favicon_url|default('/static/favicon.ico')}}" />
+    {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     <script type="application/json" id="__authLocales">{{ available_locales | json | safe }}</script>
     {% block js_head %}
@@ -63,6 +63,7 @@
             color: rgba(148, 163, 184, 0.6);
         }
     </style>
+    {% include "console/_brand_style.html" %}
 </head>
 
 <body class="min-h-screen bg-slate-100 text-slate-900">
@@ -113,7 +114,8 @@
         {% endif %}
         <!-- Main area -->
         <div class="transition-all duration-300 ease-in-out">
-            <main class="min-h-[calc(100vh-64px)] bg-slate-50">
+            <main class="min-h-[calc(100vh-64px)] bg-slate-50" {% if brand_login_background %}
+                style="background-image: url('{{ brand_login_background }}'); background-size: cover; background-position: center;" {% endif %}>
                 {% block content %}{% endblock %}
             </main>
 

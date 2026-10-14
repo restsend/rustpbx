@@ -1,0 +1,25 @@
+{#- Brand color and custom CSS, included in the head of every console layout.
+    The console's accent color is Tailwind's sky palette; its utilities read
+    the --color-sky-* theme variables, so redefining them recolors every page.
+    Shades are mixed from the one brand color (600 is the color itself). -#}
+{% if brand_primary_color %}
+<style>
+    :root {
+        --brand-primary: {{ brand_primary_color }};
+        --color-sky-50: color-mix(in oklab, var(--brand-primary) 7%, white);
+        --color-sky-100: color-mix(in oklab, var(--brand-primary) 14%, white);
+        --color-sky-200: color-mix(in oklab, var(--brand-primary) 28%, white);
+        --color-sky-300: color-mix(in oklab, var(--brand-primary) 45%, white);
+        --color-sky-400: color-mix(in oklab, var(--brand-primary) 70%, white);
+        --color-sky-500: color-mix(in oklab, var(--brand-primary) 87%, white);
+        --color-sky-600: var(--brand-primary);
+        --color-sky-700: color-mix(in oklab, var(--brand-primary) 82%, black);
+        --color-sky-800: color-mix(in oklab, var(--brand-primary) 66%, black);
+        --color-sky-900: color-mix(in oklab, var(--brand-primary) 52%, black);
+        --color-sky-950: color-mix(in oklab, var(--brand-primary) 36%, black);
+    }
+</style>
+{% endif %}
+{% if brand_custom_css %}
+<style>{{ brand_custom_css | safe }}</style>
+{% endif %}

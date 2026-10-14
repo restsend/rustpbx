@@ -6,7 +6,10 @@
 <section class="flex items-center justify-center py-16 px-4">
     <div class="w-full max-w-md space-y-8 rounded-2xl bg-white/80 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
         <div class="space-y-2 text-center">
-            <h1 class="text-2xl font-semibold text-slate-900">{{ "auth.login_welcome" | t }}</h1>
+            {% if site_logo %}
+            <img src="{{ site_logo }}" alt="{{ site_name|default('RustPBX') }}" class="mx-auto mb-4 h-12 max-w-56 object-contain" />
+            {% endif %}
+            <h1 class="text-2xl font-semibold text-slate-900">{{ login_title or ("auth.login_welcome" | t) }}</h1>
             <p class="text-sm text-slate-500">{{ "auth.login_subtitle" | t }}</p>
             {% if demo_mode %}
             <div

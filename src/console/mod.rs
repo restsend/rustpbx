@@ -336,27 +336,45 @@ impl ConsoleState {
             let static_path = self.config().static_path();
             map.entry("static_path")
                 .or_insert_with(|| serde_json::Value::String(static_path.clone()));
-            map.entry("site_logo").or_insert_with(|| {
-                serde_json::Value::String(if brand.logo_url.is_empty() {
-                    format!("{}/images/logo.png", static_path)
-                } else if let Some(rest) = brand.logo_url.strip_prefix("/static") {
-                    format!("{}{}", static_path, rest)
+            // Brand images resolve against the static path. Unset ones stay
+            // empty so the templates keep their default look.
+            let brand_asset = |url: &str| -> serde_json::Value {
+                match url.strip_prefix("/static") {
+                    Some(rest) => format!("{}{}", static_path, rest).into(),
+                    None => url.into(),
+                }
+            };
+            let logo_mini = if brand.logo_mini_url.is_empty() {
+                &brand.logo_url
+            } else {
+                &brand.logo_mini_url
+            };
+            map.entry("site_logo")
+                .or_insert_with(|| brand_asset(&brand.logo_url));
+            map.entry("site_logo_mini")
+                .or_insert_with(|| brand_asset(logo_mini));
+            map.entry("favicon_url")
+                .or_insert_with(|| brand_asset(&brand.favicon_url));
+            map.entry("brand_login_background")
+                .or_insert_with(|| brand_asset(&brand.login_background_url));
+            map.entry("login_title")
+                .or_insert_with(|| brand.login_title.clone().into());
+            // Only a changed, plain color value recolors the theme palette.
+            map.entry("brand_primary_color").or_insert_with(|| {
+                let color = brand.primary_color.trim();
+                let plain = color.len() <= 64
+                    && color.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || "#(),.% -".contains(c)
+                    });
+                if plain && !color.eq_ignore_ascii_case(crate::branding::DEFAULT_PRIMARY_COLOR) {
+                    color.into()
                 } else {
-                    brand.logo_url.clone()
-                })
+                    "".into()
+                }
             });
-            map.entry("site_logo_mini").or_insert_with(|| {
-                serde_json::Value::String(format!("{}/images/logo-mini.png", static_path))
-            });
-            map.entry("favicon_url").or_insert_with(|| {
-                serde_json::Value::String(if brand.favicon_url.is_empty() {
-                    format!("{}/images/favicon.png", static_path)
-                } else if let Some(rest) = brand.favicon_url.strip_prefix("/static") {
-                    format!("{}{}", static_path, rest)
-                } else {
-                    brand.favicon_url.clone()
-                })
-            });
+            // Raw CSS goes inside a <style> element; it must not close it.
+            map.entry("brand_custom_css")
+                .or_insert_with(|| brand.custom_css.replace("</", "<\\/").into());
             map.entry("demo_mode")
                 .or_insert_with(|| serde_json::Value::Bool(self.config().demo_mode));
             if let Some(ref alpine_js) = self.config.alpine_js {
@@ -1319,6 +1337,67 @@ mod tests {
         assert!(
             !other_html.contains("Tenant Site"),
             "unmatched host must not render the tenant brand"
+        );
+    }
+
+    #[tokio::test]
+    async fn brand_settings_reach_console_and_login_pages() {
+        use crate::branding::{BrandContext, BrandingProvider};
+        use std::sync::Arc as StdArc;
+
+        struct FullBranding;
+
+        impl BrandingProvider for FullBranding {
+            fn brand(&self) -> BrandContext {
+                BrandContext {
+                    site_name: "Acme PBX".to_string(),
+                    logo_url: "https://cdn.example.com/acme-logo.png".to_string(),
+                    favicon_url: "https://cdn.example.com/acme.ico".to_string(),
+                    primary_color: "#e11d48".to_string(),
+                    login_background_url: "https://cdn.example.com/acme-bg.jpg".to_string(),
+                    login_title: "Welcome to Acme".to_string(),
+                    custom_css: ".acme-marker { color: red; }</style>".to_string(),
+                    ..Default::default()
+                }
+            }
+        }
+
+        async fn login_page(app: axum::Router, base_path: &str) -> String {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{base_path}/login"))
+                        .body(Body::empty())
+                        .expect("build login request"),
+                )
+                .await
+                .expect("login request");
+            response_body(response).await
+        }
+
+        let state = setup_state().await;
+        let app = router(state.clone());
+
+        // Without a brand, pages keep the stock palette and no brand images.
+        let plain = login_page(app.clone(), state.base_path()).await;
+        assert!(!plain.contains("--brand-primary"));
+        assert!(!plain.contains("rel=\"icon\""));
+
+        state.set_test_branding_provider(Some(StdArc::new(FullBranding)));
+        let html = login_page(app, state.base_path()).await;
+        for expected in [
+            "--brand-primary: #e11d48",
+            ".acme-marker { color: red; }",
+            "acme-logo.png",
+            "acme.ico",
+            "acme-bg.jpg",
+            "Welcome to Acme",
+        ] {
+            assert!(html.contains(expected), "login page should render {expected}");
+        }
+        assert!(
+            !html.contains("red; }</style>"),
+            "custom CSS must not close its style element"
         );
     }
 }
