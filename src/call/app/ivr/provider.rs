@@ -485,6 +485,23 @@ impl StepProvider {
                 }
                 Err(e) => {
                     let elapsed = start.elapsed();
+                    // A 4xx (except 408/429) is a deterministic rejection —
+                    // e.g. 409 Conflict when the endpoint already holds
+                    // session state. Retrying cannot change the outcome and
+                    // only leaves the caller in dead air; fail fast so the
+                    // session-level IVR fallback can take over.
+                    let client_error = e
+                        .downcast_ref::<crate::http_util::HttpStatusError>()
+                        .is_some_and(|s| s.is_client_error());
+                    if client_error {
+                        error!(
+                            url = %url,
+                            error = %e,
+                            duration_ms = %elapsed.as_millis(),
+                            "{label} rejected with deterministic client error; not retrying"
+                        );
+                        return Err(e);
+                    }
                     last_err = e;
                     error!(
                         url = %url,
@@ -781,5 +798,112 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("detail"));
+    }
+
+    // ── Retry policy: deterministic 4xx must fail fast ─────────────────
+
+    fn probe_ctx() -> ProviderContext {
+        ProviderContext {
+            session_id: "retry-test-session".into(),
+            app_execution_id: 1,
+            caller: "sip:1001@test".into(),
+            callee: "39230".into(),
+            direction: "inbound".into(),
+            tenant_id: None,
+            ivr_id: None,
+            variables: HashMap::new(),
+            sip_headers: None,
+            event: Some(ProviderEvent::SessionStart),
+            route_name: None,
+            custom_data: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_duration_ms: None,
+            step_index: Some(0),
+            transferred_from: None,
+        }
+    }
+
+    fn fast_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 3,
+            timeout_ms: 1000,
+            retry_delay_ms: 1,
+            fallback_action: None,
+        }
+    }
+
+    /// Spawn a mock `/step` endpoint returning `status` on every request,
+    /// counting hits. Returns (url, hit-count handle).
+    async fn spawn_status_endpoint(
+        status: axum::http::StatusCode,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = hits.clone();
+        let app = axum::Router::new().route(
+            "/step",
+            axum::routing::post(move || {
+                let hits = hits_for_handler.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    status
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{addr}/step"), hits)
+    }
+
+    #[tokio::test]
+    async fn client_error_409_fails_fast_without_retry() {
+        // Production regression: the endpoint answers 409 Conflict when it
+        // already holds the session state. Retrying cannot change the
+        // outcome — the old behavior burned the full retry budget (~2s of
+        // caller dead air) before failing anyway.
+        let (url, hits) = spawn_status_endpoint(axum::http::StatusCode::CONFLICT).await;
+        let provider = StepProvider::new(url, reqwest::Client::new()).with_retry(fast_retry());
+
+        let err = provider.next_action(probe_ctx()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("409"),
+            "expected 409 in error, got: {err}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "4xx must be attempted exactly once — no retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_error_410_fails_fast_without_retry() {
+        // 410 Gone on a plain (non-resume-probe) step: also deterministic.
+        let (url, hits) = spawn_status_endpoint(axum::http::StatusCode::GONE).await;
+        let provider = StepProvider::new(url, reqwest::Client::new()).with_retry(fast_retry());
+
+        let err = provider.next_action(probe_ctx()).await.unwrap_err();
+        assert!(err.to_string().contains("410"), "got: {err}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn server_error_still_exhausts_retry_budget() {
+        // Guard the over-correction: 5xx remains transient and keeps the
+        // full retry budget.
+        let (url, hits) = spawn_status_endpoint(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let provider = StepProvider::new(url, reqwest::Client::new()).with_retry(fast_retry());
+
+        let err = provider.next_action(probe_ctx()).await.unwrap_err();
+        assert!(err.to_string().contains("500"), "got: {err}");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "5xx should use the full retry budget"
+        );
     }
 }
