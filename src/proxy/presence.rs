@@ -577,6 +577,16 @@ impl PresenceManager {
         };
         let mut expired = Vec::with_capacity(stale.len());
         for (identity, mut state) in stale {
+            let publication_lock = self.publication_lock(&identity);
+            let _publication = publication_lock.lock().await;
+            // A renewal after the sweep snapshot invalidates this expiry.
+            let current = self.get_state(&identity);
+            if current.expires_at != state.expires_at
+                || !current.expires_at.is_some_and(|deadline| deadline <= now)
+                || current.status == PresenceStatus::Offline
+            {
+                continue;
+            }
             if let Some(locator) = locator {
                 match locator.has_active_binding_for_user(&identity).await {
                     Ok(true) => {
@@ -585,12 +595,15 @@ impl PresenceManager {
                         // — a status change here would be the very false
                         // "offline while connected" NOTIFY this guard exists
                         // to prevent.
-                        let mut fresh = state.clone();
-                        fresh.expires_at = None;
-                        fresh.offline_reason = None;
                         {
                             let mut states = self.states.write();
-                            states.insert(identity.clone(), fresh);
+                            // Retire only this lease; CC may project a new status during lookup.
+                            if let Some(current) = states.get_mut(&identity)
+                                && current.expires_at == state.expires_at
+                            {
+                                current.expires_at = None;
+                                current.offline_reason = None;
+                            }
                         }
                         debug!(
                             identity = %identity,
@@ -1898,6 +1911,40 @@ mod tests {
         let expired = manager.expire_stale_publishes().await;
         assert_eq!(expired, vec!["agent-live".to_string()]);
         assert_eq!(manager.get_state("agent-live").status, PresenceStatus::Offline);
+
+        // The registration guard must preserve both renewed leases and business projections.
+        for renew_lease in [true, false] {
+            let mut publication = manager.get_state("agent-live");
+            publication.status = PresenceStatus::Idle;
+            publication.expires_at = Some(now - 60);
+            manager
+                .update_state("agent-live", publication.clone(), &EventSource::Local)
+                .await;
+            let publication_lock = manager.publication_lock("agent-live");
+            let renewal = publication_lock.lock().await;
+            let sweep = manager.expire_stale_publishes_via_hub(None, Some(&locator));
+            tokio::pin!(sweep);
+            assert!(futures::poll!(sweep.as_mut()).is_pending());
+            publication.status = PresenceStatus::Away("break".into());
+            if renew_lease {
+                publication.expires_at = Some(now + 300);
+                manager
+                    .update_state("agent-live", publication, &EventSource::Local)
+                    .await;
+            } else {
+                manager
+                    .update_projected_state("agent-live", publication, &EventSource::Local)
+                    .await;
+            }
+            drop(renewal);
+            assert!(sweep.await.is_empty());
+            let renewed = manager.get_state("agent-live");
+            assert_eq!(renewed.status, PresenceStatus::Away("break".into()));
+            assert_eq!(
+                renewed.expires_at,
+                if renew_lease { Some(now + 300) } else { None }
+            );
+        }
     }
 
     #[tokio::test]
