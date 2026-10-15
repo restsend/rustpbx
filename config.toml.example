@@ -332,8 +332,14 @@ type = "extension"
 # chain accepts SSO tokens without extra plumbing:
 #   X-Auth-Token on REGISTER, ?token= on the WebSocket URL.
 
-# Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
-# audio_codecs = ["pcma","pcmu","g722","opus"]
+# Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS, G729).
+#
+# Honored on EVERY leg — including WebRTC/WSS agent legs — and its ORDER is the
+# offer preference order (the first entry both peers support wins). Listing
+# `g729` here advertises G729 to WebRTC clients too; clients that cannot decode
+# it (browsers) simply do not select it, so it is safe for mixed fleets. When
+# unset, per-transport defaults apply (the WebRTC default excludes G729).
+# audio_codecs = ["g729","pcma","pcmu","g722","opus"]
 
 # Video codec allowlist for pass-through relay. Only codecs present in the
 # peer's SDP are retained; this setting does not create a video section.

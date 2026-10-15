@@ -762,15 +762,25 @@ impl MediaNegotiator {
         result
     }
 
-    /// Remove codecs that should not be advertised in generated WebRTC offers.
+    /// Normalize a generated WebRTC offer's codec list.
     ///
-    /// If filtering removes every audio codec, fall back to the WebRTC default
-    /// offer set so the generated SDP does not contain a DTMF-only audio m-line.
+    /// G.729 is no longer special-cased: it is advertised on a WebRTC leg
+    /// exactly when the effective codec policy selects it (e.g. `g729` listed
+    /// in `[proxy] audio_codecs`, a route/trunk `allow_codecs`, or a
+    /// destination-trunk codec), in the configured / caller order. This keeps
+    /// negotiation consistent with the media plane, which already negotiates
+    /// and transcodes G.729 over rustrtc transports just like over plain RTP.
+    /// Codecs a client cannot handle (browsers do not implement G.729) are
+    /// simply not selected by that client's answer.
+    ///
+    /// Still enforced here:
+    /// - telephone-event entries are kept only when their clock rate matches a
+    ///   retained audio codec;
+    /// - if the list would otherwise contain no audio codec, fall back to the
+    ///   WebRTC default set so the generated SDP never has a DTMF-only audio
+    ///   m-line.
     pub fn filter_webrtc_offer_codecs(caller_sdp: &str, codecs: Vec<CodecInfo>) -> Vec<CodecInfo> {
-        let mut filtered: Vec<_> = codecs
-            .into_iter()
-            .filter(|codec| codec.codec != CodecType::G729)
-            .collect();
+        let mut filtered = codecs;
 
         let audio_clock_rates: HashSet<_> = Self::audio_clock_rates_in_order(&filtered)
             .into_iter()
@@ -2600,7 +2610,7 @@ a=rtpmap:0 PCMU/8000\r\n";
     }
 
     #[test]
-    fn test_webrtc_offer_filter_removes_g729() {
+    fn test_webrtc_offer_filter_keeps_g729_when_allowed() {
         let caller_sdp = "v=0\r\n\
             o=- 1 1 IN IP4 127.0.0.1\r\n\
             s=-\r\n\
@@ -2616,13 +2626,23 @@ a=rtpmap:0 PCMU/8000\r\n";
         );
         let codecs = MediaNegotiator::filter_webrtc_offer_codecs(caller_sdp, codecs);
         let audio: Vec<_> = codecs.iter().filter(|c| !c.is_dtmf()).collect();
-        assert_eq!(audio.len(), 1);
-        assert_eq!(audio[0].codec, CodecType::PCMU);
-        assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
+        assert_eq!(
+            audio[0].codec,
+            CodecType::G729,
+            "G729 must lead when the policy allows it and the caller offered it first"
+        );
+        assert!(
+            codecs.iter().any(|c| c.codec == CodecType::G729),
+            "G729 must survive the WebRTC offer filter when the policy allows it"
+        );
+        assert!(
+            codecs.iter().any(|c| c.is_dtmf() && c.clock_rate == 8000),
+            "telephone-event/8000 must be retained alongside G729"
+        );
     }
 
     #[test]
-    fn test_webrtc_offer_filter_falls_back_when_policy_is_g729_only() {
+    fn test_webrtc_offer_filter_keeps_g729_only_policy() {
         let caller_sdp = "v=0\r\n\
             o=- 1 1 IN IP4 127.0.0.1\r\n\
             s=-\r\n\
@@ -2637,8 +2657,9 @@ a=rtpmap:0 PCMU/8000\r\n";
         );
         let codecs = MediaNegotiator::filter_webrtc_offer_codecs(caller_sdp, codecs);
         let audio: Vec<_> = codecs.iter().filter(|c| !c.is_dtmf()).collect();
-        assert!(!audio.is_empty(), "WebRTC offer must keep an audio codec");
-        assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
+        assert_eq!(audio.len(), 1, "a G729-only policy yields exactly one audio codec");
+        assert_eq!(audio[0].codec, CodecType::G729);
+        assert_eq!(audio[0].payload_type, 18, "the caller's G729 PT must be preserved");
     }
 
     #[test]

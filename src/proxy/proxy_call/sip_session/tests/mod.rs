@@ -5620,6 +5620,139 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
     );
 }
 
+// ── WebRTC leg must honor a configured G729 codec policy ───────────
+//
+// Regression for the WebRTC-G729 pass-through: the generated WebRTC callee
+// offer must carry G729 when the effective codec policy (route
+// `allow_codecs`, trunk codec, or `[proxy] audio_codecs`) selects it, and must
+// keep it out when the policy does not. Guarantees negotiation matches the
+// media plane (which can fast-path/transcode G729 over a WebRTC leg — see
+// rustpbx-media `fast_path_rtp_g729_to_webrtc_g729`).
+
+fn webrtc_g729_test_caller_offer() -> String {
+    concat!(
+        "v=0\r\n",
+        "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+        "s=Talk\r\n",
+        "c=IN IP4 192.0.2.10\r\n",
+        "t=0 0\r\n",
+        "m=audio 40000 RTP/AVP 18 0 9 8 101\r\n",
+        "a=rtpmap:18 G729/8000\r\n",
+        "a=fmtp:18 annexb=yes\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+        "a=rtpmap:9 G722/8000\r\n",
+        "a=rtpmap:8 PCMA/8000\r\n",
+        "a=rtpmap:101 telephone-event/8000\r\n",
+        "a=sendrecv\r\n",
+    )
+    .to_string()
+}
+
+async fn webrtc_callee_offer_for_allow(allow: Vec<CodecType>) -> String {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let mut dialplan = Dialplan::new(
+        "webrtc-g729".to_string(),
+        original_request,
+        DialDirection::Inbound,
+    );
+    dialplan.allow_codecs = allow;
+    let context = CallContext {
+        session_id: "webrtc-g729".to_string(),
+        dialplan: Arc::new(dialplan),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server,
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        true,
+    );
+    session.media.caller_offer = Some(webrtc_g729_test_caller_offer());
+
+    session
+        .create_callee_track(true)
+        .await
+        .expect("webrtc callee offer")
+}
+
+#[tokio::test]
+async fn webrtc_callee_offer_keeps_g729_when_allowed() {
+    let offer = webrtc_callee_offer_for_allow(vec![
+        CodecType::G729,
+        CodecType::PCMA,
+        CodecType::PCMU,
+        CodecType::G722,
+        CodecType::Opus,
+    ])
+    .await;
+
+    assert!(
+        offer.contains("UDP/TLS/RTP/SAVPF") && offer.contains("a=fingerprint"),
+        "callee leg must be a WebRTC (DTLS-SRTP) offer:\n{offer}"
+    );
+    assert!(
+        offer.contains("a=rtpmap:18 G729/8000"),
+        "G729 must be advertised to the WebRTC leg when the policy allows it:\n{offer}"
+    );
+    let profile = MediaNegotiator::extract_leg_profile(&offer);
+    assert_eq!(
+        profile.audio.as_ref().map(|codec| codec.codec),
+        Some(CodecType::G729),
+        "G729 must lead the WebRTC callee offer (caller offered it first + policy allows)"
+    );
+}
+
+#[tokio::test]
+async fn webrtc_callee_offer_omits_g729_when_not_allowed() {
+    let offer = webrtc_callee_offer_for_allow(vec![
+        CodecType::PCMU,
+        CodecType::PCMA,
+        CodecType::G722,
+        CodecType::Opus,
+    ])
+    .await;
+
+    assert!(
+        !offer.contains("G729"),
+        "G729 must not leak into a WebRTC offer when the policy excludes it:\n{offer}"
+    );
+    let profile = MediaNegotiator::extract_leg_profile(&offer);
+    assert_eq!(
+        profile.audio.as_ref().map(|codec| codec.codec),
+        Some(CodecType::PCMU),
+        "the first caller-common allowed codec must lead when G729 is not allowed"
+    );
+}
+
 // ── Bug 3: transport-aware parallel-fork callee offer caching ──────
 
 fn extract_audio_port(sdp: &str) -> Option<u16> {

@@ -15366,20 +15366,27 @@ impl SipSession {
                     .or_else(|| self.legs.get_answer(id).map(str::to_owned))
             });
         let allow_codecs = self.resolve_effective_codecs();
+        // Determine the codec policy for this leg.
+        //
+        // An explicit policy (route/turn `allow_codecs`, destination-trunk
+        // codec, or `[proxy] audio_codecs`) is honored verbatim — including on
+        // WebRTC legs, so a configured `g729` reaches the WSS/WebRTC agent in
+        // the configured order. Only when nothing is configured do we fall
+        // back to the transport defaults, and the WebRTC default set
+        // deliberately excludes G.729 (browsers do not implement it) so no
+        // deployment gets G.729 implicitly.
+        let policy: Vec<CodecType> = if !allow_codecs.is_empty() {
+            allow_codecs
+        } else if mode == rustrtc::TransportMode::WebRtc {
+            MediaNegotiator::default_webrtc_codecs()
+        } else {
+            MediaNegotiator::default_rtp_codecs()
+        };
         let mut codecs =
             if let Some(offer) = source_sdp.as_ref().or(self.media.caller_offer.as_ref()) {
-                MediaNegotiator::build_callee_codec_offer_with_allow(offer, &allow_codecs)
+                MediaNegotiator::build_callee_codec_offer_with_allow(offer, &policy)
             } else {
-                let defaults = if mode == rustrtc::TransportMode::WebRtc {
-                    MediaNegotiator::default_webrtc_codecs()
-                } else {
-                    MediaNegotiator::default_rtp_codecs()
-                };
-                MediaNegotiator::build_local_rtp_codec_offer(if allow_codecs.is_empty() {
-                    &defaults
-                } else {
-                    &allow_codecs
-                })
+                MediaNegotiator::build_local_rtp_codec_offer(&policy)
             };
         if mode == rustrtc::TransportMode::WebRtc {
             if let Some(offer) = source_sdp.as_ref().or(self.media.caller_offer.as_ref()) {
