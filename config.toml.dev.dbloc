@@ -1,0 +1,318 @@
+# A example config file
+# mv config.toml.example config.toml
+# cargo run . --bin rustpbx --conf config.toml
+#
+# ═══ CC desk test scenario (2 agents / 2 queues / step IVR) ═════════════════
+#   1. python3 src/addons/cc/scripts/cc_ivr_provider.py 18080  # step IVR provider
+#   2. cargo run --features contact-center --bin rustpbx -- --conf config.toml.dev
+#   3. python3 src/addons/cc/scripts/cc_seed_agents.py         # seed agents 1001/1002
+#   4. Agents log in at http://localhost:8082/console/cc/desk (1001/1002/123456)
+#   5. Dial 100 → IVR: press 1 → queue "support" (1001), press 2 → "sales" (1002)
+#   6. Dial "music" (e.g. from bob) → kzmusic-test queue: answers instantly,
+#      sounds/kzmusic.wav loops as hold music until you hang up
+#   RWI event dump (optional): python3 examples/rwi_event_webhook.py 28081
+#   Test matrix: 转人工(IVR key) / CSAT(hangup after agent) / 队列忙(agents busy)
+#                队列溢出(support: 2 waiting or 30s) / 咨询转·盲转·三方(cc-desk)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+http_addr = "0.0.0.0:8082"
+# http_gzip = true
+# EnvFilter directive: plain level ("info"/"debug") or per-target overrides,
+# e.g. "info,rsipstack=debug". Third-party chatter (hyper_util, rustls, sqlx,
+# rsipstack, reqwest) is pinned to warn unless named here.
+log_level = "info"
+# Paths can include a trailing * to skip whole subtrees. The monitor SSE
+# stream logs every 2s — keep it out of the access log by default.
+http_access_skip_paths = ["/health", "/healthz", "/metrics*", "/api/cc/monitor/stream*"]
+# SQLite database (default)
+database_url = "sqlite://rustpbx.sqlite3"
+rtp_start_port = 12001
+rtp_end_port = 42000
+[[proxy.user_backends]]
+type = "memory"
+
+# bob/alice: plain SIP test users. 1001/1002: CC agents — log into cc-desk
+# (WebRTC), serve queues "support" / "sales" (CC registry via
+# examples/cc_seed_agents.py; skills mapped in config/cc/skill_groups/cc-test.toml).
+[[proxy.user_backends.users]]
+id = 0
+enabled = true
+username = "bob"
+password = "123456"
+allow_guest_calls = false
+voicemail_disabled = false
+is_support_webrtc = false
+[[rwi.contexts]]
+name = "default"
+no_answer_timeout_secs = 30
+
+[[proxy.user_backends.users]]
+id = 0
+enabled = true
+username = "alice"
+password = "123456"
+allow_guest_calls = false
+voicemail_disabled = false
+is_support_webrtc = false
+
+[[proxy.user_backends.users]]
+id = 0
+enabled = true
+username = "1001"
+password = "123456"
+allow_guest_calls = false
+voicemail_disabled = false
+is_support_webrtc = true
+
+[[proxy.user_backends.users]]
+id = 0
+enabled = true
+username = "1002"
+password = "123456"
+allow_guest_calls = false
+voicemail_disabled = false
+is_support_webrtc = true
+
+[[proxy.user_backends]]
+type = "extension"
+
+# rtp_start_port = 20000
+# rtp_end_port = 30000
+
+# setup your STUN/TURN servers here, for webrtc web clients
+[[ice_servers]]
+# urls = ["stun:stun.l.google.com:19302"]
+urls = ["stun:124.223.96.208:3478", "turn:124.223.96.208:3478"]
+username = "miuturn.didi"
+credential = "ab70e6f52f331d622f77"
+
+#[[cluster.peers]]
+#addr = "1.2.3.4"
+#sip_port = 5060
+#ami_port = 8080
+
+
+
+[console]
+session_secret = "please_change_me_to_a_random_secret"
+base_path = "/console"
+# API prefix for REST endpoints (default: "/api")
+api_prefix = "/api"
+# allow self-service administrator signup after the first account
+allow_registration = false
+# set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
+secure_cookie = false
+
+[[console.api_tokens]]
+token = "dev"
+
+[proxy]
+modules = ["acl", "auth", "registrar", "call", "presence"]
+addr = "0.0.0.0"
+udp_port = 15060
+registrar_expires = 60
+ws_handler= "/ws"
+media_proxy = "all"
+ice_servers_path = "/iceservers"
+
+# Global failure-tone profile (`[proxy.audio_profile]`). Uncomment to override
+# the built-in tones (IVR/app start failures already play
+# sounds/service_unavailable_en.mp3 by default). NOTE: when enabled, this
+# sub-table must stay at the END of the [proxy] section — any bare keys placed
+# after it would be swallowed by the table.
+# [proxy.audio_profile]
+# error = "sounds/service_unavailable_en.mp3"
+# busy = "tone://480,3000"
+# Base directory for generated routing/trunk/ACL files
+generated_dir = "./config"
+
+routes_files = ["config/routes/*.toml"]
+queues_files = ["config/queue/*.toml"]
+trunks_files = ["config/trunks/*.toml"]
+addons = ["wholesale", "archive", "queue", "voicemail", "acme", "ivr_editor", "transcript", "observability", "cc"]
+# Don't responed the request when user not existed (slience for spam scanner)
+ensure_user = true
+#session_timer = true
+#session_expires = 10
+# audio_codecs = ["pcma","pcmu","g722","dtmf"]
+codec_strategy = "quality"
+# ACL rules
+acl_rules = ["allow all", "deny all"]
+acl_files = ["config/acl/*.toml"]
+realms = []
+hold_music = "sounds/kzmusic.wav"
+
+# Hello IVR test route: dial "hello" -> IVR (1 -> agent alice, 2 -> hangup).
+# IVR definition: config/ivr/hello.toml
+[[proxy.routes]]
+name = "hello-ivr"
+priority = 100
+select = "rr"
+auto_answer = true
+disabled = false
+app = "ivr"
+
+[proxy.routes.app_params]
+file = "config/ivr/hello.toml"
+
+[proxy.routes.match]
+"to.user" = "hello"
+
+# KZ music test queue — dial "music" (e.g. from bob) → call is answered
+# immediately and sounds/kzmusic.wav loops as hold music. The only target is
+# skill group "kz-hold", which has no agents, so nobody ever picks up: the
+# call stays in wait retention, looping the music, until the caller hangs up
+# (same pattern as config/queue/e2e_noagent.toml).
+[[proxy.routes]]
+name = "queue-kzmusic-test"
+priority = 100
+select = "rr"
+auto_answer = true
+disabled = false
+action = "queue"
+queue = "kzmusic-test"
+
+[proxy.routes.match]
+"to.user" = "music"
+
+[proxy.queues.kzmusic-test]
+name = "kzmusic-test"
+accept_immediately = true
+passthrough_ringback = false
+
+[proxy.queues.kzmusic-test.hold]
+audio_file = "sounds/kzmusic.wav"
+loop_playback = true
+
+# 显式给一个全空的 voice_prompts:阻止 app factory 给 skill-group 队列注入
+# 默认中文提示(builtin_app_factory 会把 VoicePrompts::zh() 的 busy_prompt
+# "当前坐席忙" 转成 30s 间隔的 comfort prompt,入队后立即播一次)。
+# 留空后 comfort_prompts 为空 → 纯音乐循环,无任何语音打断。
+[proxy.queues.kzmusic-test.voice_prompts]
+
+[proxy.queues.kzmusic-test.strategy]
+mode = "sequential"
+
+[[proxy.queues.kzmusic-test.strategy.targets]]
+uri = "skill-group:kz-hold"
+label = "kz-hold (no agents — never answers, music loops)"
+
+# Chinese voice prompts for call-failure scenarios (generated by
+# scripts/generate_failure_sounds.py). Placed at the end of the [proxy]
+# section on purpose — see the note above.
+[proxy.audio_profile]
+busy = "sounds/failure-busy-zh.wav"
+offline = "sounds/failure-offline-zh.wav"
+notfound = "sounds/failure-notfound-zh.wav"
+noanswer = "sounds/failure-noanswer-zh.wav"
+error = "sounds/failure-service-zh.wav"
+
+# JWT Fast Registration — enables Agent-ID (cc-phone JWT) login mode.
+# Required for cc-phone passwordless registration over WebSocket.
+# See docs/cc_agent_login_modes.md for full documentation.
+[proxy.jwt_auth]
+enabled = true
+secret = "dev-shared-hs256-secret-please-change"
+user_id_claim = "userId"
+# issuer = "rustpbx-dev"        # uncomment to enforce iss claim
+# audience = "cc-phone"         # uncomment to enforce aud claim
+sip_header_name = "X-Auth-Token"
+check_local_user = false
+ws_token_param = "token"
+# Enable dev-console JWT/PhoneAuth mint endpoints (POST /api/cc/dev/*).
+# Off by default; flip to true for local dev / staging only.
+dev_mint_enabled = true
+
+[recording]
+enabled = true
+auto_start = true
+type = "local"
+path = "./config/recorders"  # default when omitted or blank
+
+[archive]
+enabled = false
+archive_time = "03:00"
+timezone = "UTC"
+retention_days = 30
+archive_after_days = 0
+
+[licenses]
+
+[licenses.addons]
+wholesale = "global"
+voicemail = "global"
+ivr_editor = "global"
+
+# RWI (RustPBX WebSocket Interface) configuration
+[rwi]
+enabled = true
+max_connections = 100
+max_calls_per_connection = 10
+orphan_hold_secs = 300
+originate_rate_limit = 10
+
+[[rwi.tokens]]
+token = "dev-console-test-token"
+scopes = ["call", "session", "media", "record", "conference", "queue"]
+
+#[cluster]
+#peers = [
+#{ addr = "127.0.0.1", sip_port = 15060, ami_port = 8082 },
+#]
+
+# Detailed RWI event JSON dump — run the example sink first:
+#   python3 examples/rwi_event_webhook.py 28081
+# events = [] means ALL events (call states, queue/ACD, transfers, IVR steps...).
+[rwi_webhook]
+url = "http://localhost:28081/rwi/event"
+events = []
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Contact Center (addon-cc) — agent 1001 quick-reference deployment
+#
+# Desk-level ACW / screen-pop / outbound lines live in the CC addon's own
+# config file: {config_dir}/cc/cc.toml (fields below mirror CcConfig).
+# Per-skill-group and per-agent overrides are console fields:
+#   * SG General tab  → metadata.acw_url / metadata.screen_pop_url
+#   * Agent Advanced  → extra.acw_url / extra.screen_pop_url
+#   * Agent Advanced  → Outbound Policies (line rules: prefix + caller +
+#                        destination prefixes) — replaces desk.lines for
+#                        bound agents and enforces 403 on violations.
+# Resolution priority (ACW & ringing popup): agent > skill group > global.
+#
+# ── cc/cc.toml ──
+# [desk.acw]
+# url = "http://crm.example.com/acw?call=${callId}&agent=${agent}"   # 话后弹屏
+# wrapup_time_secs = 10
+#
+# [desk.screen_pop]
+# auto_open_on_ringing = true
+# crm_url_template = "http://crm.example.com/customer?phone=${caller}"
+#
+# [[desk.screen_pop.rules]]          # 技能组绑定弹屏（web 端按组过滤）
+# name = "support-popup"
+# popup_url = "http://crm.example.com/pop?queue=${queue}"
+# skill_groups = ["support"]
+# auto_open = true
+#
+# [desk.lines]                       # 全局外呼线路（未被策略绑定的坐席用）
+# [[desk.lines]]                     # （此处为示意——实际为 [[desk.lines]] 数组元素）
+# id = "line-mobile"
+# label = "Mobile 外线"
+# prefix = "9"                       # 拨号前缀（客户端加前缀，路由表按前缀匹配中继）
+# caller = "01012345678"             # 主叫外显；"self" = 坐席自己的分机
+# default = true
+#
+# ── Quick-route feature codes (zero-config internal dialing) ──
+# quick_route_sg_prefix = "*81"      # *81<skill-group-id> → ACD
+# quick_route_ivr_prefix = "*82"     # *82<ivr-name>       → IVR app
+# Dialing `*81support` reaches the skill group's ACD and `*82main` the IVR
+# without any route/queue configuration. Quick-transfer contacts delivered
+# to the desk clients use these codes as their dial numbers.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# DB locator for re-login test
+[proxy.locator]
+type = "database"
+url = "sqlite://locator_dev.sqlite3?mode=rwc"
