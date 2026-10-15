@@ -766,8 +766,8 @@ pub async fn get_settings(
 
     let cfg = get_merged_config(&app_state).await;
 
-    let model_ready = if let Some(path) = &cfg.models_path {
-        let model_file = model_file_path(path);
+    let model_ready = if let Some(path) = resolve_models_path(&cfg) {
+        let model_file = model_file_path(&path);
         tokio::fs::metadata(&model_file)
             .await
             .map(|meta| meta.is_file())
@@ -922,13 +922,9 @@ pub async fn download_model(
             .into_response();
     }
 
-    // Prefer models_path from config, fall back to request body
-    let models_path = transcript_cfg
-        .models_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_string())
+    // Same resolution as transcribing (MODEL_PATH, then config), so the
+    // model lands where transcription looks; fall back to the request body.
+    let models_path = resolve_models_path(&transcript_cfg)
         .or_else(|| payload.models_path.as_ref().map(|p| p.trim().to_string()))
         .filter(|p| !p.is_empty());
 
