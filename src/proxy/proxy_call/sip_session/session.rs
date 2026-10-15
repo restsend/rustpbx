@@ -3018,13 +3018,28 @@ impl SipSession {
         if self.media_leg(&LegId::from(leg_name)).is_some() {
             return Ok(());
         }
-        let recorder_sender = if side == LegSide::A {
-            self.setup_recording_capture()?
-        } else {
-            None
+        let recorder_sender = match side {
+            LegSide::A => self.setup_recording_capture()?,
+            LegSide::B => {
+                // The callee leg feeds the SAME recording task so its ingress
+                // (the agent mic) can become the recorder's B channel while
+                // the call is held. The tap starts fully off -- the caller leg
+                // owns both channels while bridged -- and is retargeted by
+                // `apply_hold_recording_routes` on hold.
+                self.media.recording.capture_sender()
+            }
         };
         let leg = crate::media::leg::LegInner::new(leg_name, &cfg, recorder_sender)?;
         self.legs.set_media_leg(&LegId::from(leg_name), leg);
+        if side == LegSide::B
+            && let Some(leg) = self.media_leg(&LegId::from(leg_name))
+        {
+            // Starts fully OFF: while bridged the caller leg's egress owns the
+            // B channel (relayed far-party audio). A second live source on the
+            // same sequential channel would interleave into garbage. Hold
+            // flips this on via `apply_hold_recording_routes`.
+            leg.ingress_tap().set_capture_route(None, None);
+        }
         if side == LegSide::A {
             self.spawn_dtmf_forwarder();
         }
@@ -8588,8 +8603,16 @@ impl SipSession {
                         Vec::new()
                     };
                     let cfg = self.build_leg_config(callee_mode, codecs, video_codecs);
-                    match crate::media::leg::LegInner::new("callee", &cfg, None) {
+                    // The callee leg feeds the same recording task so its
+                    // ingress (the agent mic) can become the recorder's B
+                    // channel while the call is held; its tap starts fully
+                    // off (the caller leg owns both channels while bridged).
+                    let recorder_sender = self.media.recording.capture_sender();
+                    match crate::media::leg::LegInner::new("callee", &cfg, recorder_sender) {
                         Ok(leg) => {
+                            // Starts fully OFF -- see `ensure_media_leg`; hold
+                            // flips ingress->B via `apply_hold_recording_routes`.
+                            leg.ingress_tap().set_capture_route(None, None);
                             if let Ok(offer) = leg.create_offer().await {
                                 if self.bridge().is_some() {
                                     self.legs.set_media_leg(&LegId::from("callee"), leg);
@@ -9810,6 +9833,8 @@ impl SipSession {
                 warn!(session_id = %self.context.session_id, %leg_id, error = %e, "Failed to send hold re-INVITE to peer");
             }
         }
+        // Keep both parties' live mic audio in the recording while held.
+        self.apply_hold_recording_routes();
         Ok(())
     }
 
@@ -9853,6 +9878,7 @@ impl SipSession {
                 warn!(session_id = %self.context.session_id, %leg_id, error = %e, "Failed to send unhold re-INVITE to peer");
             }
         }
+        self.restore_recording_routes();
         Ok(())
     }
     async fn apply_reinvite_hold_transition(
@@ -15409,7 +15435,26 @@ impl SipSession {
             )?;
         }
         let cfg = self.build_leg_config(mode, codecs, video);
-        let peer = crate::media::leg::LegInner::new(leg_id.as_str(), &cfg, None)?;
+        // The callee leg of the primary pair feeds the same recording task so
+        // its ingress (the agent mic) can become the recorder's B channel
+        // while the call is held. Its tap starts fully off -- the caller leg
+        // owns both channels while bridged -- and `apply_hold_recording_routes`
+        // retargets it on hold. Other dynamic legs (consult/transfer targets)
+        // get the sender too but stay permanently off (never in the bridge's
+        // B slot), so they capture nothing.
+        let recorder_sender = if leg_id.as_str() == "callee"
+            && self.legs.media_leg(&LegId::from("callee")).is_none()
+        {
+            self.media.recording.capture_sender()
+        } else {
+            None
+        };
+        let peer = crate::media::leg::LegInner::new(leg_id.as_str(), &cfg, recorder_sender)?;
+        if leg_id.as_str() == "callee" {
+            // Starts fully OFF -- see `ensure_media_leg`; hold flips
+            // ingress->B via `apply_hold_recording_routes`.
+            peer.ingress_tap().set_capture_route(None, None);
+        }
         let offer = peer.create_offer().await?;
         Ok((peer, offer))
     }
@@ -15976,6 +16021,13 @@ impl SipSession {
                     &self.context.session_id,
                 );
             }
+            // Bridged = default recording layout. Restoring here (not only on
+            // Unhold) keeps the capture routes aligned with the media state
+            // even when the route comes back without an explicit unhold --
+            // e.g. an app exit restoring a held route, or a playback
+            // completion re-bridging. Idempotent with
+            // `restore_recording_routes` in the unhold handlers.
+            self.restore_recording_routes();
             self.sync_rtp_timeout_pause();
             return true;
         }
@@ -16738,7 +16790,49 @@ impl SipSession {
             }
             source => peer.set_egress_source(source).await?,
         }
+        // The bridge is down: retarget the recorder so the hold window keeps
+        // both parties' live mic audio instead of going silent.
+        self.apply_hold_recording_routes();
         Ok(())
+    }
+
+    /// Switch the recorder's data sources to the hold layout.
+    ///
+    /// While a leg is held the media bridge is down, so the only audio
+    /// reaching the caller leg's egress is comfort noise / hold music, and the
+    /// far party's mic audio is not relayed anywhere. The recorder's B channel
+    /// therefore switches to the callee leg's ingress (the agent mic's
+    /// original RTP) and the caller leg's egress capture is disabled -- two
+    /// interleaved streams would garble the sequentially-appended channel.
+    /// Legs are resolved from the session registry (not the bridge) so the
+    /// flip works regardless of bridge state.
+    pub(crate) fn apply_hold_recording_routes(&self) {
+        if let Some(callee) = self.media_leg(&LegId::from("callee")) {
+            callee
+                .ingress_tap()
+                .set_capture_route(Some(crate::media::media_recorder::CaptureChannel::Callee), None);
+        }
+        if let Some(caller) = self.media_leg(&LegId::from("caller")) {
+            caller
+                .ingress_tap()
+                .set_capture_route(Some(crate::media::media_recorder::CaptureChannel::Caller), None);
+        }
+    }
+
+    /// Restore the default recording capture after unhold: caller leg
+    /// ingress->A / egress->B (the relayed far-party audio), callee leg capture
+    /// off again. Uses the session registry so the restore cannot be skipped
+    /// when the bridge was already torn down.
+    pub(crate) fn restore_recording_routes(&self) {
+        if let Some(callee) = self.media_leg(&LegId::from("callee")) {
+            callee.ingress_tap().set_capture_route(None, None);
+        }
+        if let Some(caller) = self.media_leg(&LegId::from("caller")) {
+            caller.ingress_tap().set_capture_route(
+                Some(crate::media::media_recorder::CaptureChannel::Caller),
+                Some(crate::media::media_recorder::CaptureChannel::Callee),
+            );
+        }
     }
 
     pub(crate) async fn handle_unhold(&mut self, leg_id: LegId) -> Result<()> {
@@ -16836,6 +16930,7 @@ impl SipSession {
             call_id: self.context.session_id.clone(),
             leg_id: leg_id.to_string(),
         });
+        self.restore_recording_routes();
         Ok(())
     }
 

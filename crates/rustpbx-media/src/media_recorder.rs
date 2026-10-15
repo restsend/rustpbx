@@ -50,10 +50,51 @@ fn recorder_runtime_or_current() -> tokio::runtime::Handle {
 }
 
 pub(crate) struct CapturedRtp {
-    pub(crate) direction: PacketDirection,
+    pub(crate) channel: CaptureChannel,
     pub(crate) packet: RtpPacket,
     pub(crate) received_at_micros: u64,
     pub(crate) peer_addr: Option<std::net::SocketAddr>,
+}
+
+/// Which recording channel a captured packet belongs to.
+///
+/// The tap that observes a leg decides this at capture time: the caller leg
+/// maps ingress→[`CaptureChannel::Caller`] / egress→[`CaptureChannel::Callee`]
+/// (the classic bridged-call layout), while the callee leg contributes its
+/// ingress (the agent mic — the live audio the bridge no longer relays while
+/// the call is held) as [`CaptureChannel::Callee`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureChannel {
+    /// Caller-side (leg A) audio.
+    Caller,
+    /// Callee-side (leg B) audio.
+    Callee,
+}
+
+impl CaptureChannel {
+    /// Channel recorded by a leg-observed packet travelling in `direction`
+    /// (the classic caller-tap mapping).
+    pub fn for_direction(direction: PacketDirection) -> Self {
+        match direction {
+            PacketDirection::Ingress => Self::Caller,
+            PacketDirection::Egress => Self::Callee,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Caller),
+            2 => Some(Self::Callee),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn code(&self) -> u8 {
+        match self {
+            Self::Caller => 1,
+            Self::Callee => 2,
+        }
+    }
 }
 
 /// Result produced after a file recorder has drained queued RTP and rewritten
@@ -83,7 +124,7 @@ pub trait MediaRecorder: Send {
 
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         received_at_micros: u64,
         peer_addr: Option<std::net::SocketAddr>,
@@ -149,7 +190,7 @@ impl MediaRecorder for FileRecorder {
 
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         _received_at_micros: u64,
         _peer_addr: Option<std::net::SocketAddr>,
@@ -171,7 +212,10 @@ impl MediaRecorder for FileRecorder {
         };
         recorder
             .write_sample(
-                direction_to_leg(direction),
+                match channel {
+                    CaptureChannel::Caller => Leg::A,
+                    CaptureChannel::Callee => Leg::B,
+                },
                 &MediaSample::Audio(frame),
                 None,
                 None,
@@ -231,13 +275,16 @@ impl SipflowRecorder {
 impl MediaRecorder for SipflowRecorder {
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         received_at_micros: u64,
         peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
         let raw = packet.marshal()?;
-        let leg = direction_to_leg_id(direction);
+        let leg = match channel {
+            CaptureChannel::Caller => 0,
+            CaptureChannel::Callee => 1,
+        };
         let leg = if self.swap_legs { 1 - leg } else { leg };
         self.backend.record(
             Cow::Borrowed(self.call_id.as_str()),
@@ -281,10 +328,12 @@ pub(crate) struct RecorderHandle {
     tx: mpsc::UnboundedSender<RecorderCommand>,
 }
 
-/// Non-blocking media-path sender installed on the caller leg's RTP tap.
+/// Non-blocking media-path sender installed on the tapped legs' RTP
+/// transports. Cloneable: every tap of the call (caller + callee legs) pushes
+/// into the same recording task.
 pub struct RecorderSender {
     tx: mpsc::Sender<CapturedRtp>,
-    dropped: AtomicU64,
+    dropped: Arc<AtomicU64>,
 }
 
 pub type RecordingCompletion = Result<Option<RecordingResult>>;
@@ -374,14 +423,14 @@ impl RecorderSender {
     pub(crate) fn new(tx: mpsc::Sender<CapturedRtp>) -> Self {
         Self {
             tx,
-            dropped: AtomicU64::new(0),
+            dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
     #[inline]
     pub(crate) fn capture(
         &self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         peer_addr: Option<std::net::SocketAddr>,
     ) {
@@ -390,7 +439,7 @@ impl RecorderSender {
             .map(|duration| duration.as_micros() as u64)
             .unwrap_or_default();
         let captured = CapturedRtp {
-            direction,
+            channel,
             packet: packet.clone(),
             received_at_micros,
             peer_addr,
@@ -409,8 +458,19 @@ impl RecorderSender {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Compatibility helper for direct injection: maps the classic caller-tap
+    /// direction onto its channel (ingress→Caller, egress→Callee).
     pub fn write_sample(&self, direction: PacketDirection, packet: &RtpPacket) {
-        self.capture(direction, packet, None);
+        self.capture(CaptureChannel::for_direction(direction), packet, None);
+    }
+}
+
+impl Clone for RecorderSender {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            dropped: Arc::clone(&self.dropped),
+        }
     }
 }
 
@@ -526,7 +586,7 @@ impl RecorderTask {
         if let Some(recorder) = self.recorder.as_mut()
             && let Err(error) = recorder
                 .write_rtp(
-                    captured.direction,
+                    captured.channel,
                     &captured.packet,
                     captured.received_at_micros,
                     captured.peer_addr,
@@ -558,20 +618,6 @@ async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-fn direction_to_leg(direction: PacketDirection) -> Leg {
-    match direction {
-        PacketDirection::Ingress => Leg::A,
-        PacketDirection::Egress => Leg::B,
-    }
-}
-
-fn direction_to_leg_id(direction: PacketDirection) -> i32 {
-    match direction {
-        PacketDirection::Ingress => 0,
-        PacketDirection::Egress => 1,
     }
 }
 
@@ -710,11 +756,11 @@ mod tests {
                             encoder.encode(&pcm).to_vec(),
                         );
                         recorder
-                            .write_rtp(PacketDirection::Ingress, &packet, 0, None)
+                            .write_rtp(CaptureChannel::Caller, &packet, 0, None)
                             .await
                             .unwrap();
                         recorder
-                            .write_rtp(PacketDirection::Egress, &packet, 0, None)
+                            .write_rtp(CaptureChannel::Callee, &packet, 0, None)
                             .await
                             .unwrap();
                     }
@@ -771,16 +817,16 @@ mod tests {
                     recorder.initialize().await.unwrap();
                     let mut encoder = create_encoder(CodecType::PCMU);
                     for seq in 0..10u16 {
-                        for (direction, level) in [
-                            (PacketDirection::Ingress, 8000i16),
-                            (PacketDirection::Egress, -8000i16),
+                        for (channel, level) in [
+                            (CaptureChannel::Caller, 8000i16),
+                            (CaptureChannel::Callee, -8000i16),
                         ] {
                             let packet = RtpPacket::new(
                                 RtpHeader::new(0, seq, seq as u32 * 160, 1234),
                                 encoder.encode(&vec![level; 160]).to_vec(),
                             );
                             recorder
-                                .write_rtp(direction, &packet, 0, None)
+                                .write_rtp(channel, &packet, 0, None)
                                 .await
                                 .unwrap();
                         }
@@ -1091,11 +1137,22 @@ mod tests {
     }
 
     #[test]
-    fn direction_mapping_is_stable() {
-        assert_eq!(direction_to_leg(PacketDirection::Ingress), Leg::A);
-        assert_eq!(direction_to_leg(PacketDirection::Egress), Leg::B);
-        assert_eq!(direction_to_leg_id(PacketDirection::Ingress), 0);
-        assert_eq!(direction_to_leg_id(PacketDirection::Egress), 1);
+    fn channel_mapping_is_stable() {
+        // Classic caller-tap layout: ingress (received) is the caller channel,
+        // egress (sent) is the callee channel; sipflow leg ids follow.
+        assert_eq!(
+            CaptureChannel::for_direction(PacketDirection::Ingress),
+            CaptureChannel::Caller
+        );
+        assert_eq!(
+            CaptureChannel::for_direction(PacketDirection::Egress),
+            CaptureChannel::Callee
+        );
+        assert_eq!(CaptureChannel::Caller.code(), 1);
+        assert_eq!(CaptureChannel::Callee.code(), 2);
+        assert_eq!(CaptureChannel::from_code(1), Some(CaptureChannel::Caller));
+        assert_eq!(CaptureChannel::from_code(2), Some(CaptureChannel::Callee));
+        assert_eq!(CaptureChannel::from_code(0), None);
     }
 }
 
@@ -1104,6 +1161,9 @@ mod tests {
 pub struct RecordingSession {
     recorder_handle: Option<RecorderHandle>,
     recorder_finished_rx: Option<mpsc::UnboundedReceiver<RecordingCompletion>>,
+    /// Cloneable sender retained when the capture task is created so the
+    /// callee leg's tap can feed the same recording task.
+    capture_sender: Option<RecorderSender>,
 }
 
 impl RecordingSession {
@@ -1114,7 +1174,15 @@ impl RecordingSession {
         let (handle, sender, recorder_finished_rx) = RecorderHandle::new();
         self.recorder_handle = Some(handle);
         self.recorder_finished_rx = Some(recorder_finished_rx);
+        self.capture_sender = Some(sender.clone());
         Ok(sender)
+    }
+
+    /// Sender for an additional tapped leg (the callee leg's ingress feeds the
+    /// same recording task — its mic audio is the B-channel source while the
+    /// call is held). `None` until [`Self::setup_recorder_task`] ran.
+    pub fn capture_sender(&self) -> Option<RecorderSender> {
+        self.capture_sender.clone()
     }
 
     /// Start file recording from caller leg A. The task initializes the file

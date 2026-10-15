@@ -19,7 +19,7 @@ struct FailingFinalizeRecorder;
 impl crate::media::media_recorder::MediaRecorder for FailingFinalizeRecorder {
     async fn write_rtp(
         &mut self,
-        _direction: crate::media::ingress_tap::PacketDirection,
+        _channel: crate::media::media_recorder::CaptureChannel,
         _packet: &rustrtc::rtp::RtpPacket,
         _received_at_micros: u64,
         _peer_addr: Option<std::net::SocketAddr>,

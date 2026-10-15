@@ -179,9 +179,11 @@ enum EgressCmd {
     SetSource(EgressSource),
     UpdateCodec(EgressCodec),
     /// Continue the paced timeline after rewrite relay released the wire.
-    /// Next emitted frame uses `last_wire_ts + one ptime` and sets marker.
+    /// Next emitted frame uses `last_wire_ts + one ptime`, resumes the wire
+    /// sequence space at `next_seq`, and sets marker.
     AdoptWireTimeline {
         last_wire_ts: u32,
+        next_seq: u16,
     },
 }
 
@@ -272,12 +274,17 @@ impl EgressPipeline {
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
 
-    /// Continue paced timestamps from the last packet put on the wire by the
-    /// rewrite bridge (same SSRC). Next frame is `last_wire_ts + ptime ticks`
-    /// with the marker bit set.
-    pub async fn adopt_wire_timestamp(&self, last_wire_ts: u32) -> Result<()> {
+    /// Continue paced timestamps AND the sequence space from the last packet
+    /// put on the wire by the rewrite bridge (same SSRC). Next frame is
+    /// `last_wire_ts + ptime ticks` with the marker bit set, sequenced at
+    /// `next_seq`. Adopting the sequence too keeps the emitted frames
+    /// coherent with the wire timeline the receiver already consumed.
+    pub async fn adopt_wire_timeline(&self, last_wire_ts: u32, next_seq: u16) -> Result<()> {
         self.cmd_tx
-            .send(EgressCmd::AdoptWireTimeline { last_wire_ts })
+            .send(EgressCmd::AdoptWireTimeline {
+                last_wire_ts,
+                next_seq,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
@@ -391,6 +398,20 @@ struct EgressTask {
 const TRANSCODE_PENDING_MAX_FRAMES: usize = 8;
 
 impl EgressTask {
+    /// Continue the paced timeline after the rewrite bridge released the wire.
+    /// The next frame resumes `last_wire_ts + ptime ticks` sequenced at
+    /// `next_seq` with the marker bit set.
+    fn apply_adopt_wire_timeline(&mut self, last_wire_ts: u32, next_seq: u16) {
+        self.next_rtp_timestamp = last_wire_ts.wrapping_add(self.codec_rtp_ticks_per_frame());
+        // Continue the wire's sequence space in the emitted frames as well --
+        // the paced sender keeps its own continuous output counter (seeded by
+        // the relay via note_external_packet), but frames must not carry a
+        // stale private sequence either.
+        self.sequence_number = next_seq;
+        self.marker_pending = true;
+        self.dtmf_event_timestamp = None;
+    }
+
     async fn run(
         mut self,
         mut cmd_rx: mpsc::Receiver<EgressCmd>,
@@ -526,12 +547,10 @@ impl EgressTask {
                         // Pending PCM was decoded for the old codec rate.
                         self.transcode_pending.clear();
                     }
-                    Some(EgressCmd::AdoptWireTimeline { last_wire_ts }) => {
-                        self.next_rtp_timestamp =
-                            last_wire_ts.wrapping_add(self.codec_rtp_ticks_per_frame());
-                        self.marker_pending = true;
-                        self.dtmf_event_timestamp = None;
-                    }
+                    Some(EgressCmd::AdoptWireTimeline {
+                        last_wire_ts,
+                        next_seq,
+                    }) => self.apply_adopt_wire_timeline(last_wire_ts, next_seq),
                     None => break,
                 },
                 _ = tick => {
@@ -1199,6 +1218,74 @@ mod tests {
             retried.sequence_number, second.sequence_number,
             "retried frame must reuse the rolled-back sequence"
         );
+    }
+
+    /// Regression: switching a relayed leg's egress to the paced pipeline
+    /// (hold music, IVR prompt on a bridged call) adopted only the wire RTP
+    /// timestamp, not the sequence number -- the emitted frames carried a
+    /// stale private sequence on the same SSRC. The adopt must resume the
+    /// wire sequence space.
+    #[tokio::test]
+    async fn adopt_wire_timeline_resumes_wire_sequence_space() {
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 8);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
+            sender: sender.clone(),
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Silence,
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            // Stale private counter: the pipeline never emitted while the
+            // relay owned the wire.
+            next_rtp_timestamp: 500,
+            sequence_number: 3,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 1,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
+        };
+
+        // The relay left the wire at ts 777_600 with the receiver having
+        // consumed sequences up to 9_000.
+        task.apply_adopt_wire_timeline(777_600, 9_001);
+
+        let first = task.next_frame().await.expect("first adopted frame");
+        assert_eq!(
+            first.rtp_timestamp,
+            777_600 + 160,
+            "timestamp must continue one ptime past the wire"
+        );
+        assert_eq!(
+            first.sequence_number,
+            Some(9_001),
+            "sequence must continue the wire space, not the stale private counter"
+        );
+        assert!(first.marker, "source switch must mark a talkspurt start");
+        // The run loop clears marker_pending once the frame is accepted by
+        // the sender ring -- emulate that for the second tick.
+        task.marker_pending = false;
+
+        let second = task.next_frame().await.expect("second frame");
+        assert_eq!(second.sequence_number, Some(9_002));
+        assert!(!second.marker, "marker applies to the first frame only");
     }
 
     /// Regression: app/TTS streaming (`ChannelAudioSource`) underruns used to

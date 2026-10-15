@@ -906,7 +906,23 @@ impl LegInner {
                 if let Some(sender) = audio_rtp_sender(&self.pc)
                     && sender.packets_sent() > 0
                 {
-                    self.egress.adopt_wire_timestamp(sender.last_rtp_timestamp()).await?;
+                    // Adopt both the timestamp AND the sequence space: the
+                    // receiver has already consumed the relay's numbers on
+                    // this SSRC, and a sequence restart makes the paced
+                    // output look like stale retransmissions (dropped by
+                    // jitter buffers -> choppy/absent audio after hold).
+                    tracing::debug!(
+                        leg = %self.id,
+                        wire_ts = sender.last_rtp_timestamp(),
+                        next_seq = sender.next_sequence_number(),
+                        "relay -> paced egress: adopting wire timeline"
+                    );
+                    self.egress
+                        .adopt_wire_timeline(
+                            sender.last_rtp_timestamp(),
+                            sender.next_sequence_number(),
+                        )
+                        .await?;
                 }
             }
             _ => {}

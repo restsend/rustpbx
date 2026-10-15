@@ -3459,6 +3459,104 @@ async fn stop_playback_without_leg_stops_both_legs() {
     assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
 }
 
+/// Regression: the recorder's channel routing must switch with hold state.
+///
+/// While bridged the caller leg owns both channels (ingress->A, relayed
+/// egress->B) and the callee leg captures nothing -- a second live source on
+/// the sequential B channel would interleave into garbage. While held, the B
+/// channel switches to the callee leg's ingress (the agent mic -- the audio
+/// the bridge no longer relays) and the caller egress capture (comfort
+/// noise / MOH) is dropped. Unhold restores the default layout.
+#[tokio::test]
+async fn hold_unhold_flips_recording_capture_routes() {
+    use crate::media::media_recorder::{CaptureChannel, RecordingSession};
+
+    let (mut session, mut _cmd_rx) = bridged_session_for_play_test("hold-rec-routes").await;
+    session.caller_dialog = None;
+    session.media.caller_offer = Some(recording_test_offer());
+
+    // Wire real legs whose taps carry the call's recorder sender -- the same
+    // wiring the production leg-creation paths perform.
+    let mut recording = RecordingSession::default();
+    let sender = recording.setup_recorder_task().unwrap();
+    for id in ["caller", "callee"] {
+        let leg = crate::media::leg::LegInner::new(
+            id,
+            &crate::media::leg::LegConfig::rtp_pcmu(),
+            Some(sender.clone()),
+        )
+        .unwrap();
+        if id == "callee" {
+            // Production creation sites start the callee tap fully off.
+            leg.ingress_tap().set_capture_route(None, None);
+        }
+        session.legs.set_media_leg(&LegId::from(id), leg);
+    }
+
+    let route = |session: &SipSession, leg: &str| {
+        session
+            .legs
+            .media_leg(&LegId::from(leg))
+            .unwrap()
+            .ingress_tap()
+            .capture_route()
+    };
+
+    // Bridged default: caller tap owns both channels, callee tap captures
+    // nothing.
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), Some(CaptureChannel::Callee)),
+        "bridged caller tap must record ingress->A / egress->B"
+    );
+    assert_eq!(
+        route(&session, "callee"),
+        (None, None),
+        "callee tap must not double-feed the B channel while bridged"
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::Hold {
+                leg_id: LegId::from("caller"),
+                music: None,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Hold must succeed: {:?}", result.message);
+    assert_eq!(
+        route(&session, "callee"),
+        (Some(CaptureChannel::Callee), None),
+        "hold must switch the B channel to the callee mic"
+    );
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), None),
+        "hold must drop the caller egress capture (comfort noise / MOH)"
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::Unhold {
+                leg_id: LegId::from("caller"),
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Unhold must succeed: {:?}", result.message);
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), Some(CaptureChannel::Callee)),
+        "unhold must restore the caller tap's default layout"
+    );
+    assert_eq!(
+        route(&session, "callee"),
+        (None, None),
+        "unhold must turn the callee tap capture back off"
+    );
+}
+
 #[tokio::test]
 async fn hold_unhold_commands_tear_and_restore_route() {
     let (mut session, mut _cmd_rx) = bridged_session_for_play_test("hold-unhold-restore").await;
