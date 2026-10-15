@@ -30,6 +30,14 @@ const AMI: &str = "/ami/v1";
 /// `bind_sip = true` 时绑定真实 UDP 端口（完整闭环测试需要能向坐席
 /// 发送 MESSAGE）；否则跳过绑定（挂载/校验类断言不需要传输面）。
 async fn build_app(bind_sip: bool) -> AppState {
+    build_app_with_ice(bind_sip, None).await
+}
+
+/// 同 [`build_app`]，但可注入 `[[ice_servers]]`（信封 ICE 注入断言用）。
+async fn build_app_with_ice(
+    bind_sip: bool,
+    ice_servers: Option<Vec<rustpbx::config::IceServerConfig>>,
+) -> AppState {
     let port = portpicker::pick_unused_port().unwrap_or(25060);
     let proxy = ProxyConfig {
         addr: "127.0.0.1".to_string(),
@@ -47,6 +55,7 @@ async fn build_app(bind_sip: bool) -> AppState {
         proxy,
         ami: Some(AmiConfig::default()),
         console: Some(ConsoleConfig::default()),
+        ice_servers,
         ..Default::default()
     };
     let mut builder = AppStateBuilder::new().with_config(config);
@@ -224,6 +233,88 @@ async fn admin_cmd_full_loop_answer_round_trip() {
     assert_eq!(body["accepted"], true);
     assert_eq!(body["answer"], payload);
     assert_eq!(body["trans_id"], trans_id);
+
+    app.token().cancel();
+}
+
+/// ICE servers 注入：配置 `[[ice_servers]]` 后，投给坐席的信封必须携带
+/// `ice_servers`（console 浏览器 offerer 与坐席 answerer 用同一份部署
+/// STUN/TURN，含 TURN REST 短时凭据）；未配置则不注入（旧客户端 serde
+/// default 忽略，零回归）。
+#[tokio::test]
+async fn admin_cmd_envelope_carries_server_ice_servers() {
+    let ice: rustpbx::config::IceServerConfig =
+        serde_json::from_value(serde_json::json!({"urls": ["stun:stun.example:3478"]}))
+            .expect("ice server config");
+    let app = build_app_with_ice(true, Some(vec![ice])).await;
+    let router = ami_router(&app);
+
+    let agent_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let agent_addr = agent_sock.local_addr().unwrap();
+    app.sip_server
+        .inner
+        .locator
+        .register(
+            "1001",
+            Some("localhost"),
+            Location {
+                aor: "sip:1001@localhost".try_into().unwrap(),
+                registered_aor: Some("sip:1001@localhost".try_into().unwrap()),
+                expires: 120,
+                destination: Some(SipAddr {
+                    r#type: Some(Transport::Udp),
+                    addr: HostWithPort::try_from(agent_addr.to_string()).unwrap(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let create = tokio::spawn({
+        let router = router.clone();
+        async move {
+            post_json(
+                &router,
+                &format!("{AMI}/cc/admin_cmd"),
+                serde_json::json!({"agent": "1001", "cmd": "shot", "target": "mini"}),
+            )
+            .await
+        }
+    });
+
+    let mut buf = vec![0u8; 65535];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), agent_sock.recv_from(&mut buf))
+        .await
+        .expect("agent must receive the admin-cmd MESSAGE")
+        .unwrap();
+    let raw = String::from_utf8_lossy(&buf[..len]).to_string();
+    let body = raw
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("MESSAGE must carry a body");
+    let envelope: serde_json::Value = serde_json::from_str(body).expect("envelope JSON");
+    let injected = envelope["ice_servers"]
+        .as_array()
+        .expect("envelope must carry injected ice_servers");
+    assert_eq!(injected.len(), 1, "one configured STUN entry");
+    assert_eq!(injected[0]["urls"][0], "stun:stun.example:3478");
+
+    // 回执闭合长轮询（避免 20s 超时占用）。
+    let trans_id = envelope["trans_id"].as_str().unwrap().to_string();
+    let (status, _) = post_json(
+        &router,
+        &format!("{AMI}/cc/admin_cmd_answer"),
+        serde_json::json!({"trans_id": trans_id, "accepted": true, "answer": "v=0 ok"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (status, body) = tokio::time::timeout(Duration::from_secs(5), create)
+        .await
+        .expect("create long-poll must resolve once the answer arrives")
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK, "body: {body}");
+    assert_eq!(body["accepted"], true);
 
     app.token().cancel();
 }

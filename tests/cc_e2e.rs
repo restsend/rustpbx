@@ -57,3 +57,7 @@ mod monitor_status_e2e;
 #[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/admin_cmd_e2e.rs"]
 mod admin_cmd_e2e;
+
+#[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/monitor_queue_truth_repro.rs"]
+mod monitor_queue_truth_repro;
