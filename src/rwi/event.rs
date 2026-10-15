@@ -1255,9 +1255,92 @@ pub struct IvrStepTrace {
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
 
+impl IvrStepTrace {
+    /// Completion contract: every emitted entry carries BOTH stamps, so
+    /// consumers can rely on them unconditionally — `step_end_time` is the
+    /// completion marker, and `step_start_time` falls back to it (never
+    /// later than the end). `duration_ms` is already non-optional by type.
+    /// Idempotent: entries that already carry stamps pass through untouched.
+    pub fn with_completion_stamps(mut self) -> Self {
+        if self.step_end_time.is_none() {
+            self.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+        }
+        if self.step_start_time.is_none() {
+            self.step_start_time = self.step_end_time.clone();
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Completion contract on the RWI event type itself: an entry built
+    /// without stamps is repaired (end = now, start = end) and an entry that
+    /// already carries stamps passes through untouched (idempotent).
+    #[test]
+    fn ivr_step_trace_completion_stamps_backfilled_and_idempotent() {
+        let mk = |start: Option<String>, end: Option<String>| IvrStepTrace {
+            call_id: "call-1".into(),
+            session_id: "sess-1".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger: TriggerInfo::new("ivr_fallback"),
+            action_type: "ivr_fallback".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: start,
+            step_end_time: end,
+            extra: None,
+            sip_headers: None,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        };
+
+        // Both missing → both backfilled, end >= start.
+        let repaired = mk(None, None).with_completion_stamps();
+        let start = repaired
+            .step_start_time
+            .as_deref()
+            .expect("start backfilled");
+        let end = repaired.step_end_time.as_deref().expect("end backfilled");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(end).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(start).unwrap(),
+            "backfilled end must not precede start"
+        );
+
+        // Start missing with an explicit end → start falls back to end.
+        let end_only = mk(None, Some("2026-01-01T00:00:05+00:00".into())).with_completion_stamps();
+        assert_eq!(
+            end_only.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:05+00:00"),
+            "start falls back to the explicit end"
+        );
+
+        // Already complete → untouched.
+        let untouched = mk(
+            Some("2026-01-01T00:00:00+00:00".into()),
+            Some("2026-01-01T00:00:01+00:00".into()),
+        )
+        .with_completion_stamps();
+        assert_eq!(
+            untouched.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
+        assert_eq!(
+            untouched.step_end_time.as_deref(),
+            Some("2026-01-01T00:00:01+00:00")
+        );
+    }
 
     #[test]
     fn ivr_events_serialize_extra_field() {

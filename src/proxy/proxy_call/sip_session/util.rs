@@ -397,7 +397,9 @@ pub(super) fn forward_dtmf_event(
                 next_node_id: None,
                 next_step_id: None,
                 end: None,
-            };
+            }
+            // Completion contract: both stamps present on every emitted entry.
+            .with_completion_stamps();
             gw.read().fan_out(session_id, &ev);
         }
         // The bridge owns media while active. Injecting the same digit into
@@ -501,7 +503,9 @@ pub(super) fn emit_suspended_flow_session_end(
         next_node_id: None,
         next_step_id: None,
         end: Some(true),
-    };
+    }
+    // Completion contract: both stamps present on every emitted entry.
+    .with_completion_stamps();
     gw.read().fan_out(session_id, &ev);
 }
 

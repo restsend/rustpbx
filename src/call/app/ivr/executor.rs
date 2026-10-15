@@ -374,7 +374,20 @@ impl StepIvrApp {
         }
     }
 
-    fn record_trace(&self, entry: IvrTraceEntry) {
+    fn record_trace(&self, mut entry: IvrTraceEntry) {
+        // Completion contract, enforced at the SINGLE choke point every step
+        // trace passes through: each emitted entry carries `step_end_time`
+        // (the completion marker) and `step_start_time` (falling back to the
+        // end so `end >= start` always holds) — `duration_ms` is non-optional
+        // by type. A site that left a stamp unset is repaired here, so
+        // consumers can rely on both fields unconditionally. The same
+        // normalized entry feeds the CDR collector and the RWI fan-out.
+        if entry.step_end_time.is_none() {
+            entry.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+        }
+        if entry.step_start_time.is_none() {
+            entry.step_start_time = entry.step_end_time.clone();
+        }
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
             crate::utils::spawn(async move {
@@ -405,7 +418,11 @@ impl StepIvrApp {
                 next_node_id: entry.next_node_id,
                 next_step_id: entry.next_step_id,
                 end: entry.end,
-            };
+            }
+            // Belt-and-braces: the entry was normalized above, so this is a
+            // no-op today — it keeps the "emitted event always carries both
+            // stamps" guarantee local to the construction site as well.
+            .with_completion_stamps();
             let guard = gw.read();
             guard.fan_out(&call_id, &ev);
         }
@@ -7942,6 +7959,201 @@ mod tests {
             .expect("session end trace must be enqueued");
         assert_eq!(first.event.payload["step_id"], "step-normal");
         assert_eq!(second.event.payload["step_id"], "step-end");
+    }
+
+    /// Completion contract guard: `record_trace` is the single choke point
+    /// every executor step trace passes through. An entry that reaches it
+    /// without stamps must be repaired, so an emitted `ivr_step_trace` can
+    /// NEVER lack `step_end_time` / `step_start_time` (`duration_ms` is
+    /// non-optional by type). Covers the theoretical `None` site directly.
+    #[tokio::test]
+    async fn test_record_trace_backfills_missing_completion_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut app = mock_app(vec![]);
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        // Worst case: a site leaves BOTH stamps unset.
+        app.record_trace(IvrTraceEntry {
+            session_id: "test-session".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger: crate::rwi::TriggerInfo::new("ivr_fallback"),
+            provider_url: None,
+            action_type: "ivr_fallback".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: None,
+            step_end_time: None,
+            extra: None,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        });
+
+        let ev = events.try_recv().expect("trace must be enqueued");
+        let payload = ev.event.payload;
+        let start = payload["step_start_time"]
+            .as_str()
+            .expect("step_start_time must be backfilled");
+        let end = payload["step_end_time"]
+            .as_str()
+            .expect("step_end_time must be backfilled");
+        let start_t = chrono::DateTime::parse_from_rfc3339(start).expect("start RFC3339");
+        let end_t = chrono::DateTime::parse_from_rfc3339(end).expect("end RFC3339");
+        assert!(
+            end_t >= start_t,
+            "backfilled start/end must satisfy end >= start: {payload}"
+        );
+        assert!(
+            payload["duration_ms"].is_u64(),
+            "duration_ms must be present: {payload}"
+        );
+    }
+
+    /// Every step trace emitted by ANY executor flow carries the completion
+    /// contract: `step_start_time` + `step_end_time` present, `end >= start`,
+    /// `duration_ms` present and equal to the stamp window (±50ms). Driven
+    /// through the RWI fan-out (the wire shape consumers see).
+    #[tokio::test]
+    async fn test_every_emitted_step_trace_carries_completion_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        fn assert_stamps(payloads: &[serde_json::Value], flow: &str) {
+            assert!(!payloads.is_empty(), "{flow}: no traces captured");
+            for (i, p) in payloads.iter().enumerate() {
+                let start = p["step_start_time"].as_str().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing step_start_time: {p}")
+                });
+                let end = p["step_end_time"].as_str().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing step_end_time: {p}")
+                });
+                let duration = p["duration_ms"].as_u64().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing duration_ms: {p}")
+                });
+                let start_t = chrono::DateTime::parse_from_rfc3339(start)
+                    .unwrap_or_else(|e| panic!("{flow} trace[{i}] start not RFC3339: {e}"));
+                let end_t = chrono::DateTime::parse_from_rfc3339(end)
+                    .unwrap_or_else(|e| panic!("{flow} trace[{i}] end not RFC3339: {e}"));
+                assert!(
+                    end_t >= start_t,
+                    "{flow} trace[{i}] step_end_time < step_start_time: {p}"
+                );
+                let expected = (end_t - start_t).num_milliseconds();
+                assert!(
+                    (duration as i64 - expected).abs() <= 50,
+                    "{flow} trace[{i}] duration_ms {duration} != stamp window {expected}ms: {p}"
+                );
+            }
+        }
+
+        fn drain_traces(
+            events: &mut tokio::sync::broadcast::Receiver<
+                crate::rwi::gateway::EventCacheEntry,
+            >,
+        ) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            while let Ok(ev) = events.try_recv() {
+                if ev.event.event_type == "ivr_step_trace" {
+                    out.push(ev.event.payload);
+                }
+            }
+            out
+        }
+
+        fn prompt_node(file: &str, interruptible: bool) -> ActionNode {
+            ActionNode::new(EntryAction::Prompt {
+                file: Some(file.into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            })
+        }
+
+        let wire_gateway = |app: &mut StepIvrApp| -> tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry> {
+            let gateway = RwiGateway::new();
+            let rx = gateway.subscribe_events();
+            app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+            rx
+        };
+
+        // ── (a) natural completion: [prompt, hangup] ──
+        {
+            let mut app = mock_app(vec![
+                prompt_node("hello.wav", false),
+                ActionNode::new(EntryAction::hangup_none()),
+            ]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "hello.wav"))
+                .await;
+            stack.audio_complete("ivr_prompt");
+            stack
+                .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "natural completion");
+        }
+
+        // ── (b) barge-in on an interruptible prompt ──
+        {
+            let mut app = mock_app(vec![
+                prompt_node("welcome.wav", true),
+                ActionNode::new(EntryAction::hangup_none()),
+            ]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "welcome.wav"))
+                .await;
+            stack.dtmf("5");
+            stack
+                .assert_cmd(2000, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "barge-in");
+        }
+
+        // ── (c) caller hangup mid-prompt (the zero-await on_exit burst) ──
+        {
+            let mut app = mock_app(vec![prompt_node("long.wav", false)]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "long.wav"))
+                .await;
+            stack.remote_hangup();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "caller hangup mid-prompt");
+        }
     }
 
     // ── Invariant: step_end_time implies step_start_time ──
