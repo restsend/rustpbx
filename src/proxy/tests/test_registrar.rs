@@ -205,11 +205,10 @@ async fn test_registrar_register_success() {
             peer_presence.handle_locator_event(peer_event.clone(), &remote_source).await;
             local_bridge.on_locator_event(&event, &EventSource::Local).await;
             peer_bridge.on_locator_event(&peer_event, &remote_source).await;
-            let expected = if matches!(stage, "refresh" | "unregister" | "new-contact" | "explicit") {
-                "offline"
-            } else {
-                "idle"
-            };
+            // PL2: any REGISTER — fresh or refresh — that finds the agent
+            // Offline lifts it back to the initial readiness state (Idle).
+            // Only an explicit unregister leaves the agent Offline.
+            let expected = if stage == "unregister" { "offline" } else { "idle" };
             for registry in [&local, &peer] {
                 assert_eq!(registry.get_agent("agent-alice").await.unwrap().status.to_string(), expected,
                     "registration stage {stage} must preserve the agent's business state");

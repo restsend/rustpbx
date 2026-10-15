@@ -256,6 +256,11 @@ pub struct PresenceManager {
     /// Channel used by the voicemail layer to request MWI NOTIFY delivery.
     mwi_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<MwiTrigger>>>>,
     cluster_sync: std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<ClusterSync>>>>,
+    /// Observability/test hook: presence NOTIFYs actually dispatched, and the
+    /// last `(identity, status)` they carried. Used to assert that an
+    /// `Offline` state is never pushed to a subscriber (PL4).
+    notifies_sent: Arc<std::sync::atomic::AtomicU64>,
+    last_notified: Arc<RwLock<Option<(String, String)>>>,
 }
 
 impl PresenceManager {
@@ -269,6 +274,8 @@ impl PresenceManager {
             notify_tx: Arc::new(RwLock::new(None)),
             mwi_tx: Arc::new(RwLock::new(None)),
             cluster_sync: std::sync::Arc::new(parking_lot::RwLock::new(None)),
+            notifies_sent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_notified: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -335,6 +342,24 @@ impl PresenceManager {
     /// Total MWI subscription bindings (sum of all extension buckets).
     pub fn mwi_subscriber_bindings_len(&self) -> usize {
         self.mwi_subscribers.read().values().map(|v| v.len()).sum()
+    }
+
+    /// Number of presence NOTIFYs actually dispatched (test/observability).
+    /// An `Offline` state is never counted — see `PresenceModule::send_notify`.
+    pub fn notifies_sent(&self) -> u64 {
+        self.notifies_sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Last dispatched presence NOTIFY's `(identity, status)`, if any.
+    pub fn last_notified(&self) -> Option<(String, String)> {
+        self.last_notified.read().clone()
+    }
+
+    /// Record a dispatched (non-Offline) presence NOTIFY.
+    fn record_notify(&self, identity: &str, status: &str) {
+        self.notifies_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *self.last_notified.write() = Some((identity.to_string(), status.to_string()));
     }
 
     pub fn get_state(&self, identity: &str) -> PresenceState {
@@ -824,7 +849,6 @@ impl PresenceManager {
         source: &EventSource,
     ) -> Vec<DialogId> {
         let mut pruned = Vec::new();
-        let is_refresh = matches!(event, LocatorEvent::Refreshed(_));
         match event {
             LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
@@ -854,7 +878,12 @@ impl PresenceManager {
 
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
-                        None if !is_refresh && current.status == PresenceStatus::Offline => {
+                        // PL2: any REGISTER — a fresh login OR a keepalive
+                        // refresh — proves the client is alive, so an Offline
+                        // state is lifted to Idle. A live business state
+                        // (idle/away/dnd/ringing/busy/wrapup) is preserved
+                        // untouched (the `None => return` arm below).
+                        None if current.status == PresenceStatus::Offline => {
                             PresenceStatus::Idle
                         }
                         None => return pruned,
@@ -1475,6 +1504,25 @@ impl PresenceModule {
         sub: &Subscriber,
         state: &PresenceState,
     ) -> Result<()> {
+        // PL4: an `Offline` presence state is NEVER pushed to a client. The
+        // soft-phone reconcilers match the PIDF `<note>offline</note>` exactly
+        // and align-and-toast a server-forced logout — which fires a spurious
+        // "下线提醒" during the reconnect race (the SUBSCRIBE is handled while
+        // the REGISTER is still in flight, so the initial NOTIFY would carry
+        // the previous session's stale Offline). Offline is expressed only to
+        // internal consumers (CC/UI read the manager state directly);
+        // subscribers simply stop receiving updates until the identity is
+        // live again.
+        if state.status == PresenceStatus::Offline {
+            debug!(
+                identity,
+                aor = %sub.aor,
+                "Suppressing Offline presence NOTIFY (never pushed to clients)"
+            );
+            return Ok(());
+        }
+        self.manager.record_notify(identity, &state.status.to_string());
+
         debug!(
             "Sending NOTIFY to {} for identity {} state {:?}",
             sub.aor, identity, state.status
@@ -2072,6 +2120,98 @@ mod tests {
         assert_eq!(manager.get_state(ext).status, PresenceStatus::Offline);
     }
 
+    /// PL2: a keepalive REGISTER refresh must lift a stale Offline back to
+    /// Idle. Previously `Refreshed` returned early and left it Offline, so a
+    /// reconnecting client that only re-registered stayed "offline" while its
+    /// binding was live.
+    #[tokio::test]
+    async fn refresh_register_lifts_offline_to_idle() {
+        let manager = PresenceManager::new(None);
+        let ext = "1004";
+        let loc = Location {
+            aor: Uri::try_from("sip:1004@localhost").unwrap(),
+            ..Default::default()
+        };
+
+        // Stale offline, as left by a prior session.
+        let mut offline = manager.get_state(ext);
+        offline.status = PresenceStatus::Offline;
+        manager
+            .update_state(ext, offline, &EventSource::Local)
+            .await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Offline);
+
+        manager
+            .handle_locator_event(LocatorEvent::Refreshed(loc.clone()), &EventSource::Local)
+            .await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+
+        // A subsequent refresh while Idle is a no-op (business state kept).
+        manager
+            .handle_locator_event(LocatorEvent::Refreshed(loc), &EventSource::Local)
+            .await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+    }
+
+    /// PL1/PL2: a REGISTER (fresh or refresh) must never downgrade a live
+    /// business state.
+    #[tokio::test]
+    async fn register_preserves_live_business_state() {
+        let loc = Location {
+            aor: Uri::try_from("sip:1005@localhost").unwrap(),
+            ..Default::default()
+        };
+        for state in [
+            PresenceStatus::Idle,
+            PresenceStatus::Away("lunch".into()),
+            PresenceStatus::Dnd,
+            PresenceStatus::Ringing,
+            PresenceStatus::Busy,
+            PresenceStatus::Wrapup,
+        ] {
+            let manager = PresenceManager::new(None);
+            let mut current = manager.get_state("1005");
+            current.status = state.clone();
+            manager
+                .update_state("1005", current, &EventSource::Local)
+                .await;
+
+            manager
+                .handle_locator_event(LocatorEvent::Registered(loc.clone()), &EventSource::Local)
+                .await;
+            manager
+                .handle_locator_event(LocatorEvent::Refreshed(loc.clone()), &EventSource::Local)
+                .await;
+            assert_eq!(
+                manager.get_state("1005").status,
+                state,
+                "REGISTER must preserve {state:?}"
+            );
+        }
+    }
+
+    /// A REGISTER carrying `X-CC-Presence` still applies that status verbatim,
+    /// even over an Offline state.
+    #[tokio::test]
+    async fn register_x_cc_presence_header_applies() {
+        let manager = PresenceManager::new(None);
+        let loc = Location {
+            aor: Uri::try_from("sip:1006@localhost").unwrap(),
+            headers: Some(vec![rsipstack::sip::Header::Other(
+                "X-CC-Presence".to_string(),
+                "away:lunch".to_string(),
+            )]),
+            ..Default::default()
+        };
+        manager
+            .handle_locator_event(LocatorEvent::Registered(loc), &EventSource::Local)
+            .await;
+        assert_eq!(
+            manager.get_state("1006").status,
+            PresenceStatus::Away("lunch".into())
+        );
+    }
+
     #[tokio::test]
     async fn test_subscriber_management() {
         let manager = PresenceManager::new(None);
@@ -2404,11 +2544,13 @@ mod tests {
     }
 
     /// The PIDF note vocabulary is a CLOSED contract with soft-phone
-    /// reconcilers (restsend-call matches `note == "offline"` exactly to
-    /// align-and-toast a server-forced logout). A stamped
-    /// `offline_reason` must ride `reason_code` / webhooks / the status
-    /// history only — never suffixed into the note (`offline:expired`
-    /// would fall through the client's match arm and desync its state).
+    /// reconcilers. `build_pidf_body` still emits `<note>offline</note>` for a
+    /// literal Offline state (and a stamped `offline_reason` must ride
+    /// `reason_code` / webhooks / the status history only — never suffixed
+    /// into the note, or `offline:expired` would fall through the client's
+    /// match arm and desync it). NOTE: since PL4 the dispatcher
+    /// (`PresenceModule::send_notify`) never sends an Offline state to a
+    /// client at all, so this body shape is only reachable via direct calls.
     #[test]
     fn test_build_pidf_body_offline_note_stays_in_closed_vocabulary() {
         for reason in ["expired", "unregistered", "offline"] {
