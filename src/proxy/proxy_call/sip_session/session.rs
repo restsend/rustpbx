@@ -11691,6 +11691,11 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::ProbeOfflineTarget { target, reply } => {
+                let _ = reply.send(self.probe_offline_target(&target).await);
+                CommandResult::success()
+            }
+
             CallCommand::Trace { event } => {
                 self.record_trace(event);
                 CommandResult::success()
@@ -13594,6 +13599,60 @@ impl SipSession {
         Some(merged)
     }
 
+    /// Normalize bare-user targets ("1002") with the selected realm — same
+    /// normalization the blind-transfer B-leg dial uses — so the locator can
+    /// match the registered AOR (user@realm). A hostless URI silently misses
+    /// the locator and the INVITE would go to the default port where nobody
+    /// listens.
+    fn normalize_dial_target(&self, target: &str) -> Result<rsipstack::sip::Uri> {
+        let realm = self.server.proxy_config.load().select_realm("");
+        let normalized_target = crate::call::build_sip_uri(target, &realm);
+        parse_dial_target(&normalized_target)
+            .or_else(|_| parse_dial_target(target))
+            .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))
+    }
+
+    /// A known local user without forwarding: when not registered, nobody can
+    /// answer it. An empty locator result alone does not say whether the user
+    /// exists — unknown numbers may still be remote or routed.
+    async fn is_unreachable_local_user(&self, uri: &rsipstack::sip::Uri) -> Result<bool> {
+        if !self.server.is_same_realm(&uri.host().to_string()).await {
+            return Ok(false);
+        }
+        let user = self
+            .server
+            .user_backend
+            .get_user(
+                uri.user().unwrap_or_default(),
+                Some(&uri.host().to_string()),
+                Some(&self.context.dialplan.original),
+            )
+            .await
+            .map_err(|error| anyhow!("Dynamic leg user lookup failed: {}", error))?;
+        // User forwarding is currently resolved by the incoming dialplan
+        // path; preserve that behavior rather than rejecting an offline user
+        // whose forwarding policy may handle the call.
+        Ok(user.is_some_and(|user| user.forwarding_config().is_none()))
+    }
+
+    /// Whether dialing `target` would be refused as an unregistered local
+    /// user (see `handle_add_leg_inner`). `false` when unsure. With routing
+    /// for originated calls enabled a route may still take the target, and
+    /// only the dial itself may run the route table (it reserves trunk
+    /// capacity), so the dial decides.
+    async fn probe_offline_target(&self, target: &str) -> bool {
+        let Ok(uri) = self.normalize_dial_target(target) else {
+            return false;
+        };
+        if !matches!(self.server.locator.lookup(&uri).await, Ok(locations) if locations.is_empty()) {
+            return false;
+        }
+        if self.route_originated_enabled() {
+            return false;
+        }
+        self.is_unreachable_local_user(&uri).await.unwrap_or(false)
+    }
+
     async fn handle_add_leg(
         &mut self,
         target: String,
@@ -13655,16 +13714,7 @@ impl SipSession {
             return Err(anyhow!("Leg already exists: {}", new_leg_id));
         }
 
-        // Normalize bare-user targets ("1002") with the selected realm —
-        // same normalization the blind-transfer B-leg dial uses — so the
-        // locator can match the registered AOR (user@realm). A hostless
-        // URI silently misses the locator and the INVITE would go to the
-        // default port where nobody listens.
-        let realm = self.server.proxy_config.load().select_realm("");
-        let normalized_target = crate::call::build_sip_uri(&target, &realm);
-        let uri = parse_dial_target(&normalized_target)
-            .or_else(|_| parse_dial_target(&target))
-            .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))?;
+        let uri = self.normalize_dial_target(&target)?;
         let mut location = crate::call::Location {
             aor: uri.clone(),
             ..Default::default()
@@ -13713,30 +13763,13 @@ impl SipSession {
         if !registered
             && location.aor == uri
             && location.destination.is_none()
-            && self.server.is_same_realm(&uri.host().to_string()).await
+            && self.is_unreachable_local_user(&uri).await?
         {
-            if let Some(user) = self
-                .server
-                .user_backend
-                .get_user(
-                    uri.user().unwrap_or_default(),
-                    Some(&uri.host().to_string()),
-                    Some(&self.context.dialplan.original),
-                )
-                .await
-                .map_err(|error| anyhow!("Dynamic leg user lookup failed: {}", error))?
-            {
-                // User forwarding is currently resolved by the incoming
-                // dialplan path; preserve that behavior rather than rejecting
-                // an offline user whose forwarding policy may handle the call.
-                if user.forwarding_config().is_none() {
-                    return Err(transfer::BlindTransferDialError {
-                        code: 480,
-                        message: "Target user is not registered".to_string(),
-                    }
-                    .into());
-                }
+            return Err(transfer::BlindTransferDialError {
+                code: 480,
+                message: "Target user is not registered".to_string(),
             }
+            .into());
         }
 
         // Merge caller-supplied INVITE headers (queue location enricher:

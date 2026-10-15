@@ -1546,27 +1546,33 @@ impl QueueApp {
         // Skip agents that became unavailable since this queue's target list
         // was resolved (e.g. reserved by or busy on another concurrent call)
         // so sequential fallback never INVITEs an agent already on a call.
-        // Without a registry (static agent lists) keep the legacy behavior.
-        if let Some(ref registry) = self.agent_registry {
-            loop {
-                let Some(next_uri) = self
-                    .get_agents()
-                    .get(self.current_agent_idx)
-                    .map(|l| l.aor.to_string())
-                else {
-                    break;
-                };
-                if matches!(
-                    Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await,
-                    Some(false)
-                ) {
-                    info!(agent = %next_uri, "Queue: skipping agent (no longer available)");
-                    self.current_agent_idx += 1;
-                    self.dial_attempts += 1;
-                } else {
-                    break;
+        // A target the registry does not know (static agent list) is skipped
+        // when it is a local user with no registration: the dial would be
+        // refused at once, and the queue would wait out the ring timeout.
+        loop {
+            let Some(next_uri) = self
+                .get_agents()
+                .get(self.current_agent_idx)
+                .map(|l| l.aor.to_string())
+            else {
+                break;
+            };
+            let availability = match self.agent_registry {
+                Some(ref registry) => {
+                    Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await
                 }
+                None => None,
+            };
+            let skip = match availability {
+                Some(available) => !available,
+                None => ctrl.is_offline_local_user(&next_uri).await,
+            };
+            if !skip {
+                break;
             }
+            info!(agent = %next_uri, ?availability, "Queue: skipping agent (no longer available)");
+            self.current_agent_idx += 1;
+            self.dial_attempts += 1;
         }
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
@@ -2247,21 +2253,28 @@ impl CallApp for QueueApp {
             let mut agents = self.get_agents();
             // Filter out agents that are no longer available (reserved by or
             // busy on another concurrent call) when a registry is attached.
-            if let Some(ref registry) = self.agent_registry {
-                let mut filtered = Vec::with_capacity(agents.len());
-                for agent in agents {
-                    let uri = agent.aor.to_string();
-                    if matches!(
-                        Self::agent_availability(registry.as_ref(), &uri, &self.call_id).await,
-                        Some(false)
-                    ) {
-                        info!(agent = %uri, "Queue: parallel dial skips unavailable agent");
-                        continue;
+            // A target the registry does not know is skipped when it is a
+            // local user with no registration (see `dial_next_agent`).
+            let mut filtered = Vec::with_capacity(agents.len());
+            for agent in agents {
+                let uri = agent.aor.to_string();
+                let availability = match self.agent_registry {
+                    Some(ref registry) => {
+                        Self::agent_availability(registry.as_ref(), &uri, &self.call_id).await
                     }
-                    filtered.push(agent);
+                    None => None,
+                };
+                let skip = match availability {
+                    Some(available) => !available,
+                    None => ctrl.is_offline_local_user(&uri).await,
+                };
+                if skip {
+                    info!(agent = %uri, ?availability, "Queue: parallel dial skips unavailable agent");
+                    continue;
                 }
-                agents = filtered;
+                filtered.push(agent);
             }
+            agents = filtered;
             if agents.is_empty() {
                 if self.allows_wait_retention() {
                     warn!("Queue: no available parallel agents — wait retention");

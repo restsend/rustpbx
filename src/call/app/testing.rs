@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -57,6 +57,9 @@ pub struct MockCallStack {
     pub queue_meta_updates: std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>,
     /// Recorded [`CallCommand::PinAgentMeta`] payloads (see [`Self::next_cmd`]).
     pub pinned_agent_meta: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
+    /// Dial targets the mock session reports as unregistered local users
+    /// (answers to `CallCommand::ProbeOfflineTarget`).
+    offline_targets: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
     /// Background task running the AppEventLoop.
@@ -92,8 +95,27 @@ impl MockCallStack {
 
     pub fn run_with_context(app: Box<dyn CallApp>, ctx: ApplicationContext) -> Self {
         // Real SipSessionHandle — backed only by channels, no SIP socket.
+        let (session_tx, mut session_rx) = mpsc::channel(256);
+        let handle = SipSessionHandle::new_for_test("test-session", session_tx);
+        // Request/reply probes are answered here so the app never waits on
+        // the test reading its commands; everything else is forwarded.
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let handle = SipSessionHandle::new_for_test("test-session", cmd_tx);
+        let offline_targets = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let offline = offline_targets.clone();
+        crate::utils::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    CallCommand::ProbeOfflineTarget { target, reply } => {
+                        let _ = reply.send(offline.lock().unwrap().contains(&target));
+                    }
+                    other => {
+                        if cmd_tx.send(other).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         // Synthetic event channel: test → controller.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
@@ -111,9 +133,16 @@ impl MockCallStack {
             cmd_rx,
             queue_meta_updates: std::sync::Mutex::new(Vec::new()),
             pinned_agent_meta: std::sync::Mutex::new(Vec::new()),
+            offline_targets,
             cancel,
             join_handle,
         }
+    }
+
+    /// Report `target` as an unregistered local user to offline probes.
+    pub fn set_offline(&self, target: impl Into<String>) -> &Self {
+        self.offline_targets.lock().unwrap().insert(target.into());
+        self
     }
 
     // ── Event injection ───────────────────────────────────────────────────────

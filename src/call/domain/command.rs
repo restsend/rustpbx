@@ -307,6 +307,16 @@ pub enum CallCommand {
         reply: oneshot::Sender<Option<LegId>>,
     },
 
+    /// Whether dialing `target` would be refused because it is a known local
+    /// user with no registration (the `LegAdd` check). Lets an app skip an
+    /// offline target instead of dialing it. Internal request/reply command,
+    /// never serialized.
+    #[serde(skip)]
+    ProbeOfflineTarget {
+        target: String,
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Start live transcription. Reference-counted: the transcription pump
     /// starts on the first request and runs until the matching number of
     /// `StopTranscription` commands (or call end).

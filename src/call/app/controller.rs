@@ -647,6 +647,24 @@ impl CallController {
         Ok(call_id)
     }
 
+    /// Whether `target` is a known local user with no registration, so
+    /// dialing it would be refused at once. `false` when unsure (unknown or
+    /// remote number, lookup error): the dial then decides.
+    pub async fn is_offline_local_user(&self, target: &str) -> bool {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self
+            .session
+            .send_command(CallCommand::ProbeOfflineTarget {
+                target: target.to_string(),
+                reply,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     /// Select the two legs whose live audio should be connected and restored.
     pub fn bridge(&self, leg_a: LegId, leg_b: LegId) -> anyhow::Result<()> {
         self.session.send_command(CallCommand::Bridge {
