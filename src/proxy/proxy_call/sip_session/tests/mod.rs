@@ -8873,3 +8873,54 @@ async fn own_side_unhold_restores_media_path_when_bridge_down() {
         "own-side unhold with a bridged pair must restore the media path (stop hold music)"
     );
 }
+
+/// Parallel queue round: each leg's events name the agent pinned when THAT
+/// leg was dialed, not the session-level pin (the last agent dialed).
+#[tokio::test]
+async fn test_leg_agent_id_uses_the_legs_own_agent() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+    let context = CallContext {
+        session_id: "parallel-agents".into(),
+        dialplan: Arc::new(Dialplan::new("parallel-agents".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(), start_time: Instant::now(),
+        original_caller: "sip:caller@rustpbx.com".into(),
+        original_callee: "sip:queue@rustpbx.com".into(), max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new(server, CancellationToken::new(), None, context, dialog, false);
+
+    let mut dial = |agent: &str| {
+        SipSession::set_pinned_agent_id(&session.extensions, agent);
+        let leg_id = LegId::new(uuid::Uuid::new_v4().to_string());
+        let mut leg = crate::call::domain::Leg::new(leg_id.clone())
+            .with_endpoint(format!("sip:{agent}@rustpbx.com"));
+        leg.agent_id = session.pinned_agent_id();
+        session.legs.insert(leg_id.clone(), leg);
+        leg_id
+    };
+    let alice = dial("alice");
+    let bob = dial("bob");
+
+    assert_eq!(
+        session.leg_agent_id(&alice, Some("sip:alice@rustpbx.com")).await.as_deref(),
+        Some("alice"),
+        "the first leg must not take the last-dialed agent"
+    );
+    assert_eq!(
+        session.leg_agent_id(&bob, Some("sip:bob@rustpbx.com")).await.as_deref(),
+        Some("bob")
+    );
+    assert_eq!(
+        session.leg_agent_id(&LegId::from("gone"), None).await.as_deref(),
+        Some("bob"),
+        "an unknown leg falls back to the session-level agent"
+    );
+}

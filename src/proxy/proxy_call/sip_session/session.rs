@@ -3266,22 +3266,28 @@ impl SipSession {
     /// dials a different agent than the session-level `resolved_agent_id`,
     /// which stays pinned to the first resolved agent. Legs dialed through
     /// WebRTC contacts carry temp user parts that are NOT agent ids, so an
-    /// unvalidated user-part (or a missing registry) falls back to the
-    /// session-level value.
-    async fn leg_agent_id(&self, agent_uri: Option<&str>) -> Option<String> {
-        let session_level = self.pinned_agent_id();
+    /// unvalidated user-part (or a missing registry) falls back to the agent
+    /// pinned when this leg was dialed, then the session-level value. The
+    /// session-level value alone is the LAST dialed agent, wrong for the
+    /// other legs of a parallel round.
+    async fn leg_agent_id(&self, leg_id: &LegId, agent_uri: Option<&str>) -> Option<String> {
+        let fallback = self
+            .legs
+            .get(leg_id)
+            .and_then(|leg| leg.agent_id.clone())
+            .or_else(|| self.pinned_agent_id());
         let user = agent_uri
             .and_then(Self::uri_user_part)
-            .filter(|u| Some(u.as_str()) != session_level.as_deref());
+            .filter(|u| Some(u.as_str()) != fallback.as_deref());
         match (user, &self.server.agent_registry) {
             (Some(user), Some(registry)) => {
                 if registry.get_agent(&user).await.is_some() {
                     Some(user)
                 } else {
-                    session_level
+                    fallback
                 }
             }
-            _ => session_level,
+            _ => fallback,
         }
     }
     fn extract_sdp(body: &[u8]) -> Option<String> {
@@ -12204,7 +12210,7 @@ impl SipSession {
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
                     // Agent from THIS leg first — see `leg_agent_id`.
-                    let agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    let agent_id = self.leg_agent_id(&leg_id, Some(agent_uri)).await;
                     let signal = QueueSignal::AgentRinging {
                         leg_id: leg_id.0.clone(),
                         agent_uri: agent_uri.clone(),
@@ -12420,7 +12426,7 @@ impl SipSession {
                     // sequential fallback dialed a different agent than the
                     // primary one. Gated to queue context so direct (non-
                     // queue) calls keep deriving the agent from parties.
-                    let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    let leg_agent_id = self.leg_agent_id(&leg_id, Some(agent_uri)).await;
                     if self.in_queue_context() {
                         if let Some(leg) = self.legs.get_mut(&leg_id) {
                             leg.agent_id = leg_agent_id.clone();
@@ -12719,7 +12725,7 @@ impl SipSession {
                         // `leg_agent_id`), then session extensions, so the
                         // queue app updates the correct agent's presence.
                         let resolved_agent_id = self
-                            .leg_agent_id(agent_uri.as_deref())
+                            .leg_agent_id(&leg_id, agent_uri.as_deref())
                             .await
                             .unwrap_or_default();
                         let agent_id = if !resolved_agent_id.is_empty() {
