@@ -435,7 +435,15 @@ pub trait AgentRegistry: Send + Sync {
     /// yet, so it must be supplied); ignored in peer mode (the row's own
     /// priority wins). Fails OPEN on DB errors / unregistered calls —
     /// ordering is best-effort fairness, never a dispatch blocker.
-    async fn fifo_allows_dispatch(&self, _queue_id: &str, _call_id: &str, _priority: i32) -> bool {
+    /// `available_agents` counts only candidates eligible for this dispatch,
+    /// so unrelated idle agents cannot bypass the waiting order.
+    async fn fifo_allows_dispatch(
+        &self,
+        _queue_id: &str,
+        _call_id: &str,
+        _priority: i32,
+        _available_agents: usize,
+    ) -> bool {
         true
     }
 

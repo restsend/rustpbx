@@ -150,3 +150,27 @@ test('a shared queue row outside scan coverage can request strict target owner v
   assert.equal(requests[0].session_id, 'shared-waiter');
   assert.equal(state.receptionRecoveryResults['shared-waiter'].status, 'unknown');
 });
+
+test('owner-confirmed wrapup describes the previous call without inventing a current binding', () => {
+  const state = component(async () => {});
+  const wrapup = { status: 'wrapup', binding_evidence: 'owner_runtime_verified', wrapup_session_id: 'completed-full-call-id', bound_session_id: null };
+  assert.match(state.receptionAgentBinding(wrapup), /话后关联通话：completed-full-call-id/);
+  assert.match(state.receptionAgentBinding(wrapup), /非当前通话绑定/);
+  assert.match(state.receptionAgentBinding({ ...wrapup, wrapup_session_id: null }), /所属节点已核实话后/);
+  assert.match(state.receptionAgentBinding({ status: 'wrapup' }), /尚未核实所属节点/);
+  assert.equal(state.receptionAgentBinding({ status: 'busy', bound_session_id: 'active-full-call-id' }), '绑定会话：active-full-call-id');
+  assert.match(state.receptionAgentBinding({ status: 'busy' }), /不能用历史通话推断/);
+});
+
+
+test('known business states have concrete conclusions and an explicitly searched normal agent remains visible', () => {
+  const state = component(async () => {});
+  assert.equal(state.receptionAgentConclusion({ classification: 'normal', status: 'wrapup' }), '话后处理中');
+  assert.equal(state.receptionAgentConclusion({ classification: 'normal', status: 'busy' }), '忙碌');
+  assert.equal(state.receptionAgentConclusion({ classification: 'normal', status: 'ringing' }), '振铃中');
+  assert.equal(state.receptionAgentConclusion({ classification: 'unknown', status: 'wrapup', reason: 'owner_presence_conflict' }), '状态证据不一致，需刷新核验');
+  assert.equal(state.receptionAgentConclusion({ classification: 'abnormal', status: 'idle' }), '已确认状态异常');
+  state.receptionAgentId = '489220';
+  state.receptionResult = { agents: [{ agent_id: '489220', classification: 'normal', status: 'wrapup', session_ids: [] }], sessions: [] };
+  assert.equal(state.receptionGroupAgents({ agent_ids: ['489220'] }).length, 1);
+});

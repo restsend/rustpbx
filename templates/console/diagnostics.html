@@ -94,9 +94,9 @@
                                             <template x-for="agent in receptionGroupAgents(group)" :key="agent.agent_id">
                                                 <tr class="align-top text-slate-600">
                                                     <td class="px-3 py-3"><span class="font-mono font-semibold text-slate-900" x-text="agent.agent_id"></span><div x-text="agent.display_name || '—'"></div></td>
-                                                    <td class="min-w-[180px] px-3 py-3"><strong class="text-slate-900" x-text="receptionLabel(agent.status)"></strong><p class="mt-1" x-text="'状态起始：' + formatDateTime(agent.presence?.status_since)"></p><p class="mt-1" x-text="'发布更新：' + formatDateTime(agent.presence?.updated_at)"></p><p class="mt-1" x-text="'读取时间：' + formatDateTime(agent.read_at)"></p><p class="mt-1 break-all" x-text="'发布节点：' + (agent.presence?.instance_id || '未知')"></p><p class="mt-1" x-text="'共享占用：' + (agent.presence?.current_calls ?? '未知') + ' / 容量：' + (agent.presence?.max_concurrency ?? '未知')"></p></td>
-                                                    <td class="px-3 py-3"><span :class="agent.classification === 'abnormal' ? 'text-rose-700' : agent.classification === 'normal' ? 'text-slate-700' : 'text-amber-700'" x-text="receptionLabel(agent.classification)"></span><p class="mt-1" x-text="receptionLabel(agent.reason)"></p><p x-show="agent.history_conflict" class="mt-1 font-semibold text-amber-700">共享状态与持久化历史存在冲突，请核对发布节点。</p><p class="mt-1 text-slate-500" x-text="'注册：' + receptionLabel(agent.registration)"></p></td>
-                                                    <td class="max-w-sm px-3 py-3"><p x-text="receptionAgentNextStep(agent)"></p><p class="mt-1 break-all" x-text="agent.bound_session_id ? '绑定会话：' + agent.bound_session_id : '当前绑定会话：共享状态未提供，不能用历史通话推断'"></p><details class="mt-2"><summary class="cursor-pointer text-sky-700">查看采集证据与关联会话</summary><pre class="mt-2 whitespace-pre-wrap break-all text-[11px]" x-text="JSON.stringify(agent, null, 2)"></pre></details></td>
+                                                    <td class="min-w-[180px] px-3 py-3"><strong class="text-slate-900" x-text="receptionLabel(agent.status)"></strong><p class="mt-1" x-text="'状态起始：' + formatDateTime(agent.presence?.status_since)"></p><p class="mt-1" x-text="'发布更新：' + formatDateTime(agent.presence?.updated_at)"></p><p class="mt-1" x-text="'读取时间：' + formatDateTime(agent.read_at)"></p><p class="mt-1 break-all" x-text="'发布节点：' + (agent.presence?.instance_id || '未知')"></p><p class="mt-1" x-text="'通话占用：' + (agent.presence?.current_calls ?? '未知') + '，配置容量：' + (agent.presence?.max_concurrency ?? '未知')"></p></td>
+                                                    <td class="px-3 py-3"><span :class="agent.classification === 'abnormal' ? 'text-rose-700' : agent.classification === 'normal' ? 'text-slate-700' : 'text-amber-700'" x-text="receptionAgentConclusion(agent)"></span><p class="mt-1" x-text="receptionLabel(agent.reason)"></p><p x-show="agent.history_conflict" class="mt-1 font-semibold text-amber-700">共享状态与持久化历史存在冲突，请核对发布节点。</p><p class="mt-1 text-slate-500" x-text="'注册：' + receptionLabel(agent.registration)"></p></td>
+                                                    <td class="max-w-sm px-3 py-3"><p x-text="receptionAgentNextStep(agent)"></p><p class="mt-1 break-all" x-text="receptionAgentBinding(agent)"></p><details class="mt-2"><summary class="cursor-pointer text-sky-700">查看采集证据与关联会话</summary><pre class="mt-2 whitespace-pre-wrap break-all text-[11px]" x-text="JSON.stringify(agent, null, 2)"></pre></details></td>
                                                 </tr>
                                             </template>
                                         </tbody>
@@ -1671,12 +1671,28 @@
                     receptionGroupAgents(group) {
                         if (!this.receptionResult) return [];
                         return this.receptionResult.agents.filter(agent => group.agent_ids.includes(agent.agent_id)
-                            && (this.receptionShowAll || agent.classification !== 'normal' || agent.session_ids.some(id => this.receptionResult.sessions.some(session => session.session_id === id && session.recoverable))));
+                            && (this.receptionShowAll || agent.agent_id === this.receptionAgentId.trim() || agent.classification !== 'normal' || agent.session_ids.some(id => this.receptionResult.sessions.some(session => session.session_id === id && session.recoverable))));
                     },
                     receptionGroupSessions(group) {
                         return this.receptionResult ? this.receptionResult.sessions.filter(session => group.session_ids.includes(session.session_id)) : [];
                     },
+                    receptionAgentConclusion(agent) {
+                        if (agent.reason === 'owner_presence_conflict' || agent.history_conflict) return '状态证据不一致，需刷新核验';
+                        if (agent.classification === 'normal' && ['busy', 'ringing', 'wrapup'].includes(agent.status)) {
+                            return agent.status === 'wrapup' ? '话后处理中' : this.receptionLabel(agent.status);
+                        }
+                        return this.receptionLabel(agent.classification);
+                    },
+                    receptionAgentBinding(agent) {
+                        if (agent.status === 'wrapup') {
+                            if (agent.binding_evidence !== 'owner_runtime_verified') return '话后关联通话：尚未核实所属节点';
+                            return agent.wrapup_session_id ? '话后关联通话：' + agent.wrapup_session_id + '（非当前通话绑定）' : '所属节点已核实话后；未提供关联通话编号';
+                        }
+                        return agent.bound_session_id ? '绑定会话：' + agent.bound_session_id : '当前绑定会话：尚未取得实时证据，不能用历史通话推断';
+                    },
                     receptionAgentNextStep(agent) {
+                        if (agent.reason === 'owner_presence_conflict' || agent.history_conflict) return '刷新核验共享状态与所属节点的最新证据；不要按冲突快照清除通话或预留。';
+                        if (agent.classification === 'normal' && agent.status === 'wrapup') return '等待话后结束；分配资格由来电策略决定。若长期停留，核对话后结束策略及所属节点。';
                         if (agent.registration === 'unknown') return '接听能力尚未确认；核对注册连接及关联来电证据。不要仅因状态空闲就判定正常。';
                         return '结合关联来电与调度证据处理；不要强制清除正在进行的通话或预留。';
                     },
@@ -1692,7 +1708,10 @@
                             shared_idle_registered_transport_unverified: '共享状态空闲、登记有效；连接可达性与分配资格未确认',
                             idle_capacity_exhausted: '空闲状态下共享通话占用已达容量上限',
                             invalid_shared_capacity: '共享容量信息无效，无法确认分配资格',
-                            ordinary_business_state: '正常业务状态，本身不代表异常',
+                            ordinary_business_state: '正常业务状态，本身不代表异常；接听资格仍需结合来电策略核验',
+                            owner_verified_wrapup: '所属节点已核实话后，当前通话占用为 0；话后本身不代表异常',
+                            owner_verified_call_state: '所属节点已核实通话状态与绑定；通话存活及分配资格需结合会话证据',
+                            owner_presence_conflict: '共享状态与所属节点快照不一致，请刷新核验',
                             shared_presence_history_conflict: '共享状态与持久化状态历史不一致',
                             shared_presence_missing: '未取得共享坐席状态',
                             call_binding_unverified: '共享状态尚未核实当前通话绑定，不能判断是否残留占用',
