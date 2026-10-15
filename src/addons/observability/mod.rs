@@ -230,6 +230,11 @@ impl Addon for ObservabilityAddon {
         "observability"
     }
 
+    fn has_console_pages(&self) -> bool {
+        // Serves /metrics and /healthz only.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "Observability"
     }

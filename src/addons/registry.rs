@@ -252,7 +252,7 @@ impl AddonRegistry {
     ) -> Vec<String> {
         self.addons
             .iter()
-            .filter(|a| self.is_enabled(a.id(), config))
+            .filter(|a| self.is_enabled(a.id(), config) && a.has_console_pages())
             .filter(|a| {
                 !addon_template_dirs(a.as_ref())
                     .iter()

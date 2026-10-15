@@ -243,6 +243,13 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Whether this addon renders console pages and so needs a template
+    /// directory. Addons serving only plain endpoints (e.g. metrics) return
+    /// false to stay out of the missing-templates startup check.
+    fn has_console_pages(&self) -> bool {
+        true
+    }
+
     /// Directory with static assets served under `/static/<addon_id>/`.
     fn static_dir(&self) -> Option<String> {
         None
