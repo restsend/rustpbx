@@ -443,12 +443,15 @@ async fn recording_stop_retries_real_sip_failures_and_requires_owner_confirmatio
         hook.on_call_connected(&downstream.session_hook_ctx()).await;
         hook.stop_agent_recording(&downstream.session_hook_ctx(), AGENT)
             .await;
-        let command = commands.recv().await.unwrap();
         assert!(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                downstream.execute_command(command, None)
-            )
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let command = commands.recv().await.unwrap();
+                    let stop = matches!(command, CallCommand::StopPeerRecordingSegment { .. });
+                    let result = downstream.execute_command(command, None).await;
+                    if stop { break result; }
+                }
+            })
             .await
             .expect("network retries must not block the session loop")
             .success

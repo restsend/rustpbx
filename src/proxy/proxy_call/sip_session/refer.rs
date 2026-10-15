@@ -222,14 +222,14 @@ impl SipSession {
             if owner.session_id() == self.context.session_id {
                 return Err((501, "Same-session Replaces is not supported by this cross-session path".into()));
             }
-            // The transferring party may be either primary leg: the callee
-            // (call inbound to the agent) or the caller (agent-placed
-            // outbound). Require the REFER to arrive in-dialog on one of
-            // this session's own established legs; third-party dialogs stay
-            // rejected by the dialog lookup below.
-            let from_primary_leg = self
-                .leg_id_for_dialog(&source_dialog.to_string())
-                .is_some_and(|leg| matches!(leg.as_str(), "caller" | "callee"));
+            // Queue dispatch and replacement agents use dynamic leg IDs.
+            // Accept the caller or the currently selected callee, while keeping
+            // consultation and retired dialogs outside this transfer path.
+            let transferor = self.resolve_transfer_leg();
+            let from_primary_leg = self.caller_dialog.as_ref()
+                .is_some_and(|dialog| dialog.id() == *source_dialog)
+                || self.legs.get_dialog(&transferor)
+                    .is_some_and(|dialog| dialog.id() == *source_dialog);
             if !from_primary_leg {
                 return Err((481, "REFER must originate from a party of this call".into()));
             }

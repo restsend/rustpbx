@@ -69,7 +69,7 @@ window.fetch = async (url, options) => {
 '''
 
 RUN = r'''async () => {
-  acModal = document.querySelector('#modal');
+  acRoot = document.querySelector('#modal');
   await Promise.race([acRun(window.fixture.cmd), new Promise((_, reject) => setTimeout(() => reject(new Error('transfer timeout')), 12000))]);
   const shot = document.querySelector('[data-ac-shot]');
   if (window.fixture.cmd === 'shot' && artifact) await shot.decode();
@@ -91,8 +91,8 @@ RUN = r'''async () => {
 class AdminBrowserInterop(unittest.TestCase):
     def test_png_and_gzip_over_real_datachannels(self):
         template = TEMPLATE.read_text()
-        start = template.index('  let acModal = null;')
-        script = template[start:template.index('  function closeAdminCmd()', start)]
+        start = template.index('  let acRoot = null;')
+        script = template[start:template.index('  // Legacy entry point', start)]
         log = bytearray(b'a' * 40000)
         log[CHUNK - 15] = ord('{')
         compressed = gzip.compress(bytes(log), compresslevel=0)
@@ -121,6 +121,51 @@ class AdminBrowserInterop(unittest.TestCase):
                             self.assertTrue(result['download'])
                             self.assertEqual(result['log'], bytes(log[:20000]).decode() + '\n…[40000 B]')
                         page.close()
+            finally:
+                browser.close()
+
+    def test_close_during_offer_cancels_dispatch_without_unlocking_next_run(self):
+        template = TEMPLATE.read_text()
+        start = template.index('  let acRoot = null;')
+        script = template[start:template.index('  // Legacy entry point', start)]
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.set_content('''<div id="modal" data-agent-id="interop-agent">
+                  <button data-ac-run></button><span data-ac-status></span><div data-ac-fill></div>
+                  <pre data-ac-out></pre><img data-ac-shot hidden><a data-ac-dl hidden></a>
+                  <input data-ac-target value="mini"><input data-ac-days value="1"><input data-ac-dates>
+                </div>''')
+                page.evaluate("window.fixture = {payload: ''}")
+                page.add_script_tag(content=SETUP + script)
+                result = page.evaluate(r'''async () => {
+                  const releases = [];
+                  let posts = 0;
+                  window.fetch = async url => {
+                    if (url === ICE_SERVERS_PATH) {
+                      await new Promise(resolve => releases.push(resolve));
+                      return new Response('[]');
+                    }
+                    posts++;
+                    return new Response(JSON.stringify({accepted:false, code:'fixture'}));
+                  };
+                  acRoot = document.querySelector('#modal');
+                  const first = acRun('shot');
+                  acAbort();
+                  acRoot = document.querySelector('#modal').cloneNode(true);
+                  const second = acRun('shot');
+                  releases[0]();
+                  await first;
+                  const busyAfterOldRun = acBusy;
+                  const postsAfterClose = posts;
+                  releases[1]();
+                  await second;
+                  return {postsAfterClose, busyAfterOldRun, totalPosts:posts};
+                }''')
+                self.assertEqual(result['postsAfterClose'], 0)
+                self.assertTrue(result['busyAfterOldRun'])
+                self.assertEqual(result['totalPosts'], 1)
             finally:
                 browser.close()
 
