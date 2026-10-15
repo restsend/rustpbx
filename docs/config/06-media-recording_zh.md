@@ -6,6 +6,51 @@
 
 控制 RTP 流量的处理方式，可在两个层级配置：
 
+### 周期性输入 RTP 诊断
+
+输入统计复用现有媒体品质开关和打印频控，不需要新增配置项：
+
+```toml
+[media.quality_stats]
+enabled = true
+sample_interval_ms = 500
+window_ms = 2000
+log_interval_ms = 2000
+```
+
+在 `bridge media quality window` 日志的 `stats.legs[].ingress_interval` 中查看。
+外层 `session_id` 和 `bridge_id` 是完整 session ID，`leg_id`、`side` 标识观察腿，
+`peer_addr` 是实际媒体来源。采集点在 RTP 解析后、转发和解包前，不采集原始音频，
+不依赖是否转码或是否开启录音。关闭 `enabled` 后不维护该诊断状态。
+
+来源稳定时，该字段统计自启用或上次打印以来的**非重叠区间**，覆盖整个打印间隔，
+不受滑动统计 `window_ms` 的截断影响。独立定时器按 `log_interval_ms` 触发打印，
+不等待采样或窗口填满，不因异常或换腿额外打印；每次输出完成后重新计时，下一条正常日志至少等待一个完整间隔，调度延迟不会触发密集补打。
+结束时允许额外输出一次不足周期的汇总，外层 `final_interval=true`，正常周期为 false。
+换腿前已观察到的尾段放入下一次日志的 `stats.retired_ingress_intervals[]`，
+每项保留 `leg_id`、`side` 和 `ingress_interval`。选腿退出时交接统计，避免短通话或快速换腿落在两个 tick 之间而漏报。
+
+同一打印周期内 IP/端口或 SSRC 变化时，`ingress_interval` 顶层只统计当前来源，
+旧来源统计段放入其 `previous_streams[]`，各段携带自己的 `peer_addr`、`ssrc` 和区间指标。
+每个周期最多保留 8 段旧来源明细，当前来源仍完整统计；超出部分通过
+`omitted_source_segments`、`omitted_source_packets`、`omitted_source_missing_packets`
+明确记录省略段数、收包数和新增缺口数，不归到当前来源。完整收包/缺口总数须累加当前段、旧段及省略汇总。
+
+| 字段 | 口径 |
+| --- | --- |
+| `interval_ms`、`packets`、`audio_packets`、`payload_bytes` | 实际区间时长、已协商音频及 telephone-event 收包数、其中音频包数和负载字节数；重复包也计入收包数 |
+| `new_gap_events`、`new_missing_packets`、`expected_sequence_packets`、`new_gap_percent` | 本区间新观察到的序号缺口次数、缺口包数、序号跨度和缺口比例；尚不能认定为最终网络丢包。没有新增序号跨度时比例为 null |
+| `reordered_packets`、`recovered_packets`、`max_reorder_depth_packets` | 历史范围内首次迟到的包数、补回缺口数和相对最高已见序号的最大落后包数；序号状态跨打印周期保留 |
+| `duplicate_packets`、`late_untracked_packets` | 历史范围内已见包的重复次数，以及历史范围外无法判断是重复还是补回的旧包次数 |
+| `current_stream_unresolved_gaps` | 当前流从开始跟踪以来尚未确认补回的缺口总数，不等于当前区间或播放端最终丢包数 |
+| `interarrival_samples`、`interarrival_avg_ms`、`interarrival_max_ms`、`last_audio_packet_age_ms` | 音频包到达间隔的样本数、平均值、最大值和距最后音频包的时间；间隔可跨打印边界，DTMF 不参与。静音抑制也可能产生长间隔，不能据此认定网络故障 |
+| `stream_changes`、`sequence_discontinuities`、`unresolved_gaps_at_reset` | SSRC/来源地址变化、过大前向序号跳变，以及重置前仍未补回的缺口数；不把流切换算作大规模丢包 |
+
+序号回绕正常处理，最近 `history_packets=512` 个序号用于判定补回和重复；
+范围外的旧包保持“无法判定”，不伪造恢复。telephone-event 纳入序号跟踪，避免按键被误判为音频缺包。
+这些指标描述 PBX 接收侧观察，不能单独区分 SBC 未发、途中丢包、主机接收丢弃或解析前丢弃，
+也不直接证明解码、播放和录音质量；仍需结合两端包头时间线和对应音频片段。
+
 ### 服务器级（`[proxy]`）
 
 设置所有通话的默认值。存在中继级配置时，由中继级配置覆盖。

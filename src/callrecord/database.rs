@@ -1,4 +1,4 @@
-use sea_orm::{DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set};
 
 use crate::callrecord::CallRecord;
 
@@ -187,6 +187,7 @@ pub(crate) async fn persist_call_records(
     records: &[CallRecord],
 ) -> anyhow::Result<()> {
     use rustpbx_models::call_record::{Column, Entity};
+    use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func};
 
     if records.is_empty() {
         return Ok(());
@@ -196,10 +197,17 @@ pub(crate) async fn persist_call_records(
     for record in records {
         active_models.push(build_active_model(db, record).await?);
     }
+    let incoming = |column| -> Expr {
+        if db.get_database_backend() == DbBackend::MySql {
+            Func::cust(Alias::new("VALUES")).arg(Expr::col(column)).into()
+        } else {
+            Expr::col((Alias::new("excluded"), column))
+        }
+    };
     if let Err(e) = Entity::insert_many(active_models)
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
-                .update_columns([
+                .values([
                     Column::SessionId,
                     Column::DisplayId,
                     Column::Direction,
@@ -236,7 +244,20 @@ pub(crate) async fn persist_call_records(
                     Column::MediaJitterMs,
                     Column::MediaRttMs,
                     Column::UpdatedAt,
-                ])
+                ].map(|column| {
+                    // A peer's unrecorded CDR must not erase the recording owner's
+                    // snapshot, including segment metadata and artifact locations.
+                    // Keep the decision inside the upsert so concurrent saves are atomic.
+                    let keep_recorded = Expr::col((Entity, Column::RecordingUrl))
+                        .is_not_null()
+                        .and(incoming(Column::RecordingUrl).is_null());
+                    (
+                        column,
+                        Expr::case(keep_recorded, Expr::col((Entity, column)))
+                            .finally(incoming(column))
+                            .into(),
+                    )
+                }))
                 .to_owned(),
         )
         .exec(db)

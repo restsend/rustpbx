@@ -35,6 +35,7 @@ use tokio::sync::broadcast;
 use tracing::trace;
 
 use crate::dtmf::DtmfDetector;
+use crate::ingress_stats::{IngressInterval, IngressStats};
 use crate::media_recorder::{CaptureChannel, RecorderSender};
 
 /// Lock-free 128-bit payload-type bitmask (PT 0..=127), shared by the DTMF
@@ -113,6 +114,11 @@ pub(crate) struct AudioPacketSamples {
     egress_attempts: VecDeque<AudioPacketSample>,
 }
 
+struct AudioDiagnostics {
+    samples: AudioPacketSamples,
+    input: IngressStats,
+}
+
 /// Plaintext observer for one leg: stats + DTMF detection + recording.
 ///
 /// Install via `PeerConnection::add_observer(Arc::clone(&tap))`. The same
@@ -123,7 +129,7 @@ pub struct IngressTap {
     ingress_packets: AtomicU64,
     egress_packets: AtomicU64,
     audio_packet_samples_enabled: AtomicBool,
-    audio_packet_samples: Mutex<Option<AudioPacketSamples>>,
+    audio_packet_samples: Mutex<Option<AudioDiagnostics>>,
     /// Whether to keep populating `ingress_ssrc_pts` on the hot path. The map
     /// exists only to let the RTCP relay rewrite a WebRTC receiver's PLI/NACK
     /// back onto the peer's real sender SSRC; for plain RTP↔RTP bridges (no
@@ -213,9 +219,12 @@ impl IngressTap {
     }
 
     pub(crate) fn enable_audio_packet_samples(&self) {
-        *self.audio_packet_samples.lock() = Some(AudioPacketSamples {
-            ingress: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
-            egress_attempts: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
+        *self.audio_packet_samples.lock() = Some(AudioDiagnostics {
+            samples: AudioPacketSamples {
+                ingress: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
+                egress_attempts: VecDeque::with_capacity(AUDIO_PACKET_SAMPLES),
+            },
+            input: IngressStats::new(std::time::Instant::now()),
         });
         self.audio_packet_samples_enabled
             .store(true, Ordering::Release);
@@ -298,8 +307,14 @@ impl IngressTap {
                 .as_ref()
                 .map(|sender| sender.dropped_packets())
                 .unwrap_or(0),
-            audio_packet_samples: self.audio_packet_samples.lock().clone(),
+            audio_packet_samples: self.audio_packet_samples.lock().as_ref()
+                .map(|diagnostics| diagnostics.samples.clone()),
         }
+    }
+
+    pub(crate) fn take_ingress_interval(&self) -> Option<IngressInterval> {
+        self.audio_packet_samples.lock().as_mut()
+            .map(|diagnostics| diagnostics.input.take_interval(std::time::Instant::now()))
     }
 
     /// Total inbound packets (convenience for RTP-timeout checks).
@@ -360,30 +375,43 @@ impl IngressTap {
         // Raw telephone-event RTP in both directions still reaches the recorder.
         let pt = packet.header.payload_type;
         if self.audio_packet_samples_enabled.load(Ordering::Acquire)
-            && self.is_audio_payload_type(pt)
+            && (self.is_audio_payload_type(pt) || self.is_dtmf_payload_type(pt))
         {
-            // Compare payloads across this instance's ingress/egress boundaries;
-            // RTP headers legitimately change during relay. No decode or raw audio log.
-            let mut hash = DefaultHasher::new();
-            hash.write(&packet.payload);
-            let sample = AudioPacketSample {
-                ssrc: packet.header.ssrc,
-                payload_type: pt,
-                sequence: packet.header.sequence_number,
-                timestamp: packet.header.timestamp,
-                payload_bytes: packet.payload.len(),
-                payload_hash: format!("{:016x}", hash.finish()),
-                peer_addr,
-            };
-            if let Some(samples) = self.audio_packet_samples.lock().as_mut() {
-                let samples = match direction {
-                    PacketDirection::Ingress => &mut samples.ingress,
-                    PacketDirection::Egress => &mut samples.egress_attempts,
-                };
-                if samples.len() == AUDIO_PACKET_SAMPLES {
-                    samples.pop_front();
+            let audio = self.is_audio_payload_type(pt);
+            let sample = if audio {
+                // Compare payloads across this instance's ingress/egress boundaries;
+                // RTP headers legitimately change during relay. No decode or raw audio log.
+                let mut hash = DefaultHasher::new();
+                hash.write(&packet.payload);
+                Some(AudioPacketSample {
+                    ssrc: packet.header.ssrc,
+                    payload_type: pt,
+                    sequence: packet.header.sequence_number,
+                    timestamp: packet.header.timestamp,
+                    payload_bytes: packet.payload.len(),
+                    payload_hash: format!("{:016x}", hash.finish()),
+                    peer_addr,
+                })
+            } else { None };
+            if let Some(diagnostics) = self.audio_packet_samples.lock().as_mut() {
+                if direction == PacketDirection::Ingress {
+                    // Telephone events share the audio SSRC's sequence space. Counting
+                    // them avoids inventing audio loss while the caller presses keys.
+                    diagnostics.input.observe(
+                        packet.header.ssrc, peer_addr, packet.header.sequence_number,
+                        pt, packet.payload.len(), audio, std::time::Instant::now(),
+                    );
                 }
-                samples.push_back(sample);
+                if let Some(sample) = sample {
+                    let samples = match direction {
+                        PacketDirection::Ingress => &mut diagnostics.samples.ingress,
+                        PacketDirection::Egress => &mut diagnostics.samples.egress_attempts,
+                    };
+                    if samples.len() == AUDIO_PACKET_SAMPLES {
+                        samples.pop_front();
+                    }
+                    samples.push_back(sample);
+                }
             }
         }
         if direction == PacketDirection::Ingress && self.is_dtmf_payload_type(pt) {
