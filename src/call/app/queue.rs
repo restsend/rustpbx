@@ -984,7 +984,8 @@ impl QueueApp {
                     info!(target = %target, "Queue: fallback redirect");
                     AppAction::Transfer(target.to_string())
                 },
-                &crate::proxy::proxy_call::error_catalog::QUEUE_REDIRECT_FAILED,
+                // The reason for the fallback, not the redirect's outcome.
+                &crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE,
             ),
             None => (
                 AppAction::Hangup {
