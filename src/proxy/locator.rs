@@ -156,6 +156,11 @@ pub trait Locator: Send + Sync {
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
+    /// Read persisted registration leases without expiry cleanup or presence events.
+    /// Unsupported backends must remain unknown instead of reporting a cached view.
+    async fn diagnostic_lookup(&self, _uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
+        anyhow::bail!("Read-only persisted registration inspection is unavailable")
+    }
     async fn sweep_expired(&self) -> Result<Vec<Location>> {
         Ok(Vec::new())
     }

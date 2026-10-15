@@ -303,6 +303,27 @@ impl SipSessionHandle {
             .map_err(|_| anyhow::anyhow!("session closed before answering recorder query"))?
     }
 
+    /// Query the owning session and queue loops; no cached snapshot is consulted.
+    pub async fn queue_dispatch_diagnostic(
+        &self,
+        recover: bool,
+        request_id: String,
+        expected_skill_group: Option<String>,
+    ) -> Result<crate::call::app::QueueDispatchDiagnostic, String> {
+        const QUEUE_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(5);
+        let (request, response) = crate::call::app::QueueDiagnosticRequest::new(
+            recover, request_id, expected_skill_group, QUEUE_DIAGNOSTIC_TIMEOUT,
+        );
+        let deadline = request.deadline;
+        tokio::time::timeout_at(deadline, self.cmd_tx.send(
+            CallCommand::QueueDispatchDiagnostic { request },
+        )).await.map_err(|_| "request_expired".to_string())?
+            .map_err(|_| "session_closed".to_string())?;
+        tokio::time::timeout_at(deadline, response).await
+            .map_err(|_| "result_unknown_timeout".to_string())?
+            .map_err(|_| "queue_actor_closed".to_string())?
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id.0
     }
@@ -12141,6 +12162,11 @@ impl SipSession {
         if let CallCommand::FromApplication { command: inner } = command {
             command = *inner;
         }
+        if let CallCommand::QueueRecoveryDial { request_id, app_execution_id, deadline, command: inner } = command {
+            return self
+                .execute_queue_recovery_dial(request_id, app_execution_id, deadline, *inner)
+                .await;
+        }
         let capability_check = self.check_capability(&command);
 
         match capability_check {
@@ -12230,6 +12256,99 @@ impl SipSession {
         self.process_command(command, callee_state_rx).await
     }
 
+    async fn execute_queue_recovery_dial(
+        &mut self,
+        request_id: String,
+        app_execution_id: u64,
+        deadline: tokio::time::Instant,
+        command: CallCommand,
+    ) -> CommandResult {
+        let capability_check = self.check_capability(&command);
+        let CallCommand::LegAdd {
+            target,
+            leg_id: Some(leg_id),
+            headers,
+            source_leg,
+            purpose: Some(crate::call::domain::LegPurpose::Agent),
+        } = command
+        else {
+            return CommandResult::failure("invalid_recovery_command");
+        };
+        let rejection = if tokio::time::Instant::now() >= deadline {
+            Some("request_expired")
+        } else {
+            self.queue_recovery_guard(Some(app_execution_id))
+                .await
+                .err()
+        };
+        let result = if let Some(reason) = rejection {
+            CommandResult::failure(reason)
+        } else if let MediaCapabilityCheck::Denied { reason } = capability_check {
+            CommandResult::failure_with_kind(
+                format!("media capability denied: {reason}"),
+                CommandFailureKind::MediaDenied,
+            )
+        } else {
+            let headers = headers
+                .into_iter()
+                .map(|(name, value)| rsipstack::sip::headers::make_header(&name, value))
+                .collect();
+            let source_leg = source_leg.map(|id| {
+                if id.as_str() == "callee" {
+                    self.resolve_transfer_leg()
+                } else {
+                    id
+                }
+            });
+            // Bound locator, route and media waits too; an accepted queue command
+            // is not permission to originate after its diagnostic request expires.
+            let provisional_leg = self.legs.get(&leg_id).is_none();
+            let outcome = tokio::time::timeout_at(
+                deadline,
+                self.add_leg_body(
+                    target,
+                    Some(leg_id.clone()),
+                    headers,
+                    source_leg,
+                    Some(crate::call::domain::LegPurpose::Agent),
+                    None,
+                    Some(deadline),
+                ),
+            )
+            .await;
+            match outcome {
+                Ok(Ok(id)) => CommandResult::success_with_leg(id),
+                failed => {
+                    // Removing the provisional leg also stops media and aborts
+                    // its INVITE task before the queue can release the reservation.
+                    if provisional_leg && self.legs.remove(&leg_id).is_some() {
+                        self.record_leg_event(
+                            &leg_id.0,
+                            crate::callrecord::LegTimelineEventType::Removed,
+                            None,
+                            Some(serde_json::json!({ "reason": "recovery_dial_canceled" })),
+                        );
+                    }
+                    match failed {
+                        Ok(Err(error)) => CommandResult::failure(error.to_string()),
+                        Err(_) => CommandResult::failure("request_expired"),
+                        Ok(Ok(_)) => unreachable!(),
+                    }
+                }
+            }
+        };
+        if !result.success {
+            let reason = result.message.as_deref().unwrap_or("recovery_dial_failed");
+            warn!(session_id = %self.id, %request_id, %leg_id, app_execution_id, reason,
+                leg = "agent", direction = "outbound", "Queue: guarded recovery dial rejected before SIP origination");
+            self.app_event_bridge.send_app_event(crate::call::app::ControllerEvent::Custom(
+                "queue_recovery_dial_failed".into(),
+                serde_json::json!({"request_id": request_id, "leg_id": leg_id.0, "reason": reason}),
+            ));
+        }
+        result
+    }
+
     async fn accept_leg_answer(peer: &crate::media::leg::Leg, sdp: &str) -> Result<()> {
         match peer.pc().signaling_state() {
             rustrtc::SignalingState::HaveLocalOffer => {
@@ -12305,6 +12424,41 @@ impl SipSession {
                 CommandResult::failure(reason)
             }
         }
+    }
+
+    fn queue_live_agent_legs(&self) -> usize {
+        self.legs.iter().filter(|(id, leg)| {
+            if id.as_str() == "caller" || leg.state == LegState::Ended {
+                return false;
+            }
+            // Session construction reserves a blank callee slot for media wiring.
+            // It is not a dial; every other initializing or attached leg blocks recovery.
+            !(id.as_str() == "callee" && leg.state == LegState::Initializing
+                && leg.endpoint.is_none() && leg.agent_id.is_none() && leg.purpose.is_none()
+                && self.legs.get_dialog(id).is_none())
+        }).count()
+    }
+
+    async fn queue_recovery_guard(&self, expected_generation: Option<u64>) -> Result<u64, &'static str> {
+        if self.app_runtime.current_app().as_deref() != Some("queue") {
+            return Err("not_queue");
+        }
+        if self.meta.transfer_in_progress {
+            return Err("transfer_in_progress");
+        }
+        if !self.legs.get(&LegId::from("caller"))
+            .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold)) {
+            return Err("caller_not_connected");
+        }
+        if self.queue_live_agent_legs() > 0 {
+            return Err("active_agent_leg");
+        }
+        let generation = self.app_runtime.current_app_invocation().await
+            .ok_or("queue_generation_unavailable")?.app_execution_id;
+        if expected_generation.is_some_and(|expected| expected != generation) {
+            return Err("queue_generation_changed");
+        }
+        Ok(generation)
     }
 
     async fn process_command(
@@ -12493,6 +12647,46 @@ impl SipSession {
 
             CallCommand::RealtimeStop { reason } => {
                 Self::ok_or_failure(self.handle_realtime_stop(reason).await)
+            }
+
+            CallCommand::QueueDispatchDiagnostic { mut request } => {
+                let rejection = if request.expired() {
+                    Some("request_expired")
+                } else if self.app_runtime.current_app().as_deref() != Some("queue") {
+                    Some("not_queue")
+                } else if request.recover {
+                    match self.queue_recovery_guard(None).await {
+                        Ok(generation) => {
+                            request.expected_app_execution_id = Some(generation);
+                            None
+                        }
+                        Err(reason) => Some(reason),
+                    }
+                } else {
+                    request.expected_app_execution_id = self.app_runtime.current_app_invocation().await
+                        .map(|invocation| invocation.app_execution_id);
+                    None
+                };
+                if let Some(reason) = rejection {
+                    info!(session_id = %self.id, request_id = %request.request_id,
+                        recover = request.recover, reason,
+                        "Queue: live session diagnostic guard rejected request");
+                    request.respond(Err(reason.into()));
+                } else {
+                    // These are owner-loop observations at this timestamp, not
+                    // proof that a subsequently queued dial has reached SIP.
+                    request.live_agent_legs = Some(self.queue_live_agent_legs());
+                    request.live_transfer_in_progress = Some(self.meta.transfer_in_progress);
+                    request.live_caller_connected = Some(self.legs.get(&LegId::from("caller"))
+                        .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold)));
+                    request.live_session_observed_at_ms = Some(chrono::Utc::now().timestamp_millis());
+                    if !self.app_event_bridge.send_app_event(
+                        crate::call::app::ControllerEvent::QueueDiagnostic(request.clone()),
+                    ) {
+                        request.respond(Err("queue_actor_unavailable".into()));
+                    }
+                }
+                CommandResult::success()
             }
 
             CallCommand::InjectAppEvent { event } => {
@@ -15041,7 +15235,7 @@ impl SipSession {
         source_leg: Option<LegId>,
         purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<LegId> {
-        self.add_leg_body(target, leg_id, headers, source_leg, purpose, None)
+        self.add_leg_body(target, leg_id, headers, source_leg, purpose, None, None)
             .await
     }
 
@@ -15060,7 +15254,7 @@ impl SipSession {
         purpose: Option<crate::call::domain::LegPurpose>,
         location: crate::call::Location,
     ) -> Result<LegId> {
-        self.add_leg_body(target, leg_id, headers, source_leg, purpose, Some(location))
+        self.add_leg_body(target, leg_id, headers, source_leg, purpose, Some(location), None)
             .await
     }
 
@@ -15074,6 +15268,7 @@ impl SipSession {
         source_leg: Option<LegId>,
         purpose: Option<crate::call::domain::LegPurpose>,
         pre_resolved: Option<crate::call::Location>,
+        recovery_deadline: Option<tokio::time::Instant>,
     ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
@@ -15147,6 +15342,10 @@ impl SipSession {
             }
             None => {}
         }
+        // Recheck after asynchronous location and caller-media preparation.
+        if recovery_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(anyhow!("request_expired"));
+        }
         self.legs.insert(new_leg_id.clone(), leg);
         self.update_leg_state(&new_leg_id, LegState::Initializing);
         self.record_leg_event(
@@ -15157,7 +15356,13 @@ impl SipSession {
         );
 
         // Create peer and initiate INVITE in background
-        if let Err(e) = self.initiate_sip_leg(&new_leg_id, location, purpose).await {
+        let initiated = if recovery_deadline.is_some() {
+            self.initiate_sip_leg_with_deadline(&new_leg_id, location, purpose, recovery_deadline)
+                .await
+        } else {
+            self.initiate_sip_leg(&new_leg_id, location, purpose).await
+        };
+        if let Err(e) = initiated {
             warn!(
                 session_id = %self.id,
                 error = %e,
@@ -15494,6 +15699,17 @@ impl SipSession {
         location: crate::call::Location,
         purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<()> {
+        self.initiate_sip_leg_with_deadline(leg_id, location, purpose, None)
+            .await
+    }
+
+    async fn initiate_sip_leg_with_deadline(
+        &mut self,
+        leg_id: &LegId,
+        location: crate::call::Location,
+        purpose: Option<crate::call::domain::LegPurpose>,
+        recovery_deadline: Option<tokio::time::Instant>,
+    ) -> Result<()> {
         let callee_is_webrtc = Self::callee_supports_webrtc(&location);
         let transport_mode = self.callee_transport_mode(callee_is_webrtc);
         // Dialing owns a transport; bridge membership is selected only when
@@ -15660,10 +15876,26 @@ impl SipSession {
 
         let ring_timeout = Self::effective_ring_timeout(&self.context.dialplan, &self.server);
 
+        let (start_tx, start_rx) = if recovery_deadline.is_some() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         // Spawn background task to handle INVITE response
         let invite_handle = crate::utils::spawn(async move {
             let leg_id = leg_id_for_spawn;
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+            // The worker itself may first run after the request deadline.
+            // A recovery is committed only when this task can start the INVITE.
+            if let Some(start_tx) = start_tx {
+                let allowed = recovery_deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() < deadline);
+                let _ = start_tx.send(allowed);
+                if !allowed {
+                    return;
+                }
+            }
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
             let mut result: Result<InviteDialog, String> = Err("not started".to_string());
@@ -15834,6 +16066,11 @@ impl SipSession {
         });
 
         self.legs.push_task(leg_id.clone(), invite_handle);
+        if let Some(start_rx) = start_rx {
+            if !start_rx.await.unwrap_or(false) {
+                return Err(anyhow!("request_expired"));
+            }
+        }
 
         Ok(())
     }
@@ -17199,3 +17436,7 @@ mod route_via_home_proxy_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/queue_diagnostics_tests.rs"]
+mod queue_diagnostics_tests;

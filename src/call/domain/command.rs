@@ -92,6 +92,21 @@ pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallCommand {
+    /// Internal typed live queue query; unavailable through wire command adapters.
+    #[serde(skip)]
+    QueueDispatchDiagnostic {
+        request: crate::call::app::QueueDiagnosticRequest,
+    },
+
+    /// Recovery-only origination, revalidated by the session when actually executed.
+    #[serde(skip)]
+    QueueRecoveryDial {
+        request_id: String,
+        app_execution_id: u64,
+        deadline: tokio::time::Instant,
+        command: Box<CallCommand>,
+    },
+
     /// Internal application source; never accepted or emitted by wire adapters.
     #[serde(skip)]
     FromApplication { command: Box<CallCommand> },

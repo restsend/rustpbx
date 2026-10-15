@@ -56,6 +56,8 @@ pub struct CallController {
     /// (which previously kept Arc clones + the channel sender alive past call
     /// end and skewed task metrics).
     pub(crate) timer_tasks: Arc<DashMap<String, JoinHandle<()>>>,
+    pending_fired_timers: Arc<Mutex<HashMap<String, usize>>>,
+    queue_recovery_request: Option<super::QueueDiagnosticRequest>,
 }
 
 /// Error returned when the remote party hangs up during `collect_dtmf`.
@@ -68,6 +70,9 @@ pub struct HangupDuringCollection {
 /// Events sent from the proxy layer to the controller.
 #[derive(Debug, Clone)]
 pub enum ControllerEvent {
+    /// Typed request answered by the actual running queue actor.
+    QueueDiagnostic(super::QueueDiagnosticRequest),
+
     /// DTMF digit received.
     DtmfReceived(String),
 
@@ -130,6 +135,8 @@ impl CallController {
             fired_timer_tx,
             cancelled_timers: Arc::new(Mutex::new(HashSet::new())),
             timer_tasks: Arc::new(DashMap::new()),
+            pending_fired_timers: Arc::new(Mutex::new(HashMap::new())),
+            queue_recovery_request: None,
         };
         (ctrl, fired_timer_rx)
     }
@@ -367,18 +374,52 @@ impl CallController {
         let tx = self.fired_timer_tx.clone();
         let cancelled = self.cancelled_timers.clone();
         let tasks = self.timer_tasks.clone();
+        let pending_fired = self.pending_fired_timers.clone();
         let id_task = id.clone();
         let handle = crate::utils::spawn(async move {
             tokio::time::sleep(delay).await;
+            // Count queued delivery before removing the task, so observation
+            // never mistakes a fired-but-unconsumed retry for a missing timer.
+            *pending_fired.lock().entry(id_task.clone()).or_default() += 1;
             // Self-remove so the handle map does not retain finished tasks.
             tasks.remove(&id_task);
             // Only fire if not cancelled in the meantime.
             let was_cancelled = cancelled.lock().remove(&id_task);
             if !was_cancelled {
-                let _ = tx.send(id_task);
+                if tx.send(id_task.clone()).is_err() {
+                    Self::consume_pending_timer(&pending_fired, &id_task);
+                }
+            } else {
+                Self::consume_pending_timer(&pending_fired, &id_task);
             }
         });
         self.timer_tasks.insert(id, handle);
+    }
+
+    pub(crate) fn timeout_is_armed(&self, id: &str) -> bool {
+        self.timer_tasks.contains_key(id)
+            || self.pending_fired_timers.lock().get(id).copied().unwrap_or(0) > 0
+    }
+
+    fn consume_pending_timer(pending: &Mutex<HashMap<String, usize>>, id: &str) {
+        let mut pending = pending.lock();
+        if let Some(count) = pending.get_mut(id) {
+            *count -= 1;
+            if *count == 0 {
+                pending.remove(id);
+            }
+        }
+    }
+
+    pub(crate) fn record_timer_consumed(&self, id: &str) {
+        Self::consume_pending_timer(&self.pending_fired_timers, id);
+    }
+
+    pub(crate) fn set_queue_recovery_request(
+        &mut self,
+        request: Option<super::QueueDiagnosticRequest>,
+    ) {
+        self.queue_recovery_request = request;
     }
 
     /// Cancel a pending timer previously registered with [`set_timeout`](Self::set_timeout).
@@ -642,13 +683,29 @@ impl CallController {
             .map(|h| (h.name().to_string(), h.value().to_string()))
             .collect();
 
-        self.session.send_command(CallCommand::LegAdd {
+        let command = CallCommand::LegAdd {
             source_leg: None,
             target: target.clone(),
             leg_id: Some(LegId::from(call_id.clone())),
             headers: header_pairs,
             purpose,
-        })?;
+        };
+        let command = if let Some(request) = self.queue_recovery_request.as_ref() {
+            if request.expired() {
+                return Err(anyhow::anyhow!("request_expired"));
+            }
+            CallCommand::QueueRecoveryDial {
+                request_id: request.request_id.clone(),
+                app_execution_id: request
+                    .expected_app_execution_id
+                    .ok_or_else(|| anyhow::anyhow!("queue_generation_unavailable"))?,
+                deadline: request.deadline,
+                command: Box::new(command),
+            }
+        } else {
+            command
+        };
+        self.session.send_command(command)?;
 
         info!(target = %target, call_id = %call_id, "Queue: originated call to agent");
         Ok(call_id)

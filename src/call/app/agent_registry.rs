@@ -587,6 +587,12 @@ pub trait AgentRegistry: Send + Sync {
         false
     }
 
+    /// Atomically release only an unanswered Ringing reservation for this call.
+    /// Unsupported backends leave state untouched; Busy must never be released here.
+    async fn release_unanswered_reservation(&self, _agent_id: &str, _call_id: &str) -> bool {
+        false
+    }
+
     /// Self-heal: release locally-owned agents whose Ringing/Busy state is
     /// bound to a call that no longer exists (safety net for lost teardown
     /// events). Liveness is verified against the node-local registry.

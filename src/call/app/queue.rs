@@ -33,6 +33,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+#[path = "queue_diagnostics.rs"]
+mod diagnostics;
+pub use diagnostics::{QueueDiagnosticRequest, QueueDispatchDiagnostic};
+
 // ===================================================================
 // Queue Statistics (built-in)
 // ===================================================================
@@ -538,6 +542,8 @@ pub struct QueueApp {
     /// (no-answer / cancel / reject) that keeps the call queued increments it
     /// and emits `queue_joined{attempt: n}`.
     join_attempt: u32,
+    targeted_recovery: bool,
+    recovery_requests: std::collections::VecDeque<(String, Vec<String>)>,
 }
 
 impl QueueApp {
@@ -586,6 +592,8 @@ impl QueueApp {
             max_wait_grace_used: false,
             joined_emitted_externally: false,
             join_attempt: 1,
+            targeted_recovery: false,
+            recovery_requests: std::collections::VecDeque::new(),
         }
     }
 
@@ -971,7 +979,9 @@ impl QueueApp {
         );
         // Self-heal: an agent stuck on a dead session would keep the queue
         // empty until the periodic watchdog tick.
-        if let Some(ref registry) = self.agent_registry {
+        if !self.targeted_recovery
+            && let Some(ref registry) = self.agent_registry
+        {
             let released = registry.reconcile_dead_call_bindings().await;
             if released > 0 {
                 info!(
@@ -1084,7 +1094,7 @@ impl QueueApp {
         if uris.is_empty() {
             // Self-heal, then re-poll: heals this caller within one poll
             // instead of waiting for the periodic watchdog.
-            if registry.reconcile_dead_call_bindings().await > 0 {
+            if !self.targeted_recovery && registry.reconcile_dead_call_bindings().await > 0 {
                 info!(
                     queue = %self.config.name,
                     skill_group = %sg,
@@ -1898,9 +1908,11 @@ impl QueueApp {
                 // the INVITE never went out, so the agent must be released
                 // immediately or it stays Ringing forever.
                 if let Some(ref registry) = self.agent_registry
-                    && registry
-                        .release_call(&attempt_agent_id, &self.call_id)
-                        .await
+                    && if self.targeted_recovery {
+                        registry.release_unanswered_reservation(&attempt_agent_id, &self.call_id).await
+                    } else {
+                        registry.release_call(&attempt_agent_id, &self.call_id).await
+                    }
                 {
                     info!(agent = %uri, "Queue: released reservation after originate failure");
                 }
@@ -2335,6 +2347,14 @@ impl QueueApp {
 
 #[async_trait]
 impl CallApp for QueueApp {
+    async fn on_queue_diagnostic(
+        &mut self,
+        request: &QueueDiagnosticRequest,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        self.diagnose_dispatch(request, ctrl).await
+    }
+
     fn app_type(&self) -> CallAppType {
         CallAppType::Queue
     }
@@ -2774,6 +2794,12 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
 
+        if let super::AppEvent::Custom { name, data } = &event
+            && name == "queue_recovery_dial_failed"
+        {
+            return self.recovery_dial_failed(data, ctrl).await;
+        }
+
         match event {
             super::AppEvent::Custom { name, data } => match QueueSignal::from_custom(&name, &data)
             {
@@ -3057,7 +3083,18 @@ impl CallApp for QueueApp {
                     )
                     .await
                 }
-                Some(QueueSignal::DialNext) => self.dial_next_agent(ctrl).await,
+                Some(QueueSignal::DialNext) => {
+                    // A delayed original kick must not repeat a recovered offer or
+                    // re-enter dialing after the customer has already connected.
+                    if !matches!(self.state, QueueState::DialingAgents { .. })
+                        || !self.pending_agents.is_empty()
+                        || !self.ringing_agent_legs.is_empty()
+                        || self.call_already_connected()
+                    {
+                        return Ok(AppAction::Continue);
+                    }
+                    self.dial_next_agent(ctrl).await
+                }
                 None => Ok(AppAction::Continue),
             },
             _ => Ok(AppAction::Continue),
@@ -3072,6 +3109,14 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         match id.as_str() {
             "agent_ring_timeout" => {
+                // A recovery rejection can cancel a timer after its event was queued.
+                // With no pending or ringing leg it cannot represent a no-answer.
+                if !self.recovery_requests.is_empty()
+                    && self.pending_agents.is_empty()
+                    && self.ringing_agent_legs.is_empty()
+                {
+                    return Ok(AppAction::Continue);
+                }
                 info!(call_id = %self.call_id, "Queue: agent ring timeout, handling no-answer");
 
                 // Second line of defense (the timer is cancelled on connect):
@@ -3231,6 +3276,14 @@ impl CallApp for QueueApp {
             }
             "queue_retry" => {
                 debug!("Queue: wait retention poll");
+                // Static queues reach this retry only after a guarded dial rejection.
+                if !self.allows_wait_retention()
+                    && matches!(self.state, QueueState::DialingAgents { .. })
+                    && self.pending_agents.is_empty()
+                    && self.recovery_requests.iter().any(|(_, legs)| !legs.is_empty())
+                {
+                    return self.dial_next_agent(ctrl).await;
+                }
                 self.try_offer_from_wait(ctrl).await
             }
             "escalation_check" => {
@@ -3255,7 +3308,11 @@ impl CallApp for QueueApp {
         // served by another agent). Without this the agent stays Busy forever
         // — `on_call_ended` attributes the session to the agent that actually
         // answered, so nobody else clears the phantom.
-        self.release_phantom_agents(None).await;
+        if self.targeted_recovery {
+            self.release_unanswered_recovery_reservations(None, false).await;
+        } else {
+            self.release_phantom_agents(None).await;
+        }
 
         // Update statistics if call was not connected (abandoned). A transfer
         // prompt with `connected_agent: Some(_)` means the agent already

@@ -197,6 +197,20 @@ impl AppEventLoop {
                             }
                         }
                     }
+                    Some(ControllerEvent::QueueDiagnostic(request)) => {
+                        match Self::await_or_cancel(&self.cancel_token,
+                            self.app.on_queue_diagnostic(&request, &mut self.controller)).await {
+                            WaitResult::Completed(result) => result,
+                            WaitResult::Cancelled => {
+                                tracing::info!(session_id = %self.context.call_info.session_id,
+                                    request_id = %request.request_id,
+                                    "Queue: live diagnostic canceled with call lifecycle");
+                                request.respond(Err("call_ended_or_canceled".into()));
+                                self.exit_reason = Some(ExitReason::Cancelled);
+                                Ok(AppAction::Exit)
+                            }
+                        }
+                    }
                     Some(ControllerEvent::Custom(name, data)) => {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_external_event(
                             AppEvent::Custom { name, data },
@@ -217,6 +231,7 @@ impl AppEventLoop {
                 }
             }
             Some(timer_id) = self.fired_timer_rx.recv() => {
+                self.controller.record_timer_consumed(&timer_id);
                 match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(timer_id, &mut self.controller, &self.context)).await {
                     WaitResult::Completed(res) => res,
                     WaitResult::Cancelled => {

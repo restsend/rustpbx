@@ -947,6 +947,30 @@ impl Locator for DbLocator {
         }))
     }
 
+    async fn diagnostic_lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
+        let realm = uri.host().to_string();
+        let Some((username, realm)) = self
+            .normalize_identity(uri.user().unwrap_or_default(), Some(&realm))
+            .await
+        else {
+            return Ok(Vec::new());
+        };
+        // Registration canonicalizes configured local realms to localhost.
+        // Share that identity rule without cleanup or presence-event side effects.
+        let rows = Entity::find()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(realm))
+            .order_by_desc(Column::LastModified)
+            .all(&self.db)
+            .await?;
+        let now = now_epoch_secs();
+        let instant = Instant::now();
+        rows.iter()
+            .filter(|row| !is_location_expired(row.expires, row.last_modified, now))
+            .map(|row| model_to_location(row, now, instant))
+            .collect()
+    }
+
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
         let now_epoch = now_epoch_secs();
 
@@ -1900,6 +1924,111 @@ mod tests {
                 .len(),
             1,
             "the refreshed binding must remain routable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reception_diagnostics_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reception_diagnostics_locator_read_is_strict_and_never_cleans_expired_rows() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".into(), false)
+            .await
+            .unwrap();
+        let uri: rsipstack::sip::Uri = "sip:489220@127.0.0.1".parse().unwrap();
+        assert!(
+            locator.diagnostic_lookup(&uri).await.is_err(),
+            "missing schema is not an empty registration list"
+        );
+        locator.migrate().await.unwrap();
+        let now = chrono::Utc::now();
+        for (id, realm, age) in [
+            (1, "localhost", 0),
+            (2, "localhost", 200),
+            (3, "other.invalid", 0),
+        ] {
+            ActiveModel {
+                id: Set(id),
+                aor: Set(format!("sip:489220@{realm}")),
+                username: Set("489220".into()),
+                realm: Set(realm.into()),
+                expires: Set(60),
+                last_modified: Set(now_epoch_secs() - age),
+                destination: Set("127.0.0.1:5060".into()),
+                transport: Set("UDP".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                supports_webrtc: Set(false),
+                user_agent: Set(None),
+                instance_id: Set(None),
+            }
+            .insert(&locator.db)
+            .await
+            .unwrap();
+        }
+        let rows = locator.diagnostic_lookup(&uri).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only live binding in requested realm qualifies"
+        );
+        assert_eq!(
+            Entity::find().count(&locator.db).await.unwrap(),
+            3,
+            "diagnosis must not delete expired or unrelated registrations"
+        );
+    }
+
+    #[tokio::test]
+    async fn reception_diagnostics_uses_the_real_registration_identity_normalization() {
+        let locator = DbLocator::new("sqlite::memory:".into()).await.unwrap();
+        locator.set_realm_checker(std::sync::Arc::new(|realm| {
+            let local = realm.eq_ignore_ascii_case("pbx.example.test");
+            Box::pin(async move { local })
+        }));
+        let contact: rsipstack::sip::Uri = "sip:device-token@browser.invalid;transport=ws"
+            .parse()
+            .unwrap();
+        locator
+            .register(
+                "Agent-X",
+                Some("PBX.EXAMPLE.TEST"),
+                Location {
+                    aor: contact.clone(),
+                    expires: 120,
+                    destination: Some(SipAddr {
+                        r#type: Some(rsipstack::sip::transport::Transport::Wss),
+                        addr: "192.0.2.10:443".try_into().unwrap(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let target: rsipstack::sip::Uri = "sip:AGENT-X@pbx.example.test".parse().unwrap();
+        assert_eq!(locator.lookup(&target).await.unwrap().len(), 1);
+        let rows_before = Entity::find().all(&locator.db).await.unwrap();
+        let diagnosed = locator.diagnostic_lookup(&target).await.unwrap();
+        assert_eq!(
+            diagnosed.len(),
+            1,
+            "a valid configured-realm registration must not be reported offline"
+        );
+        assert_eq!(diagnosed[0].aor, contact);
+        let unrelated: rsipstack::sip::Uri = "sip:agent-x@other.example.test".parse().unwrap();
+        assert!(
+            locator
+                .diagnostic_lookup(&unrelated)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            Entity::find().all(&locator.db).await.unwrap(),
+            rows_before,
+            "diagnosis must preserve registration rows"
         );
     }
 }

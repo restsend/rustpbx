@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 /// Type alias for mock call stack command sender.
 pub type MockCmdTx = tokio::sync::mpsc::UnboundedSender<CallCommand>;
@@ -104,7 +105,7 @@ impl MockCallStack {
         let cancel = CancellationToken::new();
         let event_loop = AppEventLoop::new(app, controller, ctx, cancel.child_token(), timer_rx);
 
-        let join_handle = crate::utils::spawn(event_loop.run());
+        let join_handle = crate::utils::spawn(event_loop.run().with_current_subscriber());
 
         Self {
             event_tx,
