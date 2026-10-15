@@ -13,6 +13,218 @@ const RECORDING_ID: &str = "11111111-1111-4111-8111-111111111111";
 const NEW_RECORDING_ID: &str = "22222222-2222-4222-8222-222222222222";
 const AGENT: &str = "agent-example";
 
+async fn assert_hold_recording_audio(
+    peer_id: &str,
+    peer_codec: audio_codec::CodecType,
+    peer_pt: u8,
+) {
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::negotiate::CodecInfo;
+    use rustrtc::peer_connection::RtpObserver;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held-agent.wav");
+    let (mut owner, _handle, _commands) = session().await;
+    owner.caller_dialog = None;
+    // Both codecs were offered by A, but B may select the dynamic PCMA PT.
+    owner.media.caller_offer = Some("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:96 PCMA/8000\r\na=sendrecv\r\n".into());
+    let initial_offer = owner.create_callee_track(false).await.unwrap();
+    let id = LegId::from(peer_id);
+    let (peer, offer) = if peer_id == "callee" {
+        (owner.media_leg(&id).unwrap(), initial_offer)
+    } else {
+        owner.legs.insert(id.clone(), Leg::new(id.clone()));
+        let (peer, offer) = owner
+            .create_leg_peer(&id, rustrtc::TransportMode::Rtp)
+            .await
+            .unwrap();
+        owner.legs.set_media_leg(&id, peer.clone());
+        (peer, offer)
+    };
+    let mut remote_cfg = LegConfig::rtp_pcmu();
+    remote_cfg.codecs = vec![CodecInfo {
+        payload_type: peer_pt,
+        codec: peer_codec,
+        clock_rate: 8000,
+        channels: 1,
+        fmtp: None,
+    }];
+    let remote = LegInner::new("remote-agent", &remote_cfg, None).unwrap();
+    let answer = remote.answer(&offer).await.unwrap();
+    peer.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    assert_eq!(
+        peer.negotiated().unwrap().audio.unwrap().payload_type,
+        peer_pt
+    );
+    let caller = owner.media_leg(&LegId::from("caller")).unwrap();
+    assert_eq!(caller.negotiated().unwrap().audio.unwrap().payload_type, 0);
+    owner.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    owner.update_leg_state(&id, LegState::Connected);
+    assert!(owner.setup_bridge(LegId::from("caller"), id.clone()).await);
+    assert!(owner.bridge().unwrap().is_bridged());
+
+    // Consult legs use the production creation boundary too, but must never
+    // contribute private speech to the selected A/B recording.
+    let consult_id = LegId::from("consult-private");
+    let (consult, _) = owner
+        .create_leg_peer(&consult_id, rustrtc::TransportMode::Rtp)
+        .await
+        .unwrap();
+    owner
+        .legs
+        .insert(consult_id.clone(), Leg::new(consult_id.clone()));
+    owner.legs.set_media_leg(&consult_id, consult.clone());
+    let started = owner
+        .execute_command(
+            CallCommand::StartRecording {
+                config: crate::call::domain::RecordConfig {
+                    path: path.to_string_lossy().into_owned(),
+                    segment_type: Some("agent".into()),
+                    label: Some(AGENT.into()),
+                    unique_id: Some(RECORDING_ID.into()),
+                    notify_app: Some(false),
+                    ..Default::default()
+                },
+            },
+            None,
+        )
+        .await;
+    assert!(started.success, "{started:?}");
+    let caller_tap = caller.ingress_tap();
+    let peer_tap = peer.ingress_tap();
+    let mut caller_encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    let mut peer_encoder = audio_codec::create_encoder(peer_codec);
+    let addr = "127.0.0.1:40100".parse().unwrap();
+    for (phase, level) in [-4000i16, -8000, -12000].into_iter().enumerate() {
+        if phase > 0 {
+            let command = if phase == 1 {
+                CallCommand::Hold {
+                    leg_id: LegId::from("caller"),
+                    music: None,
+                }
+            } else {
+                CallCommand::Unhold {
+                    leg_id: LegId::from("caller"),
+                }
+            };
+            let result = owner.execute_command(command, None).await;
+            assert!(result.success, "{result:?}");
+            assert_eq!(
+                owner.legs.get(&LegId::from("caller")).unwrap().state,
+                if phase == 1 {
+                    LegState::Hold
+                } else {
+                    LegState::Connected
+                }
+            );
+            assert_eq!(owner.bridge().unwrap().is_bridged(), phase == 2);
+        }
+        for packet_index in 0..10u16 {
+            let seq = phase as u16 * 10 + packet_index;
+            let packet = |pt, payload| {
+                RtpPacket::new(RtpHeader::new(pt, seq, u32::from(seq) * 160, 1234), payload)
+            };
+            caller_tap.on_ingress(
+                &packet(0, caller_encoder.encode(&[6000; 160]).to_vec()),
+                addr,
+            );
+            if phase == 1 {
+                peer_tap.on_ingress(
+                    &packet(peer_pt, peer_encoder.encode(&[level; 160]).to_vec()),
+                    addr,
+                );
+                if peer_id != "callee" {
+                    owner
+                        .media_leg(&LegId::from("callee"))
+                        .unwrap()
+                        .ingress_tap()
+                        .on_ingress(
+                            &packet(0, caller_encoder.encode(&[-20000; 160]).to_vec()),
+                            addr,
+                        );
+                }
+            } else {
+                caller_tap.on_egress(
+                    &packet(0, caller_encoder.encode(&[level; 160]).to_vec()),
+                    addr,
+                );
+            }
+            consult.ingress_tap().on_ingress(
+                &packet(0, caller_encoder.encode(&[-20000; 160]).to_vec()),
+                addr,
+            );
+        }
+    }
+    let stopped = owner
+        .execute_command(CallCommand::StopRecording, None)
+        .await;
+    assert!(stopped.success, "{stopped:?}");
+    assert!(
+        !owner
+            .media
+            .recording
+            .recorder_status()
+            .await
+            .unwrap()
+            .active
+    );
+    let snapshot = owner.record_snapshot();
+    assert_eq!(snapshot.recording_segments.len(), 1);
+    let segment = &snapshot.recording_segments[0];
+    assert_eq!(segment.path, path.to_string_lossy());
+    assert_eq!(segment.unique_id.as_deref(), Some(RECORDING_ID));
+    assert_eq!(segment.segment_type, "agent");
+    assert_eq!(segment.label, AGENT);
+    let wav = std::fs::read(&path).unwrap();
+    assert_eq!(segment.size, wav.len() as u64);
+    assert!(segment.duration_secs >= 0.59);
+    assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
+    assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 2);
+    let samples = audio_codec::create_decoder(audio_codec::CodecType::PCMU).decode(&wav[44..]);
+    let right: Vec<_> = samples.iter().skip(1).step_by(2).copied().collect();
+    for level in [-4000i16, -8000, -12000] {
+        let count = right
+            .iter()
+            .filter(|sample| (i32::from(**sample) - i32::from(level)).abs() < 500)
+            .count();
+        assert!(
+            count >= 1600,
+            "B channel lost phase {level}: only {count} matching samples"
+        );
+    }
+    assert!(
+        right.iter().all(|sample| *sample > -15000),
+        "private/previous-peer speech leaked into B"
+    );
+    assert!(
+        samples
+            .iter()
+            .step_by(2)
+            .filter(|sample| **sample > 5000)
+            .count()
+            >= 4800,
+        "A channel must preserve the caller across all phases"
+    );
+}
+
+#[tokio::test]
+async fn hold_recording_dynamic_agent_keeps_both_channels_without_private_speech() {
+    assert_hold_recording_audio(
+        "33333333-3333-4333-8333-333333333333",
+        audio_codec::CodecType::PCMU,
+        0,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hold_recording_decodes_callee_dynamic_payload_in_caller_format() {
+    assert_hold_recording_audio("callee", audio_codec::CodecType::PCMA, 96).await;
+}
+
 struct FailingFinalizeRecorder;
 
 #[async_trait::async_trait]

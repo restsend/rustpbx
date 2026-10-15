@@ -1033,228 +1033,250 @@ async fn module_in_dialog_refresh_keeps_subscription() {
     assert_eq!(subs[0].dialog_id, did, "refresh must keep the same dialog");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. PL4 — an Offline presence state is NEVER pushed to a client
-//
-// The soft-phone reconcilers match the PIDF `<note>offline</note>` exactly and
-// align-and-toast a server-forced logout. During a reconnect the SUBSCRIBE is
-// handled while the REGISTER is still in flight, so the initial NOTIFY used to
-// carry the previous session's stale Offline and fire a spurious "下线提醒".
-// ─────────────────────────────────────────────────────────────────────────────
-
-async fn started_presence_module() -> (Box<dyn crate::proxy::ProxyModule>, Arc<PresenceManager>) {
-    let (server, config) = create_test_server().await;
-    let manager = server.presence_manager.clone();
-    let mut module = PresenceModule::create(server.clone(), config).unwrap();
-    module.on_start().await.unwrap();
-    (module, manager)
+// Real SIP notifications: a counter before dialog lookup is not delivery evidence.
+struct PresenceWireUa {
+    server: crate::proxy::server::SipServerRef,
+    socket: Arc<tokio::net::UdpSocket>,
+    responses: tokio::sync::mpsc::UnboundedReceiver<String>,
+    notifications: tokio::sync::mpsc::UnboundedReceiver<String>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    address: SocketAddr,
 }
 
-async fn subscribe_self(module: &Box<dyn crate::proxy::ProxyModule>, user: &str) -> StatusCode {
-    subscribe_role(module, user, user).await
+impl Drop for PresenceWireUa {
+    fn drop(&mut self) {
+        self.server.cancel_token.cancel();
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
-/// Accept a `from` → `to` presence subscription and return the 200 OK status.
-async fn subscribe_role(
-    module: &Box<dyn crate::proxy::ProxyModule>,
-    from: &str,
-    to: &str,
-) -> StatusCode {
-    let (mut tx, endpoint) = create_transaction(subscribe_to(
-        from,
-        to,
-        "rustpbx.com",
-        Some(3600),
-        "presence",
-    ))
-    .await;
-    let key = tx.key.clone();
-    module
-        .on_transaction_begin(
-            CancellationToken::new(),
-            &mut tx,
-            TransactionCookie::default(),
-        )
+impl PresenceWireUa {
+    async fn start() -> Self {
+        let port = portpicker::pick_unused_port().unwrap();
+        let config = Arc::new(ProxyConfig {
+            addr: "127.0.0.1".into(),
+            udp_port: Some(port),
+            modules: Some(vec!["presence".into()]),
+            ensure_user: Some(false),
+            ..Default::default()
+        });
+        let server = Arc::new(
+            crate::proxy::server::SipServerBuilder::new(config)
+                .with_user_backend(Box::new(crate::proxy::user::MemoryUserBackend::new(None)))
+                .register_module("presence", PresenceModule::create)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let server_ref = server.get_inner();
+        let serve = crate::utils::spawn(async move {
+            server.serve().await.unwrap();
+        });
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let (response_tx, responses) = tokio::sync::mpsc::unbounded_channel();
+        let (notify_tx, notifications) = tokio::sync::mpsc::unbounded_channel();
+        let receiver = socket.clone();
+        let receive = crate::utils::spawn(async move {
+            let mut buffer = [0; 16384];
+            loop {
+                let (length, source) = receiver.recv_from(&mut buffer).await.unwrap();
+                let message = String::from_utf8(buffer[..length].to_vec()).unwrap();
+                if message.starts_with("NOTIFY ") {
+                    // Echo transaction headers so the actual server NOTIFY completes.
+                    let headers = message
+                        .split("\r\n")
+                        .filter(|line| {
+                            line.split_once(':').is_some_and(|(name, _)| {
+                                ["via", "from", "to", "call-id", "cseq"]
+                                    .contains(&name.to_ascii_lowercase().as_str())
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\r\n");
+                    let reply = format!("SIP/2.0 200 OK\r\n{headers}\r\nContent-Length: 0\r\n\r\n");
+                    receiver.send_to(reply.as_bytes(), source).await.unwrap();
+                    notify_tx.send(message).unwrap();
+                } else if message.starts_with("SIP/2.0 ") {
+                    response_tx.send(message).unwrap();
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Self {
+            server: server_ref,
+            socket,
+            responses,
+            notifications,
+            tasks: vec![serve, receive],
+            address: ([127, 0, 0, 1], port).into(),
+        }
+    }
+
+    async fn request(&mut self, method: &str, from: &str, to: &str, body: &str) {
+        let local = self.socket.local_addr().unwrap();
+        let id = rsipstack::transaction::random_text(12);
+        let request = format!(
+            "{method} sip:{to}@{server} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK{id}\r\nFrom: <sip:{from}@127.0.0.1>;tag={id}\r\nTo: <sip:{to}@127.0.0.1>\r\nCall-ID: {id}\r\nCSeq: 1 {method}\r\nContact: <sip:{from}@{local}>\r\nMax-Forwards: 70\r\nEvent: presence\r\nExpires: 3600\r\nContent-Type: application/pidf+xml\r\nContent-Length: {length}\r\n\r\n{body}",
+            server = self.address,
+            length = body.len(),
+        );
+        self.socket
+            .send_to(request.as_bytes(), self.address)
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), self.responses.recv())
+            .await
+            .expect("SIP response")
+            .unwrap();
+        assert!(
+            response.starts_with("SIP/2.0 200 "),
+            "{method} must be accepted: {response}"
+        );
+    }
+
+    async fn notify(&mut self) -> String {
+        tokio::time::timeout(Duration::from_secs(2), self.notifications.recv())
+            .await
+            .expect("actual NOTIFY must reach the UDP watcher")
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn oc_external_watcher_receives_initial_offline_and_published_closed() {
+    let mut ua = PresenceWireUa::start().await;
+    ua.request("SUBSCRIBE", "alice", "bob", "").await;
+    assert!(ua.notify().await.contains("<basic>closed</basic>"));
+
+    ua.request("PUBLISH", "bob", "bob",
+        "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"><tuple id=\"p\"><status><basic>open</basic></status></tuple></presence>").await;
+    assert!(ua.notify().await.contains("<basic>open</basic>"));
+    ua.request("PUBLISH", "bob", "bob",
+        "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"><tuple id=\"p\"><status><basic>closed</basic></status></tuple></presence>").await;
+    assert!(ua.notify().await.contains("<basic>closed</basic>"));
+    assert!(
+        wait_until(Duration::from_secs(1), || ua
+            .server
+            .presence_manager
+            .notifies_sent()
+            == 3)
         .await
-        .unwrap();
-    let finished = endpoint
-        .finished_transactions
-        .get(&key)
-        .expect("initial SUBSCRIBE must finish with a response");
-    match finished.value().as_ref() {
-        Some(SipMessage::Response(response)) => response.status_code.clone(),
-        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
-    }
+    );
 }
 
-fn state_with(status: PresenceStatus) -> PresenceState {
-    PresenceState {
-        status,
-        ..Default::default()
-    }
-}
-
-/// B1: subscribing while the identity is Offline must NOT emit a NOTIFY.
 #[tokio::test]
-async fn oc_subscribe_while_offline_sends_no_notify() {
-    let (module, manager) = started_presence_module().await;
-
-    manager
-        .update_state("1001", state_with(PresenceStatus::Offline), &EventSource::Local)
+async fn oc_self_reconnect_suppresses_stale_offline_but_delivers_idle() {
+    let mut ua = PresenceWireUa::start().await;
+    ua.server
+        .presence_manager
+        .update_state(
+            "alice",
+            PresenceState {
+                offline_reason: Some("offline".into()),
+                ..Default::default()
+            },
+            &EventSource::Local,
+        )
         .await;
-    assert_eq!(manager.notifies_sent(), 0);
-
-    let status = subscribe_self(&module, "1001").await;
-    assert_eq!(status, StatusCode::OK);
-
+    ua.request("SUBSCRIBE", "alice", "alice", "").await;
     assert!(
-        wait_until(Duration::from_secs(1), || {
-            manager.subscriber_bindings_len() == 1
-        })
-        .await,
-        "subscription must be accepted"
+        tokio::time::timeout(Duration::from_millis(200), ua.notifications.recv())
+            .await
+            .is_err(),
+        "stale self Offline must not force logout during reconnect"
     );
-    // Give the spawned initial NOTIFY every chance to (incorrectly) fire.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        manager.notifies_sent(),
-        0,
-        "an Offline state must never be pushed to the subscriber"
-    );
-}
-
-/// B2: a transition TO Offline sends no NOTIFY, but keeps the binding.
-///
-/// The subscriber carries a dialog that does not exist in `dialog_layer`, so
-/// the assertion isolates the Offline guard: were the state dispatched, the
-/// NOTIFY would be recorded and the binding pruned.
-#[tokio::test]
-async fn oc_offline_change_sends_no_notify_and_keeps_binding() {
-    let (_module, manager) = started_presence_module().await;
-    manager.add_subscriber(
-        "1001",
-        presence_sub(watcher("1001", "rustpbx.com"), "self-sub", 3600),
-    );
-
-    manager
-        .update_state("1001", state_with(PresenceStatus::Offline), &EventSource::Local)
-        .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    assert_eq!(
-        manager.notifies_sent(),
-        0,
-        "the Offline transition must not dispatch a NOTIFY"
-    );
-    assert!(manager.last_notified().is_none());
-    assert_eq!(
-        manager.subscriber_bindings_len(),
-        1,
-        "the subscription must survive an Offline transition"
-    );
-}
-
-/// B3: a non-Offline change still dispatches, and only that one.
-#[tokio::test]
-async fn oc_only_non_offline_changes_dispatch() {
-    let (_module, manager) = started_presence_module().await;
-    // A live self-subscription so the dispatch loop has a target.
-    manager.add_subscriber(
-        "1001",
-        presence_sub(watcher("1001", "rustpbx.com"), "self-sub", 3600),
-    );
-
-    // Offline then Idle, in order (FIFO single consumer).
-    manager
-        .update_state("1001", state_with(PresenceStatus::Offline), &EventSource::Local)
-        .await;
-    manager
-        .update_state("1001", state_with(PresenceStatus::Idle), &EventSource::Local)
-        .await;
-
-    assert!(
-        wait_until(Duration::from_secs(2), || {
-            manager.last_notified() == Some(("1001".to_string(), "idle".to_string()))
-        })
-        .await,
-        "the Idle change must be dispatched"
-    );
-    assert_eq!(
-        manager.notifies_sent(),
-        1,
-        "only the non-Offline change is dispatched"
-    );
-}
-
-/// B4: an external watcher gets no Offline NOTIFY for the watched identity.
-#[tokio::test]
-async fn oc_external_watcher_gets_no_offline_notify() {
-    let (_module, manager) = started_presence_module().await;
-    // alice watches bob; the dialog is deliberately absent so the test
-    // isolates the Offline guard (a dispatch would be recorded + pruned).
-    manager.add_subscriber(
-        "bob",
-        presence_sub(watcher("alice", "rustpbx.com"), "alice-watch-bob", 3600),
-    );
-
-    manager
-        .update_state("bob", state_with(PresenceStatus::Offline), &EventSource::Local)
-        .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    assert_eq!(
-        manager.notifies_sent(),
-        0,
-        "no Offline NOTIFY for the watcher"
-    );
-    assert!(manager.last_notified().is_none());
-    assert_eq!(
-        manager.subscriber_bindings_len(),
-        1,
-        "the watcher binding must survive an Offline transition"
-    );
-}
-
-/// F1: the reported race — SUBSCRIBE handled before the REGISTER completes —
-/// must never expose an Offline NOTIFY, and the REGISTER then delivers Idle.
-#[tokio::test]
-async fn oc_subscribe_before_register_never_notifies_offline() {
-    let (module, manager) = started_presence_module().await;
-
-    // Previous session's tail.
-    manager
-        .update_state("489220", state_with(PresenceStatus::Offline), &EventSource::Local)
-        .await;
-
-    // 1) SUBSCRIBE arrives first (REGISTER still in flight).
-    assert_eq!(subscribe_self(&module, "489220").await, StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(manager.notifies_sent(), 0, "no Offline NOTIFY on subscribe");
-
-    // 2) REGISTER completes → presence lifts to Idle and the client learns it.
-    manager
+    ua.server
+        .presence_manager
         .handle_locator_event(
-            LocatorEvent::Registered(webloc("489220")),
+            LocatorEvent::Registered(Location {
+                registered_aor: Some("sip:alice@127.0.0.1".parse().unwrap()),
+                ..Default::default()
+            }),
+            &EventSource::Local,
+        )
+        .await;
+    assert!(ua.notify().await.contains("<note>idle</note>"));
+    assert!(
+        wait_until(Duration::from_secs(1), || ua
+            .server
+            .presence_manager
+            .notifies_sent()
+            == 1)
+        .await
+    );
+    ua.server
+        .presence_manager
+        .update_state(
+            "alice",
+            PresenceState {
+                status: PresenceStatus::Offline,
+                offline_reason: Some("manual".into()),
+                ..Default::default()
+            },
             &EventSource::Local,
         )
         .await;
     assert!(
-        wait_until(Duration::from_secs(2), || {
-            manager.last_notified() == Some(("489220".to_string(), "idle".to_string()))
-        })
-        .await,
-        "the post-REGISTER Idle NOTIFY must be delivered"
-    );
-    assert_ne!(
-        manager.last_notified().map(|(_, s)| s),
-        Some("offline".to_string()),
-        "an Offline NOTIFY must never be the last thing the client sees"
+        ua.notify().await.contains("<basic>closed</basic>"),
+        "an explicit server logout must still notify the subscriber itself"
     );
 }
 
-fn webloc(ext: &str) -> Location {
-    Location {
-        registered_aor: Some(format!("sip:{ext}@rustpbx.com").parse().unwrap()),
-        ..Default::default()
-    }
+#[tokio::test]
+async fn oc_invalid_dialog_is_not_counted_as_sent() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let mut module = PresenceModule::create(server, config).unwrap();
+    module.on_start().await.unwrap();
+    manager.add_subscriber(
+        "bob",
+        presence_sub(watcher("alice", "rustpbx.com"), "missing", 3600),
+    );
+    manager
+        .update_state(
+            "bob",
+            PresenceState {
+                status: PresenceStatus::Idle,
+                ..Default::default()
+            },
+            &EventSource::Local,
+        )
+        .await;
+    assert!(
+        wait_until(Duration::from_secs(1), || manager
+            .get_subscribers("bob")
+            .is_empty())
+        .await,
+        "failed delivery must prune the invalid dialog"
+    );
+    assert_eq!(
+        manager.notifies_sent(),
+        0,
+        "missing dialog never delivered a NOTIFY"
+    );
+    assert!(manager.last_notified().is_none());
+}
+
+#[tokio::test]
+async fn oc_publish_offline_survives_register_keepalive() {
+    let mut ua = PresenceWireUa::start().await;
+    ua.request("PUBLISH", "bob", "bob",
+        "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"><tuple id=\"p\"><status><basic>closed</basic></status></tuple></presence>").await;
+    ua.server
+        .presence_manager
+        .handle_locator_event(
+            LocatorEvent::Refreshed(Location {
+                registered_aor: Some("sip:bob@127.0.0.1".parse().unwrap()),
+                ..Default::default()
+            }),
+            &EventSource::Local,
+        )
+        .await;
+    assert_eq!(
+        ua.server.presence_manager.get_state("bob").status,
+        PresenceStatus::Offline,
+        "a SIP keepalive must not undo the user's PUBLISH logout"
+    );
 }

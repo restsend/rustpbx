@@ -15656,26 +15656,12 @@ impl SipSession {
             )?;
         }
         let cfg = self.build_leg_config(mode, codecs, video);
-        // The callee leg of the primary pair feeds the same recording task so
-        // its ingress (the agent mic) can become the recorder's B channel
-        // while the call is held. Its tap starts fully off -- the caller leg
-        // owns both channels while bridged -- and `apply_hold_recording_routes`
-        // retargets it on hold. Other dynamic legs (consult/transfer targets)
-        // get the sender too but stay permanently off (never in the bridge's
-        // B slot), so they capture nothing.
-        let recorder_sender = if leg_id.as_str() == "callee"
-            && self.legs.media_leg(&LegId::from("callee")).is_none()
-        {
-            self.media.recording.capture_sender()
-        } else {
-            None
-        };
+        // Any dynamic leg can become the selected B side after queue dispatch
+        // or transfer. Capture stays off until hold selects that exact peer,
+        // so an unselected consultation cannot leak into the recording.
+        let recorder_sender = self.media.recording.capture_sender();
         let peer = crate::media::leg::LegInner::new(leg_id.as_str(), &cfg, recorder_sender)?;
-        if leg_id.as_str() == "callee" {
-            // Starts fully OFF -- see `ensure_media_leg`; hold flips
-            // ingress->B via `apply_hold_recording_routes`.
-            peer.ingress_tap().set_capture_route(None, None);
-        }
+        peer.ingress_tap().set_capture_route(None, None);
         let offer = peer.create_offer().await?;
         Ok((peer, offer))
     }
@@ -17049,36 +17035,52 @@ impl SipSession {
         Ok(())
     }
 
-    /// Switch the recorder's data sources to the hold layout.
-    ///
-    /// While a leg is held the media bridge is down, so the only audio
-    /// reaching the caller leg's egress is comfort noise / hold music, and the
-    /// far party's mic audio is not relayed anywhere. The recorder's B channel
-    /// therefore switches to the callee leg's ingress (the agent mic's
-    /// original RTP) and the caller leg's egress capture is disabled -- two
-    /// interleaved streams would garble the sequentially-appended channel.
-    /// Legs are resolved from the session registry (not the bridge) so the
-    /// flip works regardless of bridge state.
+    /// While held, record the selected parties' ingress rather than MOH.
     pub(crate) fn apply_hold_recording_routes(&self) {
-        if let Some(callee) = self.media_leg(&LegId::from("callee")) {
-            callee
-                .ingress_tap()
-                .set_capture_route(Some(crate::media::media_recorder::CaptureChannel::Callee), None);
+        let caller_id = LegId::from("caller");
+        // The selected pair survives unbridge. Direct-dial calls may only
+        // have the media pair; a different logical pair must not reuse it.
+        let pair = if self.bridge.legs.len() == 2 {
+            self.bridge.legs.clone()
+        } else {
+            self.bridge()
+                .map(|bridge| {
+                    [bridge.leg(LegSide::A), bridge.leg(LegSide::B)]
+                        .into_iter()
+                        .flatten()
+                        .map(|leg| leg.id().clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let selected_peer = pair
+            .iter()
+            .find(|id| **id != caller_id && pair.contains(&caller_id));
+        // Disable old B sources before enabling the selected peer.
+        for (id, _) in self.legs.iter() {
+            if let Some(leg) = self.media_leg(id) {
+                let channel = (*id == caller_id)
+                    .then_some(crate::media::media_recorder::CaptureChannel::Caller);
+                leg.ingress_tap().set_capture_route(channel, None);
+            }
         }
-        if let Some(caller) = self.media_leg(&LegId::from("caller")) {
-            caller
-                .ingress_tap()
-                .set_capture_route(Some(crate::media::media_recorder::CaptureChannel::Caller), None);
+        if let Some(peer) = selected_peer.and_then(|id| self.media_leg(id)) {
+            peer.ingress_tap().set_capture_route(
+                Some(crate::media::media_recorder::CaptureChannel::Callee),
+                None,
+            );
         }
     }
 
-    /// Restore the default recording capture after unhold: caller leg
-    /// ingress->A / egress->B (the relayed far-party audio), callee leg capture
-    /// off again. Uses the session registry so the restore cannot be skipped
-    /// when the bridge was already torn down.
+    /// Bridged audio is already in the caller's negotiated format. Disable
+    /// every other tap, including the previously selected transfer peer.
     pub(crate) fn restore_recording_routes(&self) {
-        if let Some(callee) = self.media_leg(&LegId::from("callee")) {
-            callee.ingress_tap().set_capture_route(None, None);
+        for (id, _) in self.legs.iter() {
+            if id.as_str() != "caller"
+                && let Some(leg) = self.media_leg(id)
+            {
+                leg.ingress_tap().set_capture_route(None, None);
+            }
         }
         if let Some(caller) = self.media_leg(&LegId::from("caller")) {
             caller.ingress_tap().set_capture_route(

@@ -755,6 +755,7 @@ impl LegInner {
         }
 
         *self.negotiated.lock() = Some(profile.clone());
+        self.tap.set_recording_profile(profile.clone());
         // DTMF telephone-event payload types → tap. Listen on ALL negotiated
         // telephone-event PTs (a WebRTC peer may send DTMF on any of them, e.g.
         // the 8 kHz PT for browsers), not just the single preferred `dtmf`.

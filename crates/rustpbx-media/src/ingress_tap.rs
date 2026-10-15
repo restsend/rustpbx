@@ -165,9 +165,11 @@ pub struct IngressTap {
     /// re-INVITE renegotiates the codec — a stale allowlist would silently
     /// drop every post-renegotiation audio packet from the recording.
     audio_pt_mask: PtMask,
+    // Shared snapshots retain the source PT mapping without cloning it per packet.
+    recording_profile: parking_lot::RwLock<Option<Arc<crate::negotiate::NegotiatedLegProfile>>>,
     /// Capture routing: which recording channel (if any) each direction of
     /// this leg feeds. Stored as the `CaptureChannel` code (0 = off) in
-    /// atomics so the per-packet hot path stays lock-free. The caller leg
+    /// atomics so route selection stays lock-free. The caller leg
     /// uses the classic layout (ingress->Caller, egress->Callee); the callee
     /// leg starts fully off and switches to ingress->Callee only while the
     /// call is held (see `set_capture_route`).
@@ -210,6 +212,7 @@ impl IngressTap {
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
             audio_pt_mask: PtMask::new(),
+            recording_profile: parking_lot::RwLock::new(None),
             capture_ingress_channel: AtomicU8::new(default_route.0),
             capture_egress_channel: AtomicU8::new(default_route.1),
             recorder_sender,
@@ -256,6 +259,10 @@ impl IngressTap {
     /// the new codec is excluded from the call recording.
     pub fn set_audio_payload_types(&self, pts: Vec<u8>) {
         self.audio_pt_mask.set(&pts);
+    }
+
+    pub(crate) fn set_recording_profile(&self, profile: crate::negotiate::NegotiatedLegProfile) {
+        *self.recording_profile.write() = Some(Arc::new(profile));
     }
 
     /// Retarget this leg's recording capture (lock-free, safe mid-call).
@@ -440,7 +447,12 @@ impl IngressTap {
                 PacketDirection::Egress => self.capture_egress_channel.load(Ordering::Relaxed),
             };
             if let Some(channel) = CaptureChannel::from_code(code) {
-                sender.capture(channel, packet, Some(peer_addr));
+                sender.capture_with_profile(
+                    channel,
+                    packet,
+                    Some(peer_addr),
+                    self.recording_profile.read().clone(),
+                );
             }
         }
     }

@@ -256,9 +256,8 @@ pub struct PresenceManager {
     /// Channel used by the voicemail layer to request MWI NOTIFY delivery.
     mwi_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<MwiTrigger>>>>,
     cluster_sync: std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<ClusterSync>>>>,
-    /// Observability/test hook: presence NOTIFYs actually dispatched, and the
-    /// last `(identity, status)` they carried. Used to assert that an
-    /// `Offline` state is never pushed to a subscriber (PL4).
+    /// Presence NOTIFYs acknowledged with a successful SIP response and the
+    /// last `(identity, status)` they carried.
     notifies_sent: Arc<std::sync::atomic::AtomicU64>,
     last_notified: Arc<RwLock<Option<(String, String)>>>,
 }
@@ -344,18 +343,17 @@ impl PresenceManager {
         self.mwi_subscribers.read().values().map(|v| v.len()).sum()
     }
 
-    /// Number of presence NOTIFYs actually dispatched (test/observability).
-    /// An `Offline` state is never counted — see `PresenceModule::send_notify`.
+    /// Number of presence NOTIFYs acknowledged with a successful SIP response.
     pub fn notifies_sent(&self) -> u64 {
         self.notifies_sent.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Last dispatched presence NOTIFY's `(identity, status)`, if any.
+    /// Last successfully acknowledged presence NOTIFY's `(identity, status)`.
     pub fn last_notified(&self) -> Option<(String, String)> {
         self.last_notified.read().clone()
     }
 
-    /// Record a dispatched (non-Offline) presence NOTIFY.
+    /// Record a successfully acknowledged presence NOTIFY.
     fn record_notify(&self, identity: &str, status: &str) {
         self.notifies_sent
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -405,7 +403,8 @@ impl PresenceManager {
         state: PresenceState,
         source: &EventSource,
     ) -> Option<PresenceState> {
-        self.update_state_internal(identity, state, source, false).await
+        self.update_state_internal(identity, state, source, false, |_| true)
+            .await
     }
 
     /// Business-state projections must retain the latest publication lease atomically.
@@ -415,7 +414,8 @@ impl PresenceManager {
         state: PresenceState,
         source: &EventSource,
     ) -> Option<PresenceState> {
-        self.update_state_internal(identity, state, source, true).await
+        self.update_state_internal(identity, state, source, true, |_| true)
+            .await
     }
 
     async fn update_state_internal(
@@ -424,9 +424,15 @@ impl PresenceManager {
         mut state: PresenceState,
         source: &EventSource,
         preserve_publication: bool,
+        can_update: impl FnOnce(Option<&PresenceState>) -> bool,
     ) -> Option<PresenceState> {
         let old_state = {
             let mut map = self.states.write();
+            // Recheck implicit registration recovery against the latest business
+            // state under the same lock that installs the recovered state.
+            if !can_update(map.get(identity)) {
+                return None;
+            }
             if preserve_publication && state.status != PresenceStatus::Offline {
                 state.expires_at = map.get(identity).and_then(|current| current.expires_at);
             }
@@ -849,6 +855,7 @@ impl PresenceManager {
         source: &EventSource,
     ) -> Vec<DialogId> {
         let mut pruned = Vec::new();
+        let is_refresh = matches!(event, LocatorEvent::Refreshed(_));
         match event {
             LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
@@ -878,18 +885,16 @@ impl PresenceManager {
 
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
-                        // PL2: any REGISTER — a fresh login OR a keepalive
-                        // refresh — proves the client is alive, so an Offline
-                        // state is lifted to Idle. A live business state
-                        // (idle/away/dnd/ringing/busy/wrapup) is preserved
-                        // untouched (the `None => return` arm below).
+                        // Registration may recover Offline; a keepalive only
+                        // recovers transport/lease failures, never explicit logout.
+                        // The locked predicate below also preserves newer states.
                         None if current.status == PresenceStatus::Offline => {
                             PresenceStatus::Idle
                         }
                         None => return pruned,
                     };
 
-                    self.update_state(
+                    self.update_state_internal(
                         &user,
                         PresenceState {
                             status: new_status,
@@ -902,6 +907,18 @@ impl PresenceManager {
                             ..current
                         },
                         source,
+                        false,
+                        |latest| {
+                            header_status.is_some()
+                                || latest.map_or(!is_refresh, |state| {
+                                    state.status == PresenceStatus::Offline
+                                        && (!is_refresh
+                                            || matches!(
+                                                state.offline_reason.as_deref(),
+                                                Some("expired" | "offline")
+                                            ))
+                                })
+                        },
                     )
                     .await;
                 }
@@ -1001,7 +1018,7 @@ impl ProxyModule for PresenceModule {
                         let state = module_clone.manager.get_state(&identity);
                         let subscribers = module_clone.manager.get_subscribers(&identity);
                         for sub in subscribers {
-                            if let Err(e) = module_clone.send_notify(&identity, &sub, &state).await {
+                            if let Err(e) = module_clone.send_notify(&identity, &sub, &state, false).await {
                                 debug!(
                                     dialog_id = %sub.dialog_id,
                                     error = %e,
@@ -1335,7 +1352,7 @@ impl PresenceModule {
         let identity_notify = identity.clone();
         crate::utils::spawn(async move {
             let state = module.manager.get_state(&identity_notify);
-            if let Err(e) = module.send_notify(&identity_notify, &sub, &state).await {
+            if let Err(e) = module.send_notify(&identity_notify, &sub, &state, true).await {
                 debug!(
                     dialog_id = %sub.dialog_id,
                     error = %e,
@@ -1503,17 +1520,19 @@ impl PresenceModule {
         identity: &str,
         sub: &Subscriber,
         state: &PresenceState,
+        initial: bool,
     ) -> Result<()> {
-        // PL4: an `Offline` presence state is NEVER pushed to a client. The
-        // soft-phone reconcilers match the PIDF `<note>offline</note>` exactly
-        // and align-and-toast a server-forced logout — which fires a spurious
-        // "下线提醒" during the reconnect race (the SUBSCRIBE is handled while
-        // the REGISTER is still in flight, so the initial NOTIFY would carry
-        // the previous session's stale Offline). Offline is expressed only to
-        // internal consumers (CC/UI read the manager state directly);
-        // subscribers simply stop receiving updates until the identity is
-        // live again.
-        if state.status == PresenceStatus::Offline {
+        // Only the initial self-subscription can race an in-flight login and
+        // expose an old failure state as a forced logout. Other watchers and
+        // explicit logout updates must still receive the real Offline state.
+        if initial
+            && sub.aor.user() == Some(identity)
+            && state.status == PresenceStatus::Offline
+            && matches!(
+                state.offline_reason.as_deref(),
+                None | Some("expired" | "offline")
+            )
+        {
             debug!(
                 identity,
                 aor = %sub.aor,
@@ -1521,8 +1540,6 @@ impl PresenceModule {
             );
             return Ok(());
         }
-        self.manager.record_notify(identity, &state.status.to_string());
-
         debug!(
             "Sending NOTIFY to {} for identity {} state {:?}",
             sub.aor, identity, state.status
@@ -1567,6 +1584,12 @@ impl PresenceModule {
         )
         .await
         {
+            Ok(Ok(Some(response)))
+                if response.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful =>
+            {
+                self.manager.record_notify(identity, &state.status.to_string());
+                Ok(())
+            }
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
                 self.manager.remove_subscriber_by_dialog(&sub.dialog_id);
@@ -2133,9 +2156,10 @@ mod tests {
             ..Default::default()
         };
 
-        // Stale offline, as left by a prior session.
+        // A failed transport may be healed by a keepalive; explicit logout may not.
         let mut offline = manager.get_state(ext);
         offline.status = PresenceStatus::Offline;
+        offline.offline_reason = Some("expired".into());
         manager
             .update_state(ext, offline, &EventSource::Local)
             .await;
@@ -2151,6 +2175,46 @@ mod tests {
             .handle_locator_event(LocatorEvent::Refreshed(loc), &EventSource::Local)
             .await;
         assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn refresh_register_preserves_explicit_offline() {
+        for reason in [None, Some("manual"), Some("closed"), Some("unregistered")] {
+            for source in [
+                EventSource::Local,
+                EventSource::Remote("127.0.0.1:5060".parse().unwrap()),
+            ] {
+                let manager = PresenceManager::new(None);
+                manager
+                    .update_state(
+                        "1004",
+                        PresenceState {
+                            status: PresenceStatus::Offline,
+                            offline_reason: reason.map(str::to_string),
+                            ..Default::default()
+                        },
+                        &source,
+                    )
+                    .await;
+                for _ in 0..2 {
+                    manager
+                        .handle_locator_event(
+                            LocatorEvent::Refreshed(Location {
+                                aor: Uri::try_from("sip:1004@localhost").unwrap(),
+                                ..Default::default()
+                            }),
+                            &source,
+                        )
+                        .await;
+                    assert_eq!(
+                        manager.get_state("1004").status,
+                        PresenceStatus::Offline,
+                        "keepalive must preserve explicit logout: {reason:?}"
+                    );
+                    assert_eq!(manager.get_state("1004").offline_reason.as_deref(), reason);
+                }
+            }
+        }
     }
 
     /// PL1/PL2: a REGISTER (fresh or refresh) must never downgrade a live
@@ -2548,9 +2612,8 @@ mod tests {
     /// literal Offline state (and a stamped `offline_reason` must ride
     /// `reason_code` / webhooks / the status history only — never suffixed
     /// into the note, or `offline:expired` would fall through the client's
-    /// match arm and desync it). NOTE: since PL4 the dispatcher
-    /// (`PresenceModule::send_notify`) never sends an Offline state to a
-    /// client at all, so this body shape is only reachable via direct calls.
+    /// match arm and desync it). Initial self-subscriptions may suppress a
+    /// stale failure state, while ordinary watchers still receive Offline.
     #[test]
     fn test_build_pidf_body_offline_note_stays_in_closed_vocabulary() {
         for reason in ["expired", "unregistered", "offline"] {

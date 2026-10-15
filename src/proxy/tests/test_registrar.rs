@@ -146,6 +146,7 @@ async fn test_registrar_register_success() {
         use crate::addons::cc::agent::{AgentRegistry, AgentStatus};
         use crate::addons::cc::registrar_bridge::CcRegistrarBridge;
         use crate::proxy::cluster_event::{ClusterEventHandler, ClusterLocatorMessage, EventSource};
+        use crate::proxy::locator::LocatorEvent;
         use crate::proxy::presence::{PresenceManager, PresenceStatus};
         use sea_orm::ActiveModelTrait;
         use sea_orm_migration::MigratorTrait;
@@ -175,11 +176,23 @@ async fn test_registrar_register_success() {
         for stage in ["initial", "refresh", "unregister", "relogin", "new-contact", "explicit"] {
             if matches!(stage, "refresh" | "new-contact" | "explicit") {
                 for registry in [&local, &peer] {
-                    registry.update_status("agent-alice", AgentStatus::Offline).await.unwrap();
+                    if stage == "explicit" {
+                        // Expiry is a real transition; repeating Offline preserves its old reason.
+                        registry.update_status("agent-alice", AgentStatus::Idle).await.unwrap();
+                    }
+                    registry
+                        .update_status_with_reason(
+                            "agent-alice",
+                            AgentStatus::Offline,
+                            (stage == "explicit").then(|| "expired".to_string()),
+                        )
+                        .await
+                        .unwrap();
                 }
                 for manager in [&local_presence, &peer_presence] {
                     let mut state = manager.get_state("alice");
                     state.status = PresenceStatus::Offline;
+                    state.offline_reason = (stage == "explicit").then(|| "expired".to_string());
                     manager.update_state("alice", state, &EventSource::Local).await;
                 }
             }
@@ -199,16 +212,32 @@ async fn test_registrar_register_success() {
                     .await.unwrap();
             }
             let event = events.try_recv().unwrap();
+            // A new Contact on an already registered identity is still a refresh.
+            assert!(
+                matches!(
+                    (&event, stage),
+                    (LocatorEvent::Registered(_), "initial" | "relogin")
+                        | (
+                            LocatorEvent::Refreshed(_),
+                            "refresh" | "new-contact" | "explicit"
+                        )
+                        | (LocatorEvent::Unregistered(_), "unregister")
+                ),
+                "unexpected locator event for registration stage {stage}"
+            );
             let wire = serde_json::to_vec(&ClusterLocatorMessage::from(&event)).unwrap();
             let peer_event = serde_json::from_slice::<ClusterLocatorMessage>(&wire).unwrap().to_event().unwrap();
             local_presence.handle_locator_event(event.clone(), &EventSource::Local).await;
             peer_presence.handle_locator_event(peer_event.clone(), &remote_source).await;
             local_bridge.on_locator_event(&event, &EventSource::Local).await;
             peer_bridge.on_locator_event(&peer_event, &remote_source).await;
-            // PL2: any REGISTER — fresh or refresh — that finds the agent
-            // Offline lifts it back to the initial readiness state (Idle).
-            // Only an explicit unregister leaves the agent Offline.
-            let expected = if stage == "unregister" { "offline" } else { "idle" };
+            // A keepalive preserves deliberate logout; fresh login and a
+            // fault-offline registration can recover initial readiness.
+            let expected = if matches!(stage, "unregister" | "refresh" | "new-contact") {
+                "offline"
+            } else {
+                "idle"
+            };
             for registry in [&local, &peer] {
                 assert_eq!(registry.get_agent("agent-alice").await.unwrap().status.to_string(), expected,
                     "registration stage {stage} must preserve the agent's business state");

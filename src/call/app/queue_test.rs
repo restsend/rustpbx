@@ -5199,9 +5199,8 @@ mod tests {
     /// re-resolve). Two invariants when a LATE kick lands on an already-waiting
     /// app with no dialable agents:
     /// 1. It must NOT restart hold music / retention prompts (duplicate entry);
-    /// 2. It must NOT leave the app idle WITHOUT the poll timer —
-    ///    `try_offer_from_wait` cancels `queue_retry` before dialing, so the
-    ///    idempotent `enter_waiting_for_agent` re-entry is what re-arms it.
+    /// 2. It must preserve the live poll timer so an agent becoming Idle
+    ///    after the ignored kick is still offered the waiting call.
     #[tokio::test]
     async fn test_dial_kick_in_wait_retention_is_noop() {
         use crate::call::app::agent_registry::PresenceState;
@@ -5255,8 +5254,8 @@ mod tests {
             );
         }
 
-        // NOW the agent flips to Idle (the wrapup→idle race), and the poll is
-        // armed by the idempotent re-entry: firing it must resolve and dial.
+        // The agent flips to Idle after the kick. Let the real poll timer
+        // resolve and dial instead of manually injecting a timeout event.
         registry
             .register(
                 "agent-001".to_string(),
@@ -5272,11 +5271,10 @@ mod tests {
             .update_presence("agent-001", PresenceState::Idle)
             .await
             .unwrap();
-        stack.timeout("queue_retry");
         let mut dialed = false;
         let mut seen = Vec::new();
         for _ in 0..10 {
-            match stack.next_cmd(300).await {
+            match stack.next_cmd(2500).await {
                 Some(CallCommand::LegAdd { target, .. }) if target.contains("agent-001") => {
                     dialed = true;
                     break;
@@ -5287,7 +5285,7 @@ mod tests {
         }
         assert!(
             dialed,
-            "the idempotent re-entry must re-arm queue_retry — the next poll must dial; saw: {seen:?}"
+            "the late kick must preserve queue_retry — the real poll must dial; saw: {seen:?}"
         );
 
         stack.cancel();

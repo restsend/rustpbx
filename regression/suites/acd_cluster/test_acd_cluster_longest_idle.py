@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import suppress
+from datetime import datetime
 
 import pytest
 
@@ -68,6 +69,19 @@ async def _dispatch_winner(a1, a2, base1: int, base2: int, timeout: float = 30):
     )
 
 
+def _assert_idle_order(prd, older: str, newer: str):
+    for node in prd.nodes:
+        entered = {}
+        for agent_id in (older, newer):
+            body = node.get(f"/cc/agents/{agent_id}/diagnose")
+            info = body.get("data") or body
+            assert info["status"] == "idle", f"{node.name}: {agent_id} is not idle"
+            entered[agent_id] = datetime.fromisoformat(info["last_state_changed_at"])
+        assert entered[older] < entered[newer], (
+            f"{node.name}: expected {older} idle before {newer}, got {entered}"
+        )
+
+
 async def test_default_longest_idle_selection(prd, fleet, pool, topology_factory):
     topo = topology_factory(
         tag="li1",
@@ -80,12 +94,18 @@ async def test_default_longest_idle_selection(prd, fleet, pool, topology_factory
     )
     prd.drain(["1001", "1002"])
 
-    # Register A first, let it age, then B → A is the longest-idle candidate.
-    (a1,) = await fleet.agents(["1001"])
+    # Fleet UAs may already be registered: readiness transitions, not fetching
+    # cached clients, establish the authoritative idle order for this test.
+    a1, a2 = await fleet.agents(["1001", "1002"])
+    for agent_id in ("1001", "1002"):
+        prd.set_agent_status(agent_id, "away")
+        prd.assert_agent_status_both_nodes(agent_id, "away", timeout=15)
+    prd.set_agent_status("1001", "idle")
     prd.assert_agent_status_both_nodes("1001", "idle", timeout=45)
     await asyncio.sleep(IDLE_GAP_SECS)
-    (a2,) = await fleet.agents(["1002"])
+    prd.set_agent_status("1002", "idle")
     prd.assert_agent_status_both_nodes("1002", "idle", timeout=45)
+    _assert_idle_order(prd, "1001", "1002")
 
     base1, base2 = a1.invite_count(), a2.invite_count()
 
@@ -107,6 +127,7 @@ async def test_default_longest_idle_selection(prd, fleet, pool, topology_factory
         with suppress(PrdError):
             node.end_wrapup("1001")
     prd.assert_agent_status_both_nodes("1001", "idle", timeout=25)
+    _assert_idle_order(prd, "1002", "1001")
 
     # ── dispatch 2: B (now longer idle) wins ─────────────────────────────
     base1, base2 = a1.invite_count(), a2.invite_count()

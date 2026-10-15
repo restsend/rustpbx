@@ -50,6 +50,7 @@ fn recorder_runtime_or_current() -> tokio::runtime::Handle {
 }
 
 pub(crate) struct CapturedRtp {
+    pub(crate) profile: Option<Arc<NegotiatedLegProfile>>,
     pub(crate) channel: CaptureChannel,
     pub(crate) packet: RtpPacket,
     pub(crate) received_at_micros: u64,
@@ -130,6 +131,20 @@ pub trait MediaRecorder: Send {
         peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()>;
 
+    /// Captures from another leg retain that leg's negotiated payload mapping.
+    /// Backends that preserve raw RTP can keep the original entry point.
+    async fn write_rtp_with_profile(
+        &mut self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
+        _profile: Option<&NegotiatedLegProfile>,
+    ) -> Result<()> {
+        self.write_rtp(channel, packet, received_at_micros, peer_addr)
+            .await
+    }
+
     /// Finalize the backend. File recorders return metadata; streaming
     /// recorders return `None` after flushing.
     async fn finalize(self: Box<Self>) -> Result<Option<RecordingResult>>;
@@ -195,6 +210,18 @@ impl MediaRecorder for FileRecorder {
         _received_at_micros: u64,
         _peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
+        self.write_rtp_with_profile(channel, packet, _received_at_micros, _peer_addr, None)
+            .await
+    }
+
+    async fn write_rtp_with_profile(
+        &mut self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        _received_at_micros: u64,
+        _peer_addr: Option<std::net::SocketAddr>,
+        profile: Option<&NegotiatedLegProfile>,
+    ) -> Result<()> {
         let recorder = self
             .recorder
             .as_mut()
@@ -211,7 +238,7 @@ impl MediaRecorder for FileRecorder {
             raw_packet: Some(packet.clone()),
         };
         recorder
-            .write_sample(
+            .write_sample_with_profile(
                 match channel {
                     CaptureChannel::Caller => Leg::A,
                     CaptureChannel::Callee => Leg::B,
@@ -220,6 +247,7 @@ impl MediaRecorder for FileRecorder {
                 None,
                 None,
                 None,
+                profile,
             )
             .await
     }
@@ -434,11 +462,22 @@ impl RecorderSender {
         packet: &RtpPacket,
         peer_addr: Option<std::net::SocketAddr>,
     ) {
+        self.capture_with_profile(channel, packet, peer_addr, None);
+    }
+
+    pub(crate) fn capture_with_profile(
+        &self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        peer_addr: Option<std::net::SocketAddr>,
+        profile: Option<Arc<NegotiatedLegProfile>>,
+    ) {
         let received_at_micros = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_micros() as u64)
             .unwrap_or_default();
         let captured = CapturedRtp {
+            profile,
             channel,
             packet: packet.clone(),
             received_at_micros,
@@ -585,11 +624,12 @@ impl RecorderTask {
         }
         if let Some(recorder) = self.recorder.as_mut()
             && let Err(error) = recorder
-                .write_rtp(
+                .write_rtp_with_profile(
                     captured.channel,
                     &captured.packet,
                     captured.received_at_micros,
                     captured.peer_addr,
+                    captured.profile.as_deref(),
                 )
                 .await
         {

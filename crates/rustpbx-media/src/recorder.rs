@@ -228,13 +228,26 @@ impl Recorder {
         dtmf_clock_rate: Option<u32>,
         codec_hint: Option<CodecType>,
     ) -> Result<()> {
+        self.write_sample_with_profile(leg, sample, dtmf_pt, dtmf_clock_rate, codec_hint, None)
+            .await
+    }
+
+    pub(crate) async fn write_sample_with_profile(
+        &mut self,
+        leg: Leg,
+        sample: &MediaSample,
+        dtmf_pt: Option<u8>,
+        dtmf_clock_rate: Option<u32>,
+        codec_hint: Option<CodecType>,
+        profile: Option<&NegotiatedLegProfile>,
+    ) -> Result<()> {
         let frame = match sample {
             MediaSample::Audio(frame) => frame,
             _ => return Ok(()),
         };
 
         let (profile_audio_pt, profile_audio_codec, profile_dtmf_pt, profile_dtmf_clock_rate) = {
-            let profile = &self.profile;
+            let profile = profile.unwrap_or(&self.profile);
             (
                 profile.audio.as_ref().map(|codec| codec.payload_type),
                 profile.audio.as_ref().map(|codec| codec.codec),
