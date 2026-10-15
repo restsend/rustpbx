@@ -123,6 +123,8 @@ TRUNKS = {
         "transport": "udp",
         "allow_ips": "100.88.0.42/32",
         "external_ip": "100.88.0.1",
+        # 出站 offer 只允许 G.711（PCMA/PCMU），去掉 G722/opus，避免线路侧 488。
+        "audio_codecs": ["PCMA", "PCMU"],
         "ringback": {
             "notfound": "sounds/failure-notfound-zh.wav",
             "offline": "sounds/failure-offline-zh.wav",
@@ -186,7 +188,7 @@ _UI_HTML = r"""<!DOCTYPE html>
   .call-head:hover { background:#f0f3fa; }
   .chevron { font-size:10px; color:#9ca3af; transition:transform .2s; }
 .call-card.open .chevron { transform:rotate(90deg); }
-.call-ts { font-family:"SF Mono",Menlo,monospace; font-size:13px; font-weight:600; color:#1e3c72; width:150px; flex-shrink:0; }
+.call-ts { font-family:"SF Mono",Menlo,monospace; font-size:13px; font-weight:600; color:#1e3c72; width:185px; flex-shrink:0; white-space:nowrap; }
   .call-ani { color:#059669; font-weight:500; }
   .call-arrow { color:#9ca3af; }
   .call-dnis { color:#dc2626; font-weight:500; }
@@ -207,7 +209,7 @@ _UI_HTML = r"""<!DOCTYPE html>
   .event-row { display:flex; align-items:flex-start; gap:10px; padding:6px 0;
              border-bottom:1px dashed #eef0f5; font-size:13px; }
 .event-row:last-child { border-bottom:none; }
-.event-ts { flex-shrink:0; font-family:"SF Mono",Menlo,monospace; font-size:12px; color:#6b7280; width:140px; }
+.event-ts { flex-shrink:0; font-family:"SF Mono",Menlo,monospace; font-size:12px; color:#6b7280; width:125px; white-space:nowrap; }
 .event-badge { flex-shrink:0; width:56px; text-align:center; }
   .event-badge .state-pill { display:inline-block; }
   .event-json { flex:1; font-family:"SF Mono",Menlo,monospace; font-size:12px;
@@ -249,11 +251,14 @@ function stateClass(s) {
   return m[s] || 'st-bye';
 }
 
-function fmtTime(ms) {
-  if (!ms) return '';
-  const d = new Date(ms);
+function fmtTime(us, withDate) {
+  if (!us) return '';
+  const d = new Date(Math.floor(us / 1000));       // 微秒 → 毫秒给 Date
   const pad = n => String(n).padStart(2, '0');
-  return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const pad3 = n => String(n).padStart(3, '0');
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad3(d.getMilliseconds())}${String(us % 1000).padStart(3, '0')}`;
+  if (withDate === false) return time;
+  return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${time}`;
 }
 
 async function load() {
@@ -290,7 +295,9 @@ function render(d) {
     const evts = d.calls[cid];
     const first = evts[0] || {};
     const last = evts[evts.length-1] || {};
-    const allStates = [...new Set(evts.map(e => e.status))];
+    // 折叠重复状态：统计各 status 出现次数，`180×2` 一目了然。
+    const stateCounts = {};
+    evts.forEach(e => { stateCounts[e.status] = (stateCounts[e.status]||0) + 1; });
     const xcid = first.xcid || '';
     const ani = first.ani || '';
     const dnis = first.dnis || '';
@@ -301,8 +308,8 @@ function render(d) {
     }
 
     const isOpen = expanded.has(cid);
-    const statesHtml = allStates.map(s =>
-      `<span class="state-pill ${stateClass(s)}">${s}</span>`).join(' ');
+    const statesHtml = Object.keys(stateCounts).map(s =>
+      `<span class="state-pill ${stateClass(s)}" title="出现 ${stateCounts[s]} 次">${s}${stateCounts[s] > 1 ? '×' + stateCounts[s] : ''}</span>`).join(' ');
 
     const startTime = fmtTime(first.ts);
 
@@ -311,7 +318,7 @@ function render(d) {
       bodyHtml = '<div class="card-body">' + evts.map((e,i) => {
         const j = {...e}; delete j.source; delete j.ts;
         return `<div class="event-row">
-          <div class="event-ts">${fmtTime(e.ts)}</div>
+          <div class="event-ts">${fmtTime(e.ts, false)}</div>
           <div class="event-badge"><span class="state-pill ${stateClass(e.status)}">${e.status}</span></div>
           <div class="event-json">${JSON.stringify(j)}</div>
         </div>`;
@@ -336,9 +343,13 @@ function render(d) {
   main.innerHTML = items.length ? items.join('') :
     '<div class="empty"><div class="big">🔍</div>没有匹配的呼叫</div>';
 
-  if (last && Object.keys(last).length) {
+  // 显示最新一通呼叫的状态（sortedIds 已按时间倒序，首条即最新）
+  const latestCid = sortedIds[0];
+  const latestEvts = d.calls[latestCid] || [];
+  const latest = latestEvts[latestEvts.length - 1] || {};
+  if (latest && Object.keys(latest).length) {
     document.getElementById('s-latest').textContent =
-      '最新: ' + (last.status || '') + ' ' + cid + ' (' + evts.length + '条)';
+      '最新: ' + (latest.status || '') + ' ' + latestCid + ' (' + latestEvts.length + '条)';
   }
 }
 
@@ -536,6 +547,8 @@ def sync_trunks_to_pbx():
             metadata["sbc"]["external_ip"] = cfg["external_ip"]
         if cfg.get("ringback"):
             metadata["sbc"]["ringback"] = cfg["ringback"]
+        if cfg.get("audio_codecs"):
+            metadata["sbc"]["audio_codecs"] = cfg["audio_codecs"]
         body = {
             "name": name,
             "display_name": cfg.get("display_name") or name,
@@ -576,7 +589,9 @@ def sync_trunks_to_pbx():
 
 
 def post_ccm_event(event: dict):
-    event.setdefault("ts", int(time.time() * 1000))
+    # 微秒时间戳（time.time_ns()//1000）：比毫秒精确 1000×，
+    # 且仍在 JS 安全整数范围内，前端可无损解析/排序。
+    event.setdefault("ts", time.time_ns() // 1_000)
     group_key = event.get("sessionId") or event.get("callId") or event.get("xcid") or "unknown"
     if group_key not in CCM_CALLS:
         CCM_CALLS[group_key] = []
@@ -726,6 +741,8 @@ def handle_route(payload: dict) -> dict:
         return {
             "action": "forward",
             "targets": [trunk_target(OUTBOUND_TRUNK, user)],
+            # 出站到 FS trunk 只允许 G.711，避免 FS 选定 G722 送给线路侧 488。
+            "allow_codecs": ["PCMA", "PCMU"],
             "headers": {"X-cid": xcid},
             "caller": caller_out,
         }
