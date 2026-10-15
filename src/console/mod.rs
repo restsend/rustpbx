@@ -108,6 +108,12 @@ pub trait AddonState: std::any::Any + Send + Sync + Clone + 'static {}
 
 impl<T: std::any::Any + Send + Sync + Clone + 'static> AddonState for T {}
 
+/// `?next=<target>`, encoded so a target with its own query (`?a=1&b=2`)
+/// stays one parameter.
+fn next_query(next: &str) -> String {
+    format!("?next={}", urlencoding::encode(next))
+}
+
 impl ConsoleState {
     pub async fn initialize(
         db: DatabaseConnection,
@@ -894,7 +900,7 @@ impl ConsoleState {
     pub fn login_url(&self, next: Option<String>) -> String {
         let mut url = self.url_for("/login");
         if let Some(next) = next {
-            url.push_str(&format!("?next={}", next));
+            url.push_str(&next_query(&next));
         }
         url
     }
@@ -902,7 +908,7 @@ impl ConsoleState {
     pub fn register_url(&self, next: Option<String>) -> String {
         let mut url = self.url_for("/register");
         if let Some(next) = next {
-            url.push_str(&format!("?next={}", next));
+            url.push_str(&next_query(&next));
         }
         url
     }
@@ -1400,4 +1406,58 @@ mod tests {
             "custom CSS must not close its style element"
         );
     }
+
+    #[tokio::test]
+    async fn login_url_keeps_next_as_one_encoded_parameter() {
+        let state = setup_state().await;
+        assert_eq!(
+            state.login_url(Some("/console/e911?tab=report&page=2".to_string())),
+            "/console/login?next=%2Fconsole%2Fe911%3Ftab%3Dreport%26page%3D2"
+        );
+        assert_eq!(state.login_url(None), "/console/login");
+    }
+
+    /// Logged out on a nested page with a query: redirected to login, and
+    /// after logging in, back to the same page and query.
+    #[tokio::test]
+    async fn login_returns_to_the_nested_page_and_query() {
+        let state = setup_state().await;
+        state
+            .create_user("admin@example.com", "admin", "password123")
+            .await
+            .expect("seed admin user");
+        let app = router(state.clone());
+        let page = format!("{}/extensions/new?from=test&step=2", state.base_path());
+
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(&page).body(Body::empty()).unwrap())
+            .await
+            .expect("page request");
+        assert!(response.status().is_redirection());
+        let login = response.headers()[header::LOCATION].to_str().unwrap().to_string();
+        assert_eq!(
+            login,
+            format!(
+                "{}/login?next={}",
+                state.base_path(),
+                urlencoding::encode(&page)
+            )
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&login)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("identifier=admin&password=password123"))
+                    .unwrap(),
+            )
+            .await
+            .expect("login request");
+        assert!(response.status().is_redirection());
+        assert_eq!(response.headers()[header::LOCATION].to_str().unwrap(), page);
+    }
 }
+

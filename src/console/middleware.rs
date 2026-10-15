@@ -15,6 +15,20 @@ pub struct AuthRequired(pub crate::models::user::Model);
 #[derive(Clone)]
 pub struct ApiTokenAuth(pub crate::models::user::Model);
 
+/// The page to come back to after login: the full original path and query.
+/// Routers nested under the console base path (most addons) see only the
+/// part after it in `parts.uri`; `OriginalUri` keeps the whole request target.
+fn return_target(parts: &Parts) -> String {
+    let uri = parts
+        .extensions
+        .get::<axum::extract::OriginalUri>()
+        .map(|original| &original.0)
+        .unwrap_or(&parts.uri);
+    uri.path_and_query()
+        .map(|target| target.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string())
+}
+
 impl<S> FromRequestParts<S> for AuthRequired
 where
     Arc<ConsoleState>: FromRef<S>,
@@ -28,7 +42,7 @@ where
         }
 
         let state = Arc::<ConsoleState>::from_ref(state);
-        let next = Some(parts.uri.path().to_string());
+        let next = Some(return_target(parts));
         let session_token = extract_session_cookie(&parts.headers);
 
         let session_token = session_token
@@ -205,5 +219,31 @@ impl IntoResponse for RenderTemplate<'_> {
                     .into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts(uri: &str, original: Option<&str>) -> Parts {
+        let mut request = axum::http::Request::builder().uri(uri).body(()).unwrap();
+        if let Some(original) = original {
+            request
+                .extensions_mut()
+                .insert(axum::extract::OriginalUri(original.parse().unwrap()));
+        }
+        request.into_parts().0
+    }
+
+    #[test]
+    fn return_target_keeps_the_nested_prefix_and_query() {
+        // A router nested under /console sees /e911; the original URI has it all.
+        assert_eq!(
+            return_target(&parts("/e911", Some("/console/e911?tab=report"))),
+            "/console/e911?tab=report"
+        );
+        // Without OriginalUri (not routed through axum) the request URI is used.
+        assert_eq!(return_target(&parts("/console/acme", None)), "/console/acme");
     }
 }
