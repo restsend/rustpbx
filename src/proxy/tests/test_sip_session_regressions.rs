@@ -6476,9 +6476,10 @@ fn recording_option_preserves_legacy_json_and_output_settings() {
     assert_eq!(roundtrip.stereo_swap, Some(false));
 }
 
-/// `stereo_mode = "external_left"` resolves the effective channel swap from
-/// the call shape: trunk/realm-derived direction, inbound trunk context,
-/// originate (UAC) topology, and the legacy `stereo_swap` override.
+/// `stereo_mode = "external_left"` (and its mirror `external_right`) resolves
+/// the effective channel swap from the call shape: trunk/realm-derived
+/// direction, inbound trunk context, originate (UAC) topology, and the legacy
+/// `stereo_swap` override.
 #[tokio::test]
 async fn stereo_external_left_resolves_swap_per_call_shape() {
     use crate::call::{OutboundTrunkContext, TransactionCookie, TrunkContext};
@@ -6671,6 +6672,59 @@ async fn stereo_external_left_resolves_swap_per_call_shape() {
     let mut option = RecorderOption::new("a.wav".into());
     option.stereo_mode = Some(StereoChannelMode::CalleeLeft);
     assert!(resolved_swap_with(&session, option));
+
+    // `external_right` is the mirror of `external_left`: it negates the
+    // resolved external-party classification for every call shape.
+    fn resolved_external_right(session: &SipSession) -> bool {
+        let mut option = RecorderOption::new("a.wav".into());
+        option.stereo_mode = Some(StereoChannelMode::ExternalRight);
+        resolved_swap_with(session, option)
+    }
+
+    // Inbound (external caller → internal callee): external on the right, so
+    // the caller leg swaps to the right.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // Extension-dialed outbound (internal caller → external callee): the
+    // external callee already sits on the right → no swap.
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_external_right(&session));
+
+    // Internal-to-internal: indistinguishable → caller-right fallback.
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // Trunk inbound caller under an Outbound realm: still external caller on
+    // the right.
+    let mut cookie = TransactionCookie::default();
+    cookie.insert_extension(TrunkContext {
+        id: Some(1),
+        name: "inbound-trunk".to_string(),
+        did_numbers: vec![],
+    });
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        cookie,
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // RWI/CC originate: the external customer rides leg A → swap to the right.
+    let session = build_uac_session(DialDirection::Outbound).await;
+    assert!(resolved_external_right(&session));
 }
 
 /// The trunk black-hole regression: a connected bridge whose legs receive

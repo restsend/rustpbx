@@ -381,6 +381,9 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 #   external_left           external party → left, internal → right; when the
 #                           sides cannot be distinguished (internal-to-internal
 #                           or both external) the caller stays on the left.
+#   external_right          external party → right, internal → left; the mirror
+#                           of external_left, falling back to caller-right when
+#                           the sides cannot be distinguished.
 # Applies to file recordings (local/http/s3) and to sipflow RTP capture
 # (capture-time leg swap, so exports inherit it).
 # stereo_mode = "external_left"

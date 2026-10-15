@@ -732,10 +732,11 @@ pub struct CallRecordingConfig {
     /// layer configures a stereo mode.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
-    /// Channel assignment policy (`caller_left`/`callee_left`/`external_left`).
+    /// Channel assignment policy (`caller_left`/`callee_left`/`external_left`/
+    /// `external_right`).
     /// Supersedes the legacy `stereo_swap` when configured. `None` inherits
-    /// the per-call policy / global policy; `external_left` is resolved per
-    /// call by the session (see `SipSession::external_party_on_left`).
+    /// the per-call policy / global policy; the `external_*` policies are
+    /// resolved per call by the session (see `SipSession::external_party_on_left`).
     pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
 }
 

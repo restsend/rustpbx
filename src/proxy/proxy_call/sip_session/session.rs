@@ -785,7 +785,8 @@ impl SipSession {
     /// policy, default `caller_left`) is the authoritative setting; the
     /// deprecated `stereo_swap` is honoured only when no layer configures a
     /// mode, so legacy deployments keep their behaviour until they migrate.
-    /// `external_left` classifies the external party per call.
+    /// The `external_left` / `external_right` policies classify the external
+    /// party per call (`external_right` is the mirror, placing it right).
     pub(crate) fn resolve_stereo_assignment(
         &self,
         option: &mut crate::media::recorder::RecorderOption,
@@ -807,6 +808,7 @@ impl SipSession {
         option.stereo_swap = Some(match mode {
             Some(StereoChannelMode::CalleeLeft) => true,
             Some(StereoChannelMode::ExternalLeft) => self.external_party_on_left(),
+            Some(StereoChannelMode::ExternalRight) => !self.external_party_on_left(),
             Some(StereoChannelMode::CallerLeft) => false,
             // Deprecated fallback: honoured only when no mode is configured.
             None => legacy_swap.unwrap_or(false),
@@ -815,6 +817,8 @@ impl SipSession {
 
     /// `StereoChannelMode::ExternalLeft` resolution: `true` puts the callee
     /// (leg B) on the left channel, `false` keeps the caller (leg A) there.
+    /// `StereoChannelMode::ExternalRight` negates the result so the external
+    /// party lands on the right instead.
     ///
     /// The recording tap rides the caller leg (`Ingress → leg A`), so the
     /// question is which side of the call is the external party:
@@ -830,6 +834,9 @@ impl SipSession {
     /// - Internal calls: indistinguishable → caller left (documented
     ///   fallback), unless routing sent the call out through a trunk
     ///   (mid-call forward), which makes the callee leg external.
+    ///
+    /// `ExternalRight` consumes `!external_party_on_left()`, so the
+    /// indistinguishable case falls back to caller-right instead.
     fn external_party_on_left(&self) -> bool {
         if self.primary_leg_uac {
             return false;

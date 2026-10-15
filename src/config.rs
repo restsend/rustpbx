@@ -280,10 +280,12 @@ pub struct RecordingPolicy {
     #[serde(default)]
     pub stereo_swap: Option<bool>,
     /// Stereo channel assignment policy: `caller_left` (default),
-    /// `callee_left` (≈ legacy `stereo_swap = true`) or `external_left`
-    /// (external party → left, internal → right; falls back to caller-left
-    /// when the sides cannot be distinguished). Configuring this at any
-    /// layer supersedes the legacy `stereo_swap`.
+    /// `callee_left` (≈ legacy `stereo_swap = true`), `external_left`
+    /// (external party → left, internal → right) or `external_right`
+    /// (external party → right, internal → left).
+    /// The external policies fall back to caller-left / caller-right when the
+    /// sides cannot be distinguished. Configuring this at any layer supersedes
+    /// the legacy `stereo_swap`.
     #[serde(default)]
     pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
     /// Local archival layout when `type = "local"`: `daily` (default) or

@@ -205,9 +205,9 @@ pub struct SipflowRecorder {
     call_id: String,
     /// Swap leg ids at capture: `true` writes the callee (egress) side as
     /// leg 0 and the caller (ingress) side as leg 1. Exported stereo WAVs
-    /// map leg 0 → left, so this is how `stereo_mode = "external_left"` is
-    /// honoured for RTP-captured (sipflow) recordings without touching the
-    /// export path.
+    /// map leg 0 → left, so this is how `stereo_mode = "external_left"` /
+    /// `"external_right"` is honoured for RTP-captured (sipflow) recordings
+    /// without touching the export path.
     swap_legs: bool,
 }
 

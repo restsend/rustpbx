@@ -231,6 +231,8 @@ ptime = 20              # File-recorder flush interval (ms); default 500
 #   callee_left             被叫 → 左声道，主叫 → 右声道
 #   external_left           外部用户 → 左声道，内部 → 右声道；
 #                           无法区分（双方同域/内部互拨）时回退主叫在左
+#   external_right          外部用户 → 右声道，内部 → 左声道（external_left
+#                           的镜像）；无法区分时回退主叫在右
 # stereo_mode = "external_left"
 # 已废弃的直接交换开关（true 等价 callee_left）；仅在任何层级都未配置
 # stereo_mode 时生效：
@@ -255,7 +257,7 @@ directions = ["inbound"]
 auto_start = true
 ```
 
-这些文件录音设置也适用于按需录音，单次通话的设置优先于服务器录音策略。显式设置 `samplerate`（8000–192000 Hz）时，输出重采样后的 16 位 PCM WAV；省略时保留按编码器选择的 WAV 格式。`ptime` 必须大于零，仅控制文件刷新间隔，不改变 RTP 打包间隔。`stereo_mode = "external_left"` 将外部用户放在立体声录音的左声道——按入中继上下文、呼叫方向（由 realm 推导）与外呼拓扑逐通话判定——无法区分（双方均为内部或均为外部）时回退主叫在左。这些设置不影响 SipFlow 报文采集（sipflow 录音在采集阶段交换 leg 实现 `stereo_mode`，导出结果一致）。
+这些文件录音设置也适用于按需录音，单次通话的设置优先于服务器录音策略。显式设置 `samplerate`（8000–192000 Hz）时，输出重采样后的 16 位 PCM WAV；省略时保留按编码器选择的 WAV 格式。`ptime` 必须大于零，仅控制文件刷新间隔，不改变 RTP 打包间隔。`stereo_mode = "external_left"` 将外部用户放在立体声录音的左声道（`external_right` 为镜像，放在右声道）——按入中继上下文、呼叫方向（由 realm 推导）与外呼拓扑逐通话判定——无法区分（双方均为内部或均为外部）时分别回退主叫在左 / 主叫在右。这些设置不影响 SipFlow 报文采集（sipflow 录音在采集阶段交换 leg 实现 `stereo_mode`，导出结果一致）。
 
 ### HTTP 录音上传
 

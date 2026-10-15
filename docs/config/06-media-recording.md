@@ -254,6 +254,8 @@ ptime = 20              # File-recorder flush interval (ms); default 500
 #   callee_left             callee → left, caller → right
 #   external_left           external party → left, internal → right; falls back
 #                           to caller-left when both sides are the same realm
+#   external_right          external party → right, internal → left; the mirror
+#                           of external_left (falls back to caller-right)
 # stereo_mode = "external_left"
 # Deprecated direct swap (true ≡ callee_left); honoured only when no layer
 # configures stereo_mode:
@@ -278,7 +280,7 @@ directions = ["inbound"]
 auto_start = true
 ```
 
-File recording settings also apply to on-demand recording. Per-call overrides take precedence over the server recording policy. An explicit `samplerate` (8000–192000 Hz) selects resampled 16-bit PCM WAV; omitting it preserves the codec-based WAV output. `ptime` must be positive and controls file flushing, not RTP packetization. `stereo_mode = "external_left"` places the external party on the left channel of stereo recordings — resolved per call from the inbound trunk context, the call direction (realm-derived), and the originate topology — and falls back to caller-left when both sides are internal or both external. These settings do not change SipFlow packet capture (sipflow recordings honour `stereo_mode` by swapping capture legs, so exports inherit it).
+File recording settings also apply to on-demand recording. Per-call overrides take precedence over the server recording policy. An explicit `samplerate` (8000–192000 Hz) selects resampled 16-bit PCM WAV; omitting it preserves the codec-based WAV output. `ptime` must be positive and controls file flushing, not RTP packetization. `stereo_mode = "external_left"` places the external party on the left channel of stereo recordings and `stereo_mode = "external_right"` on the right (the mirror) — both resolved per call from the inbound trunk context, the call direction (realm-derived), and the originate topology — falling back to caller-left / caller-right respectively when both sides are internal or both external. These settings do not change SipFlow packet capture (sipflow recordings honour `stereo_mode` by swapping capture legs, so exports inherit it).
 
 ### HTTP Recording Upload
 ```toml

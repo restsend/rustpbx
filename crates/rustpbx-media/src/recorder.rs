@@ -28,6 +28,10 @@ pub enum StereoChannelMode {
     /// caller-left when the sides cannot be distinguished (both internal or
     /// both external).
     ExternalLeft,
+    /// External party → right, internal party → left. The mirror of
+    /// [`Self::ExternalLeft`]. Falls back to caller-right when the sides
+    /// cannot be distinguished (both internal or both external).
+    ExternalRight,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -44,7 +48,8 @@ pub struct RecorderOption {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ptime: Option<u32>,
     /// Channel assignment policy (`caller_left` / `callee_left` /
-    /// `external_left`). Takes precedence over the legacy `stereo_swap`.
+    /// `external_left` / `external_right`). Takes precedence over the legacy
+    /// `stereo_swap`.
     #[serde(alias = "stereo_mode", skip_serializing_if = "Option::is_none")]
     pub stereo_mode: Option<StereoChannelMode>,
     /// Legacy direct channel swap. Deprecated in favour of `stereo_mode`:
@@ -926,10 +931,15 @@ mod tests {
             serde_json::to_value(StereoChannelMode::ExternalLeft).unwrap(),
             serde_json::json!("external_left")
         );
+        assert_eq!(
+            serde_json::to_value(StereoChannelMode::ExternalRight).unwrap(),
+            serde_json::json!("external_right")
+        );
         for (text, expected) in [
             ("caller_left", StereoChannelMode::CallerLeft),
             ("callee_left", StereoChannelMode::CalleeLeft),
             ("external_left", StereoChannelMode::ExternalLeft),
+            ("external_right", StereoChannelMode::ExternalRight),
         ] {
             let option: RecorderOption =
                 serde_json::from_str(&format!("{{\"recorder_file\":\"\",\"stereo_mode\":\"{text}\"}}"))
