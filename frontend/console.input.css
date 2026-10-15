@@ -1,0 +1,14 @@
+@import "tailwindcss" source(none);
+
+@source "../templates";
+@source "../src/addons";
+@source "../static/js";
+
+/* Edition checkouts are siblings locally and in the Docker build stages.
+ * Tailwind skips source directories that are absent in a particular edition.
+ */
+@source "../../rustpbx-commerce/addons";
+@source "../../rustpbx-wholesale/templates";
+@source "../../rustpbx-wholesale/static";
+@source "../../rustpbx-cc/templates";
+@source "../../rustpbx-cc/static";
