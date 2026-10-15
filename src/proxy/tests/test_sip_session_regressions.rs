@@ -224,6 +224,59 @@ impl AppRuntime for StartOnlyRuntime {
     }
 }
 
+/// Records every event injected into the app runtime so tests can assert the
+/// session's post-start kicks (`dial_next_agent`, ...).
+struct RecordingInjectRuntime {
+    injected: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl RecordingInjectRuntime {
+    fn new() -> Self {
+        Self {
+            injected: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Injected event names, in delivery order.
+    fn injected_names(&self) -> Vec<String> {
+        self.injected
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl AppRuntime for RecordingInjectRuntime {
+    async fn start_app(
+        &self,
+        _app_name: &str,
+        _params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        self.injected.lock().unwrap().push(event);
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn current_app(&self) -> Option<String> {
+        None
+    }
+}
+
 #[async_trait]
 impl AppRuntime for BridgeReturnRuntime {
     async fn start_app(
@@ -2772,6 +2825,60 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
         session.meta.app_name.as_deref(),
         Some("queue"),
         "terminal phase must be attributed to the queue app, not a stale IVR"
+    );
+}
+
+/// Regression: a skill-group queue whose pre-resolution finds ZERO agents
+/// (every agent busy/wrapup at that instant) must STILL receive the
+/// `dial_next_agent` kick.
+///
+/// `on_enter` re-resolves the group against the live registry
+/// (`QueueApp::resolve_agents`), so an agent that flips to Idle in the window
+/// between pre-resolution and app start ends up on the sequential dial list.
+/// The session used to gate the kick on the *pre-resolution* result
+/// (`has_resolved_agents`), so in that window the app had agents but nothing
+/// triggered the first INVITE — the caller sat on hold music until abandoning
+/// while the agent stayed Idle (missed ring, no SIP INVITE to the agent).
+///
+/// Trace: call `bd2e9d5d740a453cb3362111a478dc60` (2026-10-16,
+/// 10.193.244.54) — agent 489220 went wrapup→idle 0.27s after the empty
+/// pre-resolve, `Queue: resolved 1 dynamic agents` followed, yet no dial was
+/// ever issued for 215s until the caller hung up.
+#[tokio::test]
+async fn skill_group_empty_preresolve_still_injects_dial_kick() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "support".to_string(),
+        RouteQueueConfig {
+            name: Some("support".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                // No registry in this harness → the skill group resolves to an
+                // empty agent list, exactly the "empty pre-resolve" case.
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:runtime-idle".to_string(),
+                    label: Some("runtime-idle".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(RecordingInjectRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer("support", None, Vec::new(), None)
+        .await
+        .expect("queue app should start");
+
+    let names = runtime.injected_names();
+    assert!(
+        names.iter().any(|n| n == "dial_next_agent"),
+        "a skill-group queue with an empty pre-resolve must still be kicked to dial \
+         (on_enter may re-resolve an Idle agent); injected events were: {names:?}"
     );
 }
 

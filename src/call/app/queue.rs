@@ -945,6 +945,25 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<AppAction> {
+        // Idempotent re-entry: the app is ALREADY in wait retention. Restarting
+        // hold music / retention prompts / the announce here would duplicate
+        // them, so drop any stale dispatch claim and make sure the poll timer
+        // stays armed instead.
+        //
+        // The timer matters: `try_offer_from_wait` CANCELS `queue_retry` right
+        // before dialing, so a poll round whose resolved agents all became
+        // unavailable (or a late `dial_next_agent` kick from the session)
+        // depends on this re-entry to keep the clock running.
+        if matches!(
+            self.state,
+            QueueState::WaitingForAgent | QueueState::PlayingComfortPrompt
+        ) {
+            if let Some(ref registry) = self.agent_registry {
+                registry.fifo_release_dispatch(&self.call_id).await;
+            }
+            self.arm_queue_retry(ctrl);
+            return Ok(AppAction::Continue);
+        }
         info!(
             queue = %self.config.name,
             skill_group = ?self.config.skill_group,
@@ -1805,6 +1824,32 @@ impl QueueApp {
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             warn!("Queue: no more agents to dial");
+            // The session injects this kick for skill-group queues regardless
+            // of the pre-resolve result, so a LATE kick can arrive in any
+            // state. Only a dial round that genuinely exhausted its list may
+            // proceed past this point; a kick arriving during the busy /
+            // no-answer / final prompts, the fallback itself or a terminal
+            // state must not replay the prompt nor double-execute the
+            // fallback (`play_unavailable_prompt_and_then_fallback` re-runs it
+            // — it has no `abandoned_recorded` early return).
+            if self.abandoned_recorded
+                || matches!(
+                    self.state,
+                    QueueState::PlayingBusyPrompt
+                        | QueueState::PlayingNoAnswerPrompt
+                        | QueueState::PlayingFinalPrompt
+                        | QueueState::ExecutingFallback
+                        | QueueState::Done
+                )
+            {
+                debug!(
+                    queue = %self.config.name,
+                    state = ?self.state,
+                    abandoned_recorded = self.abandoned_recorded,
+                    "Queue: late dial kick after fallback started — ignoring"
+                );
+                return Ok(AppAction::Continue);
+            }
             if self.allows_wait_retention() {
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;

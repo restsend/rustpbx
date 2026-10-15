@@ -6833,6 +6833,11 @@ impl SipSession {
             self.server.proxy_config.load().queue_hold_music.clone(),
         );
 
+        // A skill-group target enables skill routing in the queue app, which
+        // re-resolves the group in `on_enter` — so the app may dial agents the
+        // pre-resolution below did not see. Captured before the move.
+        let is_skill_group_queue = primary_skill_group.is_some();
+
         // Store resolved plan in context for the queue app factory
         if let Some(ctx) = self.app_runtime.app_context() {
             *ctx.pending_queue.lock() = Some(PendingQueuePlan {
@@ -6919,10 +6924,21 @@ impl SipSession {
         );
 
         // Inject dial_next_agent to kick off sequential agent dialing
-        // (parallel mode auto-dials in on_enter). Skip when no agents were
-        // resolved — on_enter already fell through to the busy-prompt/fallback
-        // path, so a second dial attempt would replay the busy prompt.
-        if !is_parallel && has_resolved_agents {
+        // (parallel mode auto-dials in on_enter).
+        //
+        // The kick must also fire when a skill-group target pre-resolved to
+        // ZERO agents: `on_enter` re-resolves the group against the live
+        // registry (`resolve_agents`), so an agent that flipped to Idle in the
+        // gap between pre-resolution and app start would otherwise be put on
+        // the sequential dial list with nothing to trigger the first INVITE —
+        // the caller sat on hold music until abandoning while the agent stayed
+        // Idle. Harmless when the re-resolve ALSO finds nothing: the app is
+        // already in wait retention and `dial_next_agent` no-ops there.
+        //
+        // Plain (non-skill-group) queues that resolved no agents still skip the
+        // kick — `on_enter` fell through to the busy-prompt/fallback path, so a
+        // second dial attempt would replay the busy prompt.
+        if !is_parallel && (has_resolved_agents || is_skill_group_queue) {
             let (name, data) = QueueSignal::DialNext.to_custom();
             let _ = self.app_runtime.inject_event(serde_json::json!({
                 "type": "custom",

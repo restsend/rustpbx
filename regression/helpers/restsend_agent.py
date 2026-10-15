@@ -385,21 +385,24 @@ class RestsendAgent:
                     f"stderr tail: {self.stderr_text()[-400:]}")
 
     # ── high-level ops ───────────────────────────────────────────────────
-    async def register(self, expires: int = 120, transport: Optional[str] = None) -> bool:
+    async def register(self, expires: int = 120, transport: Optional[str] = None,
+                       ws_path: str = "/ws") -> bool:
         """init → bind → REGISTER.
 
         transport=None (default): classic UDP bind + ``host:sip_port`` registrar.
         transport="ws": SIP over WebSocket — ``sip_bind_ws`` to
-        ``ws://host:http_port/ws`` and a ``ws://`` registrar, the production
-        cc-phone / restsend-pc path. Killing the process then drops the WS
-        link, which rustpbx treats as a transport-close offline.
+        ``ws://host:http_port<ws_path>`` and a ``ws://`` registrar, the
+        production cc-phone / restsend-pc path. Killing the process then drops
+        the WS link, which rustpbx treats as a transport-close offline.
+        ws_path: server ``[proxy] ws_handler`` path (default ``/ws``; a
+        prefixed deployment such as the prd cluster uses ``/rustpbx/ws``).
         """
         init_cmd: dict[str, Any] = {"cmd": "init"}
         if self.enable_video is not None:
             init_cmd["enable_video"] = self.enable_video
         await self.cmd(init_cmd)
         if transport == "ws":
-            registrar = f"ws://{self.pbx.host}:{self.pbx.http_port}/ws"
+            registrar = f"ws://{self.pbx.host}:{self.pbx.http_port}{ws_path}"
             await self.cmd({"cmd": "sip_bind_ws", "registrar": registrar,
                             "user": self.user})
         else:

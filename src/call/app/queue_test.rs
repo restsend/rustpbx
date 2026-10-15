@@ -5193,4 +5193,149 @@ mod tests {
         stack.cancel();
         let _ = stack.join().await;
     }
+
+    /// Regression: the session injects `dial_next_agent` for skill-group queues
+    /// even when the pre-resolution listed no agents (because `on_enter` may
+    /// re-resolve). Two invariants when a LATE kick lands on an already-waiting
+    /// app with no dialable agents:
+    /// 1. It must NOT restart hold music / retention prompts (duplicate entry);
+    /// 2. It must NOT leave the app idle WITHOUT the poll timer —
+    ///    `try_offer_from_wait` cancels `queue_retry` before dialing, so the
+    ///    idempotent `enter_waiting_for_agent` re-entry is what re-arms it.
+    #[tokio::test]
+    async fn test_dial_kick_in_wait_retention_is_noop() {
+        use crate::call::app::agent_registry::PresenceState;
+        use std::sync::Arc;
+
+        // The registry starts EMPTY: `on_enter` sees no agents (exactly the
+        // production trace — resolve empty → wait retention), and agent-001
+        // only appears after the late kick, mirroring the wrapup→idle flip.
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![vec![
+                "sip:agent-001@localhost".to_string(),
+            ]]),
+        );
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-kick-1".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Wait-retention hold music.
+        stack.next_cmd(2000).await.expect("hold while waiting");
+
+        // The late session kick arrives while already waiting with no agents.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::Play { .. }),
+                "dial kick in wait retention must NOT restart hold music, got {cmd:?}"
+            );
+            assert!(
+                !matches!(cmd, CallCommand::Hangup(_)),
+                "dial kick in wait retention must NOT abandon the call, got {cmd:?}"
+            );
+        }
+
+        // NOW the agent flips to Idle (the wrapup→idle race), and the poll is
+        // armed by the idempotent re-entry: firing it must resolve and dial.
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence("agent-001", PresenceState::Idle)
+            .await
+            .unwrap();
+        stack.timeout("queue_retry");
+        let mut dialed = false;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            match stack.next_cmd(300).await {
+                Some(CallCommand::LegAdd { target, .. }) if target.contains("agent-001") => {
+                    dialed = true;
+                    break;
+                }
+                Some(cmd) => seen.push(format!("{cmd:?}")),
+                None => break,
+            }
+        }
+        assert!(
+            dialed,
+            "the idempotent re-entry must re-arm queue_retry — the next poll must dial; saw: {seen:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Regression (session kick × queue without an agent registry): a
+    /// skill-group queue with NO registry attached cannot retain wait
+    /// (`allows_wait_retention` false), so `on_enter` answers and starts the
+    /// busy prompt + fallback. The late session kick must not replay the busy
+    /// prompt nor drive the fallback a second time.
+    #[tokio::test]
+    async fn test_dial_kick_after_busy_prompt_is_noop() {
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config.hold = None;
+        // NOTE: no agent registry attached — this is the P1 case.
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config);
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
+
+        // The late session kick arrives while the busy prompt is playing.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::Play { .. }),
+                "late dial kick must NOT replay the busy prompt, got {cmd:?}"
+            );
+            assert!(
+                !matches!(cmd, CallCommand::Hangup(_)),
+                "late dial kick must NOT double-execute the fallback, got {cmd:?}"
+            );
+        }
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
 }

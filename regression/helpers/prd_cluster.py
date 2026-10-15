@@ -695,10 +695,17 @@ class PrdRestsendAgent:
     any pytest loop. Event matching is CURSOR-based (see wait_ring).
     """
 
-    def __init__(self, user: str, local_port: int):
-        pbx_shim = type("PbxShim", (), {"host": PRD_HOST, "sip_port": 35061})()
+    def __init__(self, user: str, local_port: int, *,
+                 expires: int = 600, transport: Optional[str] = None,
+                 ws_path: str = "/rustpbx/ws"):
+        pbx_shim = type(
+            "PbxShim", (), {"host": PRD_HOST, "sip_port": 35061, "http_port": 18082}
+        )()
         self.user = user
         self.port = local_port
+        self._expires = expires
+        self._transport = transport
+        self._ws_path = ws_path
         self.agent = RestsendAgent(pbx_shim, user, local_port=local_port)
         self._cursor = 0  # index into agent.events; matched-consumed marker
 
@@ -706,7 +713,11 @@ class PrdRestsendAgent:
     async def _start_impl(self) -> None:
         try:
             await self.agent.start()
-            if not await self.agent.register(expires=600):
+            if not await self.agent.register(
+                expires=self._expires,
+                transport=self._transport,
+                ws_path=self._ws_path,
+            ):
                 raise PrdError(
                     f"restsend {self.user} failed to register\n"
                     f"stderr: {self.agent.stderr_text()[-800:]}"
@@ -824,3 +835,14 @@ class PrdRestsendAgent:
         await asyncio.wrap_future(
             _SIDECAR.run(self.agent.cmd({"cmd": "hangup"}))
         )
+
+    async def kill(self) -> None:
+        """Hard-kill the client WITHOUT any BYE/unregister (crash / net loss).
+
+        The registration lease (or, for ``transport="ws"``, the dropped
+        WebSocket) is left for the server to reclaim — the exact
+        client-death shape the offline cleanup must handle.
+        """
+        self.agent.kill()
+        if self in _LIVE_UAS:
+            _LIVE_UAS.remove(self)
