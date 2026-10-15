@@ -73,7 +73,7 @@
                     <div>
                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
                             x-text="t.auto_renew_threshold"></label>
-                        <input type="number" x-model="autoRenewThreshold" :disabled="!autoRenewEnabled" min="1"
+                        <input type="number" x-model.number="autoRenewThreshold" :disabled="!autoRenewEnabled" min="1"
                             max="720"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:opacity-50">
                         <p class="mt-1 text-xs text-slate-400" x-text="t.auto_renew_threshold_desc"></p>
@@ -270,7 +270,8 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             auto_renew: this.autoRenewEnabled,
-                            renewal_threshold_hours: this.autoRenewThreshold,
+                            // An emptied field keeps the saved threshold.
+                            renewal_threshold_hours: this.autoRenewThreshold === '' ? null : this.autoRenewThreshold,
                             renew_https: this.autoRenewHttps,
                             renew_sips: this.autoRenewSips,
                             domain: this.autoRenewDomain || null,

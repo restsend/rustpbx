@@ -603,29 +603,43 @@ pub struct SetAutoRenewConfigRequest {
 
 /// Update auto-renew configuration
 pub async fn set_auto_renew_config(
+    State(state): State<AppState>,
     Extension(acme_state): Extension<super::AcmeState>,
     Json(req): Json<SetAutoRenewConfigRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let mut config = acme_state.auto_renew_config.write().await;
-    config.auto_renew = req.auto_renew;
+    let mut updated = config.clone();
+    updated.auto_renew = req.auto_renew;
     if let Some(threshold) = req.renewal_threshold_hours {
-        config.renewal_threshold_hours = threshold;
+        updated.renewal_threshold_hours = threshold;
     }
     if let Some(https) = req.renew_https {
-        config.renew_https = https;
+        updated.renew_https = https;
     }
     if let Some(sips) = req.renew_sips {
-        config.renew_sips = sips;
+        updated.renew_sips = sips;
     }
     if let Some(domain) = req.domain {
-        config.domain = Some(domain);
+        updated.domain = Some(domain);
     }
 
+    // Startup reads acme.toml; save there first so a restart keeps it.
+    let path = super::acme_config_path(&state.config_path);
+    if let Err(e) = super::save_acme_config(&path, &updated).await {
+        error!("Failed to save ACME config to {}: {}", path.display(), e);
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": format!("Failed to save {}: {}", path.display(), e) })),
+        )
+            .into_response();
+    }
+    *config = updated.clone();
     info!(
-        "Auto-renew config updated: auto_renew={}",
-        config.auto_renew
+        "Auto-renew config saved to {}: auto_renew={}",
+        path.display(),
+        updated.auto_renew
     );
-    Json(config.clone())
+    Json(updated).into_response()
 }
 
 /// Get information about the currently managed certificate

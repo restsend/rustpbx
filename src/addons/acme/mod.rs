@@ -55,31 +55,23 @@ impl AcmeAddon {
     /// Load auto-renew configuration from addon-specific config file.
     /// Tries `<config_dir>/acme.toml` first, falls back to defaults.
     pub async fn load_config(&self, config_path: &Option<String>) {
+        let addon_config_path = acme_config_path(config_path);
         let mut loaded = false;
-        if let Some(path) = config_path {
-            let config_dir = std::path::Path::new(path).parent();
-            if let Some(dir) = config_dir {
-                let addon_config_path = dir.join("acme.toml");
-                if addon_config_path.exists() {
-                    match tokio::fs::read_to_string(&addon_config_path).await {
-                        Ok(content) => match toml::from_str::<AcmeConfig>(&content) {
-                            Ok(acme_config) => {
-                                let mut auto_renew = self.state.auto_renew_config.write().await;
-                                *auto_renew = acme_config;
-                                loaded = true;
-                                tracing::info!(
-                                    "ACME config loaded from {}",
-                                    addon_config_path.display()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to parse acme.toml: {}", e);
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read acme.toml: {}", e);
-                        }
+        if addon_config_path.exists() {
+            match tokio::fs::read_to_string(&addon_config_path).await {
+                Ok(content) => match toml::from_str::<AcmeConfig>(&content) {
+                    Ok(acme_config) => {
+                        let mut auto_renew = self.state.auto_renew_config.write().await;
+                        *auto_renew = acme_config;
+                        loaded = true;
+                        tracing::info!("ACME config loaded from {}", addon_config_path.display());
                     }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse acme.toml: {}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to read acme.toml: {}", e);
                 }
             }
         }
@@ -87,6 +79,30 @@ impl AcmeAddon {
             tracing::info!("ACME using default configuration (no acme.toml found)");
         }
     }
+}
+
+/// `acme.toml` next to the main config file; the console saves the
+/// auto-renew settings there and startup reads them back.
+pub(crate) fn acme_config_path(config_path: &Option<String>) -> std::path::PathBuf {
+    config_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .map(|dir| dir.join("acme.toml"))
+        .unwrap_or_else(|| std::path::PathBuf::from("acme.toml"))
+}
+
+/// Persist the auto-renew settings to `path`.
+pub(crate) async fn save_acme_config(
+    path: &std::path::Path,
+    config: &AcmeConfig,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, toml::to_string_pretty(config)?).await?;
+    Ok(())
 }
 
 #[async_trait]
@@ -205,5 +221,43 @@ impl Addon for AcmeAddon {
             url: format!("{}/acme", base_path),
             permission: None,
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acme_config_path_uses_main_config_directory() {
+        assert_eq!(
+            acme_config_path(&Some("config/rustpbx.toml".to_string())),
+            std::path::PathBuf::from("config/acme.toml")
+        );
+        assert_eq!(acme_config_path(&None), std::path::PathBuf::from("acme.toml"));
+    }
+
+    #[tokio::test]
+    async fn saved_auto_renew_settings_load_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_config = dir.path().join("config.toml").to_string_lossy().to_string();
+        let saved = AcmeConfig {
+            auto_renew: true,
+            renewal_threshold_hours: 48,
+            renew_https: true,
+            renew_sips: false,
+            domain: Some("pbx.example.com".to_string()),
+        };
+        save_acme_config(&acme_config_path(&Some(main_config.clone())), &saved)
+            .await
+            .unwrap();
+
+        let addon = AcmeAddon::new();
+        addon.load_config(&Some(main_config)).await;
+        let loaded = addon.state.auto_renew_config.read().await.clone();
+        assert!(loaded.auto_renew);
+        assert_eq!(loaded.renewal_threshold_hours, 48);
+        assert!(loaded.renew_https);
+        assert_eq!(loaded.domain.as_deref(), Some("pbx.example.com"));
     }
 }
