@@ -5,12 +5,12 @@
 
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::{TestUa, TestUaEvent, create_test_sdp};
+use crate::common::wait::{wait_for_value, wait_until};
 use anyhow::Result;
 use rsipstack::dialog::DialogId;
 use rustpbx::config::ProxyConfig;
 use rustpbx::proxy::routing::{MatchConditions, RouteAction, RouteRule};
 use std::time::Duration;
-use tokio::time::sleep;
 
 const IVR_NUMBER: &str = "8890";
 
@@ -79,36 +79,34 @@ async fn enter_ivr_and_press_one(alice: &TestUa) -> Result<DialogId> {
     let dialog = alice
         .make_call(IVR_NUMBER, Some(create_test_sdp("127.0.0.1", 12345, false)))
         .await?;
-    sleep(Duration::from_millis(300)).await;
+    // The IVR answered in on_enter, so it already takes DTMF (barge-in).
     alice.send_dtmf_info(&dialog, "1").await?;
     Ok(dialog)
 }
 
 /// Wait for bob's incoming transfer leg.
 async fn wait_incoming(bob: &TestUa) -> Result<DialogId> {
-    for _ in 0..50 {
-        for event in bob.process_dialog_events().await? {
-            if let TestUaEvent::IncomingCall(id, _) = event {
-                return Ok(id);
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    anyhow::bail!("bob never received the transfer")
+    wait_for_value(Duration::from_secs(5), || async {
+        bob.process_dialog_events().await.ok()?.into_iter().find_map(|event| match event {
+            TestUaEvent::IncomingCall(id, _) => Some(id),
+            _ => None,
+        })
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("bob never received the transfer"))
 }
 
 /// Whether alice's call ends within `within`.
 async fn alice_terminated(alice: &TestUa, within: Duration) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + within;
-    while tokio::time::Instant::now() < deadline {
-        for event in alice.process_dialog_events().await? {
-            if matches!(event, TestUaEvent::CallTerminated(_)) {
-                return Ok(true);
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    Ok(false)
+    Ok(wait_until(within, || async {
+        alice.process_dialog_events().await.is_ok_and(|events| {
+            events
+                .iter()
+                .any(|event| matches!(event, TestUaEvent::CallTerminated(_)))
+        })
+    })
+    .await
+    .is_ok())
 }
 
 const TRANSFER_TO_BOB: &str = r#"{ type = "transfer", target = "bob" }"#;

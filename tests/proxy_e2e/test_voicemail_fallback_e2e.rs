@@ -7,12 +7,12 @@
 
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::TestUaEvent;
+use crate::common::wait::wait_for_value;
 use anyhow::Result;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 
 /// Callee with voicemail on; `create_ua` registers it with password "password".
 const VOICEMAIL_USER: &str = "dave";
@@ -76,20 +76,15 @@ async fn declined_call_goes_to_voicemail() -> Result<()> {
         async move { alice.make_call(VOICEMAIL_USER, Some(caller_sdp())).await }
     });
 
-    let mut declined = false;
-    for _ in 0..50 {
-        for event in dave.process_dialog_events().await? {
-            if let TestUaEvent::IncomingCall(id, _) = event {
-                dave.reject_call(&id).await?;
-                declined = true;
-            }
-        }
-        if declined {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    assert!(declined, "dave never saw the call");
+    let incoming = wait_for_value(Duration::from_secs(5), || async {
+        dave.process_dialog_events().await.ok()?.into_iter().find_map(|event| match event {
+            TestUaEvent::IncomingCall(id, _) => Some(id),
+            _ => None,
+        })
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("dave never saw the call"))?;
+    dave.reject_call(&incoming).await?;
 
     let dialog = call.await??;
     alice.hangup(&dialog).await?;
