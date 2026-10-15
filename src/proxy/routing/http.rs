@@ -58,6 +58,11 @@ impl HttpCallRouter {
 #[derive(Serialize)]
 struct HttpRequestPayload {
     pub call_id: String,
+    /// Global session id (RFC 7989) resolved for this call, same value that
+    /// RustPBX uses in the dialplan / RWI events. Letting the HTTP router
+    /// know it lets it correlate route-time artifacts (e.g. X-cid) with
+    /// RWI call events by exact session id instead of guessing.
+    pub session_id: String,
     pub from: String,
     pub to: String,
     pub source_addr: Option<String>,
@@ -174,6 +179,7 @@ impl CallRouter for HttpCallRouter {
 
         let payload = HttpRequestPayload {
             call_id: call_id.clone(),
+            session_id: crate::call::session_id::normalize_or_generate(&call_id),
             from,
             to,
             source_addr,
