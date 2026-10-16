@@ -123,7 +123,6 @@ struct HealthShared {
     /// Zero-inbound-RTP window before a leg is flagged stalled.
     stall_detect: parking_lot::RwLock<Duration>,
     quality_stats: crate::quality_stats::QualityStatsConfig,
-    retired_input: parking_lot::Mutex<Vec<(Arc<crate::ingress_tap::IngressTap>, RetiredIngressInterval)>>,
 }
 
 impl HealthShared {
@@ -132,7 +131,6 @@ impl HealthShared {
         Arc::new(Self {
             tx,
             quality_stats,
-            retired_input: parking_lot::Mutex::new(Vec::new()),
             route_activated_at: parking_lot::Mutex::new(None),
             stall_detect: parking_lot::RwLock::new(
                 crate::media_health::DEFAULT_STALL_DETECT,
@@ -182,30 +180,6 @@ impl MediaBridge {
         }
     }
 
-    // Snapshot input at deselection, even if no periodic tick saw this leg.
-    // Only diagnostic data is handed off; no peer or recorder lifecycle changes.
-    fn sync_selected_legs(&self) {
-        let mut shared = self.legs_shared.lock();
-        if self.health.quality_stats.enabled {
-            let mut retired = self.health.retired_input.lock();
-            for (side, old, new) in [(0, shared.0.as_ref(), self.leg_a.as_ref()),
-                (1, shared.1.as_ref(), self.leg_b.as_ref())] {
-                if let Some(old) = old {
-                    if !new.is_some_and(|new| Arc::ptr_eq(old, new)) {
-                        if let Some(input) = old.ingress_tap().take_ingress_interval() {
-                            retired.push((old.ingress_tap().clone(), RetiredIngressInterval {
-                                leg_id: old.id().to_string(),
-                                side: if side == 0 { "caller" } else { "callee" },
-                                ingress_interval: input,
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-        *shared = (self.leg_a.clone(), self.leg_b.clone());
-    }
-
     /// Subscribe to the latest media-health snapshot (published every 5 s
     /// sampler tick). `None` until the first tick with at least one leg.
     pub fn health_rx(
@@ -250,7 +224,7 @@ impl MediaBridge {
             cancel.cancel();
         }
         self.last_bridged = None;
-        self.sync_selected_legs();
+        *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
     }
 
     /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
@@ -388,7 +362,7 @@ impl MediaBridge {
             LegSide::A => self.leg_a.replace(new_leg),
             LegSide::B => self.leg_b.replace(new_leg),
         };
-        self.sync_selected_legs();
+        *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
         // The replaced leg is no longer part of this bridge (transfer /
         // REFER). Stop its PeerConnection NOW so ICE/DTLS/SRTP resources are
         // released even while other Arc holders (e.g. a still-exiting RTCP
@@ -422,7 +396,7 @@ impl MediaBridge {
         self.leg_a = None;
         self.leg_b = None;
         self.detached_for_playback = false;
-        self.sync_selected_legs();
+        *self.legs_shared.lock() = (None, None);
         Ok(())
     }
 
@@ -442,7 +416,7 @@ impl MediaBridge {
         self.wire_leg(LegSide::B, &b);
         self.leg_a = Some(a);
         self.leg_b = Some(b);
-        self.sync_selected_legs();
+        *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
         Ok(())
     }
 
@@ -1264,15 +1238,6 @@ struct BridgeQualityWindow {
     #[serde(flatten)]
     totals: crate::quality_stats::WindowSummary,
     legs: Vec<LegQualityWindow>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    retired_ingress_intervals: Vec<RetiredIngressInterval>,
-}
-
-#[derive(serde::Serialize)]
-struct RetiredIngressInterval {
-    leg_id: String,
-    side: &'static str,
-    ingress_interval: crate::ingress_stats::IngressInterval,
 }
 
 #[derive(serde::Serialize)]
@@ -1288,8 +1253,6 @@ struct LegQualityWindow {
     counter_resets: usize,
     egress_report: crate::quality_stats::ReportSummary,
     ingress_report: Option<IngressQualityWindow>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ingress_interval: Option<crate::ingress_stats::IngressInterval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio_packet_samples: Option<crate::ingress_tap::AudioPacketSamples>,
 }
@@ -1464,11 +1427,6 @@ fn spawn_bridge_stats_task(
         let mut interval = tokio::time::interval(Duration::from_millis(sample_interval_ms));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_health = interval.tick().await; // skip the immediate first tick
-        // Logging has its own deadline: sample/window sizes must not round
-        // the configured output cadence up to the next sampling tick.
-        let mut log_timer = tokio::time::interval(Duration::from_millis(config.log_interval_ms));
-        log_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        if config.enabled { log_timer.tick().await; }
         let mut window = crate::quality_stats::QualityWindow::new(
             Duration::from_millis(config.window_ms),
             Duration::from_millis(config.sample_interval_ms),
@@ -1478,18 +1436,12 @@ fn spawn_bridge_stats_task(
             Duration::from_millis(config.sample_interval_ms),
         ));
         let mut previous_sample = std::time::Instant::now();
+        let mut last_emit = previous_sample;
         let mut sample_a: Option<LegSample> = None;
         let mut sample_b: Option<LegSample> = None;
         let mut report_counts = [0u64; 2];
         let mut leg_report_counts = [0u64; 2];
         let mut sampled_ids = [None, None];
-        let mut ingress_ids: [Option<String>; 2] = [None, None];
-        // Keep the observation taps for the final interval when teardown has
-        // already cleared bridge selection; never retain the media peers.
-        let mut sampled_taps: [Option<Arc<crate::ingress_tap::IngressTap>>; 2] = [None, None];
-        // Retire observed replacements until the next output deadline;
-        // replacement never emits an extra log.
-        let mut retired_ingress_intervals = Vec::new();
         let mut prev_a: Option<LegSample> = None;
         let mut prev_b: Option<LegSample> = None;
         // First/last inbound-RTP observations per side (for
@@ -1499,56 +1451,21 @@ fn spawn_bridge_stats_task(
         let mut last_rx: (Option<std::time::Instant>, Option<std::time::Instant>) =
             (None, None);
         loop {
-            let (tick, finishing, sample_due, emit) = tokio::select! {
-                _ = cancel.cancelled() => (tokio::time::Instant::now(), true, true, true),
-                _ = log_timer.tick(), if config.enabled => (tokio::time::Instant::now(), false, false, true),
-                tick = interval.tick() => (tick, false, true, false),
+            let (tick, finishing) = tokio::select! {
+                _ = cancel.cancelled() => (tokio::time::Instant::now(), true),
+                tick = interval.tick() => (tick, false),
             };
             let (la, lb) = {
                 let mut g = legs_shared.lock();
                 if finishing { std::mem::take(&mut *g) } else { (g.0.clone(), g.1.clone()) }
             };
-            let mut final_inputs = [None, None];
-            if config.enabled {
-                for (tap, report) in std::mem::take(&mut *health.retired_input.lock()) {
-                    let side = if report.side == "caller" { 0 } else { 1 };
-                    if finishing && la.is_none() && lb.is_none() && final_inputs[side].is_none()
-                        && sampled_taps[side].as_ref().is_some_and(|old| Arc::ptr_eq(old, &tap)) {
-                        final_inputs[side] = Some(report.ingress_interval);
-                    } else {
-                        retired_ingress_intervals.push(report);
-                    }
-                }
-            }
-            // Input evidence follows membership independently of rate sampling.
-            // Teardown may have cleared selection; retain its taps for the final report.
-            if config.enabled && (!finishing || la.is_some() || lb.is_some()) {
-                for (side, leg) in [la.as_ref(), lb.as_ref()].into_iter().enumerate() {
-                    let next_tap = leg.map(|leg| leg.ingress_tap().clone());
-                    let changed = match (&sampled_taps[side], &next_tap) {
-                        (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-                        (None, None) => false,
-                        _ => true,
-                    };
-                    if changed {
-                        sampled_taps[side] = next_tap;
-                        ingress_ids[side] = leg.map(|leg| leg.id().to_string());
-                    }
-                }
-            }
-            let mut sa = match (sample_due, la.as_ref()) {
-                (true, Some(leg)) => Some(sample_leg(leg, config.enabled).await),
-                _ => None,
-            };
-            let mut sb = match (sample_due, lb.as_ref()) {
-                (true, Some(leg)) => Some(sample_leg(leg, config.enabled).await),
-                _ => None,
-            };
+            let mut sa = if let Some(leg) = &la { Some(sample_leg(leg, config.enabled).await) } else { None };
+            let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg, config.enabled).await) } else { None };
 
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(previous_sample);
             // Normal teardown may clear selection first; absence is not evidence of counter reset.
-            if sample_due && config.enabled && (!finishing || la.is_some() || lb.is_some())
+            if config.enabled && (!finishing || la.is_some() || lb.is_some())
                 && (finishing || config.sample_interval_ms <= 5000
                 || elapsed >= Duration::from_millis(config.sample_interval_ms)) {
                 previous_sample = now;
@@ -1645,20 +1562,17 @@ fn spawn_bridge_stats_task(
                 sample_a = sa.clone();
                 sample_b = sb.clone();
             }
-            if emit {
+            let emit_interval = Duration::from_millis(config.log_interval_ms);
+            if finishing || now.duration_since(last_emit) >= emit_interval {
+                last_emit = now;
                 if config.enabled {
-                    if let Some(summary) = window.summary(now).or_else(|| {
-                        (ingress_ids.iter().any(Option::is_some) || !retired_ingress_intervals.is_empty())
-                            .then(|| crate::quality_stats::WindowSummary::unobserved(config.window_ms))
-                    }) {
+                    if let Some(summary) = window.summary(now) {
                         let legs = leg_windows.iter_mut().enumerate().filter_map(|(side, window)| {
-                            let id = ingress_ids[side].as_ref()?;
-                            let same_leg = sampled_ids[side].as_ref() == Some(id);
-                            let summary = same_leg.then(|| window.summary(now)).flatten().unwrap_or_else(||
-                                crate::quality_stats::WindowSummary::unobserved(config.window_ms));
+                            let id = sampled_ids[side].as_ref()?;
+                            let summary = window.summary(now)?;
                             let [caller, callee] = summary.reports;
                             let (egress, ingress) = if side == 0 { (caller, callee) } else { (callee, caller) };
-                            let current = if !same_leg { None } else if side == 0 { sample_a.as_ref() } else { sample_b.as_ref() };
+                            let current = if side == 0 { sample_a.as_ref() } else { sample_b.as_ref() };
                             let recovering = current.and_then(|sample| sample.ingress_recovery).is_some_and(|at|
                                 now.duration_since(at) < Duration::from_millis(config.window_ms));
                             Some(LegQualityWindow {
@@ -1674,15 +1588,10 @@ fn spawn_bridge_stats_task(
                                     IngressQualityWindow { ssrc: sample.ssrc, clock_rate: sample.clock_rate,
                                         jitter_ms: ingress.jitter_ms,
                                         loss_percent: if recovering { None } else { ingress.loss_percent } }),
-                                ingress_interval: final_inputs[side].take().or_else(|| sampled_taps[side].as_ref()
-                                    .and_then(|tap| tap.take_ingress_interval())),
                             })
                         }).collect();
-                        match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs,
-                            retired_ingress_intervals: std::mem::take(&mut retired_ingress_intervals) }) {
+                        match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs }) {
                             Ok(stats) => info!(bridge_id = ?session_id,
-                            session_id = %session_id,
-                            final_interval = finishing,
                             scope = "transport_counters_and_fresh_remote_reports",
                             egress_a_mode = la.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
                             egress_b_mode = lb.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
@@ -1696,10 +1605,6 @@ fn spawn_bridge_stats_task(
                 }
             }
             if finishing { break; }
-            // Reset after output work, including serialization/subscriber time.
-            // A late wake-up must not shorten the next normal log interval.
-            if emit { log_timer.reset(); }
-            if !sample_due { continue; }
             // Preserve the existing 5s health/telemetry cadence and SR
             // reconciliation; fast samples must not invent SR bursts.
             // Use scheduled ticks: wake-up jitter must not skip a full health period.
@@ -2274,7 +2179,7 @@ mod tests {
         use tracing::span::{Attributes, Id, Record};
         use tracing::{Event, Metadata, Subscriber};
         #[derive(Clone, Default)]
-        struct Logs(Arc<Mutex<Vec<(std::time::Instant, String, String, bool)>>>);
+        struct Logs(Arc<Mutex<Vec<(std::time::Instant, String, String)>>>);
         impl Subscriber for Logs {
             fn enabled(&self, metadata: &Metadata<'_>) -> bool {
                 // Enabled quality diagnostics must remain visible at INFO.
@@ -2293,13 +2198,8 @@ mod tests {
                     message: String,
                     bridge: String,
                     stats: String,
-                    session: String,
-                    final_interval: Option<bool>,
                 }
                 impl tracing::field::Visit for Fields {
-                    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-                        if field.name() == "final_interval" { self.final_interval = Some(value); }
-                    }
                     fn record_debug(
                         &mut self,
                         field: &tracing::field::Field,
@@ -2308,7 +2208,6 @@ mod tests {
                         match field.name() {
                             "message" => self.message = format!("{value:?}"),
                             "bridge_id" => self.bridge = format!("{value:?}"),
-                            "session_id" => self.session = format!("{value:?}"),
                             "stats" => self.stats = format!("{value:?}"),
                             _ => {}
                         }
@@ -2317,13 +2216,10 @@ mod tests {
                 let mut fields = Fields::default();
                 event.record(&mut fields);
                 if fields.message == "bridge media quality window" {
-                    assert_eq!(fields.bridge.trim_matches('"'), fields.session,
-                        "the emitted session ID must be complete and match the bridge");
-                    assert!(fields.final_interval.is_some(), "every report must mark final status");
                     self.0
                         .lock()
                         .unwrap()
-                        .push((std::time::Instant::now(), fields.bridge, fields.stats, fields.final_interval.unwrap()));
+                        .push((std::time::Instant::now(), fields.bridge, fields.stats));
                 }
             }
         }
@@ -2337,36 +2233,6 @@ mod tests {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    // A late wake-up must not be followed by a phase-aligned
-                    // burst. Exercise actual bridge logs with Tokio's clock.
-                    tokio::time::pause();
-                    let settings = crate::quality_stats::QualityStatsConfig {
-                        enabled: true, sample_interval_ms: 10000,
-                        window_ms: 10000, log_interval_ms: 2000,
-                    };
-                    let mut delayed = MediaBridge::new_with_quality_stats("enabled-delay", settings.clone());
-                    let mut leg_config = LegConfig::rtp_pcmu();
-                    leg_config.quality_stats = settings;
-                    delayed.replace_leg(LegSide::A, LegInner::new("delayed", &leg_config, None).unwrap()).await;
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    tokio::time::advance(Duration::from_millis(3900)).await;
-                    for _ in 0..10 { tokio::task::yield_now().await; }
-                    assert_eq!(captured.lock().unwrap().len(), 1);
-                    tokio::time::advance(Duration::from_millis(100)).await;
-                    for _ in 0..10 { tokio::task::yield_now().await; }
-                    assert_eq!(captured.lock().unwrap().len(), 1,
-                        "a delayed output must restart the full logging interval");
-                    tokio::time::advance(Duration::from_millis(1902)).await;
-                    for _ in 0..10 { tokio::task::yield_now().await; }
-                    assert_eq!(captured.lock().unwrap().len(), 2);
-                    delayed.close();
-                    for _ in 0..10 { tokio::task::yield_now().await; }
-                    assert_eq!(captured.lock().unwrap().len(), 3);
-                    assert!(captured.lock().unwrap()[2].3);
-                    drop(delayed);
-                    captured.lock().unwrap().clear();
-                    tokio::time::resume();
-
                     let config = crate::quality_stats::QualityStatsConfig {
                         enabled: true,
                         sample_interval_ms: 250,
@@ -2380,7 +2246,6 @@ mod tests {
                         ("disabled", false),
                         ("enabled-a", true),
                         ("enabled-b", true),
-                        ("enabled-switch", true),
                     ] {
                         let mut settings = config.clone();
                         settings.enabled = enabled;
@@ -2489,71 +2354,14 @@ mod tests {
                         expected.lock().unwrap().insert(leg.id().to_string(),
                             (clock_rate, values["jitter"].as_f64().unwrap() * 1000.0 / clock_rate as f64));
                     }
-                    // A replaced leg must retain its final late-recovery interval.
-                    // A short call must report real input even before its first sample.
-                    for (name, short) in [("replacement", false), ("enabled-short", true), ("enabled-cleared", true)] {
-                        let mut settings = config.clone();
-                        if short {
-                            settings.sample_interval_ms = 10000;
-                            settings.window_ms = 10000;
-                            settings.log_interval_ms = 2000;
-                        }
-                        let mut leg_config = LegConfig::rtp_pcmu();
-                        leg_config.quality_stats = settings.clone();
-                        leg_config.bind_ip = Some("127.0.0.1".to_string());
-                        leg_config.external_ip = Some("127.0.0.1".to_string());
-                        leg_config.enable_latching = false;
-                        let leg = LegInner::new(name, &leg_config, None).unwrap();
-                        let remote = LegInner::new("remote", &leg_config, None).unwrap();
-                        let offer = leg.create_offer().await.unwrap();
-                        let answer = remote.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
-                        leg.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
-                        let sender = remote.pc().get_transceivers()[0].sender().unwrap();
-                        let transport = tokio::time::timeout(Duration::from_secs(1), async {
-                            loop {
-                                if let Some(transport) = sender.transport() { break transport; }
-                                tokio::task::yield_now().await;
-                            }
-                        }).await.expect("the negotiated RTP transport must become ready");
-                        transport.send_rtp(rustrtc::rtp::RtpPacket::new(
-                            rustrtc::rtp::RtpHeader::new(0, 500, 0, sender.ssrc()), vec![0xff; 160],
-                        )).await.unwrap();
-                        tokio::time::timeout(Duration::from_secs(1), async {
-                            while leg.ingress_tap().ingress_packet_count() != 1 {
-                                tokio::task::yield_now().await;
-                            }
-                        }).await.expect("the real UDP fixture must reach the input observer");
-                        if short {
-                            let mut bridge = MediaBridge::new_with_quality_stats(name, settings);
-                            bridge.replace_leg(LegSide::A, leg).await;
-                            if name == "enabled-cleared" {
-                                bridge.clear_selection().await.unwrap();
-                                bridge.close();
-                            }
-                            bridges.push(bridge);
-                        } else {
-                            bridges[3].replace_leg(LegSide::A, leg).await;
-                        }
-                        remotes.push(remote);
-                    }
                     bridges[2].clear_selection().await.unwrap();
-                    for bridge in &mut bridges[..4] {
+                    for bridge in &mut bridges {
                         bridge.close();
                         bridge.close();
                     }
-                    tokio::time::timeout(Duration::from_secs(3), async {
-                        loop {
-                            if captured.lock().unwrap().iter().any(|(_, id, _, _)| id.contains("enabled-short")) {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                    }).await.expect("logging must not wait for the 10s quality sampling interval");
-                    bridges[4].close();
-                    bridges[4].close();
                     tokio::time::timeout(Duration::from_secs(1), async {
                         loop {
-                            if captured.lock().unwrap().len() >= 9 {
+                            if captured.lock().unwrap().len() >= 4 {
                                 break;
                             }
                             tokio::task::yield_now().await;
@@ -2566,47 +2374,20 @@ mod tests {
         let lines = captured.lock().unwrap();
         assert_eq!(
             lines.len(),
-            9,
+            4,
             "every enabled bridge retains its periodic and final windows exactly once"
         );
-        for id in ["enabled-a", "enabled-b", "enabled-switch", "enabled-short", "enabled-cleared"] {
-            assert_eq!(lines.iter().filter(|(_, session, _, final_interval)|
-                session.contains(id) && *final_interval).count(), 1,
-                "each enabled session must emit exactly one final report");
-        }
-        let cleared: Vec<_> = lines.iter().filter(|(_, id, _, _)| id.contains("enabled-cleared")).collect();
-        assert_eq!(cleared.len(), 1);
-        let cleared: serde_json::Value = serde_json::from_str(&cleared[0].2).unwrap();
-        assert_eq!(cleared["retired_ingress_intervals"][0]["leg_id"], "enabled-cleared");
-        assert_eq!(cleared["retired_ingress_intervals"][0]["ingress_interval"]["packets"], 1);
-        let short: Vec<_> = lines.iter().filter(|(_, id, _, _)| id.contains("enabled-short")).collect();
-        assert_eq!(short.len(), 2, "logging precedes sampling, with exactly one final report");
-        assert!(!short[0].3);
-        assert!(short[1].3);
-        let short: serde_json::Value = serde_json::from_str(&short[0].2).unwrap();
-        assert_eq!(short["legs"][0]["ingress_interval"]["packets"], 1);
-        assert!(short["legs"][0]["rx_packets_per_second"].is_null(),
-            "input evidence must not invent a sampled packet rate");
-        let switched: Vec<_> = lines.iter().filter(|(_, id, _, _)| id.contains("enabled-switch")).collect();
-        assert_eq!(switched.len(), 2);
-        let switched: serde_json::Value = serde_json::from_str(&switched[1].2).unwrap();
-        assert_eq!(switched["legs"][0]["leg_id"], "replacement");
-        assert_eq!(switched["legs"][0]["ingress_interval"]["packets"], 1);
-        let retired = &switched["retired_ingress_intervals"][0];
-        assert_eq!(retired["leg_id"], "enabled-switch");
-        assert_eq!(retired["ingress_interval"]["packets"], 1);
-        assert_eq!(retired["ingress_interval"]["recovered_packets"], 1);
         assert!(
-            lines.iter().all(|(_, id, _, _)| id.contains("enabled-")),
+            lines.iter().all(|(_, id, _)| id.contains("enabled-")),
             "default-off bridge must stay silent"
         );
         for id in ["enabled-a", "enabled-b"] {
-            let per_call: Vec<_> = lines.iter().filter(|(_, bridge, _, _)| bridge.contains(id)).collect();
+            let per_call: Vec<_> = lines.iter().filter(|(_, bridge, _)| bridge.contains(id)).collect();
             assert_eq!(per_call.len(), 2, "each call must retain both windows");
             assert!(per_call[1].0.duration_since(per_call[0].0) < Duration::from_millis(1900),
                 "the last report must survive closing before the next periodic window");
             let mut fingerprints = std::collections::BTreeMap::new();
-            for (_, _, stats, _) in &per_call {
+            for (_, _, stats) in &per_call {
                 assert!(!stats.contains('\n'), "quality stats must stay on one line");
                 let stats: serde_json::Value = serde_json::from_str(stats)
                     .expect("quality log stats must be JSON");
@@ -2697,24 +2478,6 @@ mod tests {
             assert_eq!(initial["sampling_gaps"], 0,
                 "initializing a bridge must not report a lost sample");
             let stats: serde_json::Value = serde_json::from_str(&per_call[1].2).unwrap();
-            let input = &initial["legs"][0]["ingress_interval"];
-            assert_eq!(input["measurement"], "plaintext_rtp_before_forwarding_and_depacketization",
-                "the periodic log must describe the actual input observation boundary");
-            assert_eq!(input["packets"], 2);
-            assert_eq!(input["new_missing_packets"], 1);
-            assert_eq!(input["current_stream_unresolved_gaps"], 1);
-            assert_eq!(input["peer_addr"], initial["legs"][0]["audio_packet_samples"]["ingress"][0]["peer_addr"]);
-            let recovered = &stats["legs"][0]["ingress_interval"];
-            assert_eq!(recovered["packets"], 1, "report periods must not double count input");
-            assert_eq!(recovered["new_missing_packets"], 0);
-            assert_eq!(recovered["reordered_packets"], 1);
-            assert_eq!(recovered["recovered_packets"], 1,
-                "a late packet must repair a gap across logging boundaries");
-            assert_eq!(recovered["max_reorder_depth_packets"], 1);
-            assert_eq!(recovered["current_stream_unresolved_gaps"], 0);
-            assert!(recovered["interarrival_max_ms"].as_f64().unwrap() >= 1000.0);
-            assert_eq!(initial["legs"].as_array().unwrap().iter()
-                .map(|leg| leg["ingress_interval"]["packets"].as_u64().unwrap()).sum::<u64>(), 2);
             assert_eq!(stats["counter_resets"], 0,
                 "normal shutdown of a cleared selection must not invent a counter reset");
             assert_eq!(stats["sampling_gaps"], 0,

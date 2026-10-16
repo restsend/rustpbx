@@ -96,31 +96,6 @@ pub struct WindowSummary {
     pub reports: [ReportSummary; 2],
 }
 
-impl WindowSummary {
-    /// Input packets can exist before the first rate sample. Preserve that
-    /// evidence without turning an unobserved rate or remote report into zero.
-    pub(crate) fn unobserved(window_ms: u64) -> Self {
-        Self {
-            window_ms,
-            observed_ms: 0,
-            rx_packets_per_second: None,
-            tx_packets_per_second: None,
-            recording_queue_drops_per_second: None,
-            partial_samples: 0,
-            sampling_gaps: 0,
-            counter_resets: 0,
-            reports: ["caller", "callee"].map(|side| ReportSummary {
-                coalesced_reports: 0,
-                side,
-                direction: "egress",
-                jitter_ms: None,
-                rtt_ms: None,
-                loss_percent: None,
-            }),
-        }
-    }
-}
-
 struct Sample {
     at: Instant,
     elapsed: Duration,
