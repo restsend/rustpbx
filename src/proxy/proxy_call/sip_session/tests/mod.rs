@@ -1794,6 +1794,7 @@ async fn test_init_callee_timer_disabled_without_session_expires() {
         version: rsipstack::sip::Version::V2,
         headers: rsipstack::sip::Headers::default(),
         body: Vec::new(),
+        wire_reason: None,
     };
 
     session.init_callee_timer(
