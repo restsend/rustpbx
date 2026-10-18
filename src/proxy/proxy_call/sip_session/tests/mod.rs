@@ -12130,6 +12130,35 @@ fn drain_call_hangups(
     hangups
 }
 
+#[tokio::test]
+async fn app_reanswer_preserves_answered_metrics() {
+    for (previous_answer, callee, expected_secs) in [
+        (true, None, 172),
+        (false, None, 0),
+        (true, Some("sip:next-agent@example.test".to_string()), 0),
+    ] {
+        let (mut session, mut events) =
+            teardown_session("app-reanswer-duration", vec![], None).await;
+        session.meta.answer_time =
+            previous_answer.then(|| Instant::now() - Duration::from_secs(172));
+
+        // The satisfaction app answers an already answered caller. Only a
+        // new callee answer should start a new talk interval.
+        session
+            .accept_call(callee, Some(String::new()))
+            .await
+            .unwrap();
+        session.cleanup().await;
+        let hangups = drain_call_hangups(&mut events);
+        assert_eq!(hangups.len(), 1);
+        let duration = hangups[0]["duration_secs"].as_u64().unwrap();
+        assert!(
+            (expected_secs..expected_secs + 2).contains(&duration),
+            "previous_answer={previous_answer}: expected {expected_secs}s, got {duration}s"
+        );
+    }
+}
+
 /// 外呼接通后客户先挂机（报告的缺陷场景）：会话拆除时，仍连接着的坐席桥接腿
 /// 必须在 session 级事件之前补发 leg 级 `call_hangup`（`leg_role: "agent"`，
 /// 与 session 事件同 reason/hangup_by/duration），普通 caller/callee 腿保持

@@ -9346,8 +9346,9 @@ impl SipSession {
         // must not append a duplicate event. A callee/agent answer always
         // records and carries agent detail so the trace shows who picked up.
         let answer_is_new = self.meta.answer_time.is_none() || callee.is_some();
-        self.meta.answer_time = Some(Instant::now());
         if answer_is_new {
+            // Re-answering for an app must not reset the completed agent talk interval.
+            self.meta.answer_time = Some(Instant::now());
             let mut ev = crate::call_errors::TraceEvent::new(
                 crate::call_errors::TraceKind::Answer,
                 "Call answered",
