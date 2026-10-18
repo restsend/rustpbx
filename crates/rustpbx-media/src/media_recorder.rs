@@ -123,6 +123,9 @@ pub trait MediaRecorder: Send {
         Ok(())
     }
 
+    /// Resume the file timeline without counting deliberately paused time.
+    fn resume(&mut self) {}
+
     async fn write_rtp(
         &mut self,
         channel: CaptureChannel,
@@ -184,6 +187,12 @@ impl MediaRecorder for FileRecorder {
         Some(&self.option.recorder_file)
     }
 
+    fn resume(&mut self) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.resume_capture_clock();
+        }
+    }
+
     async fn initialize(&mut self) -> Result<()> {
         let output_codec = self
             .caller_profile
@@ -218,7 +227,7 @@ impl MediaRecorder for FileRecorder {
         &mut self,
         channel: CaptureChannel,
         packet: &RtpPacket,
-        _received_at_micros: u64,
+        received_at_micros: u64,
         _peer_addr: Option<std::net::SocketAddr>,
         profile: Option<&NegotiatedLegProfile>,
     ) -> Result<()> {
@@ -248,6 +257,7 @@ impl MediaRecorder for FileRecorder {
                 None,
                 None,
                 profile,
+                received_at_micros,
             )
             .await
     }
@@ -560,7 +570,22 @@ impl RecorderTask {
                             let _ = reply.send(self.status());
                         }
                         RecorderCommand::Pause => self.paused = true,
-                        RecorderCommand::Resume => self.paused = false,
+                        RecorderCommand::Resume => {
+                            if self.paused {
+                                // Commands take priority over RTP. Discard the
+                                // paused backlog before reanchoring on fresh media.
+                                let queued = self.rtp_rx.len();
+                                for _ in 0..queued {
+                                    if self.rtp_rx.try_recv().is_err() {
+                                        break;
+                                    }
+                                }
+                                if let Some(recorder) = self.recorder.as_mut() {
+                                    recorder.resume();
+                                }
+                                self.paused = false;
+                            }
+                        }
                         RecorderCommand::StopRecorder { reply } => {
                             let _ = reply.send(self.finalize_recorder().await);
                         }
@@ -761,6 +786,305 @@ mod tests {
         ) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn file_output_preserves_capture_time_when_one_audio_clock_runs_slow() {
+        use audio_codec::{CodecType, create_encoder, create_decoder};
+        let dir = tempfile::tempdir().unwrap();
+        for (codec, rate) in [(CodecType::PCMU, Some(8000)), (CodecType::G729, Some(8000)), (CodecType::G729, None)] {
+            let path = dir.path().join(format!("drift-{codec:?}-{rate:?}.wav"));
+            let mut negotiated = profile();
+            let audio = negotiated.audio.as_mut().unwrap();
+            audio.codec = codec;
+            audio.payload_type = codec.payload_type();
+            let mut recorder = FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: rate,
+                    ..Default::default()
+                },
+                negotiated, 2, false,
+            );
+            recorder.initialize().await.unwrap();
+            let mut encoders = [create_encoder(codec), create_encoder(codec)];
+            // Both streams have contiguous sequence numbers and 20 ms RTP
+            // increments. Only capture time exposes the slower sender clock.
+            for wall_ms in 0..=12_000u64 {
+                for (side, interval_ms) in [20, 21].into_iter().enumerate() {
+                    if wall_ms % interval_ms != 0 {
+                        continue;
+                    }
+                    let sequence = (wall_ms / interval_ms) as u16;
+                    let marked = (2000..2200).contains(&wall_ms)
+                        || (10_000..10_200).contains(&wall_ms);
+                    let pcm: Vec<i16> = (0..160).map(|i| {
+                        if marked {
+                            (10_000.0 * (i as f64 * 440.0 * std::f64::consts::TAU / 8000.0).sin()) as i16
+                        } else {
+                            0
+                        }
+                    }).collect();
+                    let packet = RtpPacket::new(
+                        RtpHeader::new(codec.payload_type(), sequence, sequence as u32 * 160, 1234 + side as u32),
+                        encoders[side].encode(&pcm).to_vec(),
+                    );
+                    recorder.write_rtp(
+                        if side == 0 { CaptureChannel::Caller } else { CaptureChannel::Callee },
+                        &packet, 1_000_000 + wall_ms * 1000, None,
+                    ).await.unwrap();
+                }
+                if wall_ms % 500 == 0 {
+                    recorder.recorder.as_mut().unwrap().flush().await.unwrap();
+                }
+            }
+            let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = if rate.is_some() {
+                wav[44..].chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+            } else {
+                assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
+                create_decoder(CodecType::PCMU).decode(&wav[44..])
+            };
+            assert!((result.duration_secs - 12.02).abs() < 0.03);
+            for side in 0..2 {
+                for marker_seconds in [2.0, 10.0] {
+                    let from = ((marker_seconds - 1.0) * 8000.0) as usize;
+                    let to = ((marker_seconds + 0.3) * 8000.0) as usize;
+                    let first = (from..to).find(|i| samples[i * 2 + side].abs() > 2000)
+                        .expect("recorded tone marker is missing");
+                    let onset = first as f64 / 8000.0;
+                    assert!((onset - marker_seconds).abs() <= 0.12,
+                        "{codec:?} channel={side} marker={marker_seconds}s recorded at {onset}s");
+                    let mut quiet_run = 0;
+                    let mut longest_quiet = 0;
+                    for i in first + 320..first + 1120 {
+                        if samples[i * 2 + side].abs() < 500 {
+                            quiet_run += 1;
+                            longest_quiet = longest_quiet.max(quiet_run);
+                        } else {
+                            quiet_run = 0;
+                        }
+                    }
+                    assert!(longest_quiet <= 160,
+                        "{codec:?} channel={side}: drift correction interrupted a tone for {longest_quiet} samples");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_keeps_first_speaker_timing_after_peer_startup_burst() {
+        use audio_codec::{CodecType, create_decoder, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup-burst.wav");
+        let mut recorder = FileRecorder::new(
+            RecorderOption::new(path.to_string_lossy().into_owned()), profile(), 2, false,
+        );
+        recorder.initialize().await.unwrap();
+        let mut encoder = create_encoder(CodecType::PCMU);
+        let quiet = encoder.encode(&vec![0; 160]);
+        let tone = encoder.encode(&vec![8000; 160]);
+        // A transport handshake can release already queued microphone audio
+        // before the caller sends its first RTP. It must not advance that
+        // caller's file position beyond the caller's actual capture time.
+        for sequence in 0..25 {
+            let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), tone.clone());
+            recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000, None).await.unwrap();
+        }
+        for wall_ms in 0..=12_000u64 {
+            if wall_ms % 20 == 0 {
+                let sequence = (25 + wall_ms / 20) as u16;
+                let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), tone.clone());
+                recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+            }
+            if wall_ms >= 600 && (wall_ms - 600) % 22 == 0 {
+                let sequence = ((wall_ms - 600) / 22) as u16;
+                let marked = (50..75).contains(&sequence) || (250..275).contains(&sequence);
+                let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 5678),
+                    if marked { tone.clone() } else { quiet.clone() });
+                recorder.write_rtp(CaptureChannel::Caller, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+            }
+            if wall_ms % 500 == 0 {
+                recorder.recorder.as_mut().unwrap().flush().await.unwrap();
+            }
+        }
+        Box::new(recorder).finalize().await.unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples = create_decoder(CodecType::PCMU).decode(&wav[44..]);
+        let mut onsets = Vec::new();
+        let mut previous = false;
+        for (i, frame) in samples.chunks_exact(2).enumerate() {
+            let audible = frame[0] > 6000;
+            if audible && !previous && onsets.last().is_none_or(|last| i - last > 8000) {
+                onsets.push(i);
+            }
+            previous = audible;
+        }
+        assert_eq!(onsets.len(), 2, "both caller markers must survive recording");
+        for (onset, expected) in onsets.into_iter().zip([1.7, 6.1]) {
+            let actual = onset as f64 / 8000.0;
+            assert!((actual - expected).abs() <= 0.12,
+                "caller marker captured at {expected}s was recorded at {actual}s");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_keeps_a_late_peer_at_its_capture_position() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for (peer_start_ms, expected_ms) in [(2500u64, 4020usize), (12500, 14020)] {
+            let path = dir.path().join(format!("late-peer-{peer_start_ms}.wav"));
+            let mut recorder = FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: Some(8000),
+                    ..Default::default()
+                }, profile(), 2, false,
+            );
+            recorder.initialize().await.unwrap();
+            let mut encoder = create_encoder(CodecType::PCMU);
+            for wall_ms in (0..=peer_start_ms + 1500).step_by(20) {
+                let packet = RtpPacket::new(
+                    RtpHeader::new(0, (wall_ms / 20) as u16, wall_ms as u32 * 8, 1234),
+                    encoder.encode(&vec![0; 160]).to_vec(),
+                );
+                recorder.write_rtp(CaptureChannel::Caller, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+                if wall_ms >= peer_start_ms {
+                    let packet = RtpPacket::new(packet.header.clone(), encoder.encode(&vec![8000; 160]).to_vec());
+                    recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+                }
+            }
+            Box::new(recorder).finalize().await.unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            assert_eq!(samples.len(), expected_ms * 8 * 2, "a peer's leading silence must not shorten either channel");
+            let first = samples.chunks_exact(2).position(|s| s[1] > 6000).unwrap();
+            assert_eq!(first, peer_start_ms as usize * 8, "late peer must retain its capture position");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_does_not_turn_capture_jitter_into_audio_gaps() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jitter.wav");
+        let mut recorder = FileRecorder::new(
+            RecorderOption {
+                recorder_file: path.to_string_lossy().into_owned(),
+                samplerate: Some(8000),
+                ..Default::default()
+            }, profile(), 2, false,
+        );
+        recorder.initialize().await.unwrap();
+        let data = create_encoder(CodecType::PCMU).encode(&vec![8000; 160]).to_vec();
+        for sequence in 0..100u16 {
+            let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), data.clone());
+            for channel in [CaptureChannel::Caller, CaptureChannel::Callee] {
+                let jitter_ms = [0, 15, 5, 25][sequence as usize % 4];
+                recorder.write_rtp(channel, &packet, 1_000_000 + sequence as u64 * 20_000 + jitter_ms * 1000, None).await.unwrap();
+            }
+        }
+        let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples: Vec<i16> = wav[44..].chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(samples.len(), 2 * 8000 * 2);
+        assert!(samples.iter().all(|s| *s > 6000), "capture jitter must not add silence to continuous audio");
+        assert_eq!(result.duration_secs, 2.0);
+    }
+
+    #[tokio::test]
+    async fn file_output_pause_excludes_paused_capture_time() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for drain_before_resume in [true, false] {
+            let path = dir.path().join(format!("pause-{drain_before_resume}.wav"));
+            let (tx, rx) = mpsc::channel(8);
+            let (command_tx, command_rx) = mpsc::unbounded_channel();
+            let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(RecorderTask::new(rx, command_rx, finished_tx).run());
+            let handle = RecorderHandle { tx: command_tx };
+            handle.set_recorder(Box::new(FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: Some(8000),
+                    ..Default::default()
+                }, profile(), 2, false,
+            )), None).await.unwrap();
+            let data = create_encoder(CodecType::PCMU).encode(&vec![8000; 160]).to_vec();
+            for (sequence, capture_micros) in [(0, 1_000_000), (1, 3_000_000), (2, 7_000_000)] {
+                for channel in [CaptureChannel::Caller, CaptureChannel::Callee] {
+                    tx.send(CapturedRtp {
+                        profile: None, channel,
+                        packet: RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), data.clone()),
+                        received_at_micros: capture_micros,
+                        peer_addr: None,
+                    }).await.unwrap();
+                }
+                if sequence != 1 || drain_before_resume {
+                    // Exercise both already-discarded and still-queued paused RTP.
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while tx.capacity() != 8 {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.unwrap();
+                }
+                if sequence == 0 {
+                    handle.pause().unwrap();
+                    assert!(handle.status().await.unwrap().paused);
+                } else if sequence == 1 {
+                    handle.resume().unwrap();
+                    assert!(!handle.status().await.unwrap().paused);
+                }
+            }
+            let result = handle.stop_recorder().await.unwrap().unwrap();
+            drop(handle);
+            task.await.unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            assert_eq!(result.duration_secs, 0.04, "paused capture time must be excluded from the file");
+            assert_eq!(samples.len(), 320 * 2);
+            assert!(samples.iter().all(|s| *s > 6000));
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_places_dtmf_once_at_capture_time() {
+        use crate::negotiate::NegotiatedCodec;
+        use audio_codec::CodecType;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dtmf-capture.wav");
+        let mut negotiated = profile();
+        negotiated.dtmf = Some(NegotiatedCodec {
+            codec: CodecType::TelephoneEvent, payload_type: 101, clock_rate: 8000, channels: 1,
+        });
+        let mut recorder = FileRecorder::new(RecorderOption {
+            recorder_file: path.to_string_lossy().into_owned(), samplerate: Some(8000),
+            ..Default::default()
+        }, negotiated, 2, false);
+        recorder.initialize().await.unwrap();
+        recorder.write_rtp(CaptureChannel::Caller, &packet(0, 0, 0), 1_000_000, None).await.unwrap();
+        for (seq, elapsed_ms, end, duration) in [
+            (1, 1000, false, 160u16), (2, 1040, false, 800),
+            (3, 1060, true, 800), (4, 1100, true, 800),
+        ] {
+            let event = RtpPacket::new(RtpHeader::new(101, seq, 64000, 1234),
+                vec![5, if end { 0x80 } else { 0 }, (duration >> 8) as u8, duration as u8]);
+            recorder.write_rtp(CaptureChannel::Callee, &event, 1_000_000 + elapsed_ms * 1000, None).await.unwrap();
+        }
+        recorder.write_rtp(CaptureChannel::Caller, &packet(0, 5, 160), 3_000_000, None).await.unwrap();
+        Box::new(recorder).finalize().await.unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples: Vec<i16> = wav[44..].chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let callee: Vec<i16> = samples.chunks_exact(2).map(|s| s[1]).collect();
+        assert!(callee[8000..8800].iter().any(|s| s.abs() > 2000));
+        assert!(callee[..8000].iter().all(|s| s.abs() < 100));
+        assert!(callee[8800..].iter().all(|s| s.abs() < 100), "terminal repeats must not extend the tone");
     }
 
     #[tokio::test]

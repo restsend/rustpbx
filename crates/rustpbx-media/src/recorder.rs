@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+// Keep ordinary packet-arrival jitter contiguous, but do not let a slow
+// sender's sample clock accumulate seconds of stereo misalignment.
+const CAPTURE_DRIFT_TOLERANCE_MS: u32 = 100;
+
 /// Stereo channel assignment policy for two-party recordings.
 ///
 /// The recorder taps the caller leg, so "caller" is leg A (ingress of the
@@ -93,6 +97,12 @@ struct DtmfEventState {
     duration_samples: u32,
 }
 
+struct CaptureClock {
+    origin_micros: u64,
+    offset_samples: u32,
+    latest_samples: u32,
+}
+
 pub(crate) struct Recorder {
     pub path: String,
     pub codec: CodecType,
@@ -117,6 +127,7 @@ pub(crate) struct Recorder {
     dtmf_state_b: Option<DtmfEventState>,
     leg_a_started: bool,
     leg_b_started: bool,
+    capture_clock: Option<CaptureClock>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
@@ -213,11 +224,18 @@ impl Recorder {
             mono_caller_only,
             leg_a_started: false,
             leg_b_started: false,
+            capture_clock: None,
         })
     }
 
     pub fn set_profile(&mut self, profile: NegotiatedLegProfile) {
         self.profile = profile;
+    }
+
+    pub(crate) fn resume_capture_clock(&mut self) {
+        // The next capture starts at the recorded end, excluding the pause
+        // from both channels while preserving their existing relative positions.
+        self.capture_clock = None;
     }
 
     pub async fn write_sample(
@@ -228,7 +246,7 @@ impl Recorder {
         dtmf_clock_rate: Option<u32>,
         codec_hint: Option<CodecType>,
     ) -> Result<()> {
-        self.write_sample_with_profile(leg, sample, dtmf_pt, dtmf_clock_rate, codec_hint, None)
+        self.write_sample_with_profile(leg, sample, dtmf_pt, dtmf_clock_rate, codec_hint, None, 0)
             .await
     }
 
@@ -240,10 +258,29 @@ impl Recorder {
         dtmf_clock_rate: Option<u32>,
         codec_hint: Option<CodecType>,
         profile: Option<&NegotiatedLegProfile>,
+        received_at_micros: u64,
     ) -> Result<()> {
         let frame = match sample {
             MediaSample::Audio(frame) => frame,
             _ => return Ok(()),
+        };
+        // Zero is the legacy direct-injection sentinel: no capture clock is
+        // available. File recording uses the timestamps captured before queuing.
+        let capture_ts = if received_at_micros == 0 {
+            None
+        } else {
+            let end = self.leg_end_ts(Leg::A).max(self.leg_end_ts(Leg::B));
+            let clock = self.capture_clock.get_or_insert(CaptureClock {
+                origin_micros: received_at_micros,
+                offset_samples: end,
+                latest_samples: end,
+            });
+            let timestamp = clock.offset_samples.saturating_add(
+                (received_at_micros.saturating_sub(clock.origin_micros) as u128 * self.sample_rate as u128
+                    / 1_000_000).min(u32::MAX as u128) as u32,
+            );
+            clock.latest_samples = clock.latest_samples.max(timestamp);
+            Some(timestamp)
         };
 
         let (profile_audio_pt, profile_audio_codec, profile_dtmf_pt, profile_dtmf_clock_rate) = {
@@ -261,11 +298,12 @@ impl Recorder {
             && pt == dpt
         {
             return self
-                .write_dtmf_payload(
+                .write_dtmf_payload_at(
                     leg,
                     &frame.data,
                     frame.rtp_timestamp,
                     dtmf_clock_rate.unwrap_or(self.sample_rate),
+                    capture_ts,
                 )
                 .await;
         }
@@ -278,11 +316,12 @@ impl Recorder {
             let code = frame.data[0];
             if crate::telephone_event::dtmf_code_to_char(code).is_some() {
                 return self
-                    .write_dtmf_payload(
+                    .write_dtmf_payload_at(
                         leg,
                         &frame.data,
                         frame.rtp_timestamp,
                         frame.clock_rate.max(8000),
+                        capture_ts,
                     )
                     .await;
             }
@@ -389,10 +428,7 @@ impl Recorder {
             .into();
         }
 
-        // Position sequentially: append right after the previous sample.
-        // This eliminates jitter-induced silence gaps (click noise) that
-        // occur with wall-clock or RTP timestamp positioning.
-        let absolute_ts = self.leg_end_ts(leg);
+        let absolute_ts = self.recording_position(leg, capture_ts);
         self.insert_audio_block(leg, absolute_ts, encoded);
         if self.last_flush.elapsed() >= self.ptime {
             self.flush().await?;
@@ -409,6 +445,26 @@ impl Recorder {
             .unwrap_or(self.next_flush_ts);
 
         buffered_end.max(self.next_flush_ts)
+    }
+
+    fn recording_position(&self, leg: Leg, capture_ts: Option<u32>) -> u32 {
+        let end = self.leg_end_ts(leg);
+        let Some(capture_ts) = capture_ts else {
+            return end;
+        };
+        let started = match leg {
+            Leg::A => self.leg_a_started,
+            Leg::B => self.leg_b_started,
+        };
+        let tolerance = self.sample_rate * CAPTURE_DRIFT_TOLERANCE_MS / 1000;
+        let target = if started {
+            // Correct only the excess drift: a 1 ms clock deficit adds 1 ms,
+            // rather than periodically inserting the whole jitter allowance.
+            capture_ts.saturating_sub(tolerance)
+        } else {
+            capture_ts
+        };
+        end.max(target)
     }
 
     fn block_span_samples(&self, data: &[u8]) -> u32 {
@@ -546,6 +602,17 @@ impl Recorder {
         rtp_timestamp: u32,
         clock_rate: u32,
     ) -> Result<()> {
+        self.write_dtmf_payload_at(leg, payload, rtp_timestamp, clock_rate, None).await
+    }
+
+    async fn write_dtmf_payload_at(
+        &mut self,
+        leg: Leg,
+        payload: &[u8],
+        rtp_timestamp: u32,
+        clock_rate: u32,
+        capture_ts: Option<u32>,
+    ) -> Result<()> {
         if payload.len() < 4 {
             return Ok(());
         }
@@ -569,7 +636,7 @@ impl Recorder {
 
         let (absolute_ts, previous_duration_samples) = existing_state
             .map(|state| (state.absolute_timestamp, state.duration_samples))
-            .unwrap_or_else(|| (self.leg_end_ts(leg), 0));
+            .unwrap_or_else(|| (self.recording_position(leg, capture_ts), 0));
         let write_start_ts = absolute_ts.saturating_add(previous_duration_samples);
 
         debug!(
@@ -616,8 +683,15 @@ impl Recorder {
     }
 
     pub async fn finalize(&mut self) -> Result<()> {
-        // Final flush: use max to flush ALL remaining data from both legs.
-        self.flush_impl(true).await?;
+        // Long capture gaps must remain in the file without allocating the
+        // entire gap at once, including when the peer first speaks at hangup.
+        loop {
+            let previous = self.next_flush_ts;
+            self.flush_impl(true).await?;
+            if self.next_flush_ts == previous {
+                break;
+            }
+        }
         self.writer.finalize().await?;
         Ok(())
     }
@@ -630,8 +704,8 @@ impl Recorder {
         self.written_samples as f64 / self.sample_rate as f64
     }
 
-    /// Shared flush path. `final_flush = true` ignores the slow-leg pacing and
-    /// the 10 s cap and drains everything remaining (used by `finalize`).
+    /// Shared flush path. Finalization bypasses slow-leg pacing, while every
+    /// write remains bounded to 10 seconds of audio.
     async fn flush_impl(&mut self, final_flush: bool) -> Result<()> {
         self.last_flush = Instant::now();
 
@@ -651,7 +725,11 @@ impl Recorder {
         let flush_target = if final_flush {
             max_ts_a.max(max_ts_b)
         } else if !self.leg_a_started || !self.leg_b_started {
-            max_ts_a.max(max_ts_b)
+            // Handshake backlogs can put one leg's samples ahead of capture
+            // time. Do not commit that future before the other leg arrives:
+            // its first packets could no longer retain their capture position.
+            let target = max_ts_a.max(max_ts_b);
+            self.capture_clock.as_ref().map_or(target, |clock| target.min(clock.latest_samples))
         } else if max_ts_a > self.next_flush_ts && max_ts_b > self.next_flush_ts {
             max_ts_a.min(max_ts_b)
         } else {
@@ -671,7 +749,7 @@ impl Recorder {
 
         let mut flush_len = flush_target - self.next_flush_ts;
 
-        if !final_flush {
+        {
             // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
             let max_flush_samples = self.sample_rate * 10;
             if flush_len > max_flush_samples {
@@ -801,15 +879,7 @@ impl Recorder {
                 if ts < flush_to {
                     // Check for gap
                     if ts > current_ts {
-                        let mut gap_samples = ts - current_ts;
-                        let max_gap = self.sample_rate; // Max 1 second of silence
-                        if gap_samples > max_gap {
-                            debug!(
-                                "Recorder gap too large: {} samples, capping to {}",
-                                gap_samples, max_gap
-                            );
-                            gap_samples = max_gap;
-                        }
+                        let gap_samples = ts - current_ts;
                         let gap_blocks = gap_samples / samples_per_block;
                         result.extend(self.get_silence_bytes(leg, gap_blocks as usize)?);
                         current_ts = ts;
@@ -1266,6 +1336,7 @@ mod tests {
             mono_caller_only: false,
             leg_a_started: false,
             leg_b_started: false,
+            capture_clock: None,
         }
     }
 }
