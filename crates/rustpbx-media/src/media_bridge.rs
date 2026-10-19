@@ -1203,7 +1203,6 @@ impl MediaBridge {
         for (_, cancel) in self.leg_wire_cancels.drain() {
             cancel.cancel();
         }
-        crate::telemetry::MediaTelemetry::unregister_bridge();
         *self.legs_shared.lock() = (None, None);
         if let Some(la) = self.leg_a.take() {
             la.stop();
@@ -1218,6 +1217,7 @@ impl MediaBridge {
 
 impl Drop for MediaBridge {
     fn drop(&mut self) {
+        crate::telemetry::MediaTelemetry::unregister_bridge();
         self.teardown();
     }
 }
