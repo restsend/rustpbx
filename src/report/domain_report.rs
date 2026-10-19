@@ -913,6 +913,19 @@ pub(crate) mod tests {
         db
     }
 
+    /// Connects to `RUSTPBX_MYSQL_TEST_URL` inside a fresh `database`.
+    pub(crate) async fn mysql_db(database: &str) -> DatabaseConnection {
+        let mut options = ConnectOptions::new(std::env::var("RUSTPBX_MYSQL_TEST_URL").unwrap());
+        options.max_connections(1);
+        let db = Database::connect(options).await.unwrap();
+        db.execute_unprepared(&format!("DROP DATABASE IF EXISTS {database}"))
+            .await
+            .unwrap();
+        db.execute_unprepared(&format!("CREATE DATABASE {database}")).await.unwrap();
+        db.execute_unprepared(&format!("USE {database}")).await.unwrap();
+        db
+    }
+
     async fn assert_voicemail_report(db: &DatabaseConnection) {
         seed_voicemail(db).await;
         let q = DomainQuery {
@@ -949,5 +962,13 @@ pub(crate) mod tests {
         let db = postgres_db("voicemail_report_test").await;
         assert_voicemail_report(&db).await;
         db.execute_unprepared("DROP SCHEMA voicemail_report_test CASCADE").await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_MYSQL_TEST_URL pointing to a MySQL test server"]
+    async fn test_voicemail_report_mysql() {
+        let db = mysql_db("rustpbx_voicemail_report_test").await;
+        assert_voicemail_report(&db).await;
+        db.execute_unprepared("DROP DATABASE rustpbx_voicemail_report_test").await.unwrap();
     }
 }

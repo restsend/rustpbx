@@ -328,7 +328,7 @@ pub fn api_urls() -> axum::Router<Arc<ConsoleState>> {
 mod tests {
     use super::*;
     use crate::report::domain_report::tests::{
-        fixture_day, postgres_db, seed_voicemail, sqlite_db,
+        fixture_day, mysql_db, postgres_db, seed_voicemail, sqlite_db,
     };
     use sea_orm::{ConnectionTrait, DatabaseConnection};
 
@@ -357,6 +357,16 @@ mod tests {
         let db = postgres_db("voicemail_metrics_test").await;
         assert_voicemail_metrics(&db).await;
         db.execute_unprepared("DROP SCHEMA voicemail_metrics_test CASCADE")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_MYSQL_TEST_URL pointing to a MySQL test server"]
+    async fn test_voicemail_metrics_mysql() {
+        let db = mysql_db("rustpbx_voicemail_metrics_test").await;
+        assert_voicemail_metrics(&db).await;
+        db.execute_unprepared("DROP DATABASE rustpbx_voicemail_metrics_test")
             .await
             .unwrap();
     }
