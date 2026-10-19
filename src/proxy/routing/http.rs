@@ -1,12 +1,13 @@
 use crate::call::cookie::SpamResult;
 use crate::call::{
-    DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
+    DialAttempt, DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
     TrunkContext, build_sip_uri,
 };
 use crate::config::{
     HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
 };
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
+use super::RetryPolicy;
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use rsipstack::sip::prelude::*;
 use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
@@ -90,10 +92,30 @@ enum HttpRouteStrategy {
     Parallel,
 }
 
+/// String targets remain compatible with existing routing services.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HttpRouteTarget {
+    Uri(String),
+    Config {
+        uri: String,
+        retry_policy: Option<RetryPolicy>,
+    },
+}
+
+/// Partial call-level overrides; omitted values inherit the server configuration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpRtpConfig {
+    bind_ip: Option<IpAddr>,
+    external_ip: Option<IpAddr>,
+}
+
 #[derive(Deserialize)]
 struct HttpResponsePayload {
     pub action: HttpRouteAction,
-    pub targets: Option<Vec<String>>,
+    pub targets: Option<Vec<HttpRouteTarget>>,
+    pub rtp_config: Option<HttpRtpConfig>,
     pub strategy: Option<HttpRouteStrategy>,
     pub status: Option<u16>,
     pub reason: Option<String>,
@@ -283,7 +305,7 @@ impl CallRouter for HttpCallRouter {
                 .with_code(&crate::proxy::routing::http_error_catalog::NOT_HANDLED));
             }
             HttpRouteAction::Forward => {
-                let mut locs = Vec::new();
+                let mut attempts = Vec::new();
                 let custom_headers = result.headers.map(|h| {
                     h.iter()
                         .map(|(k, v)| rsipstack::sip::Header::Other(k.clone(), v.clone()))
@@ -292,19 +314,38 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(targets) = result.targets {
                     for target in targets {
-                        if let Ok(uri) = rsipstack::sip::Uri::try_from(target.clone()) {
-                            locs.push(Location {
+                        let (uri, retry_policy) = match target {
+                            HttpRouteTarget::Uri(uri) => (uri, None),
+                            HttpRouteTarget::Config { uri, retry_policy } =>
+                                (uri, retry_policy),
+                        };
+                        if let Some(policy) = &retry_policy {
+                            policy.validate().map_err(|error| RouteError {
+                                error,
+                                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                                extensions: None,
+                            }.with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED))?;
+                        }
+                        // Preserve legacy HTTP routing: skip malformed target URIs.
+                        let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
+                            continue;
+                        };
+                        attempts.push(DialAttempt {
+                            retry_policy,
+                            ..Location {
                                 aor: uri,
                                 headers: custom_headers.clone(),
                                 ..Default::default()
-                            });
-                        }
+                            }.into()
+                        });
                     }
                 }
 
                 let strategy = match result.strategy {
-                    Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(locs),
-                    _ => DialStrategy::Sequential(locs.into_iter().map(Into::into).collect()),
+                    Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(
+                        attempts.into_iter().map(|attempt| attempt.location).collect(),
+                    ),
+                    _ => DialStrategy::Sequential(attempts),
                 };
 
                 // Global session id (RFC 7989): HTTP-routed calls always
@@ -329,6 +370,14 @@ impl CallRouter for HttpCallRouter {
                 dialplan.media.enable_latching = self.enable_latching;
                 dialplan.media.probation_max_packets = self.probation_max_packets;
                 dialplan.media.ice_lite = rtp_cfg.ice_lite;
+                if let Some(config) = result.rtp_config {
+                    if let Some(ip) = config.bind_ip {
+                        dialplan.media.bind_ip = Some(ip.to_string());
+                    }
+                    if let Some(ip) = config.external_ip {
+                        dialplan.media.external_ip = Some(ip.to_string());
+                    }
+                }
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());
