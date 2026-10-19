@@ -31,6 +31,7 @@ pub mod config_entry;
 pub mod department;
 pub mod extension;
 pub mod extension_department;
+pub mod fix_timestamptz_columns;
 pub mod frequency_limit;
 pub mod migration;
 pub mod policy;

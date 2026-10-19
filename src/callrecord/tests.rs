@@ -153,6 +153,37 @@ async fn test_create_call_record_table() {
     assert!(rows.is_ok(), "table should exist");
 }
 
+#[tokio::test]
+#[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+async fn test_custom_cdr_postgres_timestamptz_upgrade() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
+    let mut options = ConnectOptions::new(std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap());
+    options.max_connections(1);
+    let db = Database::connect(options).await.unwrap();
+    db.execute_unprepared("CREATE SCHEMA custom_cdr_tz_test").await.unwrap();
+    db.execute_unprepared("SET search_path TO custom_cdr_tz_test").await.unwrap();
+    db.execute_unprepared("CREATE TABLE test_cdrs (id BIGSERIAL PRIMARY KEY, call_id TEXT, \
+         started_at TIMESTAMP NOT NULL, ended_at TIMESTAMP, created_at TIMESTAMPTZ NOT NULL)")
+        .await
+        .unwrap();
+    // Creating over an old table fixes the naive columns and keeps the rest.
+    create_call_record_table(&db, "test_cdrs").await.unwrap();
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT data_type::text AS t FROM information_schema.columns \
+             WHERE table_schema = 'custom_cdr_tz_test' AND table_name = 'test_cdrs' \
+             AND column_name IN ('started_at', 'ended_at', 'created_at')",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert_eq!(row.try_get::<String>("", "t").unwrap(), "timestamp with time zone");
+    }
+    db.execute_unprepared("DROP SCHEMA custom_cdr_tz_test CASCADE").await.unwrap();
+}
+
 // ── BuiltinDatabaseSaver ──────────────────────────────────────────────────────
 
 #[tokio::test]

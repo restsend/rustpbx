@@ -48,7 +48,10 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(big_integer(Column::Id).primary_key().auto_increment())
                     .col(string(Column::Kind).char_len(32))
-                    .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
+                    .col(
+                        timestamp_with_time_zone(Column::CreatedAt)
+                            .default(Expr::current_timestamp()),
+                    )
                     .col(big_integer(Column::Num1).default(0))
                     .col(big_integer(Column::Num2).default(0))
                     .col(big_integer(Column::Num3).default(0))

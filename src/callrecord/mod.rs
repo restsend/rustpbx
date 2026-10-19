@@ -1349,8 +1349,8 @@ pub(crate) async fn create_call_record_table(
         .col(string_len_null(Alias::new("display_id"), 255))
         .col(string_len(Alias::new("direction"), 32).not_null())
         .col(string_len(Alias::new("status"), 32).not_null())
-        .col(timestamp(Alias::new("started_at")).not_null())
-        .col(timestamp_null(Alias::new("ended_at")))
+        .col(timestamp_with_time_zone(Alias::new("started_at")).not_null())
+        .col(timestamp_with_time_zone_null(Alias::new("ended_at")))
         .col(integer(Alias::new("duration_secs")).not_null())
         .col(string_len_null(Alias::new("from_number"), 128))
         .col(string_len_null(Alias::new("to_number"), 128))
@@ -1375,9 +1375,9 @@ pub(crate) async fn create_call_record_table(
         .col(json_null(Alias::new("tags")))
         .col(json_null(Alias::new("leg_timeline")))
         .col(json_null(Alias::new("metadata")))
-        .col(timestamp(Alias::new("created_at")).not_null())
-        .col(timestamp(Alias::new("updated_at")).not_null())
-        .col(timestamp_null(Alias::new("archived_at")))
+        .col(timestamp_with_time_zone(Alias::new("created_at")).not_null())
+        .col(timestamp_with_time_zone(Alias::new("updated_at")).not_null())
+        .col(timestamp_with_time_zone_null(Alias::new("archived_at")))
         .col(string_len_null(Alias::new("hangup_reason"), 64))
         .col(integer_null(Alias::new("sip_status_code")))
         .col(double_null(Alias::new("media_loss_pct")))
@@ -1387,6 +1387,11 @@ pub(crate) async fn create_call_record_table(
 
     db.execute_raw(db.get_database_backend().build(&create))
         .await?;
+
+    // Custom CDR databases never run the core migrator, so repair the
+    // Postgres column types here as well.
+    use crate::models::fix_timestamptz_columns as fix;
+    fix::fix_timestamptz_columns(db, table_name, fix::CALL_RECORD_COLUMNS).await?;
 
     // Add unique index on call_id + basic query indexes (must run after CREATE TABLE)
     let indexes = [

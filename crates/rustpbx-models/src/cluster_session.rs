@@ -53,8 +53,14 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Callee).string_len(160))
                     .col(string(Column::Direction).string_len(16))
                     .col(string_null(Column::TargetSessionId).string_len(200))
-                    .col(timestamp(Column::StartedAt).default(Expr::current_timestamp()))
-                    .col(timestamp(Column::LastUpdatedAt).default(Expr::current_timestamp()))
+                    .col(
+                        timestamp_with_time_zone(Column::StartedAt)
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        timestamp_with_time_zone(Column::LastUpdatedAt)
+                            .default(Expr::current_timestamp()),
+                    )
                     .to_owned(),
             )
             .await?;

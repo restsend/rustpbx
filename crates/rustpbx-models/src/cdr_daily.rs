@@ -1,6 +1,8 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{big_integer, big_integer_null, double, string, timestamp};
+use sea_orm_migration::schema::{
+    big_integer, big_integer_null, double, string, timestamp_with_time_zone,
+};
 use serde::{Deserialize, Serialize};
 
 /// Pre-aggregated daily CDR rollup (`rustpbx_cdr_daily`).
@@ -44,7 +46,7 @@ impl MigrationTrait for Migration {
                     .table(Entity)
                     .if_not_exists()
                     .col(big_integer(Column::Id).primary_key().auto_increment())
-                    .col(timestamp(Column::Day))
+                    .col(timestamp_with_time_zone(Column::Day))
                     .col(string(Column::Direction).char_len(32))
                     .col(big_integer_null(Column::DepartmentId))
                     .col(big_integer_null(Column::SipTrunkId))
@@ -53,7 +55,7 @@ impl MigrationTrait for Migration {
                     .col(big_integer(Column::Missed).default(0))
                     .col(big_integer(Column::TotalDurationSecs).default(0))
                     .col(double(Column::AvgDurationSecs).default(0.0))
-                    .col(timestamp(Column::UpdatedAt))
+                    .col(timestamp_with_time_zone(Column::UpdatedAt))
                     .to_owned(),
             )
             .await?;
