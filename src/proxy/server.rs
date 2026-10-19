@@ -1516,16 +1516,20 @@ impl SipServer {
 
             let runnings_tx = self.inner.runnings_tx.clone();
 
-            let source_ip = tx
+            let remote_addr = tx
                 .connection
                 .as_ref()
-                .and_then(|conn| conn.get_remote_addr())
-                .and_then(crate::proxy::routing::source_addr_ip);
-            let source_transport = tx
-                .connection
-                .as_ref()
-                .and_then(|conn| conn.get_remote_addr())
-                .and_then(|addr| addr.r#type);
+                .and_then(|conn| conn.get_remote_addr());
+            let source_ip = remote_addr.and_then(crate::proxy::routing::source_addr_ip);
+            let source_transport = remote_addr.and_then(|addr| addr.r#type);
+            // Log-friendly "ip:port" / transport strings: Display formatting
+            // keeps the noisy `Some(...)` Debug wrappers out of the logs.
+            let source_addr = remote_addr
+                .map(|addr| addr.addr.to_string())
+                .unwrap_or_default();
+            let source_transport_str = source_transport
+                .map(|transport| transport.to_string())
+                .unwrap_or_default();
 
             if let Some(max_concurrency) = self.inner.proxy_config.load().max_concurrency
                 && runnings_tx.load(Ordering::Relaxed) >= max_concurrency
@@ -1563,7 +1567,7 @@ impl SipServer {
                     crate::metrics::transaction::rejected("shutting_down");
                     warn!(
                         key = %tx.key,
-                        method = ?tx.original.method,
+                        method = %tx.original.method,
                         "draining: rejecting out-of-dialog request"
                     );
                     tx.reply(code).await.ok();
@@ -1626,7 +1630,7 @@ impl SipServer {
                             false
                         };
                         if from_websocket || is_trunk || from_trusted_proxy {
-                            info!(key = %tx.key, via_ip = %via_ip_str, ?source_ip, ?source_transport, "responding 200 OK to connectivity OPTIONS");
+                            info!(key = %tx.key, via_ip = %via_ip_str, source = %source_addr, transport = %source_transport_str, "responding 200 OK to connectivity OPTIONS");
                             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             continue;
                         }
@@ -1653,13 +1657,17 @@ impl SipServer {
                 let guard = token.clone().drop_guard();
                 select! {
                     r = Self::process_transaction(token.clone(), modules, cookie.clone(),  &mut tx) => {
-                        let final_status = tx.last_response.as_ref().map(|r| r.status_code());
+                        let final_status = tx
+                            .last_response
+                            .as_ref()
+                            .map(|r| r.status_code().code().to_string())
+                            .unwrap_or_default();
                         match r {
                             Ok(_) => {
-                                debug!(key = %tx.key, ?source_ip, ?final_status, "transaction processed in {:?}", start_time.elapsed());
+                                debug!(key = %tx.key, source = %source_addr, final_status = %final_status, "transaction processed in {:?}", start_time.elapsed());
                             },
                             Err(e) => {
-                                warn!(key = %tx.key, ?source_ip, ?final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
+                                warn!(key = %tx.key, source = %source_addr, final_status = %final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
                             }
                         }
                     }

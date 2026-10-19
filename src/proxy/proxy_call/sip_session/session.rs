@@ -15417,7 +15417,7 @@ impl SipSession {
                         target = %uri,
                         registered_contact = %registered_location.aor,
                         webrtc = registered_location.supports_webrtc,
-                        transport = ?registered_location.transport,
+                        transport = registered_location.transport.map(|t| t.to_string()).unwrap_or_default(),
                         "Resolved dynamic leg target through locator"
                     );
                     location = registered_location;

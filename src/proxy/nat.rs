@@ -90,8 +90,7 @@ fn fix_nated_contact_in_request(
     }
     if changed {
         debug!(
-            received = %received_ip,
-            port = ?target.port,
+            source = %target,
             method = %req.method,
             "Fixed NATed Contact on inbound INVITE/REGISTER"
         );
