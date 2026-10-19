@@ -617,6 +617,7 @@ async fn module_notify_missing_dialog_prunes_dead_binding() {
         .update_state(
             "bob",
             PresenceState {
+                reason: None,
                 status: PresenceStatus::Busy,
                 ..Default::default()
             },
@@ -1174,6 +1175,7 @@ async fn oc_self_reconnect_suppresses_stale_offline_but_delivers_idle() {
         .update_state(
             "alice",
             PresenceState {
+                reason: None,
                 offline_reason: Some("offline".into()),
                 ..Default::default()
             },
@@ -1211,6 +1213,7 @@ async fn oc_self_reconnect_suppresses_stale_offline_but_delivers_idle() {
         .update_state(
             "alice",
             PresenceState {
+                reason: None,
                 status: PresenceStatus::Offline,
                 offline_reason: Some("manual".into()),
                 ..Default::default()
@@ -1238,6 +1241,7 @@ async fn oc_invalid_dialog_is_not_counted_as_sent() {
         .update_state(
             "bob",
             PresenceState {
+                reason: None,
                 status: PresenceStatus::Idle,
                 ..Default::default()
             },

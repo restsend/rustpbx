@@ -116,6 +116,7 @@ async fn test_presence_notify_body_generation() {
         .update_state(
             "bob",
             crate::proxy::presence::PresenceState {
+                reason: None,
                 status: crate::proxy::presence::PresenceStatus::Busy,
                 note: None,
                 activity: None,
@@ -142,6 +143,7 @@ async fn test_presence_notify_body_generation() {
         .update_state(
             "bob",
             crate::proxy::presence::PresenceState {
+                reason: None,
                 status: crate::proxy::presence::PresenceStatus::Idle,
                 note: None,
                 activity: None,
@@ -164,6 +166,7 @@ async fn test_presence_notify_body_generation() {
         .update_state(
             "bob",
             crate::proxy::presence::PresenceState {
+                reason: None,
                 status: crate::proxy::presence::PresenceStatus::Wrapup,
                 note: None,
                 activity: None,
@@ -186,6 +189,7 @@ async fn test_presence_notify_body_generation() {
         .update_state(
             "bob",
             crate::proxy::presence::PresenceState {
+                reason: None,
                 status: crate::proxy::presence::PresenceStatus::Offline,
                 note: None,
                 activity: None,
@@ -355,6 +359,7 @@ async fn test_presence_publish_bodyless_renewal() {
             .update_state(
                 "bob",
                 PresenceState {
+                    reason: None,
                     status: PresenceStatus::Idle,
                     expires_at: Some(now + 30),
                     ..Default::default()
@@ -367,6 +372,7 @@ async fn test_presence_publish_bodyless_renewal() {
             .update_projected_state(
                 "bob",
                 PresenceState {
+                    reason: None,
                     status: status.clone(),
                     note: Some("authoritative state".into()),
                     activity: Some("business activity".into()),
@@ -423,6 +429,7 @@ async fn test_presence_publish_bodyless_renewal() {
             .update_state(
                 "bob",
                 PresenceState {
+                    reason: None,
                     status: status.clone(),
                     expires_at: expiry,
                     last_updated: now - 20,

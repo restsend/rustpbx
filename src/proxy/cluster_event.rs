@@ -162,6 +162,10 @@ pub struct ClusterPresenceMessage {
     identity: String,
     status: String,
     note: Option<String>,
+    /// Standard RPID reason, carried across peers. Older peers omit it and
+    /// deserialize to `None`; newer peers ignore it for status derivation.
+    #[serde(default)]
+    reason: Option<String>,
     activity: Option<String>,
     last_updated: i64,
     /// Why the state went offline (`"offline"` / `"expired"` /
@@ -182,6 +186,7 @@ impl ClusterPresenceMessage {
         Some(PresenceState {
             status,
             note: self.note.clone(),
+            reason: self.reason.clone(),
             activity: self.activity.clone(),
             last_updated: self.last_updated,
             // Peer-mirrored states carry no local PUBLISH TTL; the origin
@@ -236,6 +241,7 @@ impl From<(&str, &PresenceState)> for ClusterPresenceMessage {
             identity: identity.to_string(),
             status: state.status.to_string(),
             note: state.note.clone(),
+            reason: state.reason.clone(),
             activity: state.activity.clone(),
             last_updated: state.last_updated,
             offline_reason: state.offline_reason.clone(),
@@ -774,6 +780,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "available".to_string(),
             note: Some("On line".to_string()),
+            reason: None,
             activity: None,
             last_updated: 1714000000,
             offline_reason: None,
@@ -801,6 +808,7 @@ mod tests {
             identity: "2001".to_string(),
             status: "busy".to_string(),
             note: Some("In a meeting".to_string()),
+            reason: None,
             activity: Some("on-the-phone".to_string()),
             last_updated: 1714000100,
             offline_reason: None,
@@ -828,6 +836,7 @@ mod tests {
             identity: "x".to_string(),
             status: "offline".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -844,6 +853,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "idle".to_string(),
             note: Some("hello".to_string()),
+            reason: None,
             activity: None,
             last_updated: 100,
             offline_reason: None,
@@ -861,6 +871,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "available".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -875,6 +886,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "ringing".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -885,6 +897,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "wrapup".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -898,6 +911,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "busy".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -912,6 +926,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "away".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -926,6 +941,7 @@ mod tests {
             identity: "1001".to_string(),
             status: "offline".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -940,6 +956,7 @@ mod tests {
             identity: "test".to_string(),
             status: "lunch".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -954,6 +971,7 @@ mod tests {
             identity: "test".to_string(),
             status: "away:lunch".to_string(),
             note: None,
+            reason: None,
             activity: None,
             last_updated: 0,
             offline_reason: None,
@@ -1098,6 +1116,7 @@ mod tests {
     #[test]
     fn test_presence_state_to_message() {
         let state = PresenceState {
+            reason: None,
             status: PresenceStatus::Idle,
             note: Some("online".to_string()),
             activity: Some("idle".to_string()),
@@ -1116,6 +1135,7 @@ mod tests {
     #[test]
     fn test_presence_state_to_message_busy() {
         let state = PresenceState {
+            reason: None,
             status: PresenceStatus::Busy,
             note: None,
             activity: None,
@@ -1226,6 +1246,7 @@ mod tests {
         hub.register_handler(handler.clone());
 
         let state = PresenceState {
+            reason: None,
             status: PresenceStatus::Idle,
             ..Default::default()
         };
@@ -1255,6 +1276,7 @@ mod tests {
         let hub = make_test_hub();
         let identity = "1001";
         let state = PresenceState {
+            reason: None,
             status: PresenceStatus::Idle,
             note: Some("remote-test".to_string()),
             ..Default::default()
@@ -1460,6 +1482,7 @@ mod tests {
     #[test]
     fn test_presence_state_full_round_trip() {
         let original = PresenceState {
+            reason: None,
             status: PresenceStatus::Away(String::new()),
             note: Some("Lunch".to_string()),
             activity: Some("meal".to_string()),
@@ -1515,6 +1538,7 @@ mod tests {
     #[test]
     fn test_presence_message_empty_status() {
         let msg = ClusterPresenceMessage {
+            reason: None,
             identity: "test".to_string(),
             status: String::new(),
             note: None,

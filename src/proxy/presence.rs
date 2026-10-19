@@ -42,6 +42,15 @@ struct IncomingPresence {
     tuples: Vec<IncomingTuple>,
     #[serde(rename = "note", default)]
     notes: Vec<String>,
+    /// RFC 4479 data-model person carrying standard RPID metadata (reason).
+    #[serde(rename = "person", default)]
+    persons: Vec<IncomingPerson>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct IncomingPerson {
+    #[serde(rename = "activities", default)]
+    activities: Option<RpidActivities>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -60,6 +69,13 @@ struct IncomingStatus {
 
 #[derive(Debug, Deserialize, Default)]
 struct RpidActivities {
+    /// RFC 4480 human-readable activity note (`<rpid:note>`).
+    #[serde(rename = "note", default)]
+    notes: Vec<String>,
+    /// RFC 4480 application-specific activity text (`<rpid:other>`); CC uses
+    /// the exact `ring-timeout-ack <token>` grammar.
+    #[serde(rename = "other", default)]
+    other: Option<String>,
     #[serde(rename = "away", default)]
     away: Option<RpidEmpty>,
     #[serde(rename = "busy", default)]
@@ -70,6 +86,17 @@ struct RpidActivities {
 
 #[derive(Debug, Deserialize, Default)]
 struct RpidEmpty {}
+
+/// First non-empty standard RPID reason (`dm:person/rpid:activities/rpid:note`).
+fn incoming_reason(pidf: &IncomingPresence) -> Option<String> {
+    pidf.persons
+        .iter()
+        .filter_map(|person| person.activities.as_ref())
+        .flat_map(|activities| activities.notes.iter())
+        .map(|note| note.trim())
+        .find(|note| !note.is_empty())
+        .map(str::to_string)
+}
 
 // ── Serialization (outbound NOTIFY PIDF-XML) ────────────────────────────
 
@@ -184,6 +211,10 @@ impl PresenceStatus {
 pub struct PresenceState {
     pub status: PresenceStatus,
     pub note: Option<String>,
+    /// Human-readable reason from standard RPID `activities/note` (e.g. a
+    /// 小休申请理由). Never used to derive the machine status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub activity: Option<String>,
     pub last_updated: i64,
     /// PUBLISH TTL deadline (epoch secs). `None` = no TTL enforced — states
@@ -205,6 +236,7 @@ impl Default for PresenceState {
         Self {
             status: PresenceStatus::Offline,
             note: None,
+            reason: None,
             activity: None,
             last_updated: chrono::Utc::now().timestamp(),
             expires_at: None,
@@ -243,6 +275,47 @@ pub struct MwiTrigger {
     pub old_messages: u32,
 }
 
+/// Reverse business-status source: on a REGISTER that recovers from Offline the
+/// presence plane asks the business plane (the CC addon) for the extension's
+/// **persisted** status (break/away/…) instead of blindly defaulting to Idle.
+///
+/// Motivation (e2e S18 C6): after a node restart the in-memory presence store is
+/// empty, so a re-REGISTER hit the hard-coded `Offline → Idle` recovery and
+/// emitted a ghost `idle` NOTIFY while the persisted CC registry still held
+/// `away:2` — the soft-phone follows SIP presence and flipped 小休→空闲.
+///
+/// `None` = no business context (plain SIP phone); callers fall back to the
+/// historical `Idle` recovery.
+#[async_trait]
+pub trait BusinessStatusProvider: Send + Sync {
+    async fn business_status(&self, extension: &str) -> Option<PresenceState>;
+}
+
+/// Generic hook for raw SIP PUBLISH bodies. Core parses the standard PIDF
+/// status/note and then hands the untouched body to registered addons; all
+/// business-specific XML extensions (e.g. CC ring-timeout acknowledgements)
+/// stay in the addon. Core never interprets those extensions.
+///
+/// Returning `true` means the publication was fully consumed as an addon
+/// command (not a manual presence update); core replies 200 but skips its
+/// normal admission/persistence/NOTIFY path. This is required for CC ring
+/// acknowledgements, whose PIDF note is an internal marker rather than a
+/// state the agent meant to publish.
+#[async_trait]
+pub trait PresencePublishHook: Send + Sync {
+    async fn on_publish(&self, identity: &str, state: &PresenceState, body: &[u8]) -> bool;
+}
+
+/// Decision for a REGISTER recovering from Offline (pure, unit-tested): prefer
+/// the business plane's non-offline state (e.g. `away:2`); only fall back to the
+/// historical `Idle` when there is no business status.
+fn register_recovery_status(business: Option<&PresenceState>) -> PresenceStatus {
+    match business {
+        Some(st) if st.status != PresenceStatus::Offline => st.status.clone(),
+        _ => PresenceStatus::Idle,
+    }
+}
+
 #[derive(Clone)]
 pub struct PresenceManager {
     states: Arc<RwLock<HashMap<String, PresenceState>>>,
@@ -260,6 +333,11 @@ pub struct PresenceManager {
     /// last `(identity, status)` they carried.
     notifies_sent: Arc<std::sync::atomic::AtomicU64>,
     last_notified: Arc<RwLock<Option<(String, String)>>>,
+    /// Reverse business-status source (registered by the CC addon). See
+    /// [`BusinessStatusProvider`].
+    business_status_provider: Arc<RwLock<Option<Arc<dyn BusinessStatusProvider>>>>,
+    /// Addon hooks receiving the raw PUBLISH body. See [`PresencePublishHook`].
+    publish_hooks: Arc<RwLock<Vec<Arc<dyn PresencePublishHook>>>>,
 }
 
 impl PresenceManager {
@@ -275,6 +353,34 @@ impl PresenceManager {
             cluster_sync: std::sync::Arc::new(parking_lot::RwLock::new(None)),
             notifies_sent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_notified: Arc::new(RwLock::new(None)),
+            business_status_provider: Arc::new(RwLock::new(None)),
+            publish_hooks: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Register an addon hook for raw SIP PUBLISH bodies. Hooks run in
+    /// registration order before presence admission/persistence.
+    pub fn add_publish_hook(&self, hook: Arc<dyn PresencePublishHook>) {
+        self.publish_hooks.write().push(hook);
+    }
+
+    fn publish_hooks(&self) -> Vec<Arc<dyn PresencePublishHook>> {
+        self.publish_hooks.read().clone()
+    }
+
+    /// Register the reverse business-status source (the CC addon calls this once
+    /// at startup; see [`BusinessStatusProvider`]).
+    pub fn set_business_status_provider(&self, provider: Arc<dyn BusinessStatusProvider>) {
+        *self.business_status_provider.write() = Some(provider);
+    }
+
+    /// Query the business plane for an extension's persisted status. `None`
+    /// when no provider is registered.
+    async fn business_status(&self, extension: &str) -> Option<PresenceState> {
+        let provider = self.business_status_provider.read().clone();
+        match provider {
+            Some(p) => p.business_status(extension).await,
+            None => None,
         }
     }
 
@@ -345,7 +451,8 @@ impl PresenceManager {
 
     /// Number of presence NOTIFYs acknowledged with a successful SIP response.
     pub fn notifies_sent(&self) -> u64 {
-        self.notifies_sent.load(std::sync::atomic::Ordering::Relaxed)
+        self.notifies_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Last successfully acknowledged presence NOTIFY's `(identity, status)`.
@@ -366,8 +473,11 @@ impl PresenceManager {
     }
 
     pub(crate) fn publication_lock(&self, identity: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.publication_locks.write().entry(identity.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+        self.publication_locks
+            .write()
+            .entry(identity.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Rearm an accepted publication without replacing its authoritative status.
@@ -678,7 +788,8 @@ impl PresenceManager {
             // An addon may defer logout or reject the write. Admit expiry
             // before notifying subscribers, just like a client PUBLISH.
             if let Some(hub) = hub {
-                hub.emit_presence_change_locked(&identity, None, &state).await;
+                hub.emit_presence_change_locked(&identity, None, &state)
+                    .await;
             } else {
                 self.update_state(&identity, state, &EventSource::Local)
                     .await;
@@ -883,43 +994,53 @@ impl PresenceManager {
                         None
                     });
 
+                    let mut recovered: Option<PresenceState> = None;
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
                         // Registration may recover Offline; a keepalive only
                         // recovers transport/lease failures, never explicit logout.
                         // The locked predicate below also preserves newer states.
                         None if current.status == PresenceStatus::Offline => {
-                            PresenceStatus::Idle
+                            // Prefer the business plane's persisted status (break/
+                            // away) over a hard-coded Idle — a node restart empties
+                            // this store, so the old `Offline → Idle` recovery
+                            // emitted a ghost `idle` NOTIFY that desynced SIP
+                            // presence from the (DB-persisted) CC registry and
+                            // flipped a soft-phone's 小休 to 空闲 (e2e S18 C6).
+                            let business = self.business_status(&user).await;
+                            recovered = business.clone();
+                            register_recovery_status(business.as_ref())
                         }
                         None => return pruned,
                     };
 
-                    self.update_state_internal(
-                        &user,
-                        PresenceState {
-                            status: new_status,
-                            last_updated: chrono::Utc::now().timestamp(),
-                            // A fresh REGISTER proves the client is alive: a
-                            // PUBLISH TTL armed by an earlier publication
-                            // must not later flip this user offline.
-                            expires_at: None,
-                            offline_reason: None,
-                            ..current
-                        },
-                        source,
-                        false,
-                        |latest| {
-                            header_status.is_some()
-                                || latest.map_or(!is_refresh, |state| {
-                                    state.status == PresenceStatus::Offline
-                                        && (!is_refresh
-                                            || matches!(
-                                                state.offline_reason.as_deref(),
-                                                Some("expired" | "offline")
-                                            ))
-                                })
-                        },
-                    )
+                    let mut next = PresenceState {
+                        status: new_status,
+                        last_updated: chrono::Utc::now().timestamp(),
+                        // A fresh REGISTER proves the client is alive: a
+                        // PUBLISH TTL armed by an earlier publication
+                        // must not later flip this user offline.
+                        expires_at: None,
+                        offline_reason: None,
+                        ..current
+                    };
+                    if let Some(st) = recovered {
+                        // Carry the business detail (e.g. `away:2`); otherwise the
+                        // reconcile NOTIFY would degrade to a bare `away`.
+                        next.note = st.note;
+                    }
+
+                    self.update_state_internal(&user, next, source, false, |latest| {
+                        header_status.is_some()
+                            || latest.map_or(!is_refresh, |state| {
+                                state.status == PresenceStatus::Offline
+                                    && (!is_refresh
+                                        || matches!(
+                                            state.offline_reason.as_deref(),
+                                            Some("expired" | "offline")
+                                        ))
+                            })
+                    })
                     .await;
                 }
             }
@@ -1352,7 +1473,10 @@ impl PresenceModule {
         let identity_notify = identity.clone();
         crate::utils::spawn(async move {
             let state = module.manager.get_state(&identity_notify);
-            if let Err(e) = module.send_notify(&identity_notify, &sub, &state, true).await {
+            if let Err(e) = module
+                .send_notify(&identity_notify, &sub, &state, true)
+                .await
+            {
                 debug!(
                     dialog_id = %sub.dialog_id,
                     error = %e,
@@ -1471,7 +1595,13 @@ impl PresenceModule {
                 }
             }
 
+            // Standard RPID reason: <dm:person><rpid:activities><rpid:note>.
+            // Only the person extension is used; tuple notes remain the
+            // machine-readable state and must not be reinterpreted.
+            let reason = incoming_reason(&pidf);
+
             current.status = status;
+            current.reason = reason;
             if let Some(note) = activity_note {
                 current.note = Some(note);
             } else if !pidf.notes.is_empty() {
@@ -1493,6 +1623,22 @@ impl PresenceModule {
             } else {
                 current.status = PresenceStatus::Idle;
             }
+        }
+
+        // Generic addon hook: the core deliberately does not parse
+        // addon-specific PIDF extensions. Hooks run before admission so an
+        // extension can be consumed even when the addon suppresses the SIP
+        // mirror (CC does exactly that for agent presence).
+        let publish_body = tx.original.body.clone();
+        let mut consumed = false;
+        for hook in self.manager.publish_hooks() {
+            consumed |= hook.on_publish(&identity, &current, &publish_body).await;
+        }
+        if consumed {
+            // The addon owns this publication (e.g. ring-timeout ack). It is
+            // not a manual state: acknowledge SIP but do not mirror/store it.
+            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+            return Ok(());
         }
 
         let old_state = self.manager.get_state(&identity);
@@ -1587,7 +1733,8 @@ impl PresenceModule {
             Ok(Ok(Some(response)))
                 if response.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful =>
             {
-                self.manager.record_notify(identity, &state.status.to_string());
+                self.manager
+                    .record_notify(identity, &state.status.to_string());
                 Ok(())
             }
             Ok(Ok(_)) => Ok(()),
@@ -1882,6 +2029,82 @@ mod tests {
     use crate::call::Location;
     use rsipstack::sip::Uri;
 
+    /// 纯函数：REGISTER 从 Offline 恢复时的状态判定 —— 优先业务平面非 offline
+    /// 状态，无业务语境才回退 Idle。
+    #[test]
+    fn register_recovery_status_prefers_business_over_ghost_idle() {
+        assert_eq!(register_recovery_status(None), PresenceStatus::Idle);
+        let off = PresenceState {
+            status: PresenceStatus::Offline,
+            ..Default::default()
+        };
+        assert_eq!(register_recovery_status(Some(&off)), PresenceStatus::Idle);
+        let away = PresenceState {
+            status: PresenceStatus::Away("2".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            register_recovery_status(Some(&away)),
+            PresenceStatus::Away("2".into())
+        );
+    }
+
+    /// 反向业务状态来源的桩：返回预置状态。
+    struct StubBiz(Option<PresenceState>);
+    #[async_trait]
+    impl BusinessStatusProvider for StubBiz {
+        async fn business_status(&self, _extension: &str) -> Option<PresenceState> {
+            self.0.clone()
+        }
+    }
+
+    /// 回归（e2e S18 C6 定罪）：节点重启后 presence store 为空，客户端重连
+    /// REGISTER 若盲目兜底 Idle，会与 CC registry（持久化 away:2）不一致 ——
+    /// 软电话跟随 SIP presence 把小休切成空闲。注册业务状态来源后，恢复必须
+    /// 保留业务小休状态 + 明细（away:2），不得 ghost idle。
+    #[tokio::test]
+    async fn register_recovery_prefers_business_break_over_ghost_idle() {
+        let ext = "1001";
+        let loc = Location {
+            aor: Uri::try_from("sip:1001@localhost").unwrap(),
+            ..Default::default()
+        };
+
+        // 无业务来源（普通 SIP 分机）：历史行为 → Idle。
+        let manager = PresenceManager::new(None);
+        manager
+            .handle_locator_event(LocatorEvent::Registered(loc.clone()), &EventSource::Local)
+            .await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+
+        // 有业务来源（CC 小休 away:2）：恢复为小休并带明细，绝不 ghost Idle。
+        let manager = PresenceManager::new(None);
+        let biz = PresenceState {
+            status: PresenceStatus::Away("2".into()),
+            note: Some("away:2".into()),
+            ..Default::default()
+        };
+        manager.set_business_status_provider(Arc::new(StubBiz(Some(biz))));
+        manager
+            .handle_locator_event(LocatorEvent::Registered(loc.clone()), &EventSource::Local)
+            .await;
+        let st = manager.get_state(ext);
+        assert_eq!(
+            st.status,
+            PresenceStatus::Away("2".into()),
+            "业务小休不得被兜底成 Idle"
+        );
+        assert_eq!(st.note.as_deref(), Some("away:2"), "明细随行");
+
+        // 业务来源为 offline：回退 Idle（不投影 offline 到恢复路径）。
+        let manager = PresenceManager::new(None);
+        manager.set_business_status_provider(Arc::new(StubBiz(Some(PresenceState::default()))));
+        manager
+            .handle_locator_event(LocatorEvent::Registered(loc), &EventSource::Local)
+            .await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+    }
+
     /// Regression guard for the parking_lot migration: a panic while holding
     /// a presence lock must NOT poison it. Under `std::sync::RwLock` every
     /// later `.read().unwrap()` on the hot path would panic forever (crash
@@ -2063,7 +2286,10 @@ mod tests {
             .await;
         let expired = manager.expire_stale_publishes().await;
         assert_eq!(expired, vec!["agent-live".to_string()]);
-        assert_eq!(manager.get_state("agent-live").status, PresenceStatus::Offline);
+        assert_eq!(
+            manager.get_state("agent-live").status,
+            PresenceStatus::Offline
+        );
 
         // The registration guard must preserve both renewed leases and business projections.
         for renew_lease in [true, false] {
@@ -2671,6 +2897,35 @@ mod tests {
             .or_else(|| note.strip_prefix("custom:"))
             .unwrap_or(&note);
         assert_eq!(detail, "meeting");
+    }
+
+    #[test]
+    fn test_parse_publish_reason_from_standard_rpid_person() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf"
+          xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model"
+          xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid">
+  <tuple id="presence"><status><basic>open</basic></status>
+    <rpid:activities><rpid:away/></rpid:activities>
+    <note>away:break</note></tuple>
+  <dm:person id="p1"><rpid:activities>
+    <rpid:note>客户回访 &lt;30 分钟&gt;</rpid:note>
+  </rpid:activities></dm:person>
+</presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body).unwrap();
+        assert_eq!(
+            incoming_reason(&pidf).as_deref(),
+            Some("客户回访 <30 分钟>")
+        );
+        // The tuple note is still the machine state, not the reason.
+        assert_eq!(pidf.tuples[0].note.as_deref(), Some("away:break"));
+    }
+
+    #[test]
+    fn test_parse_publish_without_reason_stays_none() {
+        let body = r#"<presence><tuple><status><basic>open</basic></status><note>away:break</note></tuple></presence>"#;
+        let pidf = quick_xml::de::from_str::<IncomingPresence>(body).unwrap();
+        assert_eq!(incoming_reason(&pidf), None);
     }
 
     /// PIDF with missing `entity` and `xmlns` attributes parses cleanly.
