@@ -217,6 +217,7 @@ generated_db = true
 | CC 技能组 | `cc_skill_groups` | `skill_groups.generated.toml` |
 | CC 坐席 | `cc_agents` | `agents.generated.toml` |
 | CC 转接 | `cc_transfer` | `transfer.toml` |
+| CC 小休/行为 | `cc_phone` | `phone.generated.toml` |
 
 > **注意**：模式之间没有迁移路径。从文件系统切换到数据库模式（或反向切换）时，需要通过管理控制台重新导出所有配置。
 

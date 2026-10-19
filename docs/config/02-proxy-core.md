@@ -219,6 +219,7 @@ In this mode, the following config types are written to and loaded from the `con
 | CC Skill Groups | `cc_skill_groups` | `skill_groups.generated.toml` |
 | CC Agents | `cc_agents` | `agents.generated.toml` |
 | CC Transfer | `cc_transfer` | `transfer.toml` |
+| CC Phone breaks/behavior | `cc_phone` | `phone.generated.toml` |
 
 > **Note**: There is no migration path between modes. Switching from filesystem to DB mode (or vice versa) requires re-exporting all configs through the admin console.
 
