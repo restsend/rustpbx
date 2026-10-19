@@ -89,9 +89,14 @@ pub async fn get_call_record_transcript(
             }))
             .into_response()
         }
+        // Keep the stored status so the console can tell a failed or lost
+        // transcript apart from one that was never requested.
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({ "message": "Transcript not available" })),
+            Json(json!({
+                "message": "Transcript not available",
+                "status": record.transcript_status,
+            })),
         )
             .into_response(),
         Err(err) => {
