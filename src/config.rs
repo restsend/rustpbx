@@ -483,6 +483,43 @@ impl RecordingPolicy {
     }
 }
 
+/// `[release]` section: where release/version-management artifacts are stored
+/// plus the lifetime of on-demand presigned download URLs. Metadata itself
+/// lives in a single `release.toml` managed through the generated-config
+/// store (file or `config_entry` table), not in a dedicated DB table.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ReleaseConfig {
+    /// Artifact storage backend. Defaults to the local `storage/releases`
+    /// directory; configure `type = "s3"` to upload packages to an
+    /// S3-compatible bucket.
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+    /// Lifetime in seconds of presigned download URLs generated on demand for
+    /// S3-uploaded artifacts. Defaults to 86400 (24h); the SigV4 signature
+    /// caps validity at 7 days, so larger values are clamped.
+    #[serde(default)]
+    pub signed_url_expiry_secs: Option<u64>,
+}
+
+impl ReleaseConfig {
+    /// Lifetime of presigned release download URLs, clamped to the SigV4
+    /// 7-day maximum.
+    pub fn effective_signed_url_expiry_secs(&self) -> u64 {
+        const DEFAULT_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
+        self.signed_url_expiry_secs
+            .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
+            .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
+    }
+
+    /// Effective artifact storage, defaulting to the local
+    /// `storage/releases` directory.
+    pub fn effective_storage(&self) -> StorageConfig {
+        self.storage.clone().unwrap_or(StorageConfig::Local {
+            path: "storage/releases".to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -565,6 +602,10 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
+    /// Release/version management: artifact storage + presign expiry. See
+    /// [`ReleaseConfig`].
+    #[serde(default)]
+    pub release: Option<ReleaseConfig>,
     #[cfg(feature = "commerce")]
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
@@ -2432,6 +2473,7 @@ impl Default for Config {
             demo_mode: false,
             storage: None,
             sipflow: None,
+            release: None,
             #[cfg(feature = "commerce")]
             licenses: None,
             #[cfg(feature = "commerce")]

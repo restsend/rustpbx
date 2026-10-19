@@ -1,0 +1,163 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ "releases_page.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6" x-data="releasesPage()">
+    <div class="mx-auto max-w-5xl space-y-6">
+        <header class="space-y-1">
+            <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "nav.releases" | t }}</p>
+            <h1 class="text-2xl font-semibold text-slate-900">{{ "releases_page.title" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "releases_page.subtitle" | t }}</p>
+            <p class="text-xs text-slate-400">{{ "releases_page.api_endpoint_hint" | t }}
+                <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-600">{{ api_prefix | safe }}/release</code>
+            </p>
+        </header>
+
+        <!-- Upload form -->
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+            <h2 class="mb-4 text-sm font-semibold text-slate-900">{{ "releases_page.upload_title" | t }}</h2>
+            <form @submit.prevent="upload($event)" class="space-y-4">
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_version" | t }}</span>
+                        <input type="text" name="version" required placeholder="0.1.13"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_file" | t }}</span>
+                        <input type="file" name="file" required
+                            class="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-sky-50 file:px-3 file:py-1.5 file:text-sky-600 hover:file:bg-sky-100" />
+                    </label>
+                </div>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_notes" | t }}</span>
+                    <textarea name="release_notes" rows="3"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
+                </label>
+                <div class="flex items-center justify-between">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" name="published" value="true" checked
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_published" | t }}
+                    </label>
+                    <button type="submit" :disabled="uploading"
+                        class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                        </svg>
+                        <span x-text="uploading ? '{{ "releases_page.uploading" | t }}' : '{{ "releases_page.upload_btn" | t }}'"></span>
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Releases list -->
+        <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+            {% if releases %}
+            <table class="min-w-full divide-y divide-slate-100 text-sm">
+                <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-3">{{ "releases_page.col_version" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_file" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_size" | t }}</th>
+                        <th class="hidden px-4 py-3 md:table-cell">{{ "releases_page.col_sha256" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_status" | t }}</th>
+                        <th class="hidden px-4 py-3 lg:table-cell">{{ "releases_page.col_created" | t }}</th>
+                        <th class="px-4 py-3 text-right">{{ "releases_page.col_actions" | t }}</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-50">
+                    {% for r in releases %}
+                    <tr class="hover:bg-slate-50/60">
+                        <td class="px-4 py-3">
+                            <span class="font-semibold text-slate-900">{{ r.version }}</span>
+                            {% if r.force %}<span class="ml-1 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                        </td>
+                        <td class="max-w-48 truncate px-4 py-3 text-slate-600" title="{{ r.file_name }}">{{ r.file_name }}</td>
+                        <td class="px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
+                        <td class="hidden px-4 py-3 md:table-cell">
+                            <code class="rounded bg-slate-50 px-1.5 py-0.5 font-mono text-xs text-slate-500"
+                                :title="'{{ r.sha256 }}'"
+                                x-text="'{{ r.sha256 }}'.slice(0, 12) + '…'"></code>
+                        </td>
+                        <td class="px-4 py-3">
+                            {% if r.published %}
+                            <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                                {{ "releases_page.status_published" | t }}
+                            </span>
+                            {% else %}
+                            <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
+                                {{ "releases_page.status_draft" | t }}
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell">{{ r.created_at | default(value='') }}</td>
+                        <td class="px-4 py-3">
+                            <div class="flex items-center justify-end gap-2">
+                                <a href="{{ api_prefix | safe }}/release/{{ r.version }}/download"
+                                    class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "releases_page.action_download" | t }}</a>
+                                <button type="button" @click="togglePublish('{{ r.version }}', {{ r.published }})"
+                                    class="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">
+                                    {{ ("releases_page.action_unpublish" | t) if r.published else ("releases_page.action_publish" | t) }}
+                                </button>
+                                <button type="button" @click="remove('{{ r.version }}')"
+                                    class="rounded-md px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50">{{ "releases_page.action_delete" | t }}</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="flex flex-col items-center justify-center py-16 text-center">
+                <svg class="h-12 w-12 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p class="mt-3 text-sm text-slate-400">{{ "releases_page.no_releases" | t }}</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</div>
+
+<script>
+    function releasesPage() {
+        return {
+            uploading: false,
+            formatBytes(bytes) {
+                if (!bytes || bytes <= 0) return '-';
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let v = bytes, i = 0;
+                while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+                return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+            },
+            async upload(event) {
+                const form = event.target;
+                const fd = new FormData(form);
+                fd.set('published', form.querySelector('[name=published]').checked ? 'true' : 'false');
+                this.uploading = true;
+                try {
+                    await apiPost('/release', fd);
+                    location.reload();
+                } catch (e) {
+                    this.uploading = false;
+                }
+            },
+            async togglePublish(version, published) {
+                try {
+                    await apiPut('/release/' + encodeURIComponent(version), { published: !published });
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            async remove(version) {
+                if (!confirm('{{ "releases_page.confirm_delete" | t }}')) return;
+                try {
+                    await apiDelete('/release/' + encodeURIComponent(version));
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
+        };
+    }
+</script>
+{% endblock %}

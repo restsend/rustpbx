@@ -46,6 +46,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::notifications::api_urls())
         .merge(crate::console::handlers::metrics::api_urls())
         .merge(crate::console::handlers::reports::api_urls())
+        .merge(crate::console::handlers::release::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
     // Addon API routes (collected at runtime via Addon trait hooks), including
@@ -100,6 +101,15 @@ async fn api_auth_middleware(
     next: Next,
 ) -> Response {
     let headers = req.headers().clone();
+
+    // Release reads (version check / list / download) are intentionally
+    // public: desktop update clients cannot authenticate. Mutations under
+    // `/release` (POST/PUT/DELETE) still fall through to the checks below.
+    if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && req.uri().path().starts_with("/release")
+    {
+        return next.run(req).await;
+    }
 
     if let Some(bearer) = extract_bearer_token(&headers) {
         if auth_state.api_tokens.contains_key(&bearer) {
