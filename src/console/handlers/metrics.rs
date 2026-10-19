@@ -264,45 +264,50 @@ async fn collect_media_metrics(state: &ConsoleState) -> MediaMetrics {
 /// Voicemail counters read from the voicemail addon tables (best-effort: the
 /// addon may be disabled or its tables absent — defaults stay zero).
 async fn collect_voicemail_metrics(state: &ConsoleState) -> VoicemailMetrics {
-    use sea_orm::{ConnectionTrait, Statement, Value};
-
-    let mut metrics = VoicemailMetrics::default();
     let Some(app) = state.app_state() else {
-        return metrics;
+        return VoicemailMetrics::default();
     };
-    let db = app.db();
-    let backend = db.get_database_backend();
     let today_start = chrono::Utc::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .unwrap()
         .and_utc();
+    query_voicemail_metrics(app.db(), today_start).await
+}
 
-    // Parameterized COUNT queries; a missing table (addon disabled) errors
-    // and the metric stays at its default of 0.
+async fn query_voicemail_metrics<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    today_start: chrono::DateTime<chrono::Utc>,
+) -> VoicemailMetrics {
+    use sea_orm::ExprTrait;
+    use sea_orm::sea_query::{Alias, Asterisk, Expr, Query};
+
+    let mut metrics = VoicemailMetrics::default();
+    let backend = db.get_database_backend();
+    let count = |table: &str| {
+        Query::select()
+            .expr_as(Expr::col(Asterisk).count(), Alias::new("c"))
+            .from(Alias::new(table))
+            .to_owned()
+    };
+
+    // COUNT queries built per backend (placeholders differ); a missing table
+    // (addon disabled) errors and the metric stays at its default of 0.
     if let Some(row) = db
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            "SELECT COUNT(*) AS c FROM rustpbx_voicemail_box",
-            [],
-        ))
+        .query_one_raw(backend.build(&count("rustpbx_voicemail_box")))
         .await
         .ok()
         .flatten()
     {
-        metrics.active_mailboxes = row.try_get::<i64>("", "c").unwrap_or(0).max(0) as u32;
+        metrics.active_mailboxes =
+            std::cmp::Ord::max(row.try_get::<i64>("", "c").unwrap_or(0), 0) as u32;
     }
-    if let Some(row) = db
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            "SELECT COUNT(*) AS c FROM rustpbx_voicemail_message WHERE created_at >= ?",
-            [Value::ChronoDateTimeUtc(Some(today_start.clone()))],
-        ))
-        .await
-        .ok()
-        .flatten()
-    {
-        metrics.messages_today = row.try_get::<i64>("", "c").unwrap_or(0).max(0) as u64;
+    let today = count("rustpbx_voicemail_message")
+        .and_where(Expr::col(Alias::new("created_at")).gte(today_start))
+        .to_owned();
+    if let Some(row) = db.query_one_raw(backend.build(&today)).await.ok().flatten() {
+        metrics.messages_today =
+            std::cmp::Ord::max(row.try_get::<i64>("", "c").unwrap_or(0), 0) as u64;
     }
     metrics
 }
@@ -317,4 +322,42 @@ pub fn urls() -> axum::Router<Arc<ConsoleState>> {
 pub fn api_urls() -> axum::Router<Arc<ConsoleState>> {
     use axum::routing::get;
     axum::Router::new().route("/metrics/runtime/data", get(metrics_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::domain_report::tests::{
+        fixture_day, postgres_db, seed_voicemail, sqlite_db,
+    };
+    use sea_orm::{ConnectionTrait, DatabaseConnection};
+
+    async fn assert_voicemail_metrics(db: &DatabaseConnection) {
+        seed_voicemail(db).await;
+        let metrics = query_voicemail_metrics(db, fixture_day()).await;
+        assert_eq!(metrics.active_mailboxes, 2);
+        assert_eq!(metrics.messages_today, 2);
+    }
+
+    #[tokio::test]
+    async fn test_voicemail_metrics_sqlite() {
+        assert_voicemail_metrics(&sqlite_db().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_voicemail_metrics_without_addon_tables() {
+        let metrics = query_voicemail_metrics(&sqlite_db().await, fixture_day()).await;
+        assert_eq!(metrics.active_mailboxes, 0);
+        assert_eq!(metrics.messages_today, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+    async fn test_voicemail_metrics_postgres() {
+        let db = postgres_db("voicemail_metrics_test").await;
+        assert_voicemail_metrics(&db).await;
+        db.execute_unprepared("DROP SCHEMA voicemail_metrics_test CASCADE")
+            .await
+            .unwrap();
+    }
 }
