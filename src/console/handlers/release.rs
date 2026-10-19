@@ -16,6 +16,12 @@
 //! - `GET {api_prefix}/release/list`                 — published releases
 //! - `GET {api_prefix}/release/{version}/download`   — stream local file / 302 to presigned URL
 //!
+//! Releases may be tagged with one or more environments
+//! ([`RELEASE_ENVIRONMENTS`]: `testing` / `stable` / `preview`). Update
+//! clients pass their environment as the `env` query param; only releases
+//! tagged with that environment (or untagged ones — visible everywhere, the
+//! legacy default) are considered for the "latest" pick.
+//!
 //! Mutations require authentication (session cookie or Bearer token).
 
 use crate::config::ReleaseConfig;
@@ -42,6 +48,13 @@ use std::sync::Arc;
 pub const RELEASE_CATEGORY: &str = "release";
 /// Config-store entry name for the release manifest.
 pub const RELEASE_ENTRY: &str = "release.toml";
+
+/// Closed set of release environments. A release tagged with one or more
+/// environments is only served to update clients whose `env` query param
+/// matches one of the tags; untagged releases (empty `environments`) stay
+/// visible to every environment — the legacy default, so manifests written
+/// before this field existed keep working unchanged.
+pub const RELEASE_ENVIRONMENTS: [&str; 3] = ["testing", "stable", "preview"];
 
 /// Upload body limit for release artifacts (2 GiB). Axum's default 2 MiB
 /// limit is far too small for application packages.
@@ -87,6 +100,11 @@ pub struct ReleaseDoc {
     pub max_attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// Environments this release targets ([`RELEASE_ENVIRONMENTS`]). Empty
+    /// (or missing — `#[serde(default)]`) means "visible to every
+    /// environment", which is what legacy manifests deserialize to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
@@ -125,22 +143,26 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
 /// GET {api_prefix}/release — bare `UpdateMeta`-shaped JSON for the latest
 /// published release. 404 when nothing is published (clients treat that as
 /// "no update service" and stay silent). Query params carried by clients
-/// (`version`, `build_time`, `git_commit`) are logged for observability.
+/// (`version`, `build_time`, `git_commit`, `env`) are logged for
+/// observability. `env` selects the release environment: only releases
+/// tagged with it (plus untagged ones) are eligible for the "latest" pick.
 pub async fn check_update_handler(
     State(state): State<Arc<ConsoleState>>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
+    let requested_env = params.get("env").map(String::as_str);
     if let Some(current) = params.get("version") {
         tracing::debug!(
             current = %current,
+            env = requested_env.unwrap_or(""),
             build_time = params.get("build_time").map(String::as_str).unwrap_or(""),
             git_commit = params.get("git_commit").map(String::as_str).unwrap_or(""),
             "release check request"
         );
     }
     let docs = load_docs(&config_store(&state)).await;
-    let Some(doc) = pick_latest_published(&docs) else {
+    let Some(doc) = pick_latest_published_for_env(&docs, requested_env) else {
         return json_error(StatusCode::NOT_FOUND, "no release available");
     };
     match build_update_meta(&state, doc, &headers).await {
@@ -198,6 +220,7 @@ pub async fn upload_handler(
     let mut notes: Option<String> = None;
     let mut published = true;
     let mut doc = ReleaseDoc::default();
+    let mut envs: Vec<String> = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name().unwrap_or_default() {
@@ -209,6 +232,18 @@ pub async fn upload_handler(
             }
             "published" => {
                 published = !matches!(field.text().await.as_deref(), Ok("false" | "0" | ""));
+            }
+            // Checkbox group: the field may repeat and each value may carry
+            // comma-separated extras.
+            "environments" => {
+                if let Ok(text) = field.text().await {
+                    for part in text.split(',') {
+                        let v = part.trim().to_ascii_lowercase();
+                        if !v.is_empty() {
+                            envs.push(v);
+                        }
+                    }
+                }
             }
             "build_time" => doc.build_time = field.text().await.ok().and_then(trim_non_empty),
             "git_commit" => doc.git_commit = field.text().await.ok().and_then(trim_non_empty),
@@ -243,6 +278,18 @@ pub async fn upload_handler(
     let Some(file_name) = file_name.filter(|n| !n.trim().is_empty()) else {
         return json_error(StatusCode::BAD_REQUEST, "upload is missing a file name");
     };
+    match normalize_environments(std::mem::take(&mut envs)) {
+        Ok(list) => doc.environments = list,
+        Err(bad) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown environment `{bad}` (allowed: {})",
+                    RELEASE_ENVIRONMENTS.join(", ")
+                ),
+            )
+        }
+    }
 
     match create_release(
         &state,
@@ -305,6 +352,20 @@ pub async fn update_release_handler(
     }
     if body.max_attempts.is_some() {
         doc.max_attempts = body.max_attempts;
+    }
+    if let Some(envs) = body.environments.as_ref() {
+        match normalize_environments(envs.clone()) {
+            Ok(list) => doc.environments = list,
+            Err(bad) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unknown environment `{bad}` (allowed: {})",
+                        RELEASE_ENVIRONMENTS.join(", ")
+                    ),
+                )
+            }
+        }
     }
     let saved = doc.clone();
     if let Err(e) = save_docs(&store, &docs).await {
@@ -376,6 +437,9 @@ pub struct UpdateReleaseBody {
     pub force_rate_limit_kbps: Option<u32>,
     pub max_attempts: Option<u32>,
     pub deadline: Option<String>,
+    /// Replace the environment tags. An explicit empty array resets the
+    /// release to "visible to every environment".
+    pub environments: Option<Vec<String>>,
 }
 
 /// Parameters for [`create_release`] (kept non-multipart so tests and future
@@ -454,6 +518,7 @@ pub async fn create_release(
         force_rate_limit_kbps: params.extra.force_rate_limit_kbps,
         max_attempts: params.extra.max_attempts,
         deadline: params.extra.deadline,
+        environments: params.extra.environments,
         created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
     };
     docs.push(doc.clone());
@@ -541,15 +606,59 @@ fn artifact_storage_path(storage_cfg: &ArtifactStorage, key: &str) -> String {
     }
 }
 
-/// The latest published release by version order.
-fn pick_latest_published(docs: &[ReleaseDoc]) -> Option<&ReleaseDoc> {
+/// The latest published release by version order, restricted to `env`.
+///
+/// `env` is the update client's environment (`?env=` query param):
+/// - `None`/empty (legacy clients) — no filtering, every published doc is
+///   eligible (unchanged pre-environments behaviour);
+/// - some `env` — docs tagged with that environment **plus** untagged docs
+///   (`environments` empty = visible everywhere) are eligible.
+fn pick_latest_published_for_env<'a>(
+    docs: &'a [ReleaseDoc],
+    env: Option<&str>,
+) -> Option<&'a ReleaseDoc> {
+    let env = env
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase());
     docs.iter()
         .filter(|d| d.published && !d.version.trim().is_empty())
+        .filter(|d| match &env {
+            None => true,
+            Some(env) => {
+                d.environments.is_empty() || d.environments.iter().any(|e| e.eq_ignore_ascii_case(env))
+            }
+        })
         .max_by(|a, b| version_cmp(&a.version, &b.version))
 }
 
 fn sort_by_version_desc(docs: &mut Vec<ReleaseDoc>) {
     docs.sort_by(|a, b| version_cmp(&b.version, &a.version));
+}
+
+/// Lowercase + trim a single environment value; `Err` when it is not in
+/// [`RELEASE_ENVIRONMENTS`] (typo protection — an out-of-vocabulary tag
+/// would otherwise be permanently invisible to every client).
+fn normalize_environment(raw: &str) -> Result<String, String> {
+    let v = raw.trim().to_ascii_lowercase();
+    if RELEASE_ENVIRONMENTS.contains(&v.as_str()) {
+        Ok(v)
+    } else {
+        Err(raw.trim().to_string())
+    }
+}
+
+/// Normalize + dedupe environment values, preserving first-seen order.
+/// Returns the first offending value on failure.
+fn normalize_environments(raw: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for v in raw {
+        let v = normalize_environment(&v)?;
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    Ok(out)
 }
 
 /// UpdateMeta-compatible JSON (field names match restsend-pc `update::UpdateMeta`).
@@ -866,9 +975,124 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert_eq!(pick_latest_published(&docs).unwrap().version, "0.1.13");
+        assert_eq!(
+            pick_latest_published_for_env(&docs, None).unwrap().version,
+            "0.1.13"
+        );
         let drafts: Vec<ReleaseDoc> = docs.iter().filter(|d| !d.published).cloned().collect();
-        assert!(pick_latest_published(&drafts).is_none());
+        assert!(pick_latest_published_for_env(&drafts, None).is_none());
+    }
+
+    fn doc_env(version: &str, published: bool, envs: &[&str]) -> ReleaseDoc {
+        ReleaseDoc {
+            version: version.into(),
+            published,
+            environments: envs.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pick_latest_for_env_matches_tags_and_untagged_docs() {
+        let docs = vec![
+            doc_env("0.1.10", true, &["stable"]),
+            doc_env("0.1.11", true, &["testing"]),
+            doc_env("0.1.12", true, &["preview"]),
+            doc_env("0.1.13", false, &["testing"]), // draft: always invisible
+        ];
+        // Each env resolves to its own newest tagged release.
+        assert_eq!(
+            pick_latest_published_for_env(&docs, Some("stable"))
+                .unwrap()
+                .version,
+            "0.1.10"
+        );
+        assert_eq!(
+            pick_latest_published_for_env(&docs, Some("testing"))
+                .unwrap()
+                .version,
+            "0.1.11"
+        );
+        assert_eq!(
+            pick_latest_published_for_env(&docs, Some("preview"))
+                .unwrap()
+                .version,
+            "0.1.12"
+        );
+        // Legacy clients (no env param) keep the unfiltered behaviour.
+        assert_eq!(
+            pick_latest_published_for_env(&docs, None).unwrap().version,
+            "0.1.12"
+        );
+        // Empty-string env is treated like a missing param.
+        assert_eq!(
+            pick_latest_published_for_env(&docs, Some(""))
+                .unwrap()
+                .version,
+            "0.1.12"
+        );
+
+        // Untagged docs are visible to every env: a newer untagged release
+        // beats an older tagged one for the other channel.
+        let mixed = vec![
+            doc_env("0.2.0", true, &["stable"]),
+            doc_env("0.1.9", true, &[]),
+        ];
+        assert_eq!(
+            pick_latest_published_for_env(&mixed, Some("stable"))
+                .unwrap()
+                .version,
+            "0.2.0"
+        );
+        assert_eq!(
+            pick_latest_published_for_env(&mixed, Some("testing"))
+                .unwrap()
+                .version,
+            "0.1.9"
+        );
+    }
+
+    #[test]
+    fn pick_latest_for_env_returns_none_when_no_doc_carries_env() {
+        // Every doc pinned to stable only: a testing client gets nothing
+        // (handler answers 404 and the client stays silent).
+        let docs = vec![doc_env("0.1.10", true, &["stable"]), doc_env("0.1.11", true, &["stable"])];
+        assert!(pick_latest_published_for_env(&docs, Some("testing")).is_none());
+        assert!(pick_latest_published_for_env(&docs, Some("stable")).is_some());
+    }
+
+    #[test]
+    fn environments_normalize_and_validate_closed_vocabulary() {
+        assert_eq!(
+            normalize_environments(vec![
+                " Stable ".into(),
+                "TESTING".into(),
+                "stable".into()
+            ])
+            .unwrap(),
+            vec!["stable".to_string(), "testing".to_string()]
+        );
+        assert!(normalize_environments(vec![]).unwrap().is_empty());
+        assert_eq!(
+            normalize_environments(vec!["prod".into()]).unwrap_err(),
+            "prod"
+        );
+        assert_eq!(normalize_environment(" preview ").unwrap(), "preview");
+        assert!(normalize_environment("").is_err());
+    }
+
+    #[test]
+    fn toml_omits_empty_environments_and_roundtrips_tags() {
+        let untagged: ReleaseDoc = doc_env("0.1.10", true, &[]);
+        let s = toml::to_string(&untagged).unwrap();
+        assert!(!s.contains("environments"));
+        let back: ReleaseDoc = toml::from_str(&s).unwrap();
+        assert!(back.environments.is_empty());
+
+        let tagged = doc_env("0.1.11", true, &["testing", "preview"]);
+        let s = toml::to_string(&tagged).unwrap();
+        let back: ReleaseDoc = toml::from_str(&s).unwrap();
+        assert_eq!(back.environments, vec!["testing", "preview"]);
     }
 
     #[test]
@@ -1080,6 +1304,172 @@ mod tests {
             .map(|r| r["version"].as_str().unwrap())
             .collect();
         assert_eq!(versions, vec!["0.1.13", "0.1.9"]);
+    }
+
+    /// Environment routing end-to-end: multipart upload with `environments`
+    /// checkbox fields (repeated + mixed case), `?env=` routing on the public
+    /// check endpoint, unknown tag rejected, PUT retag.
+    #[tokio::test]
+    async fn env_tagged_release_routes_by_env_query() {
+        let (state, _tmp) = setup_release_stack().await;
+
+        // Legacy untagged release: visible to every environment.
+        seed(&state, vec![doc("0.1.13", true)]).await;
+
+        // Upload a testing+stable tagged release via checkbox fields.
+        let boundary = "relboundary42";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("version", "0.2.0"),
+                ("published", "true"),
+                ("environments", "testing"),
+                ("environments", " Stable "),
+            ],
+            Some(("file", "beta.zip", b"beta payload".as_slice())),
+        );
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/release")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "tagged upload must succeed");
+
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(
+            docs.iter().find(|d| d.version == "0.2.0").unwrap().environments,
+            vec!["testing", "stable"],
+            "tags must be normalized (lowercase, deduped)"
+        );
+
+        // env clients resolve their newest eligible release; untagged docs
+        // stay visible everywhere.
+        for (env, expected) in [
+            ("testing", "0.2.0"),
+            ("stable", "0.2.0"),
+            ("preview", "0.1.13"), // falls back to the untagged release
+        ] {
+            let resp = get(&state, &format!("/api/release?env={env}&version=0.1.0")).await;
+            assert_eq!(resp.status(), StatusCode::OK, "env={env}");
+            assert_eq!(
+                json_body(resp).await["version"], expected,
+                "env={env}"
+            );
+        }
+
+        // Unknown tag on upload → 400 and the manifest is untouched.
+        let body = multipart_body(
+            "relboundary42",
+            &[
+                ("version", "0.2.1"),
+                ("published", "true"),
+                ("environments", "prod"),
+            ],
+            Some(("file", "bad.zip", b"bad".as_slice())),
+        );
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/release")
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=relboundary42",
+                    )
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(docs.len(), 2, "rejected upload must not add an entry");
+
+        // PUT retag: narrow 0.2.0 to testing only.
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/release/0.2.0")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from("{\"environments\":[\"testing\"]}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(
+            docs.iter().find(|d| d.version == "0.2.0").unwrap().environments,
+            vec!["testing"]
+        );
+        // stable now falls back to the untagged release; PUT with an unknown
+        // tag is rejected.
+        let resp = get(&state, "/api/release?env=stable").await;
+        assert_eq!(json_body(resp).await["version"], "0.1.13");
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/release/0.2.0")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from("{\"environments\":[\"nightly\"]}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Console page renders with environment checkboxes (stable pre-checked),
+    /// per-release env badges and the "all environments" fallback badge.
+    #[tokio::test]
+    async fn releases_page_renders_environment_checkboxes_and_badges() {
+        let (state, _tmp) = setup_release_stack().await;
+        seed(
+            &state,
+            vec![
+                ReleaseDoc {
+                    environments: vec!["testing".into()],
+                    ..doc("0.2.0", true)
+                },
+                doc("0.1.13", true), // untagged → "all environments" badge
+            ],
+        )
+        .await;
+        let mut docs = load_docs(&config_store(&state)).await;
+        sort_by_version_desc(&mut docs);
+
+        let resp = state.render_with_locale(
+            "console/releases.html",
+            json!({ "nav_active": "releases", "releases": docs }),
+            "zh",
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("适用环境"), "upload form label missing");
+        assert!(
+            html.contains(r#"name="environments" value="stable" checked"#),
+            "stable checkbox must be pre-checked"
+        );
+        assert!(html.contains("不勾选 = 所有环境可见"), "hint missing");
+        assert!(html.contains(">testing</span>"), "env badge missing");
+        assert!(html.contains("全部"), "all-environments badge missing");
     }
 
     /// Public reads pass without credentials; mutations stay behind auth.

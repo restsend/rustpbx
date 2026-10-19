@@ -33,6 +33,27 @@
                     <textarea name="release_notes" rows="3"
                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
                 </label>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="testing"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            testing
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="stable" checked
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            stable
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="preview"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            preview
+                        </label>
+                        <span class="text-xs text-slate-400">{{ "releases_page.upload_environments_hint" | t }}</span>
+                    </div>
+                </div>
                 <div class="flex items-center justify-between">
                     <label class="flex items-center gap-2 text-sm text-slate-600">
                         <input type="checkbox" name="published" value="true" checked
@@ -72,6 +93,11 @@
                         <td class="px-4 py-3">
                             <span class="font-semibold text-slate-900">{{ r.version }}</span>
                             {% if r.force %}<span class="ml-1 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                            {% if r.environments %}
+                            {% for e in r.environments %}<span class="ml-1 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{{ e }}</span>{% endfor %}
+                            {% else %}
+                            <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.env_all" | t }}</span>
+                            {% endif %}
                         </td>
                         <td class="max-w-48 truncate px-4 py-3 text-slate-600" title="{{ r.file_name }}">{{ r.file_name }}</td>
                         <td class="px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
