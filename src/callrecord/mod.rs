@@ -1276,20 +1276,18 @@ fn call_record_columns() -> Vec<Alias> {
     ]
 }
 
+// Bind typed values: Postgres rejects text for timestamptz and json columns,
+// while SQLite stores these exactly as the old RFC 3339 / JSON strings.
 fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::SimpleExpr> {
     use sea_orm::sea_query::SimpleExpr;
-    fn opt_str(v: &Option<Value>) -> Option<String> {
-        v.as_ref().map(|v| v.to_string())
-    }
-    let ended_at: Option<String> = row.ended_at.map(|dt| dt.to_rfc3339());
     vec![
         row.call_id.clone().into(),
         row.session_id.clone().into(),
         None::<String>.into(),
         row.direction.clone().into(),
         row.status.clone().into(),
-        row.started_at.to_rfc3339().into(),
-        ended_at.into(),
+        row.started_at.into(),
+        row.ended_at.into(),
         row.duration_secs.into(),
         row.from_number.clone().into(),
         row.to_number.clone().into(),
@@ -1311,12 +1309,12 @@ fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::Simp
         SimpleExpr::from(row.has_transcript),
         row.transcript_status.clone().into(),
         row.transcript_language.clone().into(),
-        opt_str(&row.tags).into(),
-        opt_str(&row.leg_timeline).into(),
-        opt_str(&row.metadata).into(),
-        row.created_at.to_rfc3339().into(),
-        row.updated_at.to_rfc3339().into(),
-        None::<String>.into(),
+        row.tags.clone().into(),
+        row.leg_timeline.clone().into(),
+        row.metadata.clone().into(),
+        row.created_at.into(),
+        row.updated_at.into(),
+        None::<DateTimeUtc>.into(),
         row.hangup_reason.clone().into(),
         SimpleExpr::from(row.sip_status_code),
         SimpleExpr::from(row.media_loss_pct),
