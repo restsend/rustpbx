@@ -576,6 +576,11 @@ async fn load_stored_transcript(
         let mut fallback = PathBuf::from(&cdr_data.cdr_path);
         fallback.set_extension("transcript.json");
         candidates.push(fallback.to_string_lossy().into_owned());
+    } else if let Some(recording) = select_recording_path(record, None) {
+        // Without a CDR file the transcript is written next to the recording.
+        let mut fallback = PathBuf::from(recording);
+        fallback.set_extension("transcript.json");
+        candidates.push(fallback.to_string_lossy().into_owned());
     }
 
     candidates.retain(|candidate| !candidate.trim().is_empty());
