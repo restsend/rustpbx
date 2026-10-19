@@ -386,7 +386,7 @@ async fn peer_ring_timeout_offer_survives_terminal_invite_without_trunk_passthro
             aor: "sip:agent@example.test".parse().unwrap(),
             ..Default::default()
         };
-        let (invite, _, _) = session
+        let (invite, _, _, _) = session
             .build_target_invite_option(&target, None, None)
             .await
             .unwrap();
@@ -1606,7 +1606,7 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
         // Exercise the builder used by both sequential dialing and parallel forks.
         // No INVITE has been sent and no LegConnected notification has occurred.
         for leg_id in [None, Some("fork-1")] {
-            let (invite, _, call_id) = session
+            let (invite, _, call_id, _) = session
                 .build_target_invite_option(&target, leg_id, None)
                 .await
                 .unwrap();
@@ -1665,7 +1665,7 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
             ),
             ("X-Correlation-Id".to_string(), session_id.clone()),
         ]);
-        let (invite, _, _) = session
+        let (invite, _, _, _) = session
             .build_target_invite_option(&target, None, Some(&transfer_headers))
             .await
             .unwrap();
@@ -12725,6 +12725,297 @@ async fn leg_remove_of_unconnected_leg_emits_miss_hangup() {
     assert!(
         events.try_recv().is_err(),
         "connected-leg removal stays silent"
+    );
+}
+
+// ── Home-proxy-routed legs: this node never stamps leg_role ────────────────
+
+/// A leg whose INVITE was routed to a REMOTE `home_proxy` (`remote_registered`)
+/// keeps its leg identity on leg-scoped events but carries NO `leg_role` —
+/// the registration node's child-leg session is the single source of the
+/// agent attribution. Without this both nodes stamped
+/// `leg_role: "agent"` on the same agent leg (two ringings per dial).
+#[tokio::test]
+async fn remote_registered_leg_events_carry_no_leg_role() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "remote-role-sess".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "remote-role-sess".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    // Queue-dispatch agent leg dialed to a remote-registered agent.
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-remote"));
+    leg.agent_id = Some("bob".into());
+    leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    leg.remote_registered = true;
+    session.legs.insert(LegId::from("agent-remote"), leg);
+
+    // The raw role lookup is suppressed…
+    assert_eq!(
+        session.leg_role_of("agent-remote"),
+        None,
+        "home-proxy-routed leg must not yield a leg_role on this node"
+    );
+
+    // …and every leg-scoped lifecycle event carries leg_id WITHOUT leg_role.
+    session.update_leg_state(
+        &LegId::from("agent-remote"),
+        crate::call::domain::LegState::Ringing,
+    );
+    let ringing = events.try_recv().expect("leg ringing");
+    assert_eq!(ringing.event.event_type, "call_ringing");
+    assert_eq!(ringing.event.payload["leg_id"], "agent-remote");
+    assert!(
+        ringing.event.payload.get("leg_role").is_none(),
+        "remote leg ringing must stay role-free: {ringing:?}"
+    );
+
+    session.update_leg_state(
+        &LegId::from("agent-remote"),
+        crate::call::domain::LegState::Connected,
+    );
+    let answered = events.try_recv().expect("leg answered");
+    assert_eq!(answered.event.event_type, "call_answered");
+    assert_eq!(answered.event.payload["leg_id"], "agent-remote");
+    assert!(answered.event.payload.get("leg_role").is_none());
+
+    session.fire_hold_transition_hooks(
+        &LegId::from("agent-remote"),
+        Some(crate::call::domain::LegState::Connected),
+        crate::call::domain::LegState::Hold,
+    )
+    .await;
+    let held = events.try_recv().expect("leg held");
+    assert_eq!(held.event.event_type, "call_held");
+    assert_eq!(held.event.payload["leg_id"], "agent-remote");
+    assert!(held.event.payload.get("leg_role").is_none());
+
+    // A LOCAL agent leg in the same session is unaffected.
+    let mut local_leg = crate::call::domain::Leg::new(LegId::from("agent-local"));
+    local_leg.agent_id = Some("alice".into());
+    local_leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    session.legs.insert(LegId::from("agent-local"), local_leg);
+    assert_eq!(
+        session.leg_role_of("agent-local").as_deref(),
+        Some("agent"),
+        "locally-registered agent leg keeps its role"
+    );
+}
+
+/// Ring-timeout cancel of a remote-registered agent leg still emits the miss
+/// hangup (the queue's no-answer story stays visible) — but WITHOUT
+/// `leg_role`; the registration node reports the agent leg.
+#[tokio::test]
+async fn remote_registered_leg_miss_hangup_keeps_event_drops_role() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "remote-miss-sess".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "remote-miss-sess".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-remote"));
+    leg.state = crate::call::domain::LegState::Ringing;
+    leg.agent_id = Some("bob".into());
+    leg.remote_registered = true;
+    session.legs.insert(LegId::from("agent-remote"), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegRemove {
+                leg_id: LegId::from("agent-remote"),
+                reason: Some("ring_timeout".into()),
+            },
+            None,
+        )
+        .await;
+
+    let hangup = events.try_recv().expect("miss hangup still emitted");
+    assert_eq!(hangup.event.event_type, "call_hangup");
+    assert_eq!(hangup.event.payload["leg_id"], "agent-remote");
+    assert_eq!(hangup.event.payload["reason"], "ring_timeout");
+    assert!(
+        hangup.event.payload.get("leg_role").is_none(),
+        "remote leg miss must not carry leg_role: {hangup:?}"
+    );
+}
+
+/// Remote-registered agent leg at session teardown: the cascade must skip it
+/// (the home node's child-leg session already reports the teardown with
+/// `leg_role: "agent"`), while the raw hangup_by attribution survives —
+/// a remote BYE is still relayed by the agent's home node.
+#[tokio::test]
+async fn remote_registered_leg_hangup_by_stays_agent_without_role() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "remote-hangup-sess".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "remote-hangup-sess".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-remote"));
+    leg.agent_id = Some("bob".into());
+    leg.remote_registered = true;
+    session.legs.insert(LegId::from("agent-remote"), leg);
+    // Production dispatcher state: the queue pins the agent before dialing —
+    // `normalize_call_hangup_by` needs it to keep the "agent" attribution.
+    SipSession::set_pinned_agent_id(&session.extensions, "bob");
+
+    session.emit_rwi_leg_hangup(&LegId::from("agent-remote"), Some("UasBye".into()));
+    let hangup = events.try_recv().expect("leg hangup");
+    assert_eq!(hangup.event.payload["leg_id"], "agent-remote");
+    assert_eq!(
+        hangup.event.payload["hangup_by"], "agent",
+        "UasBye on a remote agent leg is still the agent hanging up"
+    );
+    assert!(
+        hangup.event.payload.get("leg_role").is_none(),
+        "remote leg hangup must not carry leg_role: {hangup:?}"
+    );
+}
+
+/// Teardown-cascade leg selection: an established remote-registered agent leg
+/// still registered at session end is NOT cascade-reported (the home node's
+/// child-leg session owns that teardown); a local agent leg in the same
+/// session still is.
+#[tokio::test]
+async fn remote_registered_leg_excluded_from_teardown_cascade() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "remote-cascade-sess".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "remote-cascade-sess".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    let mut remote = crate::call::domain::Leg::new(LegId::from("agent-remote"));
+    remote.state = crate::call::domain::LegState::Connected;
+    remote.agent_id = Some("bob".into());
+    remote.remote_registered = true;
+    session.legs.insert(LegId::from("agent-remote"), remote);
+
+    let mut local = crate::call::domain::Leg::new(LegId::from("agent-local"));
+    local.state = crate::call::domain::LegState::Connected;
+    local.agent_id = Some("alice".into());
+    session.legs.insert(LegId::from("agent-local"), local);
+
+    let teardowns = session.cc_leg_teardowns();
+    assert_eq!(
+        teardowns,
+        vec![("agent-local".to_string(), "agent".to_string())],
+        "only the LOCAL agent leg is cascade-reported; the remote one is \
+         reported by its registration node"
     );
 }
 

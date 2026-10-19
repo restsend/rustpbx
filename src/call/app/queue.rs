@@ -397,6 +397,24 @@ impl QueueSignal {
     }
 }
 
+/// Async dial-target locality check: `true` when the URI's registration
+/// resolves to THIS node (the queue may stamp `leg_role: "agent"` on its
+/// agent events), `false` when the registration lives on another cluster
+/// node — that node then owns the leg-role attribution for the dialog and
+/// queue events here stay role-free. Uses the SAME criterion as the actual
+/// INVITE routing (`Location::routes_via_remote_home_proxy`) so the verdict
+/// can never disagree with where the dial really went.
+///
+/// Unset (single-node / non-cluster deployment) behaves as always-local and
+/// keeps the historical wire format unchanged.
+pub type QueueLocalityChecker = std::sync::Arc<
+    dyn for<'a> Fn(
+            &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
 /// A built-in Queue application for call distribution.
 ///
 /// Routes incoming calls to available agents using configured dialing
@@ -544,6 +562,13 @@ pub struct QueueApp {
     join_attempt: u32,
     targeted_recovery: bool,
     recovery_requests: std::collections::VecDeque<(String, Vec<String>)>,
+    /// Dial-target locality check (see [`QueueLocalityChecker`]). `None` on
+    /// single-node deployments — treated as always-local.
+    locality_checker: Option<QueueLocalityChecker>,
+    /// Leg ids (originate call ids) dialed to agents registered on ANOTHER
+    /// cluster node. Their `queue_agent_*` events carry no `leg_role` — the
+    /// registration node's child-leg session reports the agent leg.
+    remote_agent_legs: HashSet<String>,
 }
 
 impl QueueApp {
@@ -594,6 +619,8 @@ impl QueueApp {
             join_attempt: 1,
             targeted_recovery: false,
             recovery_requests: std::collections::VecDeque::new(),
+            locality_checker: None,
+            remote_agent_legs: HashSet::new(),
         }
     }
 
@@ -601,6 +628,45 @@ impl QueueApp {
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentRegistry>) -> Self {
         self.agent_registry = Some(registry);
         self
+    }
+
+    /// Attach the dial-target locality check (see [`QueueLocalityChecker`]).
+    /// Built by `SipSession::start_queue_app` from the server's locator and
+    /// cluster identity.
+    pub fn with_locality_checker(mut self, checker: QueueLocalityChecker) -> Self {
+        self.locality_checker = Some(checker);
+        self
+    }
+
+    /// `true` when the target URI's registration resolves to THIS node.
+    /// Without a checker (single node) the answer is always `true` — the
+    /// historical behavior.
+    async fn target_registered_locally(&self, uri: &str) -> bool {
+        match &self.locality_checker {
+            None => true,
+            Some(check) => (check)(uri).await,
+        }
+    }
+
+    /// `leg_role` for the queue's agent lifecycle events (`queue_agent_*`):
+    /// `"agent"` only when the dialed leg targets an agent registered on THIS
+    /// node. Remote-registered targets are reported by their home node's
+    /// child-leg session — stamping here too would duplicate the
+    /// attribution. Leg ids recorded via [`Self::remember_dial_locality`].
+    fn agent_leg_role(&self, leg_id: Option<&str>) -> Option<String> {
+        match leg_id {
+            Some(id) if self.remote_agent_legs.contains(id) => None,
+            _ => Some("agent".to_string()),
+        }
+    }
+
+    /// Record the locality outcome of a dial: remote-registered targets get
+    /// their leg id remembered so the matching `queue_agent_*` events stay
+    /// role-free.
+    fn remember_dial_locality(&mut self, call_id: &str, registered_locally: bool) {
+        if !registered_locally {
+            self.remote_agent_legs.insert(call_id.to_string());
+        }
     }
 
     /// Set the call ID for tracking.
@@ -1895,11 +1961,13 @@ impl QueueApp {
             self.pending_agents.clear();
         }
         self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
+        let registered_locally = self.target_registered_locally(&uri).await;
         match ctrl
             .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
             .await
         {
             Ok(call_id) => {
+                self.remember_dial_locality(&call_id, registered_locally);
                 self.pending_agents.push((uri, call_id));
             }
             Err(e) => {
@@ -2212,12 +2280,14 @@ impl QueueApp {
             self.record_attempted_agent(agent_id.clone());
             self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
             let leg_headers = self.leg_headers_for(uri).await;
+            let registered_locally = self.target_registered_locally(uri).await;
             match ctrl
                 .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                 .await
             {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
+                    self.remember_dial_locality(&call_id, registered_locally);
                     self.pending_agents.push((uri.clone(), call_id));
                     originated = true;
                 }
@@ -2514,9 +2584,11 @@ impl CallApp for QueueApp {
                 self.pin_agent_for_dial(ctrl, &agent.agent_id, &agent.uri)
                     .await;
                 let leg_headers = self.leg_headers_for(&agent.uri).await;
+                let registered_locally = self.target_registered_locally(&agent.uri).await;
                 let call_id = ctrl
                     .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                     .await?;
+                self.remember_dial_locality(&call_id, registered_locally);
 
                 self.record_attempted_agent(agent.agent_id.clone());
                 self.pending_agents
@@ -2541,8 +2613,8 @@ impl CallApp for QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: queue_id.clone(),
                     agent_id: agent.agent_id.clone(),
-                    leg_id: Some(call_id),
-                    leg_role: Some("agent".to_string()),
+                    leg_id: Some(call_id.clone()),
+                    leg_role: self.agent_leg_role(Some(&call_id)),
                 });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
@@ -2626,6 +2698,7 @@ impl CallApp for QueueApp {
                     let attempt_agent_id = self.agent_id_for_uri(&uri).await;
                     self.record_attempted_agent(attempt_agent_id.clone());
                     self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
+                    let registered_locally = self.target_registered_locally(&uri).await;
                     match ctrl
                         .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                         .await
@@ -2636,6 +2709,7 @@ impl CallApp for QueueApp {
                                 call_id = %call_id,
                                 "Queue: parallel originate to agent"
                             );
+                            self.remember_dial_locality(&call_id, registered_locally);
                             pending.push((uri, call_id));
                         }
                         Err(e) => {
@@ -2910,8 +2984,8 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: connected_agent_id.clone(),
+                            leg_role: self.agent_leg_role(Some(&agent_leg)),
                             leg_id: Some(agent_leg.clone()),
-                            leg_role: Some("agent".to_string()),
                         });
                         self.emit_rwi(&crate::rwi::event::QueueLeft {
                             call_id: self.call_id.clone(),
@@ -2974,8 +3048,8 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: agent_id.to_string(),
+                            leg_role: self.agent_leg_role(Some(&leg_id)),
                             leg_id: Some(leg_id),
-                            leg_role: Some("agent".to_string()),
                         });
                     }
                     Ok(AppAction::Continue)
@@ -3021,8 +3095,8 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
+                            leg_role: self.agent_leg_role(leg_id.as_deref()),
                             leg_id: leg_id.clone(),
-                            leg_role: Some("agent".to_string()),
                         });
 
                         // CC adapter analytics: `skill_group_agent_rejected`
@@ -3195,8 +3269,8 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
+                            leg_role: self.agent_leg_role(Some(leg_id)),
                             leg_id: Some(leg_id.clone()),
-                            leg_role: Some("agent".to_string()),
                         });
 
                         // CC adapter analytics: `skill_group_agent_no_answer`

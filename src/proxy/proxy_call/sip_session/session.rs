@@ -550,10 +550,42 @@ impl SipSession {
 
     /// RWI `leg_role` for a leg id — `None` (omitted) for unknown legs or
     /// session-scoped events. See [`crate::call::domain::Leg::leg_role`].
+    ///
+    /// Home-proxy-routed legs (`Leg::remote_registered`) yield `None`: the
+    /// INVITE left for the endpoint's registration node, which owns the
+    /// leg-role-attributed events (its child-leg session stamps
+    /// `leg_role: "agent"` via the UUI marker). Stamping here as well would
+    /// give consumers a duplicate, second-attribution event stream for the
+    /// same agent leg.
     pub(crate) fn leg_role_of(&self, leg_id: &str) -> Option<String> {
         self.legs
             .get(&LegId::from(leg_id))
+            .filter(|leg| !leg.remote_registered)
             .map(|leg| leg.leg_role().to_string())
+    }
+
+    /// Established CC-role legs (agent / consult / transfer) still registered
+    /// at session teardown — each gets its own leg-scoped `call_hangup` so
+    /// consumers filtering by role see every teardown. Home-proxy-routed legs
+    /// are excluded: the registration node's child-leg session already
+    /// reports their teardown with the role, and a second leg-level event
+    /// here would double-report the same agent leg.
+    pub(crate) fn cc_leg_teardowns(&self) -> Vec<(String, String)> {
+        self.legs
+            .iter()
+            .filter(|(_, leg)| {
+                !leg.remote_registered
+                    && !matches!(
+                        leg.state,
+                        crate::call::domain::LegState::Initializing
+                            | crate::call::domain::LegState::Ringing
+                            | crate::call::domain::LegState::EarlyMedia
+                            | crate::call::domain::LegState::Ending
+                    )
+                    && matches!(leg.leg_role(), "agent" | "consult" | "transfer")
+            })
+            .map(|(id, leg)| (id.0.clone(), leg.leg_role().to_string()))
+            .collect()
     }
 
     /// Session-scoped `call_answered` (`leg_id: None`), emitted at most once
@@ -2090,33 +2122,14 @@ impl SipSession {
     /// Decide whether the callee leg must be routed to the registration's home
     /// node (`true`) or delivered locally (`false`).
     ///
-    /// The self check compares the registration's home address against this
-    /// node's deterministic identity: the cluster-internal address resolved
-    /// from `[cluster].peers` when available, otherwise the default contact
-    /// URI — the very address the registrar stamps as `home_proxy` when
-    /// cluster self resolution fails. Live endpoint addresses must NOT be
-    /// consulted here: `endpoint.get_addrs()` mixes in the remote addresses
-    /// of active connections, so a peer node's home address — which this node
-    /// may have connected to before — can wrongly look "local" and the
-    /// INVITE gets pushed into a connection owned by another node and
-    /// silently black-holed.
+    /// Delegates to [`Location::routes_via_remote_home_proxy`] — the shared
+    /// criterion also used by the queue's agent-locality checker.
     fn route_via_home_proxy(
         target: &Location,
         cluster_enabled: bool,
         self_ident: Option<&SipAddr>,
     ) -> bool {
-        if !cluster_enabled {
-            return false;
-        }
-        let Some(home_proxy) = target.home_proxy.as_ref() else {
-            return false;
-        };
-        match self_ident {
-            Some(self_addr) => self_addr.addr.to_string() != home_proxy.addr.to_string(),
-            // Unknown self identity: deliver through the home node, which is
-            // authoritative for its own registrations.
-            None => true,
-        }
+        target.routes_via_remote_home_proxy(cluster_enabled, self_ident)
     }
 
     fn resolve_outbound_callee_uri(
@@ -4106,10 +4119,15 @@ impl SipSession {
         leg_id_override: Option<&str>,
         transfer_headers: Option<&HashMap<String, String>>,
     ) -> Result<
+        // Returns (invite_option, callee_uri, call_id, routed_via_home_proxy).
+        // The flag is true when the INVITE is routed to the target's remote
+        // `home_proxy` — the registration lives on another cluster node, so
+        // this node must not stamp `leg_role` on this leg's events.
         (
             rsipstack::dialog::invitation::InviteOption,
             rsipstack::sip::Uri,
             String,
+            bool,
         ),
         CalleeError,
     > {
@@ -4282,7 +4300,24 @@ impl SipSession {
         let leg_id = leg_id_override.unwrap_or("callee");
         let id = LegId::from(leg_id);
         if !self.legs.contains_key(&id) {
-            self.legs.insert(id.clone(), Leg::new(id));
+            self.legs.insert(id.clone(), Leg::new(id.clone()));
+        }
+        // Record that this dial left for another node's registration — the
+        // registration node owns the leg_role attribution for this dialog
+        // (same rule as the dynamic-leg path in
+        // `initiate_sip_leg_with_deadline`). The leg entry now exists (created
+        // just above for fork legs), so the stamp always lands.
+        if let Some(leg) = self.legs.get_mut(&id) {
+            leg.remote_registered = route_via_home_proxy;
+        }
+        if route_via_home_proxy {
+            debug!(session_id = %self.id,
+                session_id = %self.context.session_id,
+                %leg_id,
+                home_proxy = ?target.home_proxy,
+                self_ident = ?self_ident,
+                "target leg routed via remote home_proxy: leg_role suppressed on this node"
+            );
         }
         self.legs.set_transport(
             crate::call::domain::LegId::from(leg_id),
@@ -4388,7 +4423,7 @@ impl SipSession {
             .map(|d| d.addr.to_string())
             .or_else(|| Some(callee_uri.host_with_port.to_string()));
 
-        Ok((option, callee_uri, callee_call_id))
+        Ok((option, callee_uri, callee_call_id, route_via_home_proxy))
     }
 
     fn update_snapshot_cache(&self) {
@@ -6861,6 +6896,45 @@ impl SipSession {
 
         // Store resolved plan in context for the queue app factory
         if let Some(ctx) = self.app_runtime.app_context() {
+            // Dial-target locality checker: resolves the URI's registration
+            // through the locator and applies the SAME criterion as the
+            // session's INVITE routing (`Location::routes_via_remote_home_proxy`)
+            // — a remote `home_proxy` means the dial (and the dialog) leave
+            // for another node, which owns the leg_role attribution. The
+            // queue app uses it to keep its `queue_agent_*` events role-free
+            // for remote-registered agents.
+            let realm = self.server.proxy_config.load().select_realm("");
+            let locality_checker: crate::call::app::queue::QueueLocalityChecker = {
+                let locator = self.server.locator.clone();
+                let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
+                let self_ident = self.self_ident_addr();
+                Arc::new(move |target: &str| {
+                    let locator = locator.clone();
+                    let self_ident = self_ident.clone();
+                    let realm = realm.clone();
+                    Box::pin(async move {
+                        let normalized = crate::call::build_sip_uri(target, &realm);
+                        let uri = match parse_dial_target(&normalized)
+                            .or_else(|_| parse_dial_target(target))
+                        {
+                            Ok(uri) => uri,
+                            Err(_) => return true,
+                        };
+                        match locator.lookup(&uri).await {
+                            Ok(locations) => match locations.first() {
+                                Some(location) => !location.routes_via_remote_home_proxy(
+                                    cluster_enabled,
+                                    self_ident.as_ref(),
+                                ),
+                                // No registration (external / trunk target):
+                                // nothing is remote — keep the role.
+                                None => true,
+                            },
+                            Err(_) => true,
+                        }
+                    })
+                })
+            };
             *ctx.pending_queue.lock() = Some(PendingQueuePlan {
                 plan: plan.clone(),
                 agent_uris,
@@ -6869,6 +6943,7 @@ impl SipSession {
                 overflow_overrides,
                 joined_emitted,
                 queue_enricher: queue_enricher_setup,
+                locality_checker: Some(locality_checker),
             });
         }
 
@@ -7318,7 +7393,7 @@ impl SipSession {
             }
 
             let leg_id_str = format!("fork-{idx}");
-            let (invite_option, callee_uri, _callee_call_id) = match self
+            let (invite_option, callee_uri, _callee_call_id, _routed_via_home_proxy) = match self
                 .build_target_invite_option(target, Some(&leg_id_str), None)
                 .await
             {
@@ -8284,7 +8359,7 @@ impl SipSession {
             self.caller_transport_mode(),
         );
 
-        let (mut invite_option, callee_uri, callee_call_id) = self
+        let (mut invite_option, callee_uri, callee_call_id, _routed_via_home_proxy) = self
             .build_target_invite_option(target, None, transfer_headers)
             .await?;
         if let Some(caller) = caller {
@@ -10791,21 +10866,7 @@ impl SipSession {
         // below), and a second leg-level event would double-report the same
         // teardown.
         if self.meta.child_leg_role.is_none() {
-            let cc_leg_teardowns: Vec<(String, String)> = self
-                .legs
-                .iter()
-                .filter(|(_, leg)| {
-                    !matches!(
-                        leg.state,
-                        crate::call::domain::LegState::Initializing
-                            | crate::call::domain::LegState::Ringing
-                            | crate::call::domain::LegState::EarlyMedia
-                            | crate::call::domain::LegState::Ending
-                    ) && matches!(leg.leg_role(), "agent" | "consult" | "transfer")
-                })
-                .map(|(id, leg)| (id.0.clone(), leg.leg_role().to_string()))
-                .collect();
-            for (leg_id, leg_role) in cc_leg_teardowns {
+            for (leg_id, leg_role) in self.cc_leg_teardowns() {
                 info!(
                     session_id = %self.id,
                     %leg_id,
@@ -14891,7 +14952,15 @@ impl SipSession {
         // which may belong to a different dialog than the leg reporting now.)
         let hangup_by = match reason.as_deref() {
             Some("UasBye") => {
-                let initiator = if self.leg_role_of(id.as_str()).as_deref() == Some("agent") {
+                // RAW agent check (not `leg_role_of`): hangup_by answers "WHO
+                // hung up", which stays true for a home-proxy-routed agent leg
+                // even though this node suppresses the leg_role field — the
+                // remote BYE is still relayed by the agent's home node.
+                let initiator = if self
+                    .legs
+                    .get(&id)
+                    .is_some_and(|leg| leg.agent_id.is_some())
+                {
                     "agent"
                 } else {
                     "callee"
@@ -15712,6 +15781,22 @@ impl SipSession {
             self_ident.as_ref(),
         );
         let callee_uri = Self::resolve_outbound_callee_uri(&location, route_via_home_proxy);
+        // Record that this dial left for another node's registration. The
+        // registration node owns the leg_role attribution for this dialog
+        // (its child-leg session stamps `leg_role: "agent"` from the UUI
+        // marker); leg-scoped events on THIS node must stay role-free so
+        // consumers never see the same agent leg attributed twice.
+        if let Some(leg) = self.legs.get_mut(leg_id) {
+            leg.remote_registered = route_via_home_proxy;
+            if route_via_home_proxy {
+                debug!(session_id = %self.id,
+                    %leg_id,
+                    home_proxy = ?location.home_proxy,
+                    self_ident = ?self_ident,
+                    "leg routed via remote home_proxy: leg_role suppressed on this node"
+                );
+            }
+        }
 
         info!(
             %leg_id,

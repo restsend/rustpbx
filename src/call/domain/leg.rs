@@ -62,6 +62,15 @@ pub struct Leg {
     /// attribution on leg-scoped events (see [`Leg::leg_role`]).
     #[serde(default)]
     pub purpose: Option<super::LegPurpose>,
+    /// True when this leg's INVITE was routed to the endpoint's remote
+    /// `home_proxy` — the registration dialed lives on another cluster node
+    /// (`SipSession::route_via_home_proxy` at dial time). That node owns the
+    /// leg-role-attributed RWI events for the dialog; this node must not
+    /// stamp any `leg_role` on leg-scoped events (no duplicate
+    /// `leg_role: "agent"` from dispatcher + home). Snapshot taken when the
+    /// INVITE went out; never set on inbound caller legs.
+    #[serde(default)]
+    pub remote_registered: bool,
 }
 
 impl Leg {
@@ -73,6 +82,7 @@ impl Leg {
             agent_id: None,
             source_leg: None,
             purpose: None,
+            remote_registered: false,
         }
     }
 
@@ -96,6 +106,11 @@ impl Leg {
     /// - `"consult"`: consult leg whose target is not a registered agent
     ///   (external expert / number).
     /// - `"caller"` / `"callee"`: positional fallback for non-CC legs.
+    ///
+    /// NOTE: this is the RAW role. When `remote_registered` is set the
+    /// session suppresses the role entirely for RWI events — the home node
+    /// that owns the registration stamps it instead (see
+    /// `SipSession::leg_role_of`).
     pub fn leg_role(&self) -> &'static str {
         if self.agent_id.is_some() {
             "agent"
@@ -164,5 +179,21 @@ mod tests {
         // Older payloads without the field deserialize with `purpose: None`.
         let legacy: Leg = serde_json::from_str(r#"{"id":"b","state":"initializing"}"#).unwrap();
         assert_eq!(legacy.purpose, None);
+    }
+
+    /// `remote_registered` roundtrips through the serialized form and stays
+    /// `false` (default) on legacy payloads that predate the field.
+    #[test]
+    fn remote_registered_serde_roundtrip() {
+        let mut leg = Leg::new(LegId::new("a"));
+        assert!(!leg.remote_registered);
+        leg.remote_registered = true;
+        let json = serde_json::to_string(&leg).unwrap();
+        let back: Leg = serde_json::from_str(&json).unwrap();
+        assert!(back.remote_registered);
+
+        // Legacy payload without the field deserializes with `false`.
+        let legacy: Leg = serde_json::from_str(r#"{"id":"b","state":"initializing"}"#).unwrap();
+        assert!(!legacy.remote_registered);
     }
 }

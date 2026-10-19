@@ -151,6 +151,42 @@ pub struct Location {
     pub home_proxy: Option<SipAddr>,
 }
 
+impl Location {
+    /// Whether a dial to this resolved location must be delivered through the
+    /// registration's REMOTE home node (`true`) or locally (`false`).
+    ///
+    /// Single source of truth for "the endpoint is not registered on this
+    /// machine": `home_proxy` is stamped at REGISTER time with the owning
+    /// node's cluster-internal address, so a mismatch against this node's
+    /// identity means the INVITE (and the dialog) leave for another node —
+    /// which then owns the leg-role attribution for that leg
+    /// (`SipSession::route_via_home_proxy`, queue agent dialing).
+    ///
+    /// The self check compares the registration's home address against this
+    /// node's deterministic identity: the cluster-internal address resolved
+    /// from `[cluster].peers` when available, otherwise the default contact
+    /// URI. Live endpoint addresses must NOT be consulted here
+    /// (see `SipSession::route_via_home_proxy` for the full rationale).
+    pub fn routes_via_remote_home_proxy(
+        &self,
+        cluster_enabled: bool,
+        self_ident: Option<&SipAddr>,
+    ) -> bool {
+        if !cluster_enabled {
+            return false;
+        }
+        let Some(home_proxy) = self.home_proxy.as_ref() else {
+            return false;
+        };
+        match self_ident {
+            Some(self_addr) => self_addr.addr.to_string() != home_proxy.addr.to_string(),
+            // Unknown self identity: deliver through the home node, which is
+            // authoritative for its own registrations.
+            None => true,
+        }
+    }
+}
+
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
@@ -1564,6 +1600,40 @@ impl RoutingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_routes_via_remote_home_proxy_matches_routing_rule() {
+        fn sip_addr(addr: &str) -> SipAddr {
+            SipAddr {
+                r#type: None,
+                addr: rsipstack::sip::HostWithPort::try_from(addr).unwrap(),
+            }
+        }
+        let local = sip_addr("10.0.0.1:5060");
+        let remote = sip_addr("10.0.0.2:5060");
+
+        // Cluster disabled: never remote (single-node keeps roles).
+        let mut loc = Location {
+            home_proxy: Some(remote.clone()),
+            ..Default::default()
+        };
+        assert!(!loc.routes_via_remote_home_proxy(false, Some(&local)));
+
+        // Remote home_proxy ≠ self → remote.
+        assert!(loc.routes_via_remote_home_proxy(true, Some(&local)));
+        // Home_proxy == self → local.
+        loc.home_proxy = Some(local.clone());
+        assert!(!loc.routes_via_remote_home_proxy(true, Some(&local)));
+
+        // No registration home (external trunk) → not remote.
+        loc.home_proxy = None;
+        assert!(!loc.routes_via_remote_home_proxy(true, Some(&local)));
+
+        // Unknown self identity: conservative — treat as remote (deliver via
+        // the home node, which owns the role attribution).
+        loc.home_proxy = Some(remote);
+        assert!(loc.routes_via_remote_home_proxy(true, None));
+    }
 
     #[test]
     fn route_point_transfer_endpoint_preserves_distinct_prefix() {
