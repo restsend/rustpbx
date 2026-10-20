@@ -266,7 +266,7 @@
                         <th class="px-4 py-3 text-right">{{ "releases_page.col_actions" | t }}</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-50">
+                <tbody>
                     {% for r in releases %}
                     <tr class="hover:bg-slate-50/60">
                         <td class="px-4 py-3">
@@ -287,9 +287,6 @@
                                     {% endif %}
                                 </div>
                                 <div class="max-w-56 truncate font-mono text-xs text-slate-500" title="{{ r.file_name }}">{{ r.file_name }}</div>
-                                <code class="w-fit rounded bg-slate-50 px-1.5 py-0.5 font-mono text-xs text-slate-400"
-                                    :title="'{{ r.sha256 }}'"
-                                    x-text="'{{ r.sha256 }}'.slice(0, 12) + '…'"></code>
                             </div>
                         </td>
                         <td class="whitespace-nowrap px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
@@ -317,7 +314,7 @@
                             </span>
                             {% endif %}
                         </td>
-                        <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell">{{ r.created_at | default(value='') }}</td>
+                        <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell" x-text="fmtTime('{{ r.created_at | default(value='') }}')"></td>
                         <td class="px-4 py-3">
                             <div class="flex items-center justify-end gap-1">
                                 <button type="button" @click="openEdit({{ loop.index0 }})"
@@ -336,23 +333,18 @@
                                             d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                                     </svg>
                                 </a>
+                                {% if not r.published %}
                                 <button type="button" @click="togglePublish('{{ r.version }}', {{ r.published }})"
-                                    title="{{ ('releases_page.action_unpublish' | t) if r.published else ('releases_page.action_publish' | t) }}"
-                                    :aria-label="'{{ ('releases_page.action_unpublish' | t) if r.published else ('releases_page.action_publish' | t) }}'"
+                                    title="{{ 'releases_page.action_publish' | t }}"
+                                    :aria-label="'{{ 'releases_page.action_publish' | t }}'"
                                     class="rounded-md p-1.5 text-amber-600 transition hover:bg-amber-50">
-                                    {% if r.published %}
-                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                            d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243" />
-                                    </svg>
-                                    {% else %}
                                     <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                                     </svg>
-                                    {% endif %}
                                 </button>
+                                {% endif %}
                                 <button type="button" @click="remove('{{ r.version }}')"
                                     title="{{ 'releases_page.action_delete' | t }}" :aria-label="'{{ 'releases_page.action_delete' | t }}'"
                                     class="rounded-md p-1.5 text-rose-600 transition hover:bg-rose-50">
@@ -540,7 +532,7 @@
                             <th class="px-4 py-2.5 text-right">{{ "client_reports.col_actions" | t }}</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-50">
+                    <tbody>
                         <template x-for="r in reports" :key="r.id">
                             <tr class="hover:bg-slate-50/60">
                                 <td class="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500" x-text="fmtTime(r.created_at)"></td>
