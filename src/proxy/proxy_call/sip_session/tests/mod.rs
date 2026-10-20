@@ -12864,6 +12864,82 @@ async fn child_leg_agent_bye_reports_agent_role_exactly_once() {
     );
 }
 
+/// Real cross-node shape: the child-leg session's legs carry NO `agent_id`
+/// (the attribution lives in the session extensions/meta, never on the leg),
+/// and the phone leg is Ended-but-registered at teardown. The session-level
+/// `call_hangup` must still claim the declared role — the former
+/// `agent_id.is_some()` filter never matched this shape, so the agent hangup
+/// lost its role entirely (prd: every call_hangup carried leg_role=null).
+#[tokio::test]
+async fn child_leg_session_hangup_claims_role_without_leg_agent_id() {
+    let child_id = "22222222222242228222222222222222";
+
+    // Dispatcher hop (Connected) + agent phone leg (Ended, still
+    // registered) — the state at session teardown after the phone hung up.
+    let mut hop = crate::call::domain::Leg::new(LegId::new("caller"));
+    hop.state = LegState::Connected;
+    let mut phone = crate::call::domain::Leg::new(LegId::new("callee"));
+    phone.state = LegState::Ended;
+
+    let (mut session, mut events) =
+        teardown_session(child_id, vec![hop, phone], Some("agent")).await;
+    session.cleanup().await;
+
+    let hangups = drain_call_hangups(&mut events);
+    let session_event = hangups
+        .iter()
+        .find(|h| h.get("leg_id").is_none())
+        .expect("session-scoped teardown present");
+    assert_eq!(
+        session_event["leg_role"], "agent",
+        "child session teardown must claim the declared role without a leg \
+         agent_id marker: {session_event:?}"
+    );
+    assert_eq!(
+        hangups
+            .iter()
+            .filter(|h| h["leg_role"] == "agent")
+            .count(),
+        1,
+        "exactly one role-attributed agent hangup: {hangups:?}"
+    );
+}
+
+/// Ring-timeout teardown: the dialog NEVER connected (the phone leg only
+/// rang) and no leg-scoped report exists — the agent machine's session-level
+/// `call_hangup` must still claim the declared role. This is the CANCEL the
+/// queue sends at ring timeout (prd: it produced a hangup without leg_role).
+#[tokio::test]
+async fn child_leg_miss_hangup_claims_role_on_ring_timeout() {
+    let child_id = "33333333333343338333333333333333";
+    let mut hop = crate::call::domain::Leg::new(LegId::new("caller"));
+    hop.state = LegState::Connected;
+    let mut phone = crate::call::domain::Leg::new(LegId::new("callee"));
+    phone.state = LegState::Ringing;
+
+    let (mut session, mut events) =
+        teardown_session(child_id, vec![hop, phone], Some("agent")).await;
+    session.cleanup().await;
+
+    let hangups = drain_call_hangups(&mut events);
+    let session_event = hangups
+        .iter()
+        .find(|h| h.get("leg_id").is_none())
+        .expect("session-scoped teardown present");
+    assert_eq!(
+        session_event["leg_role"], "agent",
+        "miss teardown must claim the declared role: {session_event:?}"
+    );
+    assert_eq!(
+        hangups
+            .iter()
+            .filter(|h| h["leg_role"] == "agent")
+            .count(),
+        1,
+        "exactly one role-attributed agent hangup in a miss flow: {hangups:?}"
+    );
+}
+
 /// REPRO (transfer slot-reuse residue): a blind/REFER replacement attaches
 /// into the reusable `callee` slot. Resetting the slot identity at the swap
 /// strips the previous occupant's agent attribution — the NEW party's (IVR /

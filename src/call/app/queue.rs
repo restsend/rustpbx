@@ -2630,7 +2630,7 @@ impl CallApp for QueueApp {
                     queue_id: queue_id.clone(),
                     agent_id: agent.agent_id.clone(),
                     leg_id: Some(call_id.clone()),
-                    leg_role: Some("agent".to_string()),
+                    leg_role: None,
                 });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
@@ -2998,7 +2998,7 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: connected_agent_id.clone(),
-                            leg_role: Some("agent".to_string()),
+                            leg_role: None,
                             leg_id: Some(agent_leg.clone()),
                         });
                         self.emit_rwi(&crate::rwi::event::QueueLeft {
@@ -3062,7 +3062,7 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: agent_id.to_string(),
-                            leg_role: Some("agent".to_string()),
+                            leg_role: None,
                             leg_id: Some(leg_id),
                         });
                     }
@@ -3109,7 +3109,7 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
-                            leg_role: Some("agent".to_string()),
+                            leg_role: None,
                             leg_id: leg_id.clone(),
                         });
 
@@ -3395,7 +3395,7 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
-                            leg_role: Some("agent".to_string()),
+                            leg_role: None,
                             leg_id: Some(leg_id.clone()),
                         });
 

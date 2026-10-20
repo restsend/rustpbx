@@ -410,11 +410,6 @@ async fn test_agent_rejected_rwi_event_contract() -> Result<()> {
         Some(1),
         "rejection round must report attempt=1: {rejected}"
     );
-    assert_eq!(
-        rejected["event"]["leg_role"].as_str(),
-        Some("agent"),
-        "queue_agent_rejected must carry leg_role: {rejected}"
-    );
     let sg_rejected =
         wait_webhook_event(&capture, "skill_group_agent_rejected", Duration::from_secs(5))
             .await
@@ -428,11 +423,6 @@ async fn test_agent_rejected_rwi_event_contract() -> Result<()> {
         sg_rejected["event"]["leg_id"].as_str(),
         rejected["event"]["leg_id"].as_str(),
         "skill_group/queue rejections name the SAME leg: {sg_rejected} vs {rejected}"
-    );
-    assert_eq!(
-        sg_rejected["event"]["leg_role"].as_str(),
-        Some("agent"),
-        "skill_group_agent_rejected must carry leg_role: {sg_rejected}"
     );
 
     // ── Bob answers round 2 ──────────────────────────────────────────────

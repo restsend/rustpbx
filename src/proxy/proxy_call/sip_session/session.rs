@@ -168,6 +168,13 @@ pub struct SipSession {
     /// missing its emit site.
     any_leg_reached_connected: bool,
 
+    /// Child-leg session only: a leg-scoped `call_hangup` already reported
+    /// the agent role for this session's dialog (the emitter removes the
+    /// leg with the report). The session-level teardown must not re-claim
+    /// the role then — and MUST claim it otherwise, including ring-timeout
+    /// teardowns where no leg ever connected (no leg-scoped report exists).
+    child_role_hangup_reported: std::sync::atomic::AtomicBool,
+
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
@@ -1706,6 +1713,7 @@ impl SipSession {
             cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             answered_event_emitted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             any_leg_reached_connected: false,
+            child_role_hangup_reported: std::sync::atomic::AtomicBool::new(false),
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
@@ -3227,6 +3235,35 @@ impl SipSession {
         agent_id: &str,
     ) {
         extensions.set_agent_attribution(agent_id);
+    }
+
+    /// Child-leg session: resolve and pin the DIALED agent before the first
+    /// leg-scoped ringing is emitted.
+    ///
+    /// The queue node pins before dialing; a cluster child-leg session has no
+    /// pin (nobody local dialed it), so its first `call_ringing` would lack
+    /// `agent_id` — and the gateway's `client_ip` stamping needs `agent_id`
+    /// in the payload. Resolving here makes the agent machine's `call_*`
+    /// contract complete from the very first event. Idempotent.
+    async fn ensure_child_agent_pinned(&mut self) {
+        if self.meta.child_leg_role.is_none() || self.pinned_agent_id().is_some() {
+            return;
+        }
+        let target = self
+            .legs
+            .get(&LegId::from("callee"))
+            .and_then(|leg| leg.endpoint.clone());
+        let Some(user) = target.as_deref().and_then(Self::uri_user_part) else {
+            return;
+        };
+        let Some(registry) = self.server.agent_registry.as_ref() else {
+            return;
+        };
+        if registry.get_agent(&user).await.is_some() {
+            Self::set_pinned_agent_id(&self.extensions, &user);
+            debug!(session_id = %self.id, agent = %user,
+                "child-leg session pinned the dialed agent before ringing");
+        }
     }
 
     /// Read a string from the session-extensions `HashMap` bag.
@@ -8604,6 +8641,10 @@ impl SipSession {
                         if !callee_sdp.is_empty() && callee_sdp.contains("v=0") {
                             if !self.media.early_media_sent {
                                 self.media.early_media_sent = true;
+                                // Child-leg session: pin the dialed agent BEFORE
+                                // the leg-scoped ringing so it carries
+                                // agent_id (→ client_ip).
+                                self.ensure_child_agent_pinned().await;
                                 self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
                                 // Provisional response carried SDP — fire the
@@ -8664,6 +8705,10 @@ impl SipSession {
                             }
                         } else {
                             if !self.media.early_media_sent {
+                                // Child-leg session: pin the dialed agent
+                                // BEFORE the leg-scoped ringing (see the
+                                // early-media branch).
+                                self.ensure_child_agent_pinned().await;
                                 self.update_leg_state(&LegId::from("callee"), LegState::Ringing);
                             }
                             if let Some(dialog) = self.caller_dialog.as_ref() {
@@ -10951,27 +10996,17 @@ impl SipSession {
             },
             leg_id: None,
             // A child-leg session (cluster-dispatched queue agent / consult /
-            // transfer) stamps the role the dispatcher declared — but only
-            // while the attributed leg is still registered here. When the leg
-            // exited through its own leg-scoped `call_hangup` (dynamic-monitor
-            // `LegEnded` → emit + REMOVE), the teardown is already reported
-            // and re-claiming the role here would double-report it. The
-            // attribution marker is `agent_id` (this session's legs carry
-            // POSITIONAL roles — the former `leg_role() == role` filter never
-            // matched them, silently dropping the attribution on cross-node
-            // dispatches, s17 A1/A10). In-setup legs (never connected) stay
-            // out of the report — their misses carry their own events.
-            leg_role: self.meta.child_leg_role.clone().filter(|_role| {
-                self.legs.values().any(|leg| {
-                    leg.agent_id.is_some()
-                        && !matches!(
-                            leg.state,
-                            crate::call::domain::LegState::Initializing
-                                | crate::call::domain::LegState::Ringing
-                                | crate::call::domain::LegState::EarlyMedia
-                                | crate::call::domain::LegState::Ending
-                        )
-                })
+            // transfer) stamps the role the dispatcher declared — unless a
+            // leg-scoped `call_hangup` already reported this dialog's
+            // teardown (the emitter latches `child_role_hangup_reported` and
+            // REMOVES the leg). Latch-based, NOT leg-state-based: a
+            // ring-timeout teardown has no leg-scoped report and its legs
+            // never reached Connected — the agent machine must still emit its
+            // attributed `call_hangup` (prd contract).
+            leg_role: self.meta.child_leg_role.clone().filter(|_| {
+                !self
+                    .child_role_hangup_reported
+                    .load(std::sync::atomic::Ordering::Relaxed)
             }),
             call_id: self.context.session_id.clone(),
             reason: hangup_reason_str,
@@ -15040,6 +15075,13 @@ impl SipSession {
         } else {
             None
         };
+        let child_role = self.child_role_for_leg(Some(id.as_str()));
+        if child_role.is_some() {
+            // Latch the report: the session-level teardown must not re-claim
+            // the role (the leg is reported here and removed).
+            self.child_role_hangup_reported
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             scope: crate::rwi::CallHangupScope::Leg,
             call_id: self.context.session_id.clone(),
@@ -15048,9 +15090,7 @@ impl SipSession {
             // teardown carries the declared role (positional "callee" lost
             // the agent attribution, s17 A1); the dispatcher-hop caller leg
             // keeps its positional role (one agent teardown, not two).
-            leg_role: self
-                .child_role_for_leg(Some(id.as_str()))
-                .or_else(|| self.leg_role_of(id.as_str())),
+            leg_role: child_role.or_else(|| self.leg_role_of(id.as_str())),
             reason,
             sip_status,
             hangup_by,

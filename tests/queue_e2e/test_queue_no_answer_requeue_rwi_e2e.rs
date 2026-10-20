@@ -182,6 +182,12 @@ async fn start_harness(capture: &WebhookCapture) -> Result<Harness> {
     .unwrap();
 
     let cc_registry = Arc::new(CcAgentRegistry::with_db(db.clone()));
+    // The CC registry's configured ring timeout wins over the route
+    // (`effective_ring_timeout`, default 30 s) — pin it to this test's
+    // per-agent timeout so the miss fires inside the assertion window.
+    let mut behavior = rustpbx::addons::cc::config::DeskBehaviorConfig::default();
+    behavior.ring_no_answer_secs = RING_TIMEOUT_SECS;
+    cc_registry.set_desk_behavior(behavior);
     cc_registry
         .register("bob".to_string(), vec!["support".to_string()], 1)
         .await

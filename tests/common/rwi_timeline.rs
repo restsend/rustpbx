@@ -214,15 +214,11 @@ impl RwiTimeline {
             }
         }
 
-        // Rejection shape: the event always describes the agent leg.
+        // Rejection shape: the event always names the agent (queue family —
+        // no leg_role/client_ip: only the registration-home node's call_*
+        // events carry those).
         for ev in self.events.iter().filter(|e| self.etype(e) == "queue_agent_rejected") {
             let p = self.payload(ev);
-            if p["leg_role"].as_str() != Some("agent") {
-                violations.push(format!(
-                    "queue_agent_rejected must carry leg_role \"agent\", got {:?}",
-                    p["leg_role"]
-                ));
-            }
             if p["agent_id"].as_str().map(str::is_empty) != Some(false) {
                 violations.push("queue_agent_rejected missing agent_id".into());
             }
@@ -617,12 +613,100 @@ impl RwiTimeline {
         );
     }
 
+    /// Agent role/attribution contract over the COMPLETE captured stream.
+    ///
+    /// The cross-node contract consumers rely on:
+    ///
+    /// * every `queue_agent_*` / `skill_group_agent_*` event (the queue
+    ///   node's single-source families) carries `leg_role: "agent"` and the
+    ///   expected `agent_id` — regardless of where the agent is registered;
+    /// * every `call_*` lifecycle event that IS role-attributed
+    ///   (`leg_role: "agent"`, i.e. the agent node's dialog events) names the
+    ///   expected agent and, for leg-scoped events, carries a `leg_id`;
+    /// * NO event may carry `leg_role: "agent"` for a different agent;
+    /// * per-occurrence uniqueness: for each `(event_type, leg_id)` —
+    ///   `leg_id` absent = session-scoped — at most ONE role-attributed
+    ///   emission. This is the guard against the doubly-reported shapes
+    ///   (ringing twins, caller-hop + callee answered, session re-claiming a
+    ///   leg teardown).
+    ///
+    /// `require_client_ip` asserts the `client_ip` stamp on every
+    /// role-attributed event (gateway lookup configured, agent registered)
+    /// and on the queue/skill agent events.
+    pub fn assert_agent_role_contract(&self, expected_agent: &str, require_client_ip: bool) {
+        let mut violations: Vec<String> = Vec::new();
+
+        let is_queue_agent_family = |t: &str| {
+            t.starts_with("queue_agent_") || t.starts_with("skill_group_agent_")
+        };
+
+        // (event_type, leg_id-or-"session") -> occurrences of role=agent
+        let mut occurrences: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::new();
+
+        for ev in &self.events {
+            let t = self.etype(ev);
+            let p = self.payload(ev);
+            let role = p["leg_role"].as_str();
+            let agent = p["agent_id"].as_str();
+            let leg_key = p["leg_id"].as_str().unwrap_or("session").to_string();
+
+            if is_queue_agent_family(t) {
+                // Queue/skill families: agent identity only. Under the
+                // final contract `leg_role`/`client_ip` belong exclusively to
+                // the registration-home node's call_* events.
+                if agent != Some(expected_agent) {
+                    violations.push(format!(
+                        "{t} must carry agent_id={expected_agent}, got {agent:?}"
+                    ));
+                }
+                continue;
+            }
+
+            if role == Some("agent") {
+                if agent != Some(expected_agent) {
+                    violations.push(format!(
+                        "{t} carries leg_role=agent for agent_id={agent:?}, expected {expected_agent}"
+                    ));
+                }
+                if !p["leg_id"].is_null() && p["leg_id"].as_str().is_none() {
+                    violations.push(format!("{t} leg-scoped agent event without a leg_id"));
+                }
+                if require_client_ip && p["client_ip"].as_str().is_none() {
+                    violations.push(format!(
+                        "{t} (leg_id={}) missing client_ip",
+                        p["leg_id"]
+                    ));
+                }
+                *occurrences.entry((t.to_string(), leg_key)).or_default() += 1;
+            }
+        }
+
+        for ((etype, leg), count) in &occurrences {
+            if *count > 1 {
+                violations.push(format!(
+                    "duplicate role=agent emission: {etype} leg_id={leg} x{count} \
+                     (one occurrence must carry at most one agent-attributed event)"
+                ));
+            }
+        }
+
+        if violations.is_empty() {
+            return;
+        }
+        panic!(
+            "agent role/attribution contract violations for call {}:\n  - {}\n timeline:\n{}",
+            self.call_id,
+            violations.join("\n  - "),
+            self.render()
+        );
+    }
+
     /// Closed-set check: every event type in this timeline must be one of
     /// `allowed` — catches unexpected events leaking into the stream AND
     /// subscription drift (an event type missing from the webhook filter
     /// silently starves assertions).
-    pub fn assert_only_expected(&self, allowed: &[&str]) {
-        let mut unexpected: Vec<&str> = self
+    pub fn assert_only_expected(&self, allowed: &[&str]) {        let mut unexpected: Vec<&str> = self
             .events
             .iter()
             .filter_map(|e| {

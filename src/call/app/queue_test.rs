@@ -3963,8 +3963,8 @@ mod tests {
             while let Ok(v) = gws_rx.try_recv() {
                 if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_no_answer") {
                     assert_eq!(
-                        v["leg_role"], "agent",
-                        "queue_agent_no_answer must describe the agent leg"
+                        v["agent_id"], "agent-001",
+                        "queue_agent_no_answer must name the agent"
                     );
                     saw = true;
                 }
@@ -4247,10 +4247,6 @@ mod tests {
         assert_eq!(
             rejected["leg_id"], "agent-leg-1",
             "rejection must bind to the dialed leg"
-        );
-        assert_eq!(
-            rejected["leg_role"], "agent",
-            "queue_agent_rejected must describe the agent leg"
         );
 
         stack.cancel();
