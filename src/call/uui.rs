@@ -133,9 +133,10 @@ pub fn extract_cc_uui(headers: &rsipstack::sip::Headers) -> Option<CcUui> {
 ///   call dispatched by another node (lifecycle suppression + `leg_role`
 ///   stamping on RWI events);
 /// - from anyone else (the agent's own device) → `meta.dial_leg_role` — a
-///   stats marker ONLY: persisted nowhere today, and never shaping the
-///   call lifecycle. Kept in session meta so agent-metric exclusions can
-///   be reintroduced on top of the parsed value when needed.
+///   stats marker: persisted into `cc_calls.leg_role` by the CC hook, and
+///   the agent's today metrics exclude these legs (a consult/transfer leg
+///   belongs to an existing logical call, not a new business call). It
+///   never shapes the call lifecycle.
 pub const LEG_ROLE_CONSULT: &str = "consult";
 pub const LEG_ROLE_TRANSFER: &str = "transfer";
 

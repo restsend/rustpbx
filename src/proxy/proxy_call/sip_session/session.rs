@@ -1484,9 +1484,10 @@ impl SipSession {
         //     external caller must not be able to plant this.
         //   - from anyone else (the agent's own self-dialed INVITE, restsend
         //     consult / Replaces transfer-target) → `dial_leg_role`: a stats
-        //     marker ONLY — kept in session meta, persisted nowhere today
-        //     (the `cc_calls.leg_role` column was rolled back; agent metrics
-        //     currently include all legs). It never shapes the lifecycle.
+        //     marker — persisted into `cc_calls.leg_role` by the CC hook and
+        //     excluded from the agent's today metrics (a consult/transfer leg
+        //     is part of an existing logical call, not a new business call).
+        //     It never shapes the lifecycle.
         // Anonymous `X-*` headers are not allowed on the wire, so the device
         // declares through the same RFC 7433 header; its data part may be
         // junk, so the UUI fallback only seeds root linkage from UUID-like

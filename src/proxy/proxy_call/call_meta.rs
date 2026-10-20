@@ -29,10 +29,10 @@ pub struct CallMeta {
     /// INVITE through the RFC 7433 `User-to-User` header's `leg=` parameter
     /// (`consult` / `transfer` — restsend-call tags its consult/求助 and
     /// Replaces transfer-target dials; `X-*` headers are not allowed on the
-    /// wire). In-memory stats marker ONLY — persisted nowhere today
-    /// (`cc_calls.leg_role` was rolled back; agent metrics include all
-    /// legs), and it never shapes the call lifecycle. `None` for ordinary
-    /// calls.
+    /// wire). A stats marker: persisted into `cc_calls.leg_role` by the CC
+    /// hook and excluded from the agent's today metrics (legs of an existing
+    /// logical call, not new business calls); it never shapes the call
+    /// lifecycle. `None` for ordinary calls.
     pub dial_leg_role: Option<String>,
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
