@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub mod addons;
 pub mod call_control;
 pub mod call_record;
+pub mod client_report;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod error_codes;

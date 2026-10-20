@@ -798,6 +798,14 @@ impl AppStateBuilder {
                             .filter(runtime_snapshot::Column::CreatedAt.lt(cutoff))
                             .exec(&snap_db)
                             .await;
+                        // Client-report log bodies share the 30-day retention
+                        // (day directories, see client_report.rs).
+                        if let Some(console) = snap_app.console.as_ref() {
+                            crate::console::handlers::client_report::prune_telemetry_files(
+                                console,
+                                30,
+                            );
+                        }
                     }
                     let server = snap_app.sip_server().inner.clone();
                     let now = chrono::Utc::now();

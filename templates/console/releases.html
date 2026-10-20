@@ -7,11 +7,26 @@
             <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "nav.releases" | t }}</p>
             <h1 class="text-2xl font-semibold text-slate-900">{{ "releases_page.title" | t }}</h1>
             <p class="text-sm text-slate-500">{{ "releases_page.subtitle" | t }}</p>
-            <p class="text-xs text-slate-400">{{ "releases_page.api_endpoint_hint" | t }}
+            <p class="text-xs text-slate-400" x-show="pageTab === 'manage'">{{ "releases_page.api_endpoint_hint" | t }}
                 <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-600">{{ api_prefix | safe }}/release</code>
             </p>
         </header>
 
+        <!-- Page tabs: release management / client telemetry -->
+        <div class="flex gap-2 rounded-xl bg-slate-100/80 p-1" role="tablist" aria-label="{{ "releases_page.title" | t }}">
+            <button type="button" @click="pageTab = 'manage'" role="tab" :aria-selected="pageTab === 'manage'"
+                class="rounded-lg px-3.5 py-1.5 text-sm font-medium transition"
+                :class="pageTab === 'manage' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
+                {{ "client_reports.tab_manage" | t }}
+            </button>
+            <button type="button" @click="openTelemetry()" role="tab" :aria-selected="pageTab === 'telemetry'"
+                class="rounded-lg px-3.5 py-1.5 text-sm font-medium transition"
+                :class="pageTab === 'telemetry' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
+                {{ "client_reports.tab_telemetry" | t }}
+            </button>
+        </div>
+
+        <div x-show="pageTab === 'manage'" x-cloak class="space-y-6">
         <!-- Storage settings -->
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5"
             x-init="loadStorage()">
@@ -300,6 +315,226 @@
             </div>
             {% endif %}
         </section>
+        </div><!-- /manage tab -->
+
+        <!-- ══ Client telemetry tab ══ -->
+        <div x-show="pageTab === 'telemetry'" x-cloak class="space-y-6" x-init="null">
+            <!-- controls -->
+            <section class="flex flex-wrap items-end gap-4 rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.from" | t }}</span>
+                    <input type="date" x-model="tlFrom"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.to" | t }}</span>
+                    <input type="date" x-model="tlTo"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_event" | t }}</span>
+                    <select x-model="tlEvent"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <template x-for="e in summary.by_event || []" :key="e.event">
+                            <option :value="e.event" x-text="(eventLabels[e.event] || e.event) + ' (' + e.count + ')'"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_version" | t }}</span>
+                    <select x-model="tlVersion"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <template x-for="v in summary.by_version || []" :key="v.version">
+                            <option :value="v.version" x-text="v.version + ' (' + v.count + ')'"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_agent" | t }}</span>
+                    <select x-model="tlAgent"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <template x-for="a in (summary.by_agent || []).slice(0, 20)" :key="a.agent">
+                            <option :value="a.agent" x-text="a.agent + ' (' + a.count + ')'"></option>
+                        </template>
+                    </select>
+                </label>
+                <button type="button" @click="loadTelemetry()"
+                    class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500">
+                    {{ "client_reports.refresh" | t }}
+                </button>
+                <a :href="exportUrl()" target="_blank" rel="noopener"
+                    class="inline-flex items-center rounded-lg px-4 py-2 text-sm font-medium text-sky-600 ring-1 ring-sky-200 transition hover:bg-sky-50">
+                    {{ "client_reports.export_csv" | t }}
+                </a>
+            </section>
+
+            <!-- KPI cards -->
+            <section class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_total" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.total ?? '-'"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_abnormal" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold" :class="(summary.abnormal || 0) > 0 ? 'text-rose-600' : 'text-emerald-600'"
+                        x-text="(summary.abnormal ?? '-') + ((summary.abnormal_pct != null) ? ' (' + summary.abnormal_pct.toFixed(1) + '%)' : '')"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_update_checks" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.update_checks ?? '-'"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_versions" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.versions ?? '-'"></p>
+                    <p class="text-[11px] text-slate-400">{{ "client_reports.kpi_agents_hint" | t }}
+                        <span x-text="summary.agents ?? '-'"></span></p>
+                </div>
+            </section>
+
+            <!-- trend bars + distributions -->
+            <section class="grid gap-4 lg:grid-cols-3">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5 lg:col-span-2">
+                    <h2 class="mb-4 text-sm font-semibold text-slate-900">{{ "client_reports.trend_title" | t }}</h2>
+                    <div class="flex h-40 items-end gap-1" x-show="trend.length">
+                        <template x-for="(p, i) in trend" :key="i">
+                            <div class="group relative flex flex-1 flex-col items-center justify-end gap-0.5"
+                                :title="bucketLabel(p) + ': ' + p.total + ' / ' + p.abnormal">
+                                <div class="w-full max-w-6 rounded-t bg-rose-400" :style="'height:' + barH(p.abnormal) + 'px'"></div>
+                                <div class="w-full max-w-6 rounded-b bg-sky-400" :style="'height:' + barH(p.total - p.abnormal) + 'px'"></div>
+                            </div>
+                        </template>
+                    </div>
+                    <p x-show="!trend.length" class="py-12 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    <div class="mt-3 flex items-center gap-4 text-xs text-slate-500">
+                        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-sky-400"></span>{{ "client_reports.legend_normal" | t }}</span>
+                        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-rose-400"></span>{{ "client_reports.legend_abnormal" | t }}</span>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_event" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <tbody class="divide-y divide-slate-50">
+                                <template x-for="e in (summary.by_event || []).slice(0, 8)" :key="e.event">
+                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlEvent = e.event; loadTelemetry()">
+                                        <td class="py-1.5 pr-2">
+                                            <span x-text="eventLabels[e.event] || e.event"
+                                                :class="e.abnormal ? 'text-rose-600' : 'text-slate-600'"></span>
+                                        </td>
+                                        <td class="py-1.5 text-right font-medium" x-text="e.count"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                        <p x-show="!(summary.by_event || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    </div>
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_version" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <tbody class="divide-y divide-slate-50">
+                                <template x-for="v in (summary.by_version || []).slice(0, 6)" :key="v.version">
+                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlVersion = v.version; loadTelemetry()">
+                                        <td class="py-1.5 pr-2 font-mono text-xs text-slate-600" x-text="v.version"></td>
+                                        <td class="py-1.5 text-right font-medium" x-text="v.count"></td>
+                                        <td class="py-1.5 pl-2 text-right text-xs text-slate-400">
+                                            <span x-show="v.update_checks" x-text="v.update_checks + ' ✓'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                        <p x-show="!(summary.by_version || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    </div>
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_agent" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <tbody class="divide-y divide-slate-50">
+                                <template x-for="a in (summary.by_agent || []).slice(0, 6)" :key="a.agent">
+                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlAgent = a.agent; loadTelemetry()">
+                                        <td class="py-1.5 pr-2 font-mono text-xs text-slate-600" x-text="a.agent"></td>
+                                        <td class="py-1.5 text-right font-medium" x-text="a.count"></td>
+                                        <td class="py-1.5 pl-2 text-right text-xs text-rose-500">
+                                            <span x-show="a.abnormal" x-text="a.abnormal"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                        <p x-show="!(summary.by_agent || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- recent reports -->
+            <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                <div class="flex items-center justify-between px-4 py-3">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "client_reports.recent_title" | t }}</h2>
+                    <span class="text-xs text-slate-400">{{ "client_reports.recent_hint" | t }}</span>
+                </div>
+                <table class="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_time" | t }}</th>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_event" | t }}</th>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_version" | t }}</th>
+                            <th class="hidden px-4 py-2.5 md:table-cell">{{ "client_reports.col_agent" | t }}</th>
+                            <th class="hidden px-4 py-2.5 lg:table-cell">{{ "client_reports.col_os" | t }}</th>
+                            <th class="hidden px-4 py-2.5 lg:table-cell">{{ "client_reports.col_call" | t }}</th>
+                            <th class="px-4 py-2.5 text-right">{{ "client_reports.col_actions" | t }}</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-50">
+                        <template x-for="r in reports" :key="r.id">
+                            <tr class="hover:bg-slate-50/60">
+                                <td class="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500" x-text="fmtTime(r.created_at)"></td>
+                                <td class="px-4 py-2.5">
+                                    <span class="rounded px-1.5 py-0.5 text-xs font-medium"
+                                        :class="r.abnormal ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-600'"
+                                        x-text="eventLabels[r.event] || r.event"></span>
+                                </td>
+                                <td class="px-4 py-2.5 font-mono text-xs text-slate-600" x-text="r.version"></td>
+                                <td class="hidden px-4 py-2.5 text-slate-600 md:table-cell" x-text="r.data?.agent_id || r.data?.sip_user || '-'"></td>
+                                <td class="hidden px-4 py-2.5 text-xs text-slate-500 lg:table-cell" x-text="[r.data?.os, r.data?.arch].filter(Boolean).join('/') || '-'"></td>
+                                <td class="hidden max-w-32 truncate px-4 py-2.5 font-mono text-xs text-slate-400 lg:table-cell" x-text="r.data?.call_id || '-'" :title="r.data?.call_id || ''"></td>
+                                <td class="px-4 py-2.5 text-right">
+                                    <button type="button" @click="openBody(r)"
+                                        class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "client_reports.view" | t }}</button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+                <p x-show="!reports.length" class="py-10 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+            </section>
+        </div><!-- /telemetry tab -->
+    </div>
+
+    <!-- Telemetry body modal -->
+    <div x-show="tlOpen" x-cloak class="fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-slate-900/40" @click="tlOpen = false"></div>
+        <div x-show="tlOpen" x-transition
+            class="relative mx-auto mt-12 flex w-[92%] max-w-3xl flex-col rounded-xl bg-white p-5 shadow-xl ring-1 ring-black/5" style="max-height:85vh">
+            <div class="mb-3 flex items-start justify-between gap-4">
+                <h2 class="text-sm font-semibold text-slate-900">
+                    {{ "client_reports.body_title" | t }}
+                    <span class="ml-1 font-mono text-sky-600" x-text="tlBody?.id"></span>
+                </h2>
+                <button type="button" @click="tlOpen = false" class="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <div class="mb-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                <span x-text="tlBody?.row ? (eventLabels[tlBody.row.event] || tlBody.row.event) : ''"></span>
+                <span x-text="tlBody?.row ? tlBody.row.version : ''" class="font-mono"></span>
+                <span x-text="tlBody?.row ? fmtTime(tlBody.row.created_at) : ''"></span>
+                <button type="button" x-show="tlBody && !tlBody.full" @click="loadFullBody()"
+                    class="ml-auto rounded-md bg-sky-50 px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-100">
+                    {{ "client_reports.load_full" | t }}
+                </button>
+            </div>
+            <pre class="flex-1 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 font-mono text-xs leading-relaxed text-slate-700 ring-1 ring-slate-100" x-text="tlBody?.text || '{{ "client_reports.body_empty" | t }}'"></pre>
+        </div>
     </div>
 
     <!-- Edit release modal -->
@@ -384,9 +619,39 @@
 <script>
     function releasesPage() {
         return {
+            pageTab: 'manage',
             releases: {{ releases | json | safe }},
             uploading: false,
             storageSaving: false,
+            // ── client telemetry ──
+            tlFrom: '',
+            tlTo: '',
+            tlEvent: '',
+            tlVersion: '',
+            tlAgent: '',
+            summary: {},
+            trend: [],
+            reports: [],
+            tlOpen: false,
+            tlBody: null,
+            eventLabels: {
+                login_fail: '{{ "client_reports.ev_login_fail" | t }}',
+                dial_fail: '{{ "client_reports.ev_dial_fail" | t }}',
+                answer_fail: '{{ "client_reports.ev_answer_fail" | t }}',
+                panic: '{{ "client_reports.ev_panic" | t }}',
+                crash_marker: '{{ "client_reports.ev_crash_marker" | t }}',
+                engine_exit: '{{ "client_reports.ev_engine_exit" | t }}',
+                manual_upload: '{{ "client_reports.ev_manual_upload" | t }}',
+                diag_run: '{{ "client_reports.ev_diag_run" | t }}',
+                link_lost: '{{ "client_reports.ev_link_lost" | t }}',
+                call_abnormal: '{{ "client_reports.ev_call_abnormal" | t }}',
+                update_success: '{{ "client_reports.ev_update_success" | t }}',
+                update_fail: '{{ "client_reports.ev_update_fail" | t }}',
+                update_download_fail: '{{ "client_reports.ev_update_download_fail" | t }}',
+                update_progress: '{{ "client_reports.ev_update_progress" | t }}',
+                update_manual_report: '{{ "client_reports.ev_update_manual_report" | t }}',
+                update_check: '{{ "client_reports.ev_update_check" | t }}',
+            },
             storageSource: 'default',
             storageDraft: {
                 type: 'local', path: 'storage/releases',
@@ -503,6 +768,79 @@
                     environments: r.environments ? [...r.environments] : [],
                 };
                 this.editOpen = true;
+            },
+            // ── client telemetry ──
+            tlQuery() {
+                const p = new URLSearchParams({ from: this.tlFrom, to: this.tlTo, bucket: 'day' });
+                return p.toString();
+            },
+            async openTelemetry() {
+                this.pageTab = 'telemetry';
+                if (!this.tlFrom) {
+                    const today = new Date();
+                    const weekAgo = new Date(Date.now() - 6 * 86400000);
+                    this.tlTo = today.toISOString().slice(0, 10);
+                    this.tlFrom = weekAgo.toISOString().slice(0, 10);
+                }
+                await this.loadTelemetry();
+            },
+            async loadTelemetry() {
+                const qs = this.tlQuery();
+                try {
+                    const [summary, trend] = await Promise.all([
+                        apiGet('/client-reports/summary?' + qs),
+                        apiGet('/client-reports/trend?' + qs),
+                    ]);
+                    this.summary = summary.data || {};
+                    this.trend = trend.data || [];
+                } catch (e) { /* surfaced by api.js */ }
+                try {
+                    const extra = new URLSearchParams(qs);
+                    if (this.tlEvent) extra.set('event', this.tlEvent);
+                    if (this.tlVersion) extra.set('version', this.tlVersion);
+                    if (this.tlAgent) extra.set('agent', this.tlAgent);
+                    extra.set('limit', '50');
+                    const list = await apiGet('/client-reports/list?' + extra.toString());
+                    this.reports = list.data || [];
+                } catch (e) {
+                    this.reports = [];
+                }
+            },
+            exportUrl() {
+                return (window.apiPrefix || '{{ api_prefix | safe }}') + '/client-reports/export?' + this.tlQuery();
+            },
+            maxTrend() {
+                return Math.max(1, ...this.trend.map((p) => p.total || 0));
+            },
+            barH(v) {
+                return Math.max(v > 0 ? 3 : 0, Math.round((v / this.maxTrend()) * 120));
+            },
+            bucketLabel(p) {
+                return (p.bucket_start || '').slice(0, 10);
+            },
+            fmtTime(ts) {
+                if (!ts) return '-';
+                const d = new Date(ts);
+                return isNaN(d) ? ts : d.toLocaleString();
+            },
+            async openBody(row) {
+                // Inline preview first (stored in the row's data JSON), full
+                // body fetchable via the button.
+                this.tlBody = {
+                    id: row.id,
+                    row,
+                    text: row.data?.body_preview || '',
+                    full: false,
+                };
+                this.tlOpen = true;
+            },
+            async loadFullBody() {
+                if (!this.tlBody) return;
+                try {
+                    const b = await apiGet('/client-reports/body?id=' + this.tlBody.id);
+                    this.tlBody.text = b.text || this.tlBody.text;
+                    this.tlBody.full = true;
+                } catch (e) { /* surfaced by api.js */ }
             },
             async saveEdit() {
                 const d = this.editDraft;

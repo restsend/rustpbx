@@ -222,6 +222,10 @@ pub async fn check_update_handler(
             git_commit = params.get("git_commit").map(String::as_str).unwrap_or(""),
             "release check request"
         );
+        // The previously debug-logged client identity doubles as the
+        // active-version telemetry (`cr:update_check` snapshot row).
+        crate::console::handlers::client_report::record_update_check(&state, &params, &headers)
+            .await;
     }
     let docs = load_docs(&config_store(&state)).await;
     let Some(doc) = pick_latest_published_for_env(&docs, requested_env) else {
@@ -1625,6 +1629,7 @@ mod tests {
                     path: tmp.path().to_string_lossy().to_string(),
                 }),
                 signed_url_expiry_secs: None,
+                telemetry_dir: None,
             }),
             ..Default::default()
         };

@@ -508,6 +508,12 @@ pub struct ReleaseConfig {
     /// caps validity at 7 days, so larger values are clamped.
     #[serde(default)]
     pub signed_url_expiry_secs: Option<u64>,
+    /// Local directory for client telemetry bodies (`POST {api_prefix}/report`).
+    /// Defaults to `storage/telemetry`. Bodies are deliberately kept on local
+    /// disk (not the artifact storage engine): ingestion must succeed even
+    /// while S3 / other subsystems are down.
+    #[serde(default)]
+    pub telemetry_dir: Option<String>,
 }
 
 impl ReleaseConfig {

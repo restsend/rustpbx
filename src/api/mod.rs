@@ -47,6 +47,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::metrics::api_urls())
         .merge(crate::console::handlers::reports::api_urls())
         .merge(crate::console::handlers::release::api_urls())
+        .merge(crate::console::handlers::client_report::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
     // Addon API routes (collected at runtime via Addon trait hooks), including
@@ -113,6 +114,14 @@ async fn api_auth_middleware(
             || path == "/release/list"
             || (path.starts_with("/release/") && path.ends_with("/download")))
     {
+        return next.run(req).await;
+    }
+
+    // The telemetry collector is public too (restsend-call uploads
+    // unauthenticated, see `crates/pc/src/telemetry.rs`). The client never
+    // holds cookies, so there is no CSRF surface; abuse is bounded by the
+    // handler's own rate limiter.
+    if *req.method() == axum::http::Method::POST && path.ends_with("/report") {
         return next.run(req).await;
     }
 
