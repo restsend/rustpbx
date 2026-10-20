@@ -660,6 +660,19 @@ impl SipServerBuilder {
         #[cfg(unix)]
         log_rlimit_nofile().await;
         let transport_layer = TransportLayer::new(cancel_token.clone());
+        match config.stream_idle_timeout {
+            Some(secs) => {
+                transport_layer.set_stream_idle_timeout(std::time::Duration::from_secs(secs));
+                info!(
+                    secs,
+                    "configured stream (TCP/TLS/WS) idle timeout (0 = disabled)"
+                );
+            }
+            None => info!(
+                default_secs = rsipstack::transport::transport_layer::DEFAULT_STREAM_IDLE_TIMEOUT_MS / 1000,
+                "stream idle timeout not configured, using default"
+            ),
+        }
         if let Some(ca_path) = config.tls_ca_certificates.as_deref()
             && !ca_path.trim().is_empty()
         {

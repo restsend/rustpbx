@@ -168,23 +168,13 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
             "total".to_string(),
             serde_json::json!(crate::utils::active_task_count()),
         );
-        let metrics = crate::utils::task_metrics_snapshot();
-        if !metrics.is_empty() {
-            let sorted: std::collections::BTreeMap<usize, Vec<String>> = {
-                let mut m: std::collections::BTreeMap<usize, Vec<String>> =
-                    std::collections::BTreeMap::new();
-                for (loc, cnt) in &metrics {
-                    m.entry(*cnt).or_default().push(loc.clone());
-                }
-                m
-            };
-            let mut entries = Vec::new();
-            for (cnt, locs) in sorted.iter().rev() {
-                for loc in locs {
-                    entries.push(serde_json::json!({"loc": loc, "count": cnt}));
-                }
-            }
-            map.insert("by_location".to_string(), serde_json::json!(entries));
+        // Flat "spawn location: live task count" entries — sorted by count
+        // descending so the hottest spawn sites read first.
+        let mut metrics: Vec<(String, usize)> =
+            crate::utils::task_metrics_snapshot().into_iter().collect();
+        metrics.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (loc, count) in metrics {
+            map.insert(loc, serde_json::json!(count));
         }
         map
     };
@@ -199,6 +189,12 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "dialogs": sip.inner.dialog_layer.len(),
         "calls": sip.inner.active_call_registry.count(),
         "running_tx": sip.inner.runnings_tx.load(Ordering::Relaxed),
+        "transport_connections": sip
+            .inner
+            .endpoint
+            .inner
+            .transport_layer
+            .connections_count(),
         "leak": serde_json::json!({
             "handles_by_dialog": sip.inner.active_call_registry.handles_by_dialog_count(),
             "dialogs_by_session": sip.inner.active_call_registry.dialog_by_session_count(),

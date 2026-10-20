@@ -1542,6 +1542,12 @@ pub struct ProxyConfig {
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
     pub tls_ca_certificates: Option<String>,
+    /// Idle timeout in seconds for stream (TCP/TLS/WS) connections: a
+    /// connection with no inbound traffic for this long is closed and retired
+    /// from the connection table, reclaiming half-open sockets whose peer
+    /// vanished without a FIN. `0` disables. Defaults to 300 when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout: Option<u64>,
     pub udp_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_ports: Option<Vec<u16>>,
@@ -2306,6 +2312,7 @@ impl Default for ProxyConfig {
             ssl_private_key: None,
             ssl_certificate: None,
             tls_ca_certificates: None,
+            stream_idle_timeout: None,
             udp_port: Some(5060),
             udp_ports: None,
             tcp_port: None,
