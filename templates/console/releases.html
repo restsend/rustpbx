@@ -204,7 +204,7 @@
                 </div>
                 <div>
                     <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_policy_title" | t }}</span>
-                    <div class="grid gap-4 sm:grid-cols-3">
+                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         <label class="block">
                             <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
                             <input type="text" name="window" placeholder="22:00-07:00"
@@ -220,6 +220,11 @@
                             <input type="text" name="deadline" placeholder="2026-11-01T00:00:00Z"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
                         </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_equivalent_to" | t }}</span>
+                            <input type="text" name="equivalent_to" placeholder="0.1.13"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
                     </div>
                     <label class="mt-3 flex items-center gap-2 text-sm text-slate-600">
                         <input type="checkbox" name="force"
@@ -227,6 +232,7 @@
                         {{ "releases_page.upload_force" | t }}
                     </label>
                     <p class="mt-1 text-xs text-slate-400">{{ "releases_page.upload_policy_hint" | t }}</p>
+                    <p class="mt-1 text-xs text-slate-400">{{ "releases_page.upload_equivalent_to_hint" | t }}</p>
                 </div>
                 <div class="flex items-center justify-between">
                     <label class="flex items-center gap-2 text-sm text-slate-600">
@@ -268,6 +274,7 @@
                                 <div class="flex flex-wrap items-center gap-1">
                                     <span class="font-semibold text-slate-900">{{ r.version }}</span>
                                     {% if r.force %}<span class="rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                                    {% if r.equivalent_to %}<span class="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700" title="{{ 'releases_page.badge_equivalent_to_title' | t }}">≡ {{ r.equivalent_to }}</span>{% endif %}
                                     {% if r.storage_is_s3 %}
                                     <span class="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
                                     {% else %}
@@ -599,7 +606,7 @@
                     <textarea rows="3" x-model="editDraft.release_notes"
                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
                 </label>
-                <div class="grid gap-4 sm:grid-cols-3">
+                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                     <label class="block">
                         <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
                         <input type="text" x-model="editDraft.window" placeholder="22:00-07:00"
@@ -615,7 +622,13 @@
                         <input type="text" x-model="editDraft.deadline" placeholder="2026-11-01T00:00:00Z"
                             class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
                     </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_equivalent_to" | t }}</span>
+                        <input type="text" x-model="editDraft.equivalent_to" placeholder="0.1.13"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
                 </div>
+                <p class="text-xs text-slate-400">{{ "releases_page.upload_equivalent_to_hint" | t }}</p>
                 <p class="text-xs text-slate-400">{{ "releases_page.upload_window_hint" | t }}</p>
                 <div>
                     <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
@@ -720,6 +733,7 @@
                 window: '',
                 min_supported: '',
                 deadline: '',
+                equivalent_to: '',
                 environments: [],
             },
             formatBytes(bytes) {
@@ -812,6 +826,7 @@
                     window: r.window || '',
                     min_supported: r.min_supported || '',
                     deadline: r.deadline || '',
+                    equivalent_to: r.equivalent_to || '',
                     environments: r.environments ? [...r.environments] : [],
                 };
                 this.editOpen = true;
@@ -908,6 +923,7 @@
                     window: trim(d.window),
                     min_supported: trim(d.min_supported),
                     deadline: trim(d.deadline),
+                    equivalent_to: trim(d.equivalent_to),
                     environments: d.environments,
                 };
                 this.editSaving = true;

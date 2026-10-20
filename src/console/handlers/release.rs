@@ -117,6 +117,12 @@ pub struct ReleaseDoc {
     pub max_attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// Quick-rollback marker: this package is tagged `version` = X but is
+    /// actually the same build as the version recorded here. Update clients
+    /// already running that version treat the release as up-to-date and
+    /// skip download/apply entirely (restsend-pc `UpdateMeta.equivalent_to`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equivalent_to: Option<String>,
     /// Environments this release targets ([`RELEASE_ENVIRONMENTS`]). Empty
     /// (or missing — `#[serde(default)]`) means "visible to every
     /// environment", which is what legacy manifests deserialize to.
@@ -338,6 +344,7 @@ pub async fn upload_handler(
                 doc.force_rate_limit_kbps = field.text().await.ok().and_then(parse_u32)
             }
             "max_attempts" => doc.max_attempts = field.text().await.ok().and_then(parse_u32),
+            "equivalent_to" => doc.equivalent_to = field.text().await.ok().and_then(trim_non_empty),
             "file" => {
                 file_name = field.file_name().map(str::to_string);
                 match field.bytes().await {
@@ -452,6 +459,9 @@ pub async fn update_release_handler(
     }
     if body.max_attempts.is_some() {
         doc.max_attempts = body.max_attempts;
+    }
+    if body.equivalent_to.is_some() {
+        doc.equivalent_to = body.equivalent_to.filter(|n| !n.is_empty());
     }
     if let Some(envs) = body.environments.as_ref() {
         match normalize_environments(envs.clone()) {
@@ -858,6 +868,8 @@ pub struct UpdateReleaseBody {
     pub force_rate_limit_kbps: Option<u32>,
     pub max_attempts: Option<u32>,
     pub deadline: Option<String>,
+    /// Quick-rollback marker (`UpdateMeta.equivalent_to`); empty string clears.
+    pub equivalent_to: Option<String>,
     /// Replace the environment tags. An explicit empty array resets the
     /// release to "visible to every environment".
     pub environments: Option<Vec<String>>,
@@ -943,6 +955,7 @@ pub async fn create_release(
         force_rate_limit_kbps: params.extra.force_rate_limit_kbps,
         max_attempts: params.extra.max_attempts,
         deadline: params.extra.deadline,
+        equivalent_to: params.extra.equivalent_to,
         environments: params.extra.environments,
         created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
     };
@@ -1103,6 +1116,7 @@ async fn build_update_meta(
         "force_rate_limit_kbps": doc.force_rate_limit_kbps,
         "max_attempts": doc.max_attempts,
         "deadline": doc.deadline,
+        "equivalent_to": doc.equivalent_to,
         "size_bytes": (doc.file_size > 0).then_some(doc.file_size),
     }))
 }
@@ -1375,6 +1389,7 @@ mod tests {
             min_supported: Some("0.1.0".into()),
             window: Some("12:10-13:20".into()),
             rate_limit_kbps: Some(2048),
+            equivalent_to: Some("0.1.12".into()),
             ..Default::default()
         };
         let file = ReleaseFile {
@@ -1394,6 +1409,7 @@ mod tests {
         assert!(back.published);
         assert_eq!(back.window.as_deref(), Some("12:10-13:20"));
         assert_eq!(back.rate_limit_kbps, Some(2048));
+        assert_eq!(back.equivalent_to.as_deref(), Some("0.1.12"));
     }
 
     #[test]
@@ -1729,6 +1745,8 @@ mod tests {
                     file_size: 42,
                     release_notes: Some("bugfix release".into()),
                     min_supported: Some("0.1.0".into()),
+                    // Quick-rollback marker (restsend-pc `UpdateMeta.equivalent_to`).
+                    equivalent_to: Some("0.1.12".into()),
                     ..Default::default()
                 },
             ],
@@ -1749,6 +1767,7 @@ mod tests {
         assert_eq!(meta["size_bytes"], 42);
         assert_eq!(meta["notes"], "bugfix release");
         assert_eq!(meta["min_supported"], "0.1.0");
+        assert_eq!(meta["equivalent_to"], "0.1.12");
         assert_eq!(meta["force"], false);
         let url = meta["url"].as_str().unwrap();
         assert!(
@@ -1901,6 +1920,92 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Quick-rollback contract (restsend-pc `UpdateMeta.equivalent_to`):
+    /// upload with the multipart field, served verbatim on the public check
+    /// endpoint, PATCH re-points it, and an empty string clears it.
+    #[tokio::test]
+    async fn equivalent_to_marker_upload_served_and_patchable() {
+        let (state, _tmp) = setup_release_stack().await;
+
+        // Upload a "0.2.0" package that is really the 0.1.13 build
+        // republished (bad build pulled, old one re-tagged higher).
+        let body = multipart_body(
+            "relboundary42",
+            &[("version", "0.2.0"), ("equivalent_to", " 0.1.13 ")],
+            Some(("file", "rollback.zip", b"rollback payload".as_slice())),
+        );
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/release")
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=relboundary42",
+                    )
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(
+            docs.iter()
+                .find(|d| d.version == "0.2.0")
+                .unwrap()
+                .equivalent_to
+                .as_deref(),
+            Some("0.1.13"),
+            "surrounding whitespace must be trimmed"
+        );
+
+        // Public check endpoint serves the marker verbatim.
+        let resp = get(&state, "/api/release").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["equivalent_to"], "0.1.13");
+
+        // PATCH re-points the marker…
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/release/0.2.0")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(r#"{"equivalent_to":"0.1.12"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // …and an empty string clears it (clients resume the normal
+        // upgrade flow instead of matching a stale version).
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/release/0.2.0")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(r#"{"equivalent_to":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(
+            docs.iter().find(|d| d.version == "0.2.0").unwrap().equivalent_to,
+            None,
+            "empty string must clear the marker"
+        );
+        let resp = get(&state, "/api/release").await;
+        assert!(json_body(resp).await["equivalent_to"].is_null());
+    }
+
     /// Console page renders with environment checkboxes (stable pre-checked),
     /// per-release env badges and the "all environments" fallback badge.
     #[tokio::test]
@@ -1911,6 +2016,7 @@ mod tests {
             vec![
                 ReleaseDoc {
                     environments: vec!["testing".into()],
+                    equivalent_to: Some("0.1.13".into()),
                     ..doc("0.2.0", true)
                 },
                 doc("0.1.13", true), // untagged → "all environments" badge
@@ -1954,6 +2060,11 @@ mod tests {
         assert!(html.contains("更新策略"), "policy section missing");
         assert!(html.contains(r#"name="window""#), "window input missing");
         assert!(html.contains(r#"name="force""#), "force checkbox missing");
+        assert!(
+            html.contains(r#"name="equivalent_to""#),
+            "rollback marker input missing"
+        );
+        assert!(html.contains("≡ 0.1.13"), "rollback badge missing");
         assert!(html.contains("不勾选 = 所有环境可见"), "hint missing");
         assert!(html.contains(">testing</span>"), "env badge missing");
         assert!(html.contains("全部"), "all-environments badge missing");
