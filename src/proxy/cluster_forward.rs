@@ -485,9 +485,9 @@ mod tests {
     }
 
     /// `routed_op_on_owner` must POST the op body to the peer owning the
-    /// session (resolved via the session registry) — this is the path the
-    /// console's user-data forwarding uses when the REST request lands on a
-    /// non-owner node.
+    /// canonical session even when a dialog alias uses the same ID. Exercise
+    /// both registration orders and ensure alias cleanup preserves the owner.
+    /// Optional database URLs must point to isolated registry-test databases.
     #[tokio::test]
     async fn routed_op_posts_to_owning_peer() {
         use crate::call::runtime::{
@@ -517,22 +517,29 @@ mod tests {
         let peers = vec![peer("127.0.0.1", 5060, port)];
         let mut failures = Vec::new();
         let mysql_url = std::env::var("RUSTPBX_TEST_MYSQL_URL").ok();
+        let postgres_url = std::env::var("RUSTPBX_TEST_POSTGRES_URL").ok();
         let mut backends = vec!["memory", "sqlite"];
-        if let Some(url) = mysql_url.as_deref() {
-            let url = url::Url::parse(url).unwrap_or_else(|_| panic!("invalid MySQL test URL"));
-            assert!(
-                url.path().starts_with("/rustpbx_registrytest_"),
-                "MySQL regression requires an isolated rustpbx_registrytest_ database"
-            );
-            backends.push("mysql");
+        for (backend, url) in [
+            ("mysql", mysql_url.as_deref()),
+            ("postgres", postgres_url.as_deref()),
+        ] {
+            if let Some(url) = url {
+                let url = url::Url::parse(url)
+                    .unwrap_or_else(|_| panic!("invalid {backend} test URL"));
+                assert!(
+                    url.path().starts_with("/rustpbx_registrytest_"),
+                    "{backend} regression requires an isolated rustpbx_registrytest_ database"
+                );
+                backends.push(backend);
+            }
         }
         for backend in backends {
             for alias_first in [false, true] {
                 let registry: SessionRegistryRef = if backend != "memory" {
-                    let url = if backend == "mysql" {
-                        mysql_url.as_deref().unwrap()
-                    } else {
-                        "sqlite::memory:"
+                    let url = match backend {
+                        "mysql" => mysql_url.as_deref().unwrap(),
+                        "postgres" => postgres_url.as_deref().unwrap(),
+                        _ => "sqlite::memory:",
                     };
                     let db = sea_orm::Database::connect(url)
                         .await

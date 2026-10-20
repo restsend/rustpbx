@@ -154,12 +154,12 @@ impl SessionRegistry for DbSessionRegistry {
             // on every backend when a home-proxy dialog reuses a session's id.
             let value = if info.is_alias() {
                 Expr::case(
-                    Expr::col(Column::Direction)
+                    Expr::col((Entity, Column::Direction))
                         .eq(SessionInfo::ALIAS_DIRECTION)
-                        .or(Expr::col(Column::Direction).like("alias:%")),
+                        .or(Expr::col((Entity, Column::Direction)).like("alias:%")),
                     value,
                 )
-                .finally(Expr::col(column))
+                .finally(Expr::col((Entity, column)))
                 .into()
             } else {
                 value
