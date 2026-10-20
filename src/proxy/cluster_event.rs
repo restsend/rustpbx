@@ -139,11 +139,23 @@ impl ClusterLocatorMessage {
         // it here used to clear the peer's registry entry on every relayed
         // register/refresh, so non-home nodes emitted agent events without
         // `client_ip`.
+        //
+        // Wire format = `SipAddr`'s Display: `"TRANSPORT host:port"`
+        // (registration sockets ALWAYS carry one — UDP/TCP/WSS…) or a bare
+        // `"host:port"` on older peers. Parsing with a bare HostWithPort
+        // silently failed on the transport prefix, losing the IP again.
         let destination = self.destination.as_deref().and_then(|value| {
-            rsipstack::sip::HostWithPort::try_from(value)
+            let (transport, hostport) = match value.split_once(' ') {
+                Some((token, rest)) => match token.parse::<rsipstack::sip::Transport>() {
+                    Ok(transport) => (Some(transport), rest),
+                    Err(_) => (None, value),
+                },
+                None => (None, value),
+            };
+            rsipstack::sip::HostWithPort::try_from(hostport)
                 .ok()
                 .map(|addr| rsipstack::transport::SipAddr {
-                    r#type: None,
+                    r#type: transport,
                     addr,
                 })
         });
@@ -682,29 +694,65 @@ mod tests {
     /// `Location.destination` on the peer, so `to_event()` dropping it
     /// cleared the peer's registry entry on every relayed register/refresh
     /// and non-home nodes emitted agent events without `client_ip`.
+    ///
+    /// The wire value is `SipAddr`'s Display — `"TRANSPORT host:port"` —
+    /// because registration sockets ALWAYS carry a transport (UDP/TCP/WSS).
+    /// Hand-written bare `ip:port` in tests bypassed that and let a
+    /// HostWithPort-only parser pass while the real relay stayed broken.
     #[test]
     fn test_locator_message_to_event_preserves_destination() {
-        let msg = ClusterLocatorMessage {
-            event: "registered".to_string(),
-            aor: "sip:1001@pbx.local".to_string(),
-            registered_aor: Some("sip:1001@pbx.local".to_string()),
-            contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
-            expires: 3600,
-            destination: Some("192.168.3.21:51200".to_string()),
-            reason: None,
-        };
+        for transport in ["UDP", "WSS"] {
+            let wire_value = format!("{transport} 192.0.2.1:51200");
+            let msg = ClusterLocatorMessage {
+                event: "registered".to_string(),
+                aor: "sip:1001@pbx.local".to_string(),
+                registered_aor: Some("sip:1001@pbx.local".to_string()),
+                contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
+                expires: 3600,
+                destination: Some(wire_value),
+                reason: None,
+            };
 
-        match msg.to_event() {
+            match msg.to_event() {
+                Some(LocatorEvent::Registered(loc)) => {
+                    let dest = loc
+                        .destination
+                        .as_ref()
+                        .expect("destination must survive the relay");
+                    assert_eq!(dest.addr.to_string(), "192.0.2.1:51200", "{transport}");
+                    // The bridge's source-IP extraction sees the client IP
+                    // regardless of the transport prefix.
+                    assert_eq!(
+                        crate::proxy::routing::source_addr_ip(dest).map(|ip| ip.to_string()),
+                        Some("192.0.2.1".to_string()),
+                        "{transport}: source_addr_ip must see through the prefix"
+                    );
+                }
+                other => panic!("{transport}: expected Registered, got {other:?}"),
+            }
+        }
+
+        // Full roundtrip from a real SipAddr (Display serialization).
+        let mut loc = Location::default();
+        loc.aor = "sip:1002@cluster.local".parse().unwrap();
+        loc.destination = Some(rsipstack::transport::SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: rsipstack::sip::HostWithPort::try_from("192.0.2.9:51200").unwrap(),
+        });
+        let wire =
+            ClusterLocatorMessage::from(&LocatorEvent::Registered(loc));
+        assert_eq!(
+            wire.destination.as_deref(),
+            Some("WSS 192.0.2.9:51200"),
+            "wire format is SipAddr Display (transport-prefixed)"
+        );
+        match wire.to_event() {
             Some(LocatorEvent::Registered(loc)) => {
-                let dest = loc
-                    .destination
-                    .as_ref()
-                    .expect("destination must survive the relay");
-                assert_eq!(dest.addr.to_string(), "192.168.3.21:51200");
-                // The bridge's source-IP extraction sees the client IP.
+                let dest = loc.destination.as_ref().expect("roundtrip destination");
+                assert_eq!(dest.r#type, Some(rsipstack::sip::Transport::Wss));
                 assert_eq!(
                     crate::proxy::routing::source_addr_ip(dest).map(|ip| ip.to_string()),
-                    Some("192.168.3.21".to_string())
+                    Some("192.0.2.9".to_string())
                 );
             }
             other => panic!("expected Registered, got {other:?}"),
