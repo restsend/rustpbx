@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QuerySelect, Set};
 #[cfg(test)]
 use sea_orm::{PaginatorTrait, QueryOrder};
 use tokio::task::JoinHandle;
@@ -138,19 +138,36 @@ impl SessionRegistry for DbSessionRegistry {
             started_at: Set(info.started_at),
             last_updated_at: Set(chrono::Utc::now()),
         };
+        let mut conflict = OnConflict::column(Column::CallId);
+        for (column, value) in [
+            (Column::NodeId, Expr::value(info.node_id.clone())),
+            (Column::Caller, Expr::value(info.caller.clone())),
+            (Column::Callee, Expr::value(info.callee.clone())),
+            (Column::Direction, Expr::value(info.direction.clone())),
+            (
+                Column::TargetSessionId,
+                Expr::value(info.target_session_id.clone()),
+            ),
+            (Column::LastUpdatedAt, Expr::value(chrono::Utc::now())),
+        ] {
+            // MySQL ignores an upsert WHERE clause; CASE keeps the priority atomic
+            // on every backend when a home-proxy dialog reuses a session's id.
+            let value = if info.is_alias() {
+                Expr::case(
+                    Expr::col(Column::Direction)
+                        .eq(SessionInfo::ALIAS_DIRECTION)
+                        .or(Expr::col(Column::Direction).like("alias:%")),
+                    value,
+                )
+                .finally(Expr::col(column))
+                .into()
+            } else {
+                value
+            };
+            conflict.value(column, value);
+        }
         Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(Column::CallId)
-                    .update_columns([
-                        Column::NodeId,
-                        Column::Caller,
-                        Column::Callee,
-                        Column::Direction,
-                        Column::TargetSessionId,
-                        Column::LastUpdatedAt,
-                    ])
-                    .to_owned(),
-            )
+            .on_conflict(conflict.to_owned())
             // Registering an unchanged session is successful even when MySQL changes no rows.
             .exec_without_returning(&self.db)
             .await
@@ -158,9 +175,16 @@ impl SessionRegistry for DbSessionRegistry {
         Ok(())
     }
 
-    async fn unregister(&self, call_id: &str) -> Result<(), RegistryError> {
-        Entity::delete_by_id(call_id)
-            .exec(&self.db)
+    async fn unregister(&self, info: &SessionInfo) -> Result<(), RegistryError> {
+        let query = Entity::delete_many()
+            .filter(Column::CallId.eq(&info.call_id))
+            .filter(Column::NodeId.eq(&info.node_id))
+            .filter(Column::Direction.eq(&info.direction));
+        let query = match &info.target_session_id {
+            Some(target) => query.filter(Column::TargetSessionId.eq(target)),
+            None => query.filter(Column::TargetSessionId.is_null()),
+        };
+        query.exec(&self.db)
             .await
             .map_err(|e| RegistryError::Unavailable(e.to_string()))?;
         Ok(())
@@ -502,7 +526,7 @@ mod tests {
     async fn unregister_removes() {
         let r = reg().await;
         r.register(&info("a", "node-1")).await.unwrap();
-        r.unregister("a").await.unwrap();
+        r.unregister(&info("a", "node-1")).await.unwrap();
         assert_eq!(r.active_count().await, 0);
         assert!(r.lookup_owner("a").await.is_none());
     }

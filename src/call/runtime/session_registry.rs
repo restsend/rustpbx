@@ -160,11 +160,12 @@ pub trait SessionRegistry: Send + Sync + 'static {
     /// Upsert a session record.  Called once at session birth and idempotent —
     /// a re-register overwrites stale node ownership (e.g. after a crash the
     /// resurrected session claims the same call id on the new owner node).
+    /// A dialog alias must never replace an existing canonical session.
     async fn register(&self, info: &SessionInfo) -> Result<(), RegistryError>;
 
-    /// Remove a session record.  Called on normal session end (via
-    /// [`SessionGuard`] RAII drop).
-    async fn unregister(&self, call_id: &str) -> Result<(), RegistryError>;
+    /// Remove only the matching registration, never a different owner or alias target.
+    /// Called on normal session end via [`SessionGuard`] RAII drop.
+    async fn unregister(&self, info: &SessionInfo) -> Result<(), RegistryError>;
 
     /// Batch-refresh `last_updated_at` for `live_call_ids` — the sessions this
     /// node still holds live.  Rows for call ids **not** in the list are left
@@ -212,7 +213,7 @@ impl SessionRegistry for NoopSessionRegistry {
     async fn register(&self, _info: &SessionInfo) -> Result<(), RegistryError> {
         Ok(())
     }
-    async fn unregister(&self, _call_id: &str) -> Result<(), RegistryError> {
+    async fn unregister(&self, _info: &SessionInfo) -> Result<(), RegistryError> {
         Ok(())
     }
     async fn heartbeat_node(
@@ -260,7 +261,7 @@ impl NoopSessionRegistry {
 /// There is intentionally NO per-session heartbeat task here — liveness of all
 /// sessions owned by a node is maintained by the single [`NodeHeartbeat`].
 pub struct SessionGuard {
-    call_id: String,
+    info: SessionInfo,
     registry: SessionRegistryRef,
     released: bool,
     retry_delays: Vec<Duration>,
@@ -274,7 +275,7 @@ impl SessionGuard {
     ) -> Result<Self, RegistryError> {
         registry.register(&info).await?;
         Ok(Self {
-            call_id: info.call_id,
+            info,
             registry,
             released: false,
             retry_delays: UNREGISTER_RETRY_DELAYS.to_vec(),
@@ -283,7 +284,7 @@ impl SessionGuard {
 
     /// Explicitly unregister (async) and prevent the Drop from double-firing.
     pub async fn release(mut self) -> Result<(), RegistryError> {
-        let result = self.registry.unregister(&self.call_id).await;
+        let result = self.registry.unregister(&self.info).await;
         self.released = true;
         result
     }
@@ -298,26 +299,26 @@ impl SessionGuard {
 /// Fire-and-forget `unregister` with bounded backoff retries.
 fn spawn_unregister_with_retry(
     registry: SessionRegistryRef,
-    call_id: String,
+    info: SessionInfo,
     delays: Vec<Duration>,
 ) {
     utils::spawn(async move {
         let mut attempt = 1usize;
         loop {
-            match registry.unregister(&call_id).await {
+            match registry.unregister(&info).await {
                 Ok(()) => return,
                 Err(e) if attempt > delays.len() => {
                     crate::db_report::report_db_write_failure(
                         "cluster_sessions",
                         "delete",
-                        Some(call_id.as_str()),
+                        Some(info.call_id.as_str()),
                         &e,
                     );
                     return;
                 }
                 Err(_) => {
                     let delay = delays[attempt - 1];
-                    tracing::debug!(call_id = %call_id, attempt, ?delay,
+                    tracing::debug!(call_id = %info.call_id, attempt, ?delay,
                         "session registry unregister failed (RAII drop); retrying");
                     tokio::time::sleep(delay).await;
                     attempt += 1;
@@ -334,7 +335,7 @@ impl Drop for SessionGuard {
         }
         spawn_unregister_with_retry(
             self.registry.clone(),
-            self.call_id.clone(),
+            self.info.clone(),
             self.retry_delays.clone(),
         );
     }
@@ -661,12 +662,12 @@ mod tests {
             async fn register(&self, info: &SessionInfo) -> Result<(), RegistryError> {
                 self.inner.register(info).await
             }
-            async fn unregister(&self, call_id: &str) -> Result<(), RegistryError> {
+            async fn unregister(&self, info: &SessionInfo) -> Result<(), RegistryError> {
                 if self.failures_left.load(Ordering::SeqCst) > 0 {
                     self.failures_left.fetch_sub(1, Ordering::SeqCst);
                     return Err(RegistryError::Unavailable("db blip".into()));
                 }
-                self.inner.unregister(call_id).await
+                self.inner.unregister(info).await
             }
             async fn heartbeat_node(
                 &self,

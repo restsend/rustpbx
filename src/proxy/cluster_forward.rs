@@ -388,7 +388,7 @@ mod tests {
         }
         async fn unregister(
             &self,
-            _call_id: &str,
+            _info: &crate::call::runtime::SessionInfo,
         ) -> Result<(), crate::call::runtime::RegistryError> {
             Ok(())
         }

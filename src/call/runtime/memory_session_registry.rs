@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use tokio::task::JoinHandle;
 
 use super::{RegistryError, SessionInfo, SessionRegistry, SessionRegistryRef};
@@ -119,18 +119,29 @@ impl MemorySessionRegistry {
 #[async_trait]
 impl SessionRegistry for MemorySessionRegistry {
     async fn register(&self, info: &SessionInfo) -> Result<(), RegistryError> {
-        self.sessions.insert(
-            info.call_id.clone(),
-            RegistryEntry {
-                info: info.clone(),
-                last_update: Instant::now(),
-            },
-        );
+        let registration = RegistryEntry {
+            info: info.clone(),
+            last_update: Instant::now(),
+        };
+        match self.sessions.entry(info.call_id.clone()) {
+            Entry::Occupied(mut entry) => {
+                if !info.is_alias() || entry.get().info.is_alias() {
+                    entry.insert(registration);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(registration);
+            }
+        }
         Ok(())
     }
 
-    async fn unregister(&self, call_id: &str) -> Result<(), RegistryError> {
-        self.sessions.remove(call_id);
+    async fn unregister(&self, info: &SessionInfo) -> Result<(), RegistryError> {
+        self.sessions.remove_if(&info.call_id, |_, entry| {
+            entry.info.node_id == info.node_id
+                && entry.info.direction == info.direction
+                && entry.info.target_session_id == info.target_session_id
+        });
         Ok(())
     }
 
@@ -238,7 +249,7 @@ mod tests {
     async fn unregister_removes() {
         let r = reg(Duration::from_secs(3600));
         seed(&r, "a", "node-1").await;
-        r.unregister("a").await.unwrap();
+        r.unregister(&SessionInfo::new("a", "node-1")).await.unwrap();
         assert_eq!(r.active_count().await, 0);
     }
 
