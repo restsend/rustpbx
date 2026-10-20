@@ -1983,7 +1983,7 @@ pub(crate) mod tests {
     /// endpoint, PATCH re-points it, and an empty string clears it.
     #[tokio::test]
     async fn equivalent_to_marker_upload_served_and_patchable() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         // Upload a "0.2.0" package that is really the 0.1.13 build
         // republished (bad build pulled, old one re-tagged higher).
@@ -2008,7 +2008,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(
             docs.iter()
                 .find(|d| d.version == "0.2.0")
@@ -2054,7 +2054,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(
             docs.iter().find(|d| d.version == "0.2.0").unwrap().equivalent_to,
             None,
@@ -2609,7 +2609,7 @@ pub(crate) mod tests {
     /// empty window clears the stored value.
     #[tokio::test]
     async fn policy_fields_flow_through_upload_and_put_validates_window() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         let boundary = "relpolicy1";
         let body = multipart_body(
@@ -2662,7 +2662,7 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(
             docs.iter().find(|d| d.version == "0.3.0").unwrap().window,
             Some("22:00-07:00".into())
@@ -2677,7 +2677,7 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert!(
             docs.iter()
                 .find(|d| d.version == "0.3.0")
