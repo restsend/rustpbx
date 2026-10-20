@@ -397,7 +397,19 @@
             editOpen: false,
             editSaving: false,
             editVersion: '',
-            editDraft: {},
+            // Initialize every field — especially the environments ARRAY.
+            // Alpine coerces a nested-undefined model to '' on first bind,
+            // which clobbers the checkbox `value` attributes and makes the
+            // whole group toggle together.
+            editDraft: {
+                release_notes: '',
+                published: false,
+                force: false,
+                window: '',
+                min_supported: '',
+                deadline: '',
+                environments: [],
+            },
             formatBytes(bytes) {
                 if (!bytes || bytes <= 0) return '-';
                 const units = ['B', 'KB', 'MB', 'GB'];
