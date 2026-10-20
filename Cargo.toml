@@ -115,8 +115,8 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.7.4"
-audio-codec = "0.4.7"
+rsipstack = "0.7.7"
+audio-codec = "0.4.13"
 rustrtc = "0.4.3"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",

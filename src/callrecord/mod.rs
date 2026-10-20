@@ -1276,20 +1276,18 @@ fn call_record_columns() -> Vec<Alias> {
     ]
 }
 
+// Bind typed values: Postgres rejects text for timestamptz and json columns,
+// while SQLite stores these exactly as the old RFC 3339 / JSON strings.
 fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::SimpleExpr> {
     use sea_orm::sea_query::SimpleExpr;
-    fn opt_str(v: &Option<Value>) -> Option<String> {
-        v.as_ref().map(|v| v.to_string())
-    }
-    let ended_at: Option<String> = row.ended_at.map(|dt| dt.to_rfc3339());
     vec![
         row.call_id.clone().into(),
         row.session_id.clone().into(),
         None::<String>.into(),
         row.direction.clone().into(),
         row.status.clone().into(),
-        row.started_at.to_rfc3339().into(),
-        ended_at.into(),
+        row.started_at.into(),
+        row.ended_at.into(),
         row.duration_secs.into(),
         row.from_number.clone().into(),
         row.to_number.clone().into(),
@@ -1311,12 +1309,12 @@ fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::Simp
         SimpleExpr::from(row.has_transcript),
         row.transcript_status.clone().into(),
         row.transcript_language.clone().into(),
-        opt_str(&row.tags).into(),
-        opt_str(&row.leg_timeline).into(),
-        opt_str(&row.metadata).into(),
-        row.created_at.to_rfc3339().into(),
-        row.updated_at.to_rfc3339().into(),
-        None::<String>.into(),
+        row.tags.clone().into(),
+        row.leg_timeline.clone().into(),
+        row.metadata.clone().into(),
+        row.created_at.into(),
+        row.updated_at.into(),
+        None::<DateTimeUtc>.into(),
         row.hangup_reason.clone().into(),
         SimpleExpr::from(row.sip_status_code),
         SimpleExpr::from(row.media_loss_pct),
@@ -1349,8 +1347,8 @@ pub(crate) async fn create_call_record_table(
         .col(string_len_null(Alias::new("display_id"), 255))
         .col(string_len(Alias::new("direction"), 32).not_null())
         .col(string_len(Alias::new("status"), 32).not_null())
-        .col(timestamp(Alias::new("started_at")).not_null())
-        .col(timestamp_null(Alias::new("ended_at")))
+        .col(timestamp_with_time_zone(Alias::new("started_at")).not_null())
+        .col(timestamp_with_time_zone_null(Alias::new("ended_at")))
         .col(integer(Alias::new("duration_secs")).not_null())
         .col(string_len_null(Alias::new("from_number"), 128))
         .col(string_len_null(Alias::new("to_number"), 128))
@@ -1375,9 +1373,9 @@ pub(crate) async fn create_call_record_table(
         .col(json_null(Alias::new("tags")))
         .col(json_null(Alias::new("leg_timeline")))
         .col(json_null(Alias::new("metadata")))
-        .col(timestamp(Alias::new("created_at")).not_null())
-        .col(timestamp(Alias::new("updated_at")).not_null())
-        .col(timestamp_null(Alias::new("archived_at")))
+        .col(timestamp_with_time_zone(Alias::new("created_at")).not_null())
+        .col(timestamp_with_time_zone(Alias::new("updated_at")).not_null())
+        .col(timestamp_with_time_zone_null(Alias::new("archived_at")))
         .col(string_len_null(Alias::new("hangup_reason"), 64))
         .col(integer_null(Alias::new("sip_status_code")))
         .col(double_null(Alias::new("media_loss_pct")))
@@ -1387,6 +1385,11 @@ pub(crate) async fn create_call_record_table(
 
     db.execute_raw(db.get_database_backend().build(&create))
         .await?;
+
+    // Custom CDR databases never run the core migrator, so repair the
+    // Postgres column types here as well.
+    use crate::models::fix_timestamptz_columns as fix;
+    fix::fix_timestamptz_columns(db, table_name, fix::CALL_RECORD_COLUMNS).await?;
 
     // Add unique index on call_id + basic query indexes (must run after CREATE TABLE)
     let indexes = [

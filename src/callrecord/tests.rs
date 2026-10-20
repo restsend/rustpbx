@@ -153,6 +153,94 @@ async fn test_create_call_record_table() {
     assert!(rows.is_ok(), "table should exist");
 }
 
+#[tokio::test]
+#[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+async fn test_custom_cdr_postgres_timestamptz_upgrade() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
+    let mut options = ConnectOptions::new(std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap());
+    options.max_connections(1);
+    let db = Database::connect(options).await.unwrap();
+    db.execute_unprepared("CREATE SCHEMA custom_cdr_tz_test").await.unwrap();
+    db.execute_unprepared("SET search_path TO custom_cdr_tz_test").await.unwrap();
+    db.execute_unprepared("CREATE TABLE test_cdrs (id BIGSERIAL PRIMARY KEY, call_id TEXT, \
+         started_at TIMESTAMP NOT NULL, ended_at TIMESTAMP, created_at TIMESTAMPTZ NOT NULL)")
+        .await
+        .unwrap();
+    // Creating over an old table fixes the naive columns and keeps the rest.
+    create_call_record_table(&db, "test_cdrs").await.unwrap();
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT data_type::text AS t FROM information_schema.columns \
+             WHERE table_schema = 'custom_cdr_tz_test' AND table_name = 'test_cdrs' \
+             AND column_name IN ('started_at', 'ended_at', 'created_at')",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert_eq!(row.try_get::<String>("", "t").unwrap(), "timestamp with time zone");
+    }
+    db.execute_unprepared("DROP SCHEMA custom_cdr_tz_test CASCADE").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_custom_saver_sqlite_keeps_text_format() {
+    use sea_orm::{ConnectionTrait, Statement};
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "my_cdrs").await.unwrap();
+    let saver = crate::callrecord::CustomDatabaseSaver {
+        db: db.clone(),
+        table_name: "my_cdrs".to_string(),
+    };
+    let record = make_record();
+    saver.save(std::slice::from_ref(&record)).await.unwrap();
+    // Typed binds must store the same RFC 3339 text the old string binds did.
+    let row = db
+        .query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT CAST(started_at AS TEXT) AS s, CAST(ended_at AS TEXT) AS e FROM my_cdrs",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "s").unwrap(), record.start_time.to_rfc3339());
+    assert_eq!(row.try_get::<String>("", "e").unwrap(), record.end_time.to_rfc3339());
+}
+
+#[tokio::test]
+#[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+async fn test_custom_saver_writes_on_postgres() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
+    let mut options = ConnectOptions::new(std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap());
+    options.max_connections(1);
+    let db = Database::connect(options).await.unwrap();
+    db.execute_unprepared("CREATE SCHEMA custom_saver_pg_test").await.unwrap();
+    db.execute_unprepared("SET search_path TO custom_saver_pg_test").await.unwrap();
+    create_call_record_table(&db, "my_cdrs").await.unwrap();
+    let saver = crate::callrecord::CustomDatabaseSaver {
+        db: db.clone(),
+        table_name: "my_cdrs".to_string(),
+    };
+    let mut record = make_record();
+    record.start_time = "2026-10-19T05:55:49.123456Z".parse().unwrap();
+    record.end_time = record.start_time + chrono::Duration::seconds(30);
+    record.details.metadata = Some(HashMap::from([("k".to_string(), "v".into())]));
+    saver.save(std::slice::from_ref(&record)).await.unwrap();
+    let row = db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT started_at, ended_at, metadata::text AS metadata FROM my_cdrs",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<chrono::DateTime<Utc>>("", "started_at").unwrap(), record.start_time);
+    assert_eq!(row.try_get::<chrono::DateTime<Utc>>("", "ended_at").unwrap(), record.end_time);
+    assert!(row.try_get::<String>("", "metadata").unwrap().contains("\"k\""));
+    db.execute_unprepared("DROP SCHEMA custom_saver_pg_test CASCADE").await.unwrap();
+}
+
 // ── BuiltinDatabaseSaver ──────────────────────────────────────────────────────
 
 #[tokio::test]

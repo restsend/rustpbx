@@ -209,5 +209,11 @@ pub async fn sip_ws_handler(
         }
     }
     ws_token.cancel();
-    endpoint_ref.transport_layer.del_connection(&local_addr);
+    // Identity-based removal: only THIS connection is taken out of the
+    // transport cache. `del_connection(&addr)` would tear down every
+    // connection sharing the peer ip:port — several agents behind one office
+    // NAT legitimately do (see rsipstack 0.7.5 connection-conflict handling).
+    endpoint_ref
+        .transport_layer
+        .remove_connection(&sip_connection);
 }
