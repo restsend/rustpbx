@@ -542,6 +542,15 @@ pub struct QueueApp {
     /// agent the queue marked Busy/Ringing for this call that never actually
     /// connected (e.g. rejected with 486 while another agent answered).
     attempted_agents: Vec<String>,
+    /// Agent ids this call rang that never answered (ring timeout / late
+    /// no-answer signal). Wait-retention polls exclude them when picking the
+    /// next offer so a no-answer round-trip rotates to a FRESH agent; once
+    /// every resolved candidate is in the set a new rotation starts over the
+    /// original list. Never cleared on requeue (that is the point) — only
+    /// when a full rotation completes. Distinct from `attempted_agents`,
+    /// which is transient phantom-release bookkeeping and is drained by
+    /// `release_phantom_agents`.
+    no_answer_agents: Vec<String>,
     /// Whether the `max_wait_timeout` has been armed for this queue entry.
     /// Re-entering wait retention (e.g. after a failed dial round) must NOT
     /// re-arm it — `set_timeout` replaces timers, which would extend the
@@ -613,6 +622,7 @@ impl QueueApp {
             abandoned_recorded: false,
             fallback_executed: false,
             attempted_agents: Vec::new(),
+            no_answer_agents: Vec::new(),
             max_wait_armed: false,
             max_wait_grace_used: false,
             joined_emitted_externally: false,
@@ -916,6 +926,15 @@ impl QueueApp {
         }
     }
 
+    /// Remember an agent that rang for THIS call without being answered, so
+    /// wait-retention polls prefer a fresh candidate (no-answer rotation).
+    fn record_no_answer_agent(&mut self, agent_id: String) {
+        if agent_id.is_empty() || self.no_answer_agents.contains(&agent_id) {
+            return;
+        }
+        self.no_answer_agents.push(agent_id);
+    }
+
     /// Resolve the registry agent_id behind a dialed URI (falls back to the
     /// URI user part).
     async fn agent_id_for_uri(&self, uri: &str) -> String {
@@ -1177,6 +1196,33 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
+        // Fresh-candidate preference: after a no-answer round-trip the next
+        // offer must go to an agent this call has NOT already rung. Drop the
+        // no-answered agents from the resolved list; when EVERY resolved
+        // candidate was already tried (single-agent group, or the others were
+        // taken by concurrent calls), start a new rotation over the original
+        // list so the call keeps cycling until `max_wait_secs` instead of
+        // starving in wait retention.
+        if !self.no_answer_agents.is_empty() {
+            let fresh: Vec<String> = uris
+                .iter()
+                .filter(|uri| {
+                    let id = extract_sip_username(uri).unwrap_or_else(|| uri.to_string());
+                    !self.no_answer_agents.contains(&id)
+                })
+                .cloned()
+                .collect();
+            if fresh.is_empty() {
+                debug!(
+                    queue = %self.config.name,
+                    "Queue: all resolved candidates already no-answered this call — starting a new rotation"
+                );
+                self.no_answer_agents.clear();
+            } else {
+                uris = fresh;
+            }
+        }
+
         info!(
             skill_group = %sg,
             agents = uris.len(),
@@ -1429,6 +1475,11 @@ impl QueueApp {
     }
 
     /// Check if we should use parallel dialing.
+    /// NOTE: an explicit `Parallel` dial strategy is honored even for
+    /// skill-group queues — it is an operator opt-in to ring-all. The default
+    /// (sequential) mode offers ONE agent at a time; the no-answer rotation
+    /// (`no_answer_agents` filter + per-agent wait-retention re-entry) applies
+    /// to that default path.
     fn is_parallel(&self) -> bool {
         matches!(self.plan.dial_strategy, Some(DialStrategy::Parallel(_)))
     }
@@ -1671,6 +1722,31 @@ impl QueueApp {
         }
         self.current_agent_idx += 1;
         self.dial_attempts += 1;
+
+        // Skill-group queues: a ring NO-ANSWER round-trips the call through
+        // wait retention after EVERY failed agent instead of burning the rest
+        // of the resolved round. The next poll offers a fresh candidate (the
+        // just-failed agent is excluded via `no_answer_agents`), exactly one
+        // agent rings at a time, and the webhook observes
+        // `queue_joined{attempt:n}` per assignment. Explicit rejections
+        // (Busy/486) keep the fast same-round sequential re-dial contract
+        // (see test_queue_rejected_rwi_e2e), and non-skill-group queues keep
+        // the legacy dial-next behavior entirely.
+        if matches!(reason, AgentUnavailableReason::NoAnswer) && self.allows_wait_retention() {
+            if self.fallback_executed {
+                debug!(
+                    queue = %self.config.name,
+                    "Queue: fallback already executed — skipping wait-retention re-entry"
+                );
+                return Ok(AppAction::Continue);
+            }
+            info!("Queue: agent no-answer — returning to wait retention for the next offer");
+            self.release_phantom_agents(None).await;
+            self.dynamic_agents = None;
+            self.current_agent_idx = 0;
+            self.emit_queue_rejoined();
+            return self.enter_waiting_for_agent(ctrl).await;
+        }
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
@@ -3141,6 +3217,7 @@ impl CallApp for QueueApp {
                             .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
                             .await;
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
+                        self.record_no_answer_agent(agent_id.clone());
                     }
                     self.handle_agent_unavailable(
                         ctrl,
@@ -3240,6 +3317,7 @@ impl CallApp for QueueApp {
                     ctrl.remove_legs(&timed_out_legs, "ring_timeout");
                 }
 
+                let mut timed_out_agent_ids: Vec<String> = Vec::new();
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
                     for (uri, leg_id) in &timed_out_agents {
@@ -3253,6 +3331,7 @@ impl CallApp for QueueApp {
                         let _ = registry
                             .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
                             .await;
+                        timed_out_agent_ids.push(agent_id.clone());
 
                         ctrl.notify_event(
                             "queue.agent_no_answer",
@@ -3278,6 +3357,9 @@ impl CallApp for QueueApp {
                         self.notify_no_answer(&agent_id, self.dial_attempts, leg_id)
                             .await;
                     }
+                }
+                for agent_id in timed_out_agent_ids {
+                    self.record_no_answer_agent(agent_id);
                 }
 
                 self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer, None)
