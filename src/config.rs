@@ -115,6 +115,15 @@ fn default_callid_suffix() -> Option<String> {
     Some("miuda.ai".to_string())
 }
 
+fn default_session_id_length() -> usize {
+    // Historical default: UUID v4 simple form (32 hex chars).
+    crate::call::session_id::LENGTH_MAX
+}
+
+fn default_session_id_inherit_callid() -> bool {
+    true
+}
+
 fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
 }
@@ -1518,6 +1527,18 @@ pub struct ProxyConfig {
     pub useragent: Option<String>,
     #[serde(default = "default_callid_suffix")]
     pub callid_suffix: Option<String>,
+    /// Length (hex chars) of freshly generated global session ids.
+    /// 8..=32; the default 32 mirrors the legacy UUID v4 simple form.
+    #[serde(default = "default_session_id_length")]
+    pub session_id_length: usize,
+    /// Wire format of the outgoing SIP `Session-ID` header: `native` stamps
+    /// the internal id verbatim; `rfc7989` zero-pads it to 32 hex chars.
+    #[serde(default)]
+    pub session_id_header_mode: crate::call::session_id::SessionIdHeaderMode,
+    /// Reuse id-shaped incoming SIP Call-IDs as the session id. When false,
+    /// only `Session-ID` headers inherit and every originate gets a fresh id.
+    #[serde(default = "default_session_id_inherit_callid")]
+    pub session_id_inherit_callid: bool,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -2308,6 +2329,9 @@ impl Default for ProxyConfig {
             ua_black_list: Some(vec![]),
             ua_block_scanners: default_ua_block_scanners(),
             addr: "0.0.0.0".to_string(),
+            session_id_length: default_session_id_length(),
+            session_id_header_mode: Default::default(),
+            session_id_inherit_callid: default_session_id_inherit_callid(),
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),

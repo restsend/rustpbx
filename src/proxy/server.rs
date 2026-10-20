@@ -896,6 +896,29 @@ impl SipServerBuilder {
             ..Default::default()
         };
 
+        // Seed the global session-id generator from config. Invalid lengths
+        // are clamped into the legal band (defaults keep the legacy 32-hex
+        // behaviour when the keys are absent).
+        let session_id_length = crate::call::session_id::init_settings(
+            config.session_id_length,
+            config.session_id_header_mode,
+            config.session_id_inherit_callid,
+        );
+        if session_id_length != config.session_id_length {
+            warn!(
+                configured = config.session_id_length,
+                effective = session_id_length,
+                "proxy.session_id_length out of range, clamped"
+            );
+        } else if session_id_length != crate::call::session_id::LENGTH_MAX {
+            info!(
+                length = session_id_length,
+                mode = ?config.session_id_header_mode,
+                inherit_callid = config.session_id_inherit_callid,
+                "session id generator configured"
+            );
+        }
+
         if let Some(t1_timer) = config.t1_timer {
             endpoint_option.t1 = Duration::from_millis(t1_timer);
         }

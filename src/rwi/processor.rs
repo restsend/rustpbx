@@ -900,11 +900,12 @@ impl RwiCommandProcessor {
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
 
-        // Global session id (RFC 7989): originates are session roots. The
-        // wire call_id stays client-addressable, but the session id carried
-        // in the Session-ID header / UUI / CallMeta is normalized to the
-        // canonical 32 hex form so downstream nodes inherit one stable id.
-        let global_session_id = crate::call::session_id::normalize_or_generate(&req.call_id);
+        // Global session id: originates are session roots. The wire call_id
+        // stays client-addressable, but the session id carried in the
+        // Session-ID header / UUI / CallMeta is normalized to the canonical
+        // hex form (length per `proxy.session_id_length`) so downstream nodes
+        // inherit one stable id.
+        let global_session_id = crate::call::session_id::derive_from_call_id(&req.call_id);
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
@@ -946,6 +947,14 @@ impl RwiCommandProcessor {
         let originate_codecs =
             crate::media::MediaNegotiator::build_local_rtp_codec_offer(&configured_audio_codecs);
 
+        // RFC 7989: the originate INVITE carries the normalized global
+        // session id as its local-uuid; downstream PBXs/SBCs mirror it.
+        // Short native ids ride the raw-header channel (see build_wire_header).
+        let (origin_session_id, origin_session_id_header) =
+            crate::call::session_id::build_wire_header(Some(&global_session_id));
+        if let Some(header) = origin_session_id_header {
+            headers.push(header);
+        }
         let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
@@ -967,7 +976,7 @@ impl RwiCommandProcessor {
             call_id: Some(req.call_id.clone()),
             // RFC 7989: the originate INVITE carries the normalized global
             // session id as its local-uuid; downstream PBXs/SBCs mirror it.
-            session_id: Some(global_session_id.clone()),
+            session_id: origin_session_id,
             ..Default::default()
         };
 

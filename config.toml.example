@@ -180,6 +180,25 @@ ami_path = "/ami/v1"
 ice_servers_path = "/iceservers"
 media_proxy = "auto"
 
+# Global session id (RFC 7989 correlation id shared by every leg of a call,
+# also the CDR `call_id`/`session_id` key).
+# Length in hex chars of freshly generated ids. Range 8..=32; the default 32
+# mirrors the legacy UUID v4 simple form. Set 16 for short ids (64-bit random).
+# session_id_length = 32
+# Wire format of the outgoing SIP `Session-ID` header:
+#   "native"  = stamp the internal id verbatim (ids shorter than 32 hex are
+#               not strictly RFC 7989 shaped — strict peers discard the header
+#               and fall back to Call-ID correlation; same-version peers and
+#               cluster nodes inherit it normally)
+#   "rfc7989" = zero-pad the id to 32 hex chars so the header always satisfies
+#               the RFC's UUID shape
+# session_id_header_mode = "native"
+# Reuse id-shaped incoming SIP Call-IDs (32 hex or the configured length) as
+# the session id. false = only `Session-ID` headers inherit; every originate
+# gets a fresh id (removes forked-INVITE / spoofed-Call-ID collision risk at
+# the cost of correlation with legacy upstreams).
+# session_id_inherit_callid = true
+
 # Direct extension-to-extension (P2P) calls: when a callee has multiple
 # registered devices, ring ALL of them in parallel (first to answer wins).
 # Set to false to ring only the most recently registered device instead.

@@ -301,12 +301,13 @@ impl CallRouter for HttpCallRouter {
                     _ => DialStrategy::Sequential(locs),
                 };
 
-                // Global session id (RFC 7989): HTTP-routed calls always
-                // participate (UUID-shaped Call-ID > fresh UUID) — the HTTP
-                // router is an explicit routing deployment, never a plain
-                // P2P dial. Root inheritance rides the Session-ID header in
-                // the session constructor.
-                let session_id = crate::call::session_id::normalize_or_generate(&call_id);
+                // Global session id: HTTP-routed calls always participate
+                // (id-shaped Call-ID > fresh id, honouring
+                // `session_id_inherit_callid`) — the HTTP router is an
+                // explicit routing deployment, never a plain P2P dial. Root
+                // inheritance rides the Session-ID header in the session
+                // constructor.
+                let session_id = crate::call::session_id::derive_from_call_id(&call_id);
                 let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
                     .with_session_id_enabled(true);
 

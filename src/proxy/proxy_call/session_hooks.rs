@@ -106,9 +106,9 @@ pub struct CallSessionContext {
     pub transferred: bool,
     /// Dial intent the *caller's own device* declared on the initial INVITE
     /// (RFC 7433 `User-to-User` `leg=` parameter — `consult` / `transfer`,
-    /// see `call::uui`). In-memory stats marker only — persisted nowhere
-    /// (no `cc_calls.leg_role` column; agent metrics include all legs) and
-    /// never shaping the call lifecycle.
+    /// see `call::uui`). Persisted into `cc_calls.leg_role` by the CC hook
+    /// so agent today-metrics can keep these self-dialed sub-call legs out
+    /// of the counters; it never shapes the call lifecycle.
     pub leg_role: Option<String>,
     /// Call direction: `"inbound"` or `"outbound"`.
     pub direction: String,

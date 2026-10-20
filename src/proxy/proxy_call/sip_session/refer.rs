@@ -546,6 +546,15 @@ impl SipSession {
             "Max-Forwards".into(),
             "70".into(),
         )];
+        // Wire form of the root session id for the INVITE below: native short
+        // ids ride a raw Session-ID header (rsipstack's InviteOption.session_id
+        // validation only accepts 32 hex chars).
+        let transfer_session_id = crate::call::session_id::build_wire_header(
+            crate::call::session_id::normalize(&root_session_id).as_deref(),
+        );
+        if let Some(header) = transfer_session_id.1.clone() {
+            headers.push(header);
+        }
         // Carry the root session id to the transfer target via UUI so an
         // external network leg can re-attach on the way back in, and declare
         // the leg intent (`leg=transfer`): a cluster peer that terminates the
@@ -598,10 +607,10 @@ impl SipSession {
             credential: None,
             headers: Some(headers),
             call_id: Some(new_call_id.clone()),
-            // RFC 7989: carry the root session id when it is UUID-shaped so
+            // RFC 7989: carry the root session id when it is id-shaped so
             // the transfer target correlates the logical call. Legacy root
             // ids (raw Call-IDs) keep relying on the UUI header above.
-            session_id: crate::call::session_id::normalize(&root_session_id),
+            session_id: transfer_session_id.0,
             ..Default::default()
         };
 

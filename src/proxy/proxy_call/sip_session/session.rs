@@ -1501,7 +1501,7 @@ impl SipSession {
                         .as_ref()
                         .filter(|uui| {
                             uui.leg.is_none()
-                                || crate::call::session_id::is_uuid_like(&uui.session_id)
+                                || crate::call::session_id::is_session_id_like(&uui.session_id)
                         })
                         .map(|uui| uui.session_id.clone())
                 });
@@ -4380,6 +4380,15 @@ impl SipSession {
             .to_string()
         });
         self.meta.callee_call_ids.insert(callee_call_id.clone());
+        // Resolve the wire form of the session id up front: a native short id
+        // is appended to `headers` as a raw Session-ID header (rsipstack's
+        // InviteOption.session_id validation only accepts 32 hex chars).
+        let dial_session_id = crate::call::session_id::build_wire_header(
+            self.session_id_for_outgoing_leg().as_deref(),
+        );
+        if let Some(header) = dial_session_id.1.clone() {
+            headers.push(header);
+        }
 
         // CTI uses the agent leg's SIP Call-ID, including while it is ringing.
         // Register it before either sequential or parallel dialing sends INVITE.
@@ -4406,7 +4415,9 @@ impl SipSession {
             // RFC 7989: carry the global session id as the local-uuid so the
             // downstream endpoint/cluster peer can correlate the logical call.
             // P2P flows (session_id_enabled == false) stay header-free.
-            session_id: self.session_id_for_outgoing_leg(),
+            // Short native ids ride the raw-header channel instead (see
+            // `build_wire_header`).
+            session_id: dial_session_id.0,
             contact: contact_uri,
             ..Default::default()
         };
@@ -15768,6 +15779,7 @@ impl SipSession {
         purpose: Option<crate::call::domain::LegPurpose>,
         recovery_deadline: Option<tokio::time::Instant>,
     ) -> Result<()> {
+
         let callee_is_webrtc = Self::callee_supports_webrtc(&location);
         let transport_mode = self.callee_transport_mode(callee_is_webrtc);
         // Dialing owns a transport; bridge membership is selected only when
@@ -15849,6 +15861,15 @@ impl SipSession {
                 | Some(crate::call::domain::LegPurpose::Consult)
         );
         let mut headers = location.headers.clone().unwrap_or_default();
+        // Wire form of the session id for the INVITE below: native short ids
+        // are appended here as a raw Session-ID header (rsipstack's
+        // InviteOption.session_id validation only accepts 32 hex chars).
+        let leg_session_id = crate::call::session_id::build_wire_header(
+            self.session_id_for_outgoing_leg().as_deref(),
+        );
+        if let Some(header) = leg_session_id.1.clone() {
+            headers.push(header);
+        }
         let bleg_call_id = if is_agent_facing {
             let base = self
                 .session_id_for_outgoing_leg()
@@ -15894,7 +15915,7 @@ impl SipSession {
             headers: Some(headers),
             call_id: Some(bleg_call_id.clone()),
             // RFC 7989: queue/consult agent legs inherit the global session id.
-            session_id: self.session_id_for_outgoing_leg(),
+            session_id: leg_session_id.0,
             ..Default::default()
         };
         if crate::call::sip::ring_timeout_offer(

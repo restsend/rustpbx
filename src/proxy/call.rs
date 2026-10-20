@@ -1078,19 +1078,19 @@ impl CallModule {
             .map(|r| r.new_recording_config())
             .unwrap_or_default();
 
-        // Global session id (RFC 7989): use the Call-ID when UUID-shaped,
-        // else a fresh UUID. Plain P2P extension dialling keeps the raw
-        // Call-ID — no Session-ID is generated or injected for those calls.
-        // Cross-node/cross-entity root inheritance happens later in the
-        // session constructor via the Session-ID header (UUI fallback), so
-        // this leg id stays unique per node (cluster session registry keys
-        // on it).
+        // Global session id: use the Call-ID when id-shaped (unless
+        // `session_id_inherit_callid` is disabled), else a fresh id. Plain
+        // P2P extension dialling keeps the raw Call-ID — no Session-ID is
+        // generated or injected for those calls. Cross-node/cross-entity
+        // root inheritance happens later in the session constructor via the
+        // Session-ID header (UUI fallback), so this leg id stays unique per
+        // node (cluster session registry keys on it).
         let session_id_enabled = !(direction == DialDirection::Internal
             && pending_app.is_none()
             && pending_queue.is_none()
             && routed_forward.is_none());
         let session_id = if session_id_enabled {
-            crate::call::session_id::normalize_or_generate(&dialog_id)
+            crate::call::session_id::derive_from_call_id(&dialog_id)
         } else {
             session_id
         };
