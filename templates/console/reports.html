@@ -585,7 +585,9 @@
             </div>
         </div>
 
-<script src="/static/cc/vendor/chart.umd.min.js" onerror="this.remove()"></script>
+<!-- Chart.js 与 dashboard 同一套策略：config.toml [console] chart_js 可覆盖，默认 CDN -->
+<script defer
+    src="{{chart_js|default('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js')|safe}}"></script>
 <script>
     function reportsPage() {
         return {
