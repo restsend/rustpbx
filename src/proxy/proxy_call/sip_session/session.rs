@@ -575,7 +575,16 @@ impl SipSession {
         self.legs
             .get(&LegId::from(leg_id))
             .filter(|leg| !leg.remote_registered)
-            .map(|leg| leg.leg_role().to_string())
+            .map(|leg| {
+                // A trusted peer declares the home node's endpoint role. A
+                // replacement dial parks that identity until its outcome is known.
+                if leg_id == "callee" && !self.meta.transfer_in_progress {
+                    if let Some(role) = self.meta.child_leg_role.as_ref() {
+                        return role.clone();
+                    }
+                }
+                leg.leg_role().to_string()
+            })
     }
 
     /// Child-leg session role attribution, scoped to the legs it may claim.

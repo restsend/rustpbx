@@ -233,7 +233,10 @@ pub async fn check_update_handler(
         crate::console::handlers::client_report::record_update_check(&state, &params, &headers)
             .await;
     }
-    let docs = load_docs(&config_store(&state)).await;
+    let docs = match load_docs(&config_store(&state)).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let Some(doc) = pick_latest_published_for_env(&docs, requested_env) else {
         return json_error(StatusCode::NOT_FOUND, "no release available");
     };
@@ -248,7 +251,10 @@ pub async fn check_update_handler(
 
 /// GET {api_prefix}/release/list — published releases, newest version first.
 pub async fn list_releases_handler(State(state): State<Arc<ConsoleState>>) -> Response {
-    let mut docs: Vec<ReleaseDoc> = load_docs(&config_store(&state)).await;
+    let mut docs = match load_docs(&config_store(&state)).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     docs.retain(|d| d.published);
     sort_by_version_desc(&mut docs);
     Json(json!({ "releases": docs })).into_response()
@@ -260,7 +266,10 @@ pub async fn download_handler(
     State(state): State<Arc<ConsoleState>>,
     AxumPath(version): AxumPath<String>,
 ) -> Response {
-    let docs = load_docs(&config_store(&state)).await;
+    let docs = match load_docs(&config_store(&state)).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let Some(doc) = docs
         .iter()
         .find(|d| d.published && d.version == version)
@@ -283,9 +292,12 @@ pub async fn download_handler(
 /// optional `release_notes` / `published` / policy fields).
 pub async fn upload_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     mut multipart: Multipart,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let mut version: Option<String> = None;
     let mut file_name: Option<String> = None;
     let mut data: Option<bytes::Bytes> = None;
@@ -419,13 +431,19 @@ pub async fn upload_handler(
 /// force / window / limits…).
 pub async fn update_release_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(version): AxumPath<String>,
     Json(body): Json<UpdateReleaseBody>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let _guard = RELEASE_FILE_LOCK.lock().await;
     let store = config_store(&state);
-    let mut docs = load_docs(&store).await;
+    let mut docs = match load_docs(&store).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let Some(doc) = docs.iter_mut().find(|d| d.version == version) else {
         return json_error(StatusCode::NOT_FOUND, "release not found");
     };
@@ -488,12 +506,18 @@ pub async fn update_release_handler(
 /// manifest entry.
 pub async fn delete_release_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(version): AxumPath<String>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let _guard = RELEASE_FILE_LOCK.lock().await;
     let store = config_store(&state);
-    let mut docs = load_docs(&store).await;
+    let mut docs = match load_docs(&store).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let Some(pos) = docs.iter().position(|d| d.version == version) else {
         return json_error(StatusCode::NOT_FOUND, "release not found");
     };
@@ -520,7 +544,13 @@ pub async fn releases_page(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    let mut docs = load_docs(&config_store(&state)).await;
+    if let Err(resp) = state.require_permission(&user, "system", "read").await {
+        return resp;
+    }
+    let mut docs = match load_docs(&config_store(&state)).await {
+        Ok(docs) => docs,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     sort_by_version_desc(&mut docs);
     let current_user = state.build_current_user_ctx(&user).await;
     // Tera lacks a `starting_with` test — precompute the storage badge.
@@ -890,6 +920,11 @@ pub async fn create_release(
     }
     let key = format!("{}/{}", version, safe_name);
 
+    // Artifact writes and deletion must share the manifest's serialization boundary.
+    let _guard = RELEASE_FILE_LOCK.lock().await;
+    let store = config_store(state);
+    let mut docs = load_docs(&store).await?;
+
     let storage_cfg = match resolve_upload_storage(state, params.storage).await {
         Ok(cfg) => cfg,
         Err(e) => return Err(e),
@@ -909,9 +944,6 @@ pub async fn create_release(
         .map(|b| format!("{b:02x}"))
         .collect();
 
-    let _guard = RELEASE_FILE_LOCK.lock().await;
-    let store = config_store(state);
-    let mut docs = load_docs(&store).await;
     // Re-upload of the same version: drop the previous artifact if it now
     // points somewhere else, then replace the entry. The old artifact may
     // live in the other backend (local ↔ S3), so resolve its storage from
@@ -981,15 +1013,13 @@ fn release_config(state: &ConsoleState) -> ReleaseConfig {
     state.config().release.clone().unwrap_or_default()
 }
 
-async fn load_docs(store: &GeneratedConfigStore) -> Vec<ReleaseDoc> {
+async fn load_docs(store: &GeneratedConfigStore) -> Result<Vec<ReleaseDoc>, String> {
     match store.read(RELEASE_CATEGORY, RELEASE_ENTRY).await {
         Ok(Some(content)) => toml::from_str::<ReleaseFile>(&content)
             .map(|f| f.releases)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to parse release.toml, treating as empty");
-                Vec::new()
-            }),
-        _ => Vec::new(),
+            .map_err(|e| format!("failed to parse release.toml: {e}")),
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => Err(format!("failed to read release.toml: {e}")),
     }
 }
 
@@ -1012,14 +1042,8 @@ fn artifact_object_key(storage: &Storage, storage_path: &str) -> Option<String> 
     if raw.is_empty() {
         return None;
     }
-    if raw.starts_with("http://") || raw.starts_with("https://") {
+    if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("s3://") {
         return storage.object_key_from_url(raw);
-    }
-    if let Some(rest) = raw.strip_prefix("s3://") {
-        // `s3://{bucket}/{key}` — drop the bucket segment.
-        let key = rest.split_once('/').map(|(_, k)| k).unwrap_or("");
-        let key = key.trim_start_matches('/');
-        return (!key.is_empty()).then(|| key.to_string());
     }
     let key = raw.trim_start_matches('/');
     (!key.is_empty()).then(|| key.to_string())
@@ -1184,12 +1208,20 @@ async fn presign_artifact(
     if let Ok(ArtifactStorage::S3 {
         bucket,
         endpoint: Some(endpoint),
+        prefix,
         ..
     }) = storage_of_kind(state, StorageKind::S3).await
     {
         let bucket = bucket.trim_matches('/');
         let base = endpoint.trim_end_matches('/');
         if !bucket.is_empty() && !base.is_empty() {
+            let prefix = prefix.unwrap_or_default();
+            let prefix = prefix.trim_end_matches('/');
+            let key = if prefix.is_empty() {
+                key
+            } else {
+                format!("{prefix}/{key}")
+            };
             return Ok(Some(format!("{base}/{bucket}/{key}")));
         }
     }
@@ -1365,7 +1397,7 @@ pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::{ApiTokenConfig, Config, ConsoleConfig};
     use tower::ServiceExt;
@@ -1607,6 +1639,7 @@ mod tests {
             artifact_object_key(&storage, &path).as_deref(),
             Some("0.1.13/app.zip")
         );
+        assert!(artifact_object_key(&storage, "s3://other/0.1.13/app.zip").is_none());
 
         let local_cfg = ArtifactStorage::Local {
             path: "storage/releases".into(),
@@ -1624,7 +1657,14 @@ mod tests {
 
     // ── handler / client-contract tests ─────────────────────────────────
 
-    async fn setup_release_stack() -> (Arc<ConsoleState>, tempfile::TempDir) {
+    pub(crate) async fn setup_release_stack(
+    ) -> (Arc<ConsoleState>, tempfile::TempDir, crate::app::AppState) {
+        setup_release_stack_with_storage(None).await
+    }
+
+    async fn setup_release_stack_with_storage(
+        storage: Option<ArtifactStorage>,
+    ) -> (Arc<ConsoleState>, tempfile::TempDir, crate::app::AppState) {
         let tmp = tempfile::tempdir().unwrap();
         let mut console_cfg = ConsoleConfig::default();
         console_cfg.api_tokens = vec![ApiTokenConfig {
@@ -1641,9 +1681,9 @@ mod tests {
             },
             console: Some(console_cfg),
             release: Some(ReleaseConfig {
-                storage: Some(ArtifactStorage::Local {
+                storage: Some(storage.unwrap_or_else(|| ArtifactStorage::Local {
                     path: tmp.path().to_string_lossy().to_string(),
-                }),
+                })),
                 signed_url_expiry_secs: None,
                 telemetry_dir: None,
             }),
@@ -1657,7 +1697,7 @@ mod tests {
             .unwrap();
         let state = crate::console::handlers::test_helpers::setup_state().await;
         state.set_app_state(Some(Arc::downgrade(&app)));
-        (state, tmp)
+        (state, tmp, app)
     }
 
     fn doc(version: &str, published: bool) -> ReleaseDoc {
@@ -1694,7 +1734,7 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn multipart_body(
+    pub(crate) fn multipart_body(
         boundary: &str,
         fields: &[(&str, &str)],
         file: Option<(&str, &str, &[u8])>,
@@ -1725,7 +1765,7 @@ mod tests {
     /// for the highest *published* version only.
     #[tokio::test]
     async fn check_update_returns_bare_update_meta_for_latest_published() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         // Nothing published yet → 404 (client treats as "not configured").
         let resp = get(&state, "/api/release").await;
@@ -1797,7 +1837,7 @@ mod tests {
     /// check endpoint, unknown tag rejected, PUT retag.
     #[tokio::test]
     async fn env_tagged_release_routes_by_env_query() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         // Legacy untagged release: visible to every environment.
         seed(&state, vec![doc("0.1.13", true)]).await;
@@ -1831,7 +1871,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "tagged upload must succeed");
 
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(
             docs.iter().find(|d| d.version == "0.2.0").unwrap().environments,
             vec!["testing", "stable"],
@@ -1879,7 +1919,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(docs.len(), 2, "rejected upload must not add an entry");
 
         // PUT retag: narrow 0.2.0 to testing only.
@@ -1896,7 +1936,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert_eq!(
             docs.iter().find(|d| d.version == "0.2.0").unwrap().environments,
             vec!["testing"]
@@ -2010,7 +2050,7 @@ mod tests {
     /// per-release env badges and the "all environments" fallback badge.
     #[tokio::test]
     async fn releases_page_renders_environment_checkboxes_and_badges() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
         seed(
             &state,
             vec![
@@ -2027,7 +2067,7 @@ mod tests {
             ],
         )
         .await;
-        let mut docs = load_docs(&config_store(&state)).await;
+        let mut docs = load_docs(&config_store(&state)).await.unwrap();
         sort_by_version_desc(&mut docs);
         // Mirror the page handler: precompute the storage badge flag.
         let releases: Vec<serde_json::Value> = docs
@@ -2075,10 +2115,258 @@ mod tests {
         assert!(html.contains(">本地</span>"), "local storage badge missing");
     }
 
+    #[tokio::test]
+    async fn anonymous_s3_download_uses_configured_prefix() {
+        let (state, _tmp, _app) = setup_release_stack_with_storage(Some(ArtifactStorage::S3 {
+            vendor: crate::storage::S3Vendor::Minio,
+            bucket: "releases".into(),
+            region: "us-east-1".into(),
+            access_key: None,
+            secret_key: None,
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            prefix: Some("desktop".into()),
+        }))
+        .await;
+        seed(
+            &state,
+            vec![ReleaseDoc {
+                storage_path: "s3://releases/0.1.13/app.zip".into(),
+                ..doc("0.1.13", true)
+            }],
+        )
+        .await;
+        let meta = json_body(get(&state, "/api/release").await).await;
+        assert_eq!(
+            meta["url"],
+            "http://127.0.0.1:9000/releases/desktop/0.1.13/app.zip"
+        );
+        let download = get(&state, "/api/release/0.1.13/download").await;
+        assert_eq!(download.status(), StatusCode::FOUND);
+        assert_eq!(
+            download.headers()[header::LOCATION],
+            "http://127.0.0.1:9000/releases/desktop/0.1.13/app.zip"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_mutations_require_privileged_session() {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel};
+        let (state, tmp, _app) = setup_release_stack().await;
+        seed(&state, vec![doc("0.1.13", true)]).await;
+        for user in [
+            crate::console::handlers::test_helpers::unprivileged_user(),
+            crate::console::handlers::test_helpers::superuser(),
+        ] {
+            user.clone()
+                .into_active_model()
+                .insert(state.db())
+                .await
+                .unwrap();
+            let session = state.generate_session_token(user.id).unwrap();
+            let mut statuses = Vec::new();
+            for (method, path, content_type, body) in [
+                (
+                    "POST",
+                    "/api/release",
+                    "multipart/form-data; boundary=relboundary42",
+                    multipart_body(
+                        "relboundary42",
+                        &[("version", "0.2.0")],
+                        Some(("file", "app.zip", b"unauthorized")),
+                    ),
+                ),
+                (
+                    "PUT",
+                    "/api/release/0.1.13",
+                    "application/json",
+                    b"{\"published\":false}".to_vec(),
+                ),
+                (
+                    "DELETE",
+                    "/api/release/0.1.13",
+                    "application/json",
+                    Vec::new(),
+                ),
+            ] {
+                let response = crate::api::router(state.clone())
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(
+                                header::COOKIE,
+                                format!("rustpbx_session={session}; csrf_token=test-csrf"),
+                            )
+                            .header("x-csrf-token", "test-csrf")
+                            .header(header::CONTENT_TYPE, content_type)
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                statuses.push(response.status());
+            }
+            let expected = if user.is_superuser {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(
+                statuses,
+                vec![expected; 3],
+                "POST/PUT/DELETE must require system:write"
+            );
+            assert_eq!(tmp.path().join("0.2.0/app.zip").exists(), user.is_superuser);
+            let releases = load_docs(&config_store(&state)).await.unwrap();
+            assert_eq!(releases.len(), 1);
+            assert!(releases[0].published);
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_preserves_artifact_when_manifest_corrupt() {
+        assert_upload_preserves_artifact_when_manifest_unreadable(true).await;
+    }
+
+    #[tokio::test]
+    async fn upload_preserves_artifact_when_manifest_read_fails() {
+        assert_upload_preserves_artifact_when_manifest_unreadable(false).await;
+    }
+
+    async fn assert_upload_preserves_artifact_when_manifest_unreadable(malformed_toml: bool) {
+        use sea_orm::ConnectionTrait;
+        let (state, tmp, _app) = setup_release_stack().await;
+        create_release(
+            &state,
+            CreateReleaseParams {
+                version: "0.1.13".into(),
+                file_name: "app.zip".into(),
+                data: bytes::Bytes::from_static(b"original"),
+                release_notes: None,
+                published: true,
+                extra: ReleaseDoc::default(),
+                storage: None,
+            },
+        )
+        .await
+        .unwrap();
+        let store = config_store(&state);
+        if malformed_toml {
+            store
+                .write(RELEASE_CATEGORY, RELEASE_ENTRY, "[[broken")
+                .await
+                .unwrap();
+        } else {
+            _app.db()
+                .execute_unprepared(
+                    "ALTER TABLE config_entries RENAME TO unavailable_config_entries",
+                )
+                .await
+                .unwrap();
+        }
+        let result = create_release(
+            &state,
+            CreateReleaseParams {
+                version: "0.1.13".into(),
+                file_name: "app.zip".into(),
+                data: bytes::Bytes::from_static(b"replacement"),
+                release_notes: None,
+                published: true,
+                extra: ReleaseDoc::default(),
+                storage: None,
+            },
+        )
+        .await;
+        assert!(result.is_err(), "unreadable manifest must abort upload");
+        assert_eq!(
+            tokio::fs::read(tmp.path().join("0.1.13/app.zip"))
+                .await
+                .unwrap(),
+            b"original"
+        );
+        if malformed_toml {
+            assert_eq!(
+                store
+                    .read(RELEASE_CATEGORY, RELEASE_ENTRY)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "[[broken"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_upload_and_delete_keep_artifact_consistent() {
+        let (state, _tmp, _app) = setup_release_stack().await;
+        create_release(
+            &state,
+            CreateReleaseParams {
+                version: "0.1.13".into(),
+                file_name: "app.zip".into(),
+                data: bytes::Bytes::from_static(b"original"),
+                release_notes: None,
+                published: true,
+                extra: ReleaseDoc::default(),
+                storage: None,
+            },
+        )
+        .await
+        .unwrap();
+        let guard = RELEASE_FILE_LOCK.lock().await;
+        let deleting = delete_release_handler(
+            State(state.clone()),
+            AuthRequired(crate::console::handlers::test_helpers::superuser()),
+            AxumPath("0.1.13".into()),
+        );
+        tokio::pin!(deleting);
+        assert!(futures::poll!(&mut deleting).is_pending());
+        let uploading = create_release(
+            &state,
+            CreateReleaseParams {
+                version: "0.1.13".into(),
+                file_name: "app.zip".into(),
+                data: bytes::Bytes::from_static(b"replacement"),
+                release_notes: None,
+                published: true,
+                extra: ReleaseDoc::default(),
+                storage: None,
+            },
+        );
+        tokio::pin!(uploading);
+        // Keep the real manifest lock held while asynchronous artifact I/O runs.
+        // An upload must not write an artifact that the queued deletion owns.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut uploading)
+                .await
+                .is_err()
+        );
+        let current = get(&state, "/api/release/0.1.13/download").await;
+        let current = axum::body::to_bytes(current.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.as_ref(),
+            b"original",
+            "artifact writes must share the manifest lock"
+        );
+        drop(guard);
+        assert_eq!(deleting.await.status(), StatusCode::OK);
+        uploading.await.unwrap();
+        let downloaded = get(&state, "/api/release/0.1.13/download").await;
+        assert_eq!(downloaded.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(downloaded.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"replacement");
+        let meta = json_body(get(&state, "/api/release").await).await;
+        assert_eq!(meta["sha256"], "95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47");
+    }
+
     /// Public reads pass without credentials; mutations stay behind auth.
     #[tokio::test]
     async fn public_reads_open_but_mutations_require_auth() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         let resp = get(&state, "/api/release/list").await;
         assert_eq!(resp.status(), StatusCode::OK, "list must be public");
@@ -2111,7 +2399,7 @@ mod tests {
     /// same version replaces the entry and cleans the previous file.
     #[tokio::test]
     async fn upload_via_bearer_then_public_download_and_replace() {
-        let (state, tmp) = setup_release_stack().await;
+        let (state, tmp, _app) = setup_release_stack().await;
 
         let payload: &[u8] = b"PK\x03\x04 fake package payload for 0.1.13";
         let boundary = "relboundary42";
@@ -2193,7 +2481,7 @@ mod tests {
         assert!(!artifact.exists(), "previous artifact must be cleaned up");
 
         let store = config_store(&state);
-        let docs = load_docs(&store).await;
+        let docs = load_docs(&store).await.unwrap();
         assert_eq!(docs.len(), 1, "same version must replace, not duplicate");
         assert_eq!(docs[0].file_name, "app-fixed.zip");
 
@@ -2208,7 +2496,7 @@ mod tests {
     /// makes them visible.
     #[tokio::test]
     async fn draft_hidden_until_published_via_put() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         let boundary = "relboundary42";
         let body = multipart_body(
@@ -2284,7 +2572,7 @@ mod tests {
             get(&state, "/api/release").await.status(),
             StatusCode::NOT_FOUND
         );
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert!(docs.is_empty(), "manifest entry must be gone");
     }
 
@@ -2612,7 +2900,7 @@ mod tests {
     /// was narrowed.
     #[tokio::test]
     async fn storage_settings_roundtrip_masks_secrets_and_requires_auth() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
 
         // Storage settings are not public even though /release reads are.
         assert_eq!(
@@ -2722,7 +3010,7 @@ mod tests {
     /// configured local directory.
     #[tokio::test]
     async fn upload_storage_field_routes_local_and_rejects_bad_choices() {
-        let (state, tmp) = setup_release_stack().await;
+        let (state, tmp, _app) = setup_release_stack().await;
 
         let post = |fields: &[(&str, &str)]| {
             let body = multipart_body(
@@ -2765,7 +3053,7 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("not configured"), "got: {text}");
-        let docs = load_docs(&config_store(&state)).await;
+        let docs = load_docs(&config_store(&state)).await.unwrap();
         assert!(docs.is_empty(), "failed uploads must not add entries");
 
         // Explicit local → stored in the configured local dir.
@@ -2794,7 +3082,7 @@ mod tests {
     /// no S3 storage is configured.
     #[tokio::test]
     async fn s3_artifacts_presign_via_page_saved_storage() {
-        let (state, _tmp) = setup_release_stack().await;
+        let (state, _tmp, _app) = setup_release_stack().await;
         seed(
             &state,
             vec![ReleaseDoc {

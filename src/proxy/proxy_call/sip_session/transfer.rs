@@ -1610,11 +1610,12 @@ impl SipSession {
         // occupant's attribution (a blind/REFER to an IVR or extension used to
         // keep `leg_role: "agent"` alive on every later event). Restored
         // verbatim when the dial FAILS — the replaced dialog stays alive and
-        // keeps its attribution.
+        // keeps its attribution. Registration ownership belongs to that
+        // original dialog too and must survive a rejected replacement.
         let parked_callee_identity = self
             .legs
             .get(&LegId::from("callee"))
-            .map(|leg| (leg.agent_id.clone(), leg.purpose));
+            .map(|leg| (leg.agent_id.clone(), leg.purpose, leg.remote_registered));
         if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
             leg.agent_id = None;
             leg.purpose = None;
@@ -1675,10 +1676,11 @@ impl SipSession {
             });
             return Ok(());
         }
-        if let Some((agent_id, purpose)) = parked_callee_identity {
+        if let Some((agent_id, purpose, remote_registered)) = parked_callee_identity {
             if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
                 leg.agent_id = agent_id;
                 leg.purpose = purpose;
+                leg.remote_registered = remote_registered;
             }
         }
         result.map_err(|(code, text, reason)| {

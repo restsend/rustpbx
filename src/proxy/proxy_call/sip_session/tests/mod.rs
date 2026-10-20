@@ -12479,11 +12479,17 @@ async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::proxy::tests::common::{
-        create_test_request, create_test_server_with_config, create_transaction,
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
     };
 
     const ROOT: &str = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
-    let (mut server, _) = create_test_server_with_config(ProxyConfig::default()).await;
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        ProxyConfig::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
     std::sync::Arc::get_mut(&mut server)
         .unwrap()
         .cluster_peer_ips = vec!["192.0.2.10".parse().unwrap()];
@@ -12541,7 +12547,7 @@ async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
             created_at: chrono::Utc::now().to_rfc3339(),
             metadata: None,
         };
-        let (session, _handle, _cmd_rx) = SipSession::new(
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
             server.clone(),
             CancellationToken::new(),
             None,
@@ -12554,11 +12560,239 @@ async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
             expected_role,
             "case {i}: leg={leg:?} peer={peer:?}"
         );
+        if leg == Some("agent") {
+            // Receive the endpoint callbacks on the home node without manually
+            // stamping its legs: only the trusted inbound UUI declares the role.
+            let callee = LegId::from("callee");
+            let dialog_id = rsipstack::dialog::DialogId {
+                call_id: format!("home-endpoint-{i}"),
+                local_tag: "local".into(),
+                remote_tag: "remote".into(),
+            };
+            session.callee_dialogs.insert(dialog_id.clone(), ());
+            while events.try_recv().is_ok() {}
+            session
+                .handle_callee_state(DialogState::Confirmed(
+                    dialog_id,
+                    rsipstack::sip::Response::default(),
+                ))
+                .await
+                .unwrap();
+            for direction in ["sendonly", "sendrecv"] {
+                let sdp = format!(
+                    "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na={direction}\r\n"
+                );
+                let offer =
+                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &sdp).unwrap();
+                session
+                    .apply_reinvite_hold_transition(DialogSide::Callee, &callee, &offer, &[])
+                    .await;
+            }
+            session.cleanup().await;
+            let mut payloads = Vec::new();
+            while let Ok(entry) = events.try_recv() {
+                payloads.push((entry.event.event_type, entry.event.payload));
+            }
+            let want_role = if expected_role.is_some() {
+                "agent"
+            } else {
+                "callee"
+            };
+            for kind in ["call_answered", "call_held", "call_unheld"] {
+                let payload = payloads
+                    .iter()
+                    .find(|(name, value)| *name == kind && value["leg_id"] == "callee")
+                    .unwrap_or_else(|| panic!("case {i}: missing {kind}: {payloads:?}"));
+                assert_eq!(payload.1["leg_role"], want_role, "case {i}: {kind}");
+            }
+            if expected_role.is_some() {
+                assert_eq!(
+                    payloads
+                        .iter()
+                        .filter(|(kind, value)| {
+                            *kind == "call_hangup" && value["leg_role"] == "agent"
+                        })
+                        .count(),
+                    1,
+                    "home node must report one agent teardown: {payloads:?}"
+                );
+            }
+        }
         if leg.is_some() {
             // Root linkage via the UUI session id is independent of the leg
             // marker (even a forged marker still correlates the call).
             assert_eq!(session.meta.root_session_id.as_deref(), Some(ROOT));
         }
+    }
+}
+
+/// A rejected replacement must leave the original dialog's locality intact.
+#[tokio::test]
+async fn failed_blind_transfer_restores_agent_leg_locality() {
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::proxy::tests::test_sip_session_regressions::{
+        build_session_with_cmd_rx_on, setup_recording_test_media,
+    };
+    use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
+    use rsipstack::transport::{SipAddr, udp::UdpConnection};
+
+    for original_remote in [false, true] {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = target.local_addr().unwrap();
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let (mut server, _) = create_test_server_with_rwi_gateway(
+            Default::default(),
+            Arc::new(parking_lot::RwLock::new(gateway)),
+        )
+        .await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec![address.ip()];
+        let endpoint = server.endpoint.inner.clone();
+        for local in endpoint.transport_layer.get_addrs() {
+            endpoint.transport_layer.del_transport(&local);
+        }
+        let transport =
+            UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+        endpoint.transport_layer.add_transport(transport.into());
+        let serving_endpoint = endpoint.clone();
+        let serving = tokio::spawn(async move {
+            serving_endpoint.serve().await.unwrap();
+        });
+        let target_uri: rsipstack::sip::Uri = format!("sip:target@{address}").parse().unwrap();
+        server
+            .locator
+            .register(
+                "target",
+                None,
+                Location {
+                    aor: target_uri.clone(),
+                    expires: 3600,
+                    registered_aor: Some(target_uri.clone()),
+                    home_proxy: (!original_remote).then(|| SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Udp),
+                        addr: address.to_string().as_str().try_into().unwrap(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let registered = server.locator.lookup(&target_uri).await.unwrap();
+        assert_eq!(
+            registered.len(),
+            1,
+            "replacement must use its registered location"
+        );
+        assert_eq!(registered[0].home_proxy.is_some(), !original_remote);
+        let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+        let dialplan = Dialplan::new("failed-locality".into(), request, DialDirection::Inbound)
+            .with_caller("sip:customer@example.test".parse().unwrap());
+        let (mut session, _handle, _commands) =
+            build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        setup_recording_test_media(&mut session).await;
+        let original_request =
+            create_test_request(Method::Invite, "agent", None, "example.test", None);
+        let (tx, _) = create_transaction(original_request).await;
+        let (state_tx, _) = mpsc::unbounded_channel();
+        let original_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
+        let original_id = original_dialog.id();
+        let callee = LegId::from("callee");
+        session.legs.set_dialog(
+            callee.clone(),
+            rsipstack::dialog::dialog::Dialog::Invite(original_dialog),
+        );
+        let leg = session.legs.get_mut(&callee).unwrap();
+        leg.agent_id = Some("agent".into());
+        leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+        leg.remote_registered = original_remote;
+        leg.state = LegState::Connected;
+        session.meta.connected_callee_dialog_id = Some(original_id.clone());
+        session.meta.connected_callee = Some("sip:agent@example.test".into());
+        SipSession::set_pinned_agent_id(&session.extensions, "agent");
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
+        let responder = tokio::spawn(async move {
+            let mut buffer = [0u8; 65536];
+            let (size, source) =
+                tokio::time::timeout(Duration::from_secs(3), target.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let SipMessage::Request(invite) =
+                SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap()
+            else {
+                panic!("expected INVITE");
+            };
+            assert_eq!(invite.method, Method::Invite);
+            let mut response = endpoint.make_response(&invite, StatusCode::BusyHere, None);
+            response
+                .headers
+                .retain(|header| !matches!(header, Header::To(_)));
+            response.headers.push(Header::To(
+                format!("<sip:target@{address}>;tag=rejected").into(),
+            ));
+            target
+                .send_to(response.to_string().as_bytes(), source)
+                .await
+                .unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.handle_blind_transfer(
+                callee.clone(),
+                target_uri.to_string(),
+                transfer::TransferDisposition::AwaitResult,
+                &mut callee_rx,
+                HashMap::new(),
+            ),
+        )
+        .await
+        .expect("transfer must receive the rejection");
+        responder.await.unwrap();
+        serving.abort();
+        assert!(result.is_err(), "486 must fail the replacement");
+        assert!(result.unwrap_err().to_string().contains("486"));
+        assert_eq!(session.legs.get_dialog(&callee).unwrap().id(), original_id);
+        while events.try_recv().is_ok() {}
+        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+        let offer = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, sdp).unwrap();
+        session.bridge.legs.clear();
+        session
+            .apply_reinvite_hold_transition(DialogSide::Callee, &callee, &offer, &[])
+            .await;
+        session.emit_rwi_leg_hangup(&callee, Some("UasBye".into()));
+        let remote_after_failure = session.legs.get(&callee).unwrap().remote_registered;
+        let mut payloads = Vec::new();
+        while let Ok(entry) = events.try_recv() {
+            if matches!(entry.event.event_type, "call_held" | "call_hangup") {
+                payloads.push(entry.event.payload);
+            }
+        }
+        session.cleanup().await;
+        assert_eq!(payloads.len(), 2);
+        for payload in payloads {
+            assert_eq!(payload["leg_id"], "callee");
+            if original_remote {
+                assert!(
+                    payload.get("leg_role").is_none(),
+                    "remote original must remain suppressed: {payload}"
+                );
+            } else {
+                assert_eq!(
+                    payload["leg_role"], "agent",
+                    "local original still owns its events"
+                );
+            }
+        }
+        assert_eq!(remote_after_failure, original_remote);
     }
 }
 
