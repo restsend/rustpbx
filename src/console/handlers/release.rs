@@ -368,6 +368,11 @@ pub async fn upload_handler(
             )
         }
     }
+    if let Some(w) = &doc.window
+        && let Err(e) = validate_window(w)
+    {
+        return json_error(StatusCode::BAD_REQUEST, e);
+    }
 
     // Fail fast on an unusable backend choice before reading the whole
     // manifest (an unconfigured S3 target is an operator error → 400).
@@ -425,8 +430,12 @@ pub async fn update_release_handler(
     if body.min_supported.is_some() {
         doc.min_supported = body.min_supported.filter(|n| !n.is_empty());
     }
-    if body.window.is_some() {
-        doc.window = body.window.filter(|n| !n.is_empty());
+    if let Some(v) = body.window {
+        let trimmed = v.trim().to_string();
+        if !trimmed.is_empty() && let Err(e) = validate_window(&trimmed) {
+            return json_error(StatusCode::BAD_REQUEST, e);
+        }
+        doc.window = Some(trimmed).filter(|n| !n.is_empty());
     }
     if body.deadline.is_some() {
         doc.deadline = body.deadline.filter(|n| !n.is_empty());
@@ -1246,6 +1255,32 @@ fn parse_u32(v: String) -> Option<u32> {
     v.trim().parse().ok()
 }
 
+/// Validate the optional daily download window `HH:MM-HH:MM`. Cross-midnight
+/// ranges (`22:00-07:00`) are fine; the value is passed through to update
+/// clients verbatim, so reject typos early instead of letting the client
+/// fail to parse it later.
+fn validate_window(raw: &str) -> Result<(), String> {
+    let bad = || format!("invalid window `{raw}` (expected HH:MM-HH:MM)");
+    let (start, end) = raw.split_once('-').ok_or_else(bad)?;
+    let parse_hhmm = |s: &str| -> Result<(), String> {
+        let (h, m) = s.split_once(':').ok_or_else(bad)?;
+        let digits =
+            |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit());
+        if !digits(h) || !digits(m) {
+            return Err(bad());
+        }
+        if h.parse::<u32>().unwrap() > 23 || m.parse::<u32>().unwrap() > 59 {
+            return Err(format!(
+                "window time `{s}` out of range (00:00-23:59)"
+            ));
+        }
+        Ok(())
+    };
+    parse_hhmm(start.trim())?;
+    parse_hhmm(end.trim())?;
+    Ok(())
+}
+
 /// Keep versions filesystem-safe: letters, digits, `.`, `-`, `_`, `+`.
 /// Consecutive dots collapse to one so the version can never introduce a
 /// `..` traversal segment into the artifact key.
@@ -1365,6 +1400,22 @@ mod tests {
         assert_eq!(version_cmp("v1.0.0", "1.0.0"), Equal);
         assert_eq!(version_cmp("1.0", "1.0.0"), Equal);
         assert_eq!(version_cmp("2.0.0", "10.0.0"), Less);
+    }
+
+    #[test]
+    fn window_validation_accepts_daily_and_cross_midnight() {
+        assert!(validate_window("00:00-23:59").is_ok());
+        // Cross-midnight is the common case for overnight pushes.
+        assert!(validate_window("22:00-07:00").is_ok());
+        assert!(validate_window("22:00 - 07:00").is_ok());
+        assert!(validate_window("9:5-7:0").is_ok());
+        assert!(validate_window("24:00-07:00").is_err());
+        assert!(validate_window("22:60-07:00").is_err());
+        assert!(validate_window("22:00").is_err());
+        assert!(validate_window("22:00-").is_err());
+        assert!(validate_window("ab-cd").is_err());
+        assert!(validate_window("2a:00-07:00").is_err());
+        assert!(validate_window("").is_err());
     }
 
     #[test]
@@ -1888,9 +1939,16 @@ mod tests {
         let html = String::from_utf8_lossy(&bytes);
         assert!(html.contains("适用环境"), "upload form label missing");
         assert!(
-            html.contains(r#"name="environments" value="stable" checked"#),
-            "stable checkbox must be pre-checked"
+            html.contains(r#"name="environments" value="testing" checked"#),
+            "testing checkbox must be pre-checked"
         );
+        assert!(
+            !html.contains(r#"name="environments" value="stable" checked"#),
+            "stable checkbox must not be pre-checked"
+        );
+        assert!(html.contains("更新策略"), "policy section missing");
+        assert!(html.contains(r#"name="window""#), "window input missing");
+        assert!(html.contains(r#"name="force""#), "force checkbox missing");
         assert!(html.contains("不勾选 = 所有环境可见"), "hint missing");
         assert!(html.contains(">testing</span>"), "env badge missing");
         assert!(html.contains("全部"), "all-environments badge missing");
@@ -2115,6 +2173,90 @@ mod tests {
     }
 
     // ── storage settings: local + S3 on the releases page ───────────────
+
+    /// Policy fields (force / window / min_supported / deadline) flow through
+    /// upload → UpdateMeta, PUT rejects a malformed window, and PUT with an
+    /// empty window clears the stored value.
+    #[tokio::test]
+    async fn policy_fields_flow_through_upload_and_put_validates_window() {
+        let (state, _tmp) = setup_release_stack().await;
+
+        let boundary = "relpolicy1";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("version", "0.3.0"),
+                ("published", "true"),
+                ("force", "true"),
+                ("window", "22:00-07:00"),
+                ("min_supported", "0.1.10"),
+                ("deadline", "2026-11-01T00:00:00Z"),
+            ],
+            Some(("file", "app.zip", b"policy payload".as_slice())),
+        );
+        let resp = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/release")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let saved = json_body(resp.into_response()).await;
+        assert_eq!(saved["release"]["force"], true);
+        assert_eq!(saved["release"]["window"], "22:00-07:00");
+        assert_eq!(saved["release"]["min_supported"], "0.1.10");
+        assert_eq!(saved["release"]["deadline"], "2026-11-01T00:00:00Z");
+
+        // The check endpoint passes the policy through to update clients.
+        let meta = json_body(get(&state, "/api/release").await).await;
+        assert_eq!(meta["force"], true);
+        assert_eq!(meta["window"], "22:00-07:00");
+        assert_eq!(meta["min_supported"], "0.1.10");
+        assert_eq!(meta["deadline"], "2026-11-01T00:00:00Z");
+
+        // Malformed window → 400, stored value untouched.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/0.3.0",
+            Body::from("{\"window\":\"25:00-07:00\"}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let docs = load_docs(&config_store(&state)).await;
+        assert_eq!(
+            docs.iter().find(|d| d.version == "0.3.0").unwrap().window,
+            Some("22:00-07:00".into())
+        );
+
+        // Empty window → clears the stored value.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/0.3.0",
+            Body::from("{\"window\":\"\"}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let docs = load_docs(&config_store(&state)).await;
+        assert!(
+            docs.iter()
+                .find(|d| d.version == "0.3.0")
+                .unwrap()
+                .window
+                .is_none(),
+            "empty window must clear the stored value"
+        );
+    }
 
     async fn authed(state: &Arc<ConsoleState>, method: &str, uri: &str, body: Body) -> Response {
         crate::api::router(state.clone())

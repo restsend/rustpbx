@@ -159,12 +159,12 @@
                     <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
                     <div class="flex items-center gap-4 text-sm text-slate-600">
                         <label class="flex items-center gap-2">
-                            <input type="checkbox" name="environments" value="testing"
+                            <input type="checkbox" name="environments" value="testing" checked
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
                             testing
                         </label>
                         <label class="flex items-center gap-2">
-                            <input type="checkbox" name="environments" value="stable" checked
+                            <input type="checkbox" name="environments" value="stable"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
                             stable
                         </label>
@@ -175,6 +175,32 @@
                         </label>
                         <span class="text-xs text-slate-400">{{ "releases_page.upload_environments_hint" | t }}</span>
                     </div>
+                </div>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_policy_title" | t }}</span>
+                    <div class="grid gap-4 sm:grid-cols-3">
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
+                            <input type="text" name="window" placeholder="22:00-07:00"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_min_supported" | t }}</span>
+                            <input type="text" name="min_supported" placeholder="0.1.10"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_deadline" | t }}</span>
+                            <input type="text" name="deadline" placeholder="2026-11-01T00:00:00Z"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                    </div>
+                    <label class="mt-3 flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" name="force"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_force" | t }}
+                    </label>
+                    <p class="mt-1 text-xs text-slate-400">{{ "releases_page.upload_policy_hint" | t }}</p>
                 </div>
                 <div class="flex items-center justify-between">
                     <label class="flex items-center gap-2 text-sm text-slate-600">
@@ -215,6 +241,7 @@
                         <td class="px-4 py-3">
                             <span class="font-semibold text-slate-900">{{ r.version }}</span>
                             {% if r.force %}<span class="ml-1 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                            {% if r.window %}<span class="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">{{ r.window }}</span>{% endif %}
                             {% if r.storage_is_s3 %}
                             <span class="ml-1 rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
                             {% else %}
@@ -247,6 +274,8 @@
                         <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell">{{ r.created_at | default(value='') }}</td>
                         <td class="px-4 py-3">
                             <div class="flex items-center justify-end gap-2">
+                                <button type="button" @click="openEdit({{ loop.index0 }})"
+                                    class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "releases_page.action_edit" | t }}</button>
                                 <a href="{{ api_prefix | safe }}/release/{{ r.version }}/download"
                                     class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "releases_page.action_download" | t }}</a>
                                 <button type="button" @click="togglePublish('{{ r.version }}', {{ r.published }})"
@@ -272,11 +301,90 @@
             {% endif %}
         </section>
     </div>
+
+    <!-- Edit release modal -->
+    <div x-show="editOpen" x-cloak class="fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-slate-900/40" @click="editOpen = false"></div>
+        <div x-show="editOpen" x-transition
+            class="relative mx-auto mt-16 max-h-[85vh] w-[92%] max-w-xl overflow-y-auto rounded-xl bg-white p-5 shadow-xl ring-1 ring-black/5">
+            <h2 class="mb-4 text-sm font-semibold text-slate-900">
+                {{ "releases_page.edit_title" | t }}
+                <span class="ml-1 font-mono text-sky-600" x-text="editVersion"></span>
+            </h2>
+            <form @submit.prevent="saveEdit()" class="space-y-4">
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_notes" | t }}</span>
+                    <textarea rows="3" x-model="editDraft.release_notes"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
+                </label>
+                <div class="grid gap-4 sm:grid-cols-3">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
+                        <input type="text" x-model="editDraft.window" placeholder="22:00-07:00"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_min_supported" | t }}</span>
+                        <input type="text" x-model="editDraft.min_supported" placeholder="0.1.10"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_deadline" | t }}</span>
+                        <input type="text" x-model="editDraft.deadline" placeholder="2026-11-01T00:00:00Z"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                </div>
+                <p class="text-xs text-slate-400">{{ "releases_page.upload_window_hint" | t }}</p>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="testing" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            testing
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="stable" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            stable
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="preview" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            preview
+                        </label>
+                        <span class="text-xs text-slate-400">{{ "releases_page.upload_environments_hint" | t }}</span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-6">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" x-model="editDraft.published"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_published" | t }}
+                    </label>
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" x-model="editDraft.force"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_force" | t }}
+                    </label>
+                </div>
+                <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                    <button type="button" @click="editOpen = false"
+                        class="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-50">{{ "releases_page.edit_cancel" | t }}</button>
+                    <button type="submit" :disabled="editSaving"
+                        class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        <span x-text="editSaving ? '{{ "releases_page.edit_saving" | t }}' : '{{ "releases_page.edit_save" | t }}'"></span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
 </div>
 
 <script>
     function releasesPage() {
         return {
+            releases: {{ releases | json | safe }},
             uploading: false,
             storageSaving: false,
             storageSource: 'default',
@@ -286,6 +394,10 @@
                 access_key: '', secret_key: '', has_credentials: false, clear_credentials: false,
             },
             uploadStorage: 'local',
+            editOpen: false,
+            editSaving: false,
+            editVersion: '',
+            editDraft: {},
             formatBytes(bytes) {
                 if (!bytes || bytes <= 0) return '-';
                 const units = ['B', 'KB', 'MB', 'GB'];
@@ -342,6 +454,7 @@
                 const form = event.target;
                 const fd = new FormData(form);
                 fd.set('published', form.querySelector('[name=published]').checked ? 'true' : 'false');
+                fd.set('force', form.querySelector('[name=force]').checked ? 'true' : 'false');
                 fd.set('storage', this.uploadStorage);
                 this.uploading = true;
                 try {
@@ -363,6 +476,43 @@
                     await apiDelete('/release/' + encodeURIComponent(version));
                     location.reload();
                 } catch (e) { /* surfaced by api.js */ }
+            },
+            openEdit(index) {
+                const r = this.releases[index];
+                if (!r) return;
+                this.editVersion = r.version;
+                this.editDraft = {
+                    release_notes: r.release_notes || '',
+                    published: !!r.published,
+                    force: !!r.force,
+                    window: r.window || '',
+                    min_supported: r.min_supported || '',
+                    deadline: r.deadline || '',
+                    environments: r.environments ? [...r.environments] : [],
+                };
+                this.editOpen = true;
+            },
+            async saveEdit() {
+                const d = this.editDraft;
+                const trim = (v) => (v || '').trim();
+                // Send fields explicitly: an empty string clears the stored
+                // value, an empty environments array means "all environments".
+                const body = {
+                    release_notes: trim(d.release_notes),
+                    published: !!d.published,
+                    force: !!d.force,
+                    window: trim(d.window),
+                    min_supported: trim(d.min_supported),
+                    deadline: trim(d.deadline),
+                    environments: d.environments,
+                };
+                this.editSaving = true;
+                try {
+                    await apiPut('/release/' + encodeURIComponent(this.editVersion), body);
+                    location.reload();
+                } catch (e) {
+                    this.editSaving = false;
+                }
             },
         };
     }
