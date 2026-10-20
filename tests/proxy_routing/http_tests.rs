@@ -85,6 +85,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_http_router_per_target_retry_policy_and_legacy_compatibility() {
+        let plan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": [
+                "sip:first@example.com",
+                {"uri": "sip:second@example.com", "retry_policy": {"status_codes": [408, 503]}},
+                {"uri": "sip:last@example.com", "retry_policy": {"status_codes": []}}
+            ]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].location.aor.to_string(), "sip:first@example.com");
+        assert_eq!(attempts[1].location.aor.to_string(), "sip:second@example.com");
+        assert!(attempts[0].retry_policy.is_none());
+        assert_eq!(attempts[1].retry_policy.as_ref().unwrap().status_codes, vec![408, 503]);
+        assert!(attempts[2].retry_policy.as_ref().unwrap().status_codes.is_empty());
+
+        let legacy = resolve_with_response(json!({
+            "action": "forward", "targets": ["sip:first@example.com", {"uri": "sip:last@example.com"}]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = legacy.flow else {
+            panic!("expected sequential targets");
+        };
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().all(|attempt| attempt.retry_policy.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_http_router_legacy_targets_skip_invalid_uri() {
+        let plan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:first@example.com", "", "sip:last@example.com"]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[1].location.aor.to_string(), "sip:last@example.com");
+        assert!(attempts.iter().all(|attempt| attempt.retry_policy.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_http_router_rtp_override_and_parallel_targets() {
+        let plan = resolve_with_response(json!({
+            "action": "forward", "strategy": "parallel",
+            "targets": ["sip:first@example.com", {"uri": "sip:last@example.com"}],
+            "media_proxy": "all",
+            "rtp_config": {"bind_ip": "127.0.0.2", "external_ip": "2001:db8::1"}
+        })).await.unwrap();
+        assert_eq!(plan.media.bind_ip.as_deref(), Some("127.0.0.2"));
+        assert_eq!(plan.media.external_ip.as_deref(), Some("2001:db8::1"));
+        assert!(plan.media.enable_latching);
+        assert_eq!(plan.media.proxy_mode, MediaProxyMode::All);
+        let DialplanFlow::Targets(DialStrategy::Parallel(targets)) = plan.flow else {
+            panic!("expected parallel targets");
+        };
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_http_router_rejects_invalid_retry_and_rtp_config() {
+        for fields in [
+            json!({"targets": [{"uri": "sip:test@example.com", "retry_policy": {"status_codes": [200]}}]}),
+            json!({"targets": [{"uri": "sip:test@example.com", "retry_policy": {"status_codes": [700]}}]}),
+            json!({"rtp_config": {"bind_ip": "invalid-ip"}}),
+            json!({"rtp_config": {"external_ip": "invalid-ip"}}),
+            json!({"rtp_config": {"bind_ip_typo": "127.0.0.2"}}),
+        ] {
+            let mut response = json!({"action": "forward", "targets": ["sip:test@example.com"]});
+            response.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            let error = resolve_with_response(response).await.err().expect("invalid config must fail");
+            assert_eq!(error.status, Some(rsipstack::sip::StatusCode::ServerInternalError));
+        }
+    }
+
+    #[tokio::test]
     async fn test_http_router_forward() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
@@ -837,7 +915,8 @@ mod tests {
                 Json(json!({
                     "action": "forward",
                     "targets": ["sip:1001@127.0.0.1"],
-                    "media_proxy": "all"
+                    "media_proxy": "all",
+                    "rtp_config": {"bind_ip": "127.0.0.2"}
                 }))
             }),
         );
@@ -858,6 +937,7 @@ mod tests {
 
         let rtp_config = RtpConfig {
             external_ip: Some("203.0.113.1".to_string()),
+            bind_ip: Some("127.0.0.1".to_string()),
             start_port: Some(10000),
             end_port: Some(20000),
             ..Default::default()
@@ -914,7 +994,8 @@ mod tests {
             dialplan.media.proxy_mode,
             rustpbx::config::MediaProxyMode::All
         );
-        // Verify RTP config from server is applied
+        assert_eq!(dialplan.media.bind_ip.as_deref(), Some("127.0.0.2"));
+        // Omitted RTP fields still inherit server settings
         assert_eq!(dialplan.media.external_ip.as_deref(), Some("203.0.113.1"));
         assert_eq!(dialplan.media.rtp_start_port, Some(10000));
         assert_eq!(dialplan.media.rtp_end_port, Some(20000));

@@ -1,3 +1,12 @@
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS console-assets
+WORKDIR /build/rustpbx/frontend
+COPY frontend/ ./
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --no-fund
+COPY templates/ /build/rustpbx/templates/
+COPY src/addons/ /build/rustpbx/src/addons/
+COPY static/ /build/rustpbx/static/
+RUN npm run build
+
 FROM debian:trixie-slim
 
 LABEL maintainer="shenjindi@miuda.ai"
@@ -28,6 +37,8 @@ COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
 RUN mkdir -p /app/config
 # Copy static resources
 COPY ./static /app/static
+COPY --from=console-assets /build/rustpbx/static/css /app/static/css
+COPY --from=console-assets /build/rustpbx/static/vendor /app/static/vendor
 COPY ./templates /app/templates
 COPY ./locales /app/locales
 COPY ./config/sounds /app/config/sounds

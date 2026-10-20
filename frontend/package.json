@@ -1,0 +1,14 @@
+{
+  "name": "rustpbx-console-assets",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:css && npm run build:vendor",
+    "build:css": "tailwindcss -i console.input.css -o ../static/css/console.css --minify",
+    "build:vendor": "node build-vendor.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "chart.js": "4.5.0",
+    "tailwindcss": "4.3.3"
+  }
+}

@@ -2,6 +2,7 @@
 # templates/, locales/, config/ and src/addons/**; the commercial edition
 # images embed this whole tree as the `core` named build context.
 target/
+**/node_modules/
 recordings/
 storage/
 e2e-artifacts/

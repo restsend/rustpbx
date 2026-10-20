@@ -5,7 +5,7 @@
 #   scripts/run_cargo_tests.sh --serial          # baseline: one binary after another
 #   scripts/run_cargo_tests.sh --parallel        # run binaries concurrently (default N = nproc/2)
 #   scripts/run_cargo_tests.sh --parallel 3      # explicit concurrency
-#   scripts/run_cargo_tests.sh --serial --features commerce,wholesale,contact-center
+#   scripts/run_cargo_tests.sh --serial --features commerce
 #
 # Build happens FIRST via cargo (`--no-run --message-format=json`) so cargo's
 # build lock is never contended; the test executables are then invoked directly
@@ -18,7 +18,7 @@ set -uo pipefail
 
 MODE="parallel"
 JOBS=""
-FEATURES="commerce,wholesale,contact-center"
+FEATURES="commerce"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --serial) MODE="serial"; shift ;;
@@ -138,6 +138,10 @@ TOTAL_END="$(date +%s)"
 
 # --- summary -----------------------------------------------------------------
 SUMMARY="$LOG_DIR/summary.txt"
+# Derive failures from the results file (works for both serial and parallel,
+# where background subshells can't touch this shell's arrays). Computed here,
+# not inside the piped block below, which runs in a subshell.
+FAILED_LIST="$(awk '$2 != 0 { print $1 }' "$RESULTS" | tr '\n' ' ')"
 {
   echo "mode=$MODE jobs=$JOBS features=$FEATURES"
   echo "build_secs=$((BUILD_END - BUILD_START))"
@@ -149,9 +153,6 @@ SUMMARY="$LOG_DIR/summary.txt"
   done
   echo ""
   echo "total_wall_secs=$((TOTAL_END - TOTAL_START)) (tests only, build excluded)"
-  # Derive failures from the results file (works for both serial and parallel,
-  # where background subshells can't touch this shell's arrays).
-  FAILED_LIST="$(awk '$2 != 0 { print $1 }' "$RESULTS" | tr '\n' ' ')"
   if [[ -n "${FAILED_LIST// /}" ]]; then
     echo "failed_suites: $FAILED_LIST"
   else

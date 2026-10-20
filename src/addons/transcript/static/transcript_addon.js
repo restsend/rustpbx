@@ -37,15 +37,16 @@
 
                 try {
                     const response = await fetch(`${this.apiPrefix}/call-records/${this.recordId}/transcript`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        if (data && data.transcript) {
-                            this.transcript = data.transcript;
-                            this.transcriptStatus = 'completed';
-                            this.transcriptVisible = true;
-                        } else if (data && data.status) {
-                            this.transcriptStatus = data.status;
-                        }
+                    const data = await response.json().catch(() => null);
+                    if (response.ok && data && data.transcript) {
+                        this.transcript = data.transcript;
+                        this.transcriptStatus = 'completed';
+                        this.transcriptVisible = true;
+                    } else if (data && data.status) {
+                        // No transcript to show: a completed run whose result
+                        // cannot be found is reported as missing, not pending.
+                        const status = String(data.status).toLowerCase();
+                        this.transcriptStatus = status === 'completed' ? 'missing' : status;
                     }
                 } catch (e) {
                     console.error("Failed to check transcript status", e);
@@ -102,7 +103,7 @@
 
             pollStatus() {
                 const interval = setInterval(async () => {
-                    if (this.transcriptStatus === 'completed' || this.transcriptStatus === 'failed') {
+                    if (['completed', 'failed', 'missing'].includes(this.transcriptStatus)) {
                         clearInterval(interval);
                         return;
                     }
@@ -115,6 +116,7 @@
                 switch ((status || '').toLowerCase()) {
                     case 'completed': return 'text-emerald-600';
                     case 'processing': return 'text-amber-500';
+                    case 'missing': return 'text-amber-500';
                     case 'failed': return 'text-rose-500';
                     default: return 'text-slate-400';
                 }
@@ -124,6 +126,7 @@
                 switch ((status || '').toLowerCase()) {
                     case 'completed': return 'Ready';
                     case 'processing': return 'Processing';
+                    case 'missing': return 'Result missing';
                     case 'failed': return 'Failed';
                     default: return 'Pending';
                 }
@@ -135,6 +138,7 @@
                 const status = (this.transcriptStatus || '').toLowerCase();
                 if (status === 'processing') return 'Refresh status';
                 if (status === 'failed') return 'Retry transcript';
+                if (status === 'missing') return 'Re-run transcript';
                 if (this.transcriptVisible) return 'Re-run transcript';
                 if (this.transcriptStatus === 'completed') return 'Load transcript';
                 return 'Request transcript';

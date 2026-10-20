@@ -585,7 +585,7 @@
             </div>
         </div>
 
-<script src="/static/cc/vendor/chart.umd.min.js" onerror="this.remove()"></script>
+<script src="{{ chart_js | default((static_path | default('/static')) ~ '/vendor/chart.umd.min.js') | safe }}"></script>
 <script>
     function reportsPage() {
         return {

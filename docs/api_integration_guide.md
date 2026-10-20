@@ -81,6 +81,49 @@ When omitted, the global value is inherited; if neither is set, `media` is the
 default. The field may also be returned without `record` to override the timing
 while retaining the global recording enablement policy.
 
+**Sequential failover and RTP interface selection**:
+
+```json
+{
+  "action": "forward",
+  "strategy": "sequential",
+  "targets": [
+    {"uri": "sip:1001@192.0.2.10:5060", "retry_policy": {"status_codes": [408, 503]}},
+    {
+      "uri": "sip:1001@192.0.2.11:5060",
+      "retry_policy": {"status_codes": []}
+    }
+  ],
+  "media_proxy": "all",
+  "rtp_config": {
+    "bind_ip": "10.0.0.10",
+    "external_ip": "203.0.113.10"
+  }
+}
+```
+
+Targets may mix SIP URI strings and objects containing `uri` and an optional
+`retry_policy`. Retry policies are configured only per target. The
+failed target's policy decides whether to try the next target: `status_codes`
+accepts final SIP failure codes 300–699, and an empty list stops failover.
+A string target or an object without a policy preserves legacy HTTP routing:
+advance after any failure.
+Each target is tried once in order; this does not retry the HTTP webhook request.
+An answer or caller cancellation stops dialing. Parallel dialing rings targets
+concurrently and ignores retry policies. `max_ring_time` bounds the entire
+sequence, while `timeout` limits call duration.
+
+`rtp_config` supports `bind_ip` (the local RTP/SRTP socket interface) and
+`external_ip` (the address advertised in SDP). Both accept IPv4 or IPv6 literals;
+the bind address must exist on the PBX host. Omitted or null fields inherit
+server settings. These are call-wide settings and stay the same across retries.
+Use `media_proxy: "all"` when media must pass through this interface; direct or
+bypass media does not bind a proxy RTP socket. WebRTC continues to gather ICE
+candidates across interfaces and does not use this fixed bind IP. Other RTC
+settings retain their existing server defaults; this object does not expose the
+full RTC configuration. Invalid IPs, unknown `rtp_config` fields or invalid retry codes cause a SIP 500 routing error.
+Malformed target URIs are skipped, preserving existing HTTP routing behavior.
+
 ### 1.2 User Backend (SIP Authentication)
 Delegate SIP registration password checking to your external DB or API.
 

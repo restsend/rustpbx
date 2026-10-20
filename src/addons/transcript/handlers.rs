@@ -89,9 +89,14 @@ pub async fn get_call_record_transcript(
             }))
             .into_response()
         }
+        // Keep the stored status so the console can tell a failed or lost
+        // transcript apart from one that was never requested.
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({ "message": "Transcript not available" })),
+            Json(json!({
+                "message": "Transcript not available",
+                "status": record.transcript_status,
+            })),
         )
             .into_response(),
         Err(err) => {
@@ -574,6 +579,11 @@ async fn load_stored_transcript(
 
     if let Some(cdr_data) = cdr {
         let mut fallback = PathBuf::from(&cdr_data.cdr_path);
+        fallback.set_extension("transcript.json");
+        candidates.push(fallback.to_string_lossy().into_owned());
+    } else if let Some(recording) = select_recording_path(record, None) {
+        // Without a CDR file the transcript is written next to the recording.
+        let mut fallback = PathBuf::from(recording);
         fallback.set_extension("transcript.json");
         candidates.push(fallback.to_string_lossy().into_owned());
     }

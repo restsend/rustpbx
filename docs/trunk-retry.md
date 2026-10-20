@@ -86,8 +86,9 @@ fixed for the call by the first target, since neither can change mid-call.
 Single-leg routing (originate, transfer, RWI) uses the first target.
 
 After a failure, the dialer tries the next target only when the failed target's
-policy lists the final status. The HTTP router does not return per-target
-retry policies yet.
+policy lists the final status. The HTTP router also accepts
+per-target `retry_policy` objects; see the [HTTP routing API](api_integration_guide.md#11-http-router-dynamic-call-routing).
+HTTP targets without a policy retain their legacy advance-on-failure behaviour.
 
 ## Attempt results
 

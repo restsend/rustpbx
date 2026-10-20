@@ -84,6 +84,37 @@ RustPBX 通过两种方式与外部系统交互：
 
 `record_start_at` 为本通通话覆盖 `[recording].auto_start_at`。省略时继承全局值；两者均未设置时默认为 `media`。也可以只返回此字段而不返回 `record`，在保留全局录音启用策略的同时覆盖开始时机。
 
+**顺序重试与 RTP 网卡选择**：
+
+```json
+{
+  "action": "forward",
+  "strategy": "sequential",
+  "targets": [
+    {"uri": "sip:1001@192.0.2.10:5060", "retry_policy": {"status_codes": [408, 503]}},
+    {"uri": "sip:1001@192.0.2.11:5060", "retry_policy": {"status_codes": []}}
+  ],
+  "media_proxy": "all",
+  "rtp_config": {"bind_ip": "10.0.0.10", "external_ip": "203.0.113.10"}
+}
+```
+
+`targets` 可以混用 SIP URI 字符串和包含 `uri`、可选 `retry_policy` 的对象。
+重试策略仅在目标级配置；当前目标失败时，只有状态码在其 `status_codes`
+列表内才尝试下一个目标。状态码范围为 300–699，空列表禁止继续重试。
+字符串目标或未设置策略的对象保留原有行为：失败后继续下一个目标。每个目标只尝试一次，
+不会重新请求 HTTP 路由服务。接听或主叫取消后停止；`parallel` 并行呼叫不使用重试策略。
+`max_ring_time` 限制整个呼叫建立阶段，`timeout` 限制通话时长。
+
+`rtp_config.bind_ip` 指定本机 RTP/SRTP socket 绑定地址，必须是 PBX 主机上的 IP；
+`external_ip` 指定 SDP 宣告地址。两者支持 IPv4/IPv6 字面量，省略或 null 继承服务器配置。
+这些设置作用于整个呼叫，重试时保持不变。需要媒体经过指定网卡时使用
+`media_proxy: "all"`；直连或 bypass 不会绑定代理 RTP socket。
+WebRTC 仍然通过 ICE 跨网卡收集候选地址，不受此固定绑定地址限制。
+此对象仅开放上述两个字段，其余 RTC 设置仍采用现有服务器默认值。
+无效 IP、未知 `rtp_config` 字段或无效重试状态码会导致 SIP 500 路由错误。
+无效目标 URI 继续按原有行为跳过。
+
 ### 1.2 用户后端（SIP 认证）
 
 将 SIP 注册密码检查委托给外部数据库或 API。
