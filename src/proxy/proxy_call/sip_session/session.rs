@@ -3249,10 +3249,20 @@ impl SipSession {
         if self.meta.child_leg_role.is_none() || self.pinned_agent_id().is_some() {
             return;
         }
+        // Initial-dial legs carry no `endpoint` (only dynamic LegAdd legs
+        // do) — fall back to the dialplan's first target, then the original
+        // callee (the child dialog's dialed DN).
         let target = self
             .legs
             .get(&LegId::from("callee"))
-            .and_then(|leg| leg.endpoint.clone());
+            .and_then(|leg| leg.endpoint.clone())
+            .or_else(|| {
+                self.context
+                    .dialplan
+                    .first_target()
+                    .map(|t| t.aor.to_string())
+            })
+            .or_else(|| Some(self.context.original_callee.clone()));
         let Some(user) = target.as_deref().and_then(Self::uri_user_part) else {
             return;
         };
