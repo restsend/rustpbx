@@ -13147,6 +13147,83 @@ async fn remote_registered_leg_hangup_by_stays_agent_without_role() {
     );
 }
 
+/// Home-node child-leg session: the UUI-attributed role rides the dialog's
+/// lifecycle events. 344f7451 left the leg-scoped `call_answered` on the
+/// positional "callee" role and the session `call_hangup` without any role
+/// (its `leg_role() == role` filter never matched a positional leg), so
+/// consumers filtering `leg_role == "agent"` lost answered/hangup on
+/// cross-node dispatches (prd s17 A1/A10).
+#[tokio::test]
+async fn child_leg_session_stamps_attributed_role_on_lifecycle_events() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "child-role-sess".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "child-role-sess".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+    // The dispatcher routed this INVITE through the agent's home node; the
+    // UUI marker declares this session's dialog role.
+    session.meta.child_leg_role = Some("agent".into());
+
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-leg"));
+    leg.agent_id = Some("bob".into());
+    leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    session.legs.insert(LegId::from("agent-leg"), leg);
+    // Production home-node state: the dispatcher pins the agent on the routed
+    // INVITE — `normalize_call_hangup_by` needs it for the "agent" attribution.
+    SipSession::set_pinned_agent_id(&session.extensions, "bob");
+
+    // Answered: the UUI role, NOT the positional callee role.
+    session.update_leg_state(&LegId::from("agent-leg"), crate::call::domain::LegState::Connected);
+    let answered = events.try_recv().expect("leg answered");
+    assert_eq!(answered.event.event_type, "call_answered");
+    assert_eq!(
+        answered.event.payload["leg_role"], "agent",
+        "answered must carry the UUI role, not the positional callee: {answered:?}"
+    );
+
+    // Leg-scoped hangup: the UUI role rides the teardown too.
+    session.emit_rwi_leg_hangup(&LegId::from("agent-leg"), Some("UasBye".into()));
+    let hangup = events.try_recv().expect("leg hangup");
+    assert_eq!(hangup.event.event_type, "call_hangup");
+    assert_eq!(
+        hangup.event.payload["leg_role"], "agent",
+        "leg hangup must carry the UUI role: {hangup:?}"
+    );
+    assert_eq!(
+        hangup.event.payload["hangup_by"], "agent",
+        "UasBye on the agent leg is the agent hanging up"
+    );
+}
+
 /// Teardown-cascade leg selection: an established remote-registered agent leg
 /// still registered at session end is NOT cascade-reported (the home node's
 /// child-leg session owns that teardown); a local agent leg in the same
@@ -13334,3 +13411,4 @@ async fn caller_termination_preserves_application_exit_cause() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+

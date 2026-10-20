@@ -10910,23 +10910,26 @@ impl SipSession {
             },
             leg_id: None,
             // A child-leg session (cluster-dispatched queue agent / consult /
-            // transfer) stamps the role the dispatcher declared — but ONLY
-            // while that leg is still registered: an unregistered leg already
-            // went through its terminal transition, and its own leg-scoped
-            // `call_hangup` has reported the teardown. Re-claiming the role
-            // here would give consumers a second, contradictory
-            // `leg_role == "agent"` event (UasBye from the leg exit vs the
-            // session reason). In-setup legs (never connected) stay out of
-            // the report — their misses carry their own events.
-            leg_role: self.meta.child_leg_role.clone().filter(|role| {
+            // transfer) stamps the role the dispatcher declared — but only
+            // while the attributed leg is still registered here. When the leg
+            // exited through its own leg-scoped `call_hangup` (dynamic-monitor
+            // `LegEnded` → emit + REMOVE), the teardown is already reported
+            // and re-claiming the role here would double-report it. The
+            // attribution marker is `agent_id` (this session's legs carry
+            // POSITIONAL roles — the former `leg_role() == role` filter never
+            // matched them, silently dropping the attribution on cross-node
+            // dispatches, s17 A1/A10). In-setup legs (never connected) stay
+            // out of the report — their misses carry their own events.
+            leg_role: self.meta.child_leg_role.clone().filter(|_role| {
                 self.legs.values().any(|leg| {
-                    !matches!(
-                        leg.state,
-                        crate::call::domain::LegState::Initializing
-                            | crate::call::domain::LegState::Ringing
-                            | crate::call::domain::LegState::EarlyMedia
-                            | crate::call::domain::LegState::Ending
-                    ) && leg.leg_role() == role.as_str()
+                    leg.agent_id.is_some()
+                        && !matches!(
+                            leg.state,
+                            crate::call::domain::LegState::Initializing
+                                | crate::call::domain::LegState::Ringing
+                                | crate::call::domain::LegState::EarlyMedia
+                                | crate::call::domain::LegState::Ending
+                        )
                 })
             }),
             call_id: self.context.session_id.clone(),
@@ -15000,7 +15003,13 @@ impl SipSession {
             scope: crate::rwi::CallHangupScope::Leg,
             call_id: self.context.session_id.clone(),
             leg_id: Some(id.to_string()),
-            leg_role: self.leg_role_of(id.as_str()),
+            // Child-leg session: the UUI role rides the leg-scoped teardown
+            // too (positional "callee" lost the agent attribution, s17 A1).
+            leg_role: self
+                .meta
+                .child_leg_role
+                .clone()
+                .or_else(|| self.leg_role_of(id.as_str())),
             reason,
             sip_status,
             hangup_by,
@@ -15041,7 +15050,17 @@ impl SipSession {
                         if !was_hold {
                             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                                 leg_id: Some(leg_id.to_string()),
-                                leg_role: self.leg_role_of(leg_id.as_str()),
+                                // Child-leg session (cluster-dispatched queue
+                                // agent / consult / transfer): the UUI role
+                                // rides EVERY lifecycle event of this dialog —
+                                // positional "callee" here made consumers
+                                // filtering leg_role="agent" lose answered
+                                // (s17 A1/A10). Non-child sessions: unchanged.
+                                leg_role: self
+                                    .meta
+                                    .child_leg_role
+                                    .clone()
+                                    .or_else(|| self.leg_role_of(leg_id.as_str())),
                                 call_id: self.context.session_id.clone(),
                             });
                         }
@@ -15124,16 +15143,26 @@ impl SipSession {
             }
         }
         // Core hold/unheld events (agent attribution comes from the meta
-        // already published at ringing/connected time).
+        // already published at ringing/connected time). Child-leg session:
+        // the UUI role rides hold/unheld too (positional "callee" lost the
+        // agent attribution, same as answered/hangup).
         if entered_hold {
             self.emit_typed_rwi_event(&crate::rwi::CallHeld {
-                leg_role: self.leg_role_of(&leg_id_str),
+                leg_role: self
+                    .meta
+                    .child_leg_role
+                    .clone()
+                    .or_else(|| self.leg_role_of(&leg_id_str)),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
         } else {
             self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
-                leg_role: self.leg_role_of(&leg_id_str),
+                leg_role: self
+                    .meta
+                    .child_leg_role
+                    .clone()
+                    .or_else(|| self.leg_role_of(&leg_id_str)),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
