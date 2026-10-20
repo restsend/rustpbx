@@ -456,6 +456,29 @@ pub trait AgentRegistry: Send + Sync {
             .await
     }
 
+    /// Resolve a retry round while excluding agents that already rang.
+    /// Backends that reserve candidates or publish assignments must override
+    /// this hook and exclude them before either side effect. The default
+    /// preserves filtering for resolvers without reservation side effects.
+    async fn resolve_target_with_exclusions(
+        &self,
+        target_uri: &str,
+        policy: Option<&str>,
+        call_id: &str,
+        priority: i32,
+        excluded_agent_ids: &[String],
+    ) -> Vec<String> {
+        let mut targets = self
+            .resolve_target_with_priority(target_uri, policy, call_id, priority)
+            .await;
+        targets.retain(|uri| {
+            let id = crate::models::call_record::extract_sip_username(uri)
+                .unwrap_or_else(|| uri.to_string());
+            !excluded_agent_ids.contains(&id)
+        });
+        targets
+    }
+
     /// Like [`Self::select_agent_with_policy`] but also carries the caller's
     /// ACD queue priority (see [`Self::resolve_target_with_priority`]).
     /// Default implementation ignores the priority and delegates.

@@ -198,7 +198,14 @@ pub fn extract_inherited(request: &Request) -> Option<String> {
 /// Call-ID reuse there is no accidental-shape risk in accepting it.
 pub fn parse_wire_header(raw: &str) -> Option<String> {
     let local = raw.split(';').next().unwrap_or("").trim();
-    let v: String = local
+    normalize_inherited(local)
+}
+
+/// Validate an explicitly inherited id independently of the local generator
+/// length, so forwarding across differently configured nodes preserves it.
+pub fn normalize_inherited(candidate: &str) -> Option<String> {
+    let v: String = candidate
+        .trim()
         .trim_start_matches("urn:uuid:")
         .replace('-', "")
         .to_ascii_lowercase();
@@ -228,7 +235,7 @@ pub fn build_wire_header(id: Option<&str>) -> (Option<String>, Option<Header>) {
     let Some(id) = id else {
         return (None, None);
     };
-    let Some(clean) = normalize(id) else {
+    let Some(clean) = normalize_inherited(id) else {
         // Defensive: never stamp a non-id-shaped candidate on the wire.
         return (None, None);
     };

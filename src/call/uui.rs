@@ -21,8 +21,9 @@
 //!   an existing logical call apart from a new call. Only trusted from
 //!   cluster peers; old peers ignore the unknown param.
 //!
-//! Plain p2p / wholesale calls never carry this header: it is only injected by
-//! the CC enricher and the transfer paths.
+//! Plain P2P calls do not inject this header. Besides CC dispatch, originate
+//! and transfer paths, opt-in RFC7989 padding uses it to retain a short root
+//! id's original length without changing the Session-ID wire format.
 
 use rsipstack::sip::Header;
 

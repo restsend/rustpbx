@@ -1543,15 +1543,26 @@ impl SipSession {
             ConstructMode::Uas { server_dialog } => {
                 let request = server_dialog.initial_request();
                 let cc_uui = crate::call::uui::extract_cc_uui(&request.headers);
-                let root = crate::call::session_id::extract_inherited(&request).or_else(|| {
-                    cc_uui
-                        .as_ref()
-                        .filter(|uui| {
-                            uui.leg.is_none()
-                                || crate::call::session_id::is_session_id_like(&uui.session_id)
-                        })
-                        .map(|uui| uui.session_id.clone())
-                });
+                let inherited = crate::call::session_id::extract_inherited(&request);
+                let uui_root = cc_uui
+                    .as_ref()
+                    .filter(|uui| {
+                        uui.leg.is_none()
+                            || crate::call::session_id::normalize_inherited(&uui.session_id).is_some()
+                    })
+                    .map(|uui| uui.session_id.clone());
+                let root = match (inherited, uui_root) {
+                    (Some(header), Some(uui)) => {
+                        // RFC wire padding changes the representation, not the root.
+                        // Only matching UUI can recover its original short length;
+                        // legitimate leading-zero UUIDs otherwise remain intact.
+                        let original = crate::call::session_id::normalize_inherited(&uui)
+                            .filter(|id| id.len() < crate::call::session_id::LENGTH_MAX)
+                            .filter(|id| format!("{id:0>32}") == header);
+                        Some(original.unwrap_or(header))
+                    }
+                    (header, uui) => header.or(uui),
+                };
                 let declared = cc_uui
                     .as_ref()
                     .and_then(|uui| uui.leg.as_deref())
@@ -4182,7 +4193,7 @@ impl SipSession {
             .as_deref()
             .or(self.context.dialplan.session_id.as_deref())
             .unwrap_or(&self.context.session_id);
-        crate::call::session_id::normalize(candidate)
+        crate::call::session_id::normalize_inherited(candidate)
     }
 
     /// True when the inbound request arrived from a configured cluster peer.
@@ -4520,11 +4531,30 @@ impl SipSession {
         // Resolve the wire form of the session id up front: a native short id
         // is appended to `headers` as a raw Session-ID header (rsipstack's
         // InviteOption.session_id validation only accepts 32 hex chars).
-        let dial_session_id = crate::call::session_id::build_wire_header(
-            self.session_id_for_outgoing_leg().as_deref(),
-        );
+        let outgoing_session_id = self.session_id_for_outgoing_leg();
+        let dial_session_id =
+            crate::call::session_id::build_wire_header(outgoing_session_id.as_deref());
         if let Some(header) = dial_session_id.1.clone() {
             headers.push(header);
+        }
+        if let (Some(root), Some(wire)) =
+            (outgoing_session_id.as_deref(), dial_session_id.0.as_deref())
+        {
+            // RFC padding loses the original length. Carry the root through
+            // the existing UUI channel, preserving any supplied CC metadata
+            // and leaving unrelated UUI purposes untouched.
+            if root != wire
+                && !headers.iter().any(|header| {
+                    header
+                        .name()
+                        .eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME)
+                        && crate::call::uui::parse_uui(&header.value()).is_some()
+                })
+            {
+                headers.push(crate::call::uui::build_uui_header(
+                    root, None, None, None, None,
+                ));
+            }
         }
 
         // CTI uses the agent leg's SIP Call-ID, including while it is ringing.

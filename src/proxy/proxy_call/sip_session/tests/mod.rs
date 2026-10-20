@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "addon-cc")]
 mod recording_stop_tests;
 
+mod session_id_tests;
+
 #[tokio::test]
 async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
     use crate::call::{DialDirection, Dialplan};

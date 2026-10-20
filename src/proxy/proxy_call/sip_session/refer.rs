@@ -549,9 +549,8 @@ impl SipSession {
         // Wire form of the root session id for the INVITE below: native short
         // ids ride a raw Session-ID header (rsipstack's InviteOption.session_id
         // validation only accepts 32 hex chars).
-        let transfer_session_id = crate::call::session_id::build_wire_header(
-            crate::call::session_id::normalize(&root_session_id).as_deref(),
-        );
+        let transfer_session_id =
+            crate::call::session_id::build_wire_header(Some(&root_session_id));
         if let Some(header) = transfer_session_id.1.clone() {
             headers.push(header);
         }

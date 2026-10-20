@@ -1117,8 +1117,25 @@ impl QueueApp {
         let target = format!("skill-group:{}", sg);
         let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
         let mut uris = registry
-            .resolve_target_with_priority(&target, None, &self.call_id, priority)
+            .resolve_target_with_exclusions(
+                &target,
+                None,
+                &self.call_id,
+                priority,
+                &self.no_answer_agents,
+            )
             .await;
+        // Exclusions must reach the resolver BEFORE it reserves or announces
+        // an agent. Once every eligible agent has rung, start a new rotation;
+        // keep the history if even an unrestricted poll has no candidates.
+        if uris.is_empty() && !self.no_answer_agents.is_empty() {
+            uris = registry
+                .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                .await;
+            if !uris.is_empty() {
+                self.no_answer_agents.clear();
+            }
+        }
         if uris.is_empty() {
             // Self-heal, then re-poll: heals this caller within one poll
             // instead of waiting for the periodic watchdog.
@@ -1129,7 +1146,13 @@ impl QueueApp {
                     "Queue: dead agent bindings healed — re-polling candidates"
                 );
                 uris = registry
-                    .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                    .resolve_target_with_exclusions(
+                        &target,
+                        None,
+                        &self.call_id,
+                        priority,
+                        &self.no_answer_agents,
+                    )
                     .await;
             }
         }
@@ -1137,33 +1160,6 @@ impl QueueApp {
             debug!(skill_group = %sg, "Queue: wait retention poll — still no Idle agent");
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
-        }
-
-        // Fresh-candidate preference: after a no-answer round-trip the next
-        // offer must go to an agent this call has NOT already rung. Drop the
-        // no-answered agents from the resolved list; when EVERY resolved
-        // candidate was already tried (single-agent group, or the others were
-        // taken by concurrent calls), start a new rotation over the original
-        // list so the call keeps cycling until `max_wait_secs` instead of
-        // starving in wait retention.
-        if !self.no_answer_agents.is_empty() {
-            let fresh: Vec<String> = uris
-                .iter()
-                .filter(|uri| {
-                    let id = extract_sip_username(uri).unwrap_or_else(|| uri.to_string());
-                    !self.no_answer_agents.contains(&id)
-                })
-                .cloned()
-                .collect();
-            if fresh.is_empty() {
-                debug!(
-                    queue = %self.config.name,
-                    "Queue: all resolved candidates already no-answered this call — starting a new rotation"
-                );
-                self.no_answer_agents.clear();
-            } else {
-                uris = fresh;
-            }
         }
 
         info!(

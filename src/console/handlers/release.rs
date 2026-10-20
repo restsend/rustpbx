@@ -581,8 +581,11 @@ pub async fn releases_page(
 /// local directory). Credentials are never returned; only `has_credentials`.
 pub async fn get_storage_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "read").await {
+        return resp;
+    }
     let store = config_store(&state);
     let stored = stored_storage(&store).await;
     let from_toml = state
@@ -605,12 +608,15 @@ pub async fn get_storage_handler(
 /// here; `clear_credentials: true` removes them (anonymous bucket access).
 pub async fn put_storage_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(body): Json<UpdateStorageBody>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let store = config_store(&state);
-    let existing = stored_storage(&store).await;
-    let cfg = match storage_from_update_body(&body, existing.as_ref()) {
+    let existing = effective_release_storage(&state).await;
+    let cfg = match storage_from_update_body(&body, Some(&existing)) {
         Ok(cfg) => cfg,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
@@ -642,8 +648,11 @@ pub async fn put_storage_handler(
 /// directory).
 pub async fn delete_storage_handler(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let store = config_store(&state);
     if let Err(e) = store
         .delete(RELEASE_CATEGORY, RELEASE_STORAGE_ENTRY)
@@ -753,8 +762,17 @@ async fn storage_of_kind(state: &ConsoleState, kind: StorageKind) -> Result<Arti
 /// Backend owning a stored artifact path: `s3://…` → the configured S3
 /// bucket, anything else → the local directory.
 async fn storage_for_path(state: &ConsoleState, storage_path: &str) -> Result<ArtifactStorage, String> {
-    if storage_path.trim().starts_with("s3://") {
-        storage_of_kind(state, StorageKind::S3).await
+    if let Some(path) = storage_path.trim().strip_prefix("s3://") {
+        let bucket = path.split('/').next().unwrap_or_default();
+        let stored = stored_storage(&config_store(state)).await;
+        let from_toml = state.config().release.as_ref().and_then(|r| r.storage.clone());
+        // A new upload default must not redirect artifacts owned by another bucket.
+        for cfg in [stored, from_toml].into_iter().flatten() {
+            if matches!(&cfg, ArtifactStorage::S3 { bucket: configured, .. } if configured == bucket) {
+                return Ok(cfg);
+            }
+        }
+        Err("S3 storage for the artifact bucket is not configured".into())
     } else {
         storage_of_kind(state, StorageKind::Local).await
     }
@@ -1210,7 +1228,7 @@ async fn presign_artifact(
         endpoint: Some(endpoint),
         prefix,
         ..
-    }) = storage_of_kind(state, StorageKind::S3).await
+    }) = storage_for_path(state, storage_path).await
     {
         let bucket = bucket.trim_matches('/');
         let base = endpoint.trim_end_matches('/');
@@ -2187,6 +2205,14 @@ pub(crate) mod tests {
                     "application/json",
                     Vec::new(),
                 ),
+                ("GET", "/api/release/storage", "application/json", Vec::new()),
+                (
+                    "PUT",
+                    "/api/release/storage",
+                    "application/json",
+                    br#"{"type":"local","path":"storage/test-releases"}"#.to_vec(),
+                ),
+                ("DELETE", "/api/release/storage", "application/json", Vec::new()),
             ] {
                 let response = crate::api::router(state.clone())
                     .oneshot(
@@ -2213,8 +2239,8 @@ pub(crate) mod tests {
             };
             assert_eq!(
                 statuses,
-                vec![expected; 3],
-                "POST/PUT/DELETE must require system:write"
+                vec![expected; 6],
+                "release administration must require system permissions"
             );
             assert_eq!(tmp.path().join("0.2.0/app.zip").exists(), user.is_superuser);
             let releases = load_docs(&config_store(&state)).await.unwrap();
@@ -3002,6 +3028,75 @@ pub(crate) mod tests {
         let cfg = json_body(authed(&state, "GET", "/api/release/storage", Body::empty()).await).await;
         assert_eq!(cfg["source"], "config");
         assert_eq!(cfg["type"], "local");
+    }
+
+    #[tokio::test]
+    async fn storage_settings_keep_config_credentials_on_first_save() {
+        let (state, _tmp, _app) = setup_release_stack_with_storage(Some(ArtifactStorage::S3 {
+            vendor: crate::storage::S3Vendor::Minio,
+            bucket: "releases".into(),
+            region: "us-east-1".into(),
+            access_key: Some("test-access".into()),
+            secret_key: Some("test-secret".into()),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            prefix: None,
+        }))
+        .await;
+        let initial = json_body(authed(&state, "GET", "/api/release/storage", Body::empty()).await).await;
+        assert_eq!(initial["has_credentials"], true);
+        assert_eq!(initial["source"], "config");
+        let response = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(r#"{"type":"s3","vendor":"minio","bucket":"releases","region":"us-east-1","endpoint":"http://127.0.0.1:9000","access_key":"","secret_key":"","clear_credentials":false}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["has_credentials"], true);
+        let saved = stored_storage(&config_store(&state)).await.unwrap();
+        let ArtifactStorage::S3 { access_key, secret_key, .. } = saved else {
+            panic!("expected S3 backend");
+        };
+        assert_eq!(access_key.as_deref(), Some("test-access"));
+        assert_eq!(secret_key.as_deref(), Some("test-secret"));
+    }
+
+    #[tokio::test]
+    async fn stored_s3_default_preserves_downloads_from_configured_bucket() {
+        for signed in [false, true] {
+            let (state, _tmp, _app) = setup_release_stack_with_storage(Some(ArtifactStorage::S3 {
+                vendor: crate::storage::S3Vendor::Minio,
+                bucket: "original".into(),
+                region: "us-east-1".into(),
+                access_key: signed.then(|| "test-access".into()),
+                secret_key: signed.then(|| "test-secret".into()),
+                endpoint: Some("http://127.0.0.1:9000".into()),
+                prefix: None,
+            }))
+            .await;
+            seed(&state, vec![ReleaseDoc {
+                storage_path: "s3://original/0.1.13/app.zip".into(),
+                ..doc("0.1.13", true)
+            }]).await;
+            let response = authed(
+                &state,
+                "PUT",
+                "/api/release/storage",
+                Body::from(r#"{"type":"s3","vendor":"minio","bucket":"new-default","region":"us-east-1","endpoint":"http://127.0.0.1:9001","access_key":"new-access","secret_key":"new-secret"}"#),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let check = get(&state, "/api/release").await;
+            assert_eq!(check.status(), StatusCode::OK);
+            let url = json_body(check).await["url"].as_str().unwrap().to_string();
+            assert!(url.starts_with("http://127.0.0.1:9000/original/"), "{url}");
+            assert_eq!(url.contains("X-Amz-Signature"), signed);
+            let download = get(&state, "/api/release/0.1.13/download").await;
+            assert_eq!(download.status(), StatusCode::FOUND);
+            assert!(download.headers()[header::LOCATION].to_str().unwrap()
+                .starts_with("http://127.0.0.1:9000/original/"));
+        }
     }
 
     /// The multipart `storage` field picks the backend per upload: unknown
