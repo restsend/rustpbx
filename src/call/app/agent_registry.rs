@@ -128,6 +128,75 @@ pub struct AgentRingPolicy {
     pub no_answer_state: PresenceState,
 }
 
+/// What the registry did to reconcile an agent who actively REJECTED an
+/// assignment (486 Busy Here). Consumed by the queue app for the CDR trace
+/// and the assigned-not-answered alert.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AgentRejectOutcome {
+    /// Base status the ring binding was released to (`away`/`dnd`/`wrapup`/
+    /// `idle`), when the binding was still live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub released_to: Option<String>,
+    /// The client-declared break restored (memory capture or durable
+    /// history reconstruction) — server/client presence mismatch healed.
+    /// Serialized as `away:<detail>` / `dnd`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_break: Option<String>,
+    /// The configured automatic no-answer break was forced after
+    /// consecutive rejects (hard loop stop).
+    #[serde(default)]
+    pub forced_break: bool,
+    /// Cooldown staged via wrapup, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<u64>,
+    /// Consecutive reject/no-answer streak after this event.
+    #[serde(default)]
+    pub streak: u32,
+}
+
+impl AgentRejectOutcome {
+    /// Server thought the agent was schedulable while the client refused —
+    /// the state-drift signature.
+    pub fn state_mismatch(&self) -> bool {
+        self.restored_break.is_some() || self.forced_break
+    }
+}
+
+/// Why an assignment failed to be picked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignFailReason {
+    /// The agent's UA answered 486 (Busy Here) — typically a client-side
+    /// auto-reject while the agent is on a break.
+    Rejected,
+    /// The ring timed out without an answer.
+    NoAnswer,
+}
+
+impl AssignFailReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssignFailReason::Rejected => "rejected_486",
+            AssignFailReason::NoAnswer => "no_answer",
+        }
+    }
+}
+
+/// Instant "assigned but not answered" alert payload (486 reject or ring
+/// timeout). Fired per event by the queue app through the addon alerting
+/// plane; see `emit_assign_failed_alert`.
+#[derive(Debug, Clone)]
+pub struct AssignFailedAlert {
+    pub call_id: String,
+    pub queue_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub reason: AssignFailReason,
+    /// Canonical SIP status of the failure (486 for rejects).
+    pub sip_status: Option<u16>,
+    /// Reject reconciliation details (absent for ring timeouts).
+    pub outcome: Option<AgentRejectOutcome>,
+}
+
 /// Complete agent information stored in registry
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
@@ -272,6 +341,34 @@ pub trait AgentRegistry: Send + Sync {
     ) {
         self.note_agent_no_answer(agent_id, call_id).await;
     }
+
+    /// Called when an assigned agent actively REJECTED the offer (486 Busy
+    /// Here) — a client-side readiness signal, unlike a mere ring timeout.
+    ///
+    /// Implementations treat the reject like a no-answer for scheduling
+    /// (round exclusion + cooldown/streak) and additionally reconcile the
+    /// server's presence view with what the client just declared by
+    /// refusing: restore the pre-ring break the ring overwrote (memory
+    /// capture or durable history reconstruction — heals the
+    /// server-`idle`-vs-client-小休 drift that keeps re-dispatching into a
+    /// 486 auto-reject loop), and force the automatic no-answer break after
+    /// consecutive rejects. Returns the reconciliation outcome for the CDR
+    /// trace and the assigned-not-answered alert.
+    async fn note_agent_rejected(
+        &self,
+        agent_id: &str,
+        call_id: &str,
+        policy: Option<&AgentRingPolicy>,
+    ) -> AgentRejectOutcome {
+        self.note_agent_no_answer_with_policy(agent_id, call_id, policy)
+            .await;
+        AgentRejectOutcome::default()
+    }
+
+    /// Fire an instant "assigned but not answered" alert (486 reject or
+    /// ring timeout) through the addon's alerting plane (webhook / RWI /
+    /// metrics / alert history). Default: no alerting configured.
+    async fn emit_assign_failed_alert(&self, _info: &AssignFailedAlert) {}
 
     async fn prepare_client_ring_offer(
         &self,

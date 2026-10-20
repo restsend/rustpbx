@@ -66,6 +66,7 @@ fn engine_with_policies(policies: HashMap<String, AcdPolicy>, default: &str) -> 
         default_policy: default.to_string(),
         strict_fifo: true,
         no_answer_cooldown_secs: 0,
+        reject_cooldown_secs: 0,
         console_managed: false,
     }))
 }

@@ -2067,6 +2067,11 @@ mod tests {
         fifo_callers: std::sync::Mutex<Vec<String>>,
         fifo_begins: std::sync::Mutex<Vec<String>>,
         fifo_releases: std::sync::Mutex<Vec<String>>,
+        /// 486 reconciliations seen by `note_agent_rejected`:
+        /// (agent_id, call_id, policy_present).
+        rejects: std::sync::Mutex<Vec<(String, String, bool)>>,
+        /// Alerts seen by `emit_assign_failed_alert`.
+        assign_alerts: std::sync::Mutex<Vec<crate::call::app::agent_registry::AssignFailedAlert>>,
     }
 
     impl HookRecordingRegistry {
@@ -2088,6 +2093,8 @@ mod tests {
                 fifo_callers: std::sync::Mutex::new(Vec::new()),
                 fifo_begins: std::sync::Mutex::new(Vec::new()),
                 fifo_releases: std::sync::Mutex::new(Vec::new()),
+                rejects: std::sync::Mutex::new(Vec::new()),
+                assign_alerts: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -2285,6 +2292,29 @@ mod tests {
                 reason.to_string(),
                 action.to_string(),
             ));
+        }
+
+        async fn note_agent_rejected(
+            &self,
+            agent_id: &str,
+            call_id: &str,
+            policy: Option<&crate::call::app::agent_registry::AgentRingPolicy>,
+        ) -> crate::call::app::agent_registry::AgentRejectOutcome {
+            self.rejects.lock().unwrap().push((
+                agent_id.to_string(),
+                call_id.to_string(),
+                policy.is_some(),
+            ));
+            self.inner
+                .note_agent_rejected(agent_id, call_id, policy)
+                .await
+        }
+
+        async fn emit_assign_failed_alert(
+            &self,
+            info: &crate::call::app::agent_registry::AssignFailedAlert,
+        ) {
+            self.assign_alerts.lock().unwrap().push(info.clone());
         }
     }
 
@@ -4346,6 +4376,145 @@ mod tests {
         assert_eq!(
             rejected["leg_role"], "agent",
             "queue_agent_rejected must describe the agent leg"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// A 486 rejection drives the full anti-loop contract:
+    /// `note_agent_rejected` reconciliation, the round exclusion set (the
+    /// same agent is NOT re-dialed within the round), the terminal CDR
+    /// trace entry, and the instant assigned-not-answered alert.
+    #[tokio::test]
+    async fn test_queue_agent_reject_reconciles_excludes_and_alerts() {
+        use crate::call::app::agent_registry::AssignFailReason;
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .register(
+                "agent-002".to_string(),
+                "Bob".to_string(),
+                "sip:agent2@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        for id in ["agent-001", "agent-002"] {
+            registry
+                .inner
+                .update_presence(id, crate::call::app::agent_registry::PresenceState::Idle)
+                .await
+                .unwrap();
+        }
+
+        let mut config = build_sequential_queue_config();
+        config.fallback = Some(QueueFallbackAction::Failure(FailureAction::Hangup {
+            code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            reason: Some("All agents busy".to_string()),
+        }));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+
+        // The agent rejects with 486.
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({
+                "leg_id": "agent-leg-1",
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent-001",
+                "reason": "Rejected with 486",
+            }),
+        );
+
+        // Reconciliation + alert are dispatched synchronously in the handler.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let rejected = !registry.rejects.lock().unwrap().is_empty();
+            let alerted = !registry.assign_alerts.lock().unwrap().is_empty();
+            if (rejected && alerted) || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let rejects = registry.rejects.lock().unwrap().clone();
+        assert_eq!(
+            rejects,
+            vec![("agent-001".to_string(), "call-001".to_string(), false)],
+            "the 486 must drive note_agent_rejected exactly once"
+        );
+        let alerts = registry.assign_alerts.lock().unwrap().clone();
+        assert_eq!(alerts.len(), 1, "one instant assigned-not-answered alert");
+        assert_eq!(alerts[0].agent_id, "agent-001");
+        assert_eq!(alerts[0].queue_id, "sequential-queue");
+        assert_eq!(alerts[0].reason, AssignFailReason::Rejected);
+        assert_eq!(alerts[0].sip_status, Some(486));
+
+        // The sequential re-dial offers the NEXT agent (never the rejecting
+        // one); notify-event echoes may interleave — drain them.
+        let mut redial_target = None;
+        for _ in 0..20 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::InjectAppEvent { .. }) => continue,
+                Some(CallCommand::LegAdd { target, .. }) => {
+                    redial_target = Some(target);
+                    break;
+                }
+                Some(other) => panic!("expected re-dial LegAdd, got {other:?}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            redial_target.as_deref(),
+            Some("sip:agent2@example.com"),
+            "the rejecting agent must be skipped in the same round"
         );
 
         stack.cancel();

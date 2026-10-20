@@ -2356,6 +2356,11 @@ impl CallModule {
             // 中继信封自带 `agent`（创建节点注入），按它在本节点终端投递。
             // 只做终端（home==self）：locator 中途漂移 → 404（创建侧长轮询
             // 超时收场），中继消息不再二次转发。
+            //
+            // 应答以**本 RELAY MESSAGE 事务的 200 body** 带回创建节点（坐席
+            // 跳同一机制）：home 在 [`ADMIN_CMD_AGENT_WAIT`] 内等坐席 answer，
+            // 拿到即 200+body；无本地注册 404；坐席无应答 200+空 body（创建
+            // 侧按 timeout 收场）。
             let relay_agent = serde_json::from_slice::<serde_json::Value>(tx.original.body())
                 .ok()
                 .and_then(|v| v.get("agent").and_then(|a| a.as_str()).map(str::to_string));
@@ -2366,10 +2371,27 @@ impl CallModule {
                 }
                 None => Err(anyhow::anyhow!("admin relay body missing agent")),
             } {
-                Ok(true) => {
+                Ok(crate::call::sip::AdminCmdOutcome::Answered(answer)) => {
+                    info!(
+                        bytes = answer.body.len(),
+                        "admin cmd relay: agent answer relayed via 200 body"
+                    );
+                    let headers = vec![rsipstack::sip::Header::ContentType(
+                        answer
+                            .content_type
+                            .unwrap_or_else(|| crate::call::sip::ADMIN_CMD_ANSWER_CT.into())
+                            .into(),
+                    )];
+                    tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(answer.body))
+                        .await?;
+                }
+                Ok(crate::call::sip::AdminCmdOutcome::NoAnswer) => {
+                    // 坐席无应答（离线/崩溃/老版本）：200 + 空 body，创建侧
+                    // 按 timeout 收场——不让创建侧空等到自己的超时。
+                    info!("admin cmd relay: agent did not answer in time");
                     tx.reply(rsipstack::sip::StatusCode::OK).await?;
                 }
-                Ok(false) => {
+                Ok(crate::call::sip::AdminCmdOutcome::NotRegistered) => {
                     // 目标坐席在本节点无本地注册（stale locator / 已注销）。
                     tx.reply(rsipstack::sip::StatusCode::NotFound).await?;
                 }
@@ -2859,9 +2881,20 @@ mod tests {
                 }).await.unwrap();
             }
             let body = br#"{"v":1,"cmd":"log","trans_id":"tx-2","agent":"agent","days":1}"#.to_vec();
-            let delivered = crate::call::sip::deliver_admin_cmd(&server, "agent", &body)
-                .await.expect("delivery attempt must not error");
-            assert!(delivered, "the registered agent must be found");
+            // 短等待窗口：本 harness 无人应答 MESSAGE——投递即证路由正确，
+            // 结果应为 NoAnswer（而非 NotRegistered）。
+            let outcome = crate::call::sip::deliver_admin_cmd_with_wait(
+                &server,
+                "agent",
+                &body,
+                std::time::Duration::from_millis(300),
+            )
+            .await
+            .expect("delivery attempt must not error");
+            assert!(
+                matches!(outcome, crate::call::sip::AdminCmdOutcome::NoAnswer),
+                "registered agent must be found and paged, got {outcome:?}"
+            );
             let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 loop {
                     if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =

@@ -43,6 +43,10 @@ mod agent_acd_status_acceptance_e2e;
 mod queue_alert_e2e;
 
 #[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/assigned_not_answered_e2e.rs"]
+mod assigned_not_answered_e2e;
+
+#[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/outbound_policy_e2e.rs"]
 mod outbound_policy_e2e;
 

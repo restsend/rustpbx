@@ -18,7 +18,10 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::agent_registry::{AgentRegistry, AgentRingPolicy, PresenceState, RoutingStrategy};
+use super::agent_registry::{
+    AgentRegistry, AgentRingPolicy, AssignFailReason, AssignFailedAlert, PresenceState,
+    RoutingStrategy,
+};
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
@@ -1729,9 +1732,12 @@ impl QueueApp {
         // just-failed agent is excluded via `no_answer_agents`), exactly one
         // agent rings at a time, and the webhook observes
         // `queue_joined{attempt:n}` per assignment. Explicit rejections
-        // (Busy/486) keep the fast same-round sequential re-dial contract
-        // (see test_queue_rejected_rwi_e2e), and non-skill-group queues keep
-        // the legacy dial-next behavior entirely.
+        // (Busy/486) now share that exclusion — the rejecting agent is also
+        // recorded in `no_answer_agents` for the round and reconciled via
+        // `note_agent_rejected` (break restore / cooldown), because a client
+        // auto-rejecting while the server shows idle is presence drift, and
+        // re-dialing it loops (see test_queue_rejected_rwi_e2e). Non-skill-
+        // group queues keep the legacy dial-next behavior entirely.
         if matches!(reason, AgentUnavailableReason::NoAnswer) && self.allows_wait_retention() {
             if self.fallback_executed {
                 debug!(
@@ -3184,8 +3190,62 @@ impl CallApp for QueueApp {
                         )
                         .await;
 
-                        if let Some(ref registry) = self.agent_registry {
+                        if let Some(registry) = self.agent_registry.clone() {
+                            // A 486 is a client-side readiness signal, not a
+                            // capacity signal: reconcile the agent like a
+                            // no-answer (restore the client-declared break /
+                            // cooldown / streak) BEFORE the generic release,
+                            // then record them in THIS round's exclusion set
+                            // so wait retention cannot immediately re-dial
+                            // the same auto-rejecting agent (the 486 loop).
+                            let outcome = registry
+                                .note_agent_rejected(
+                                    &agent_id,
+                                    &self.call_id,
+                                    self.ring_policy.as_ref(),
+                                )
+                                .await;
                             let _ = registry.release_call(&agent_id, &self.call_id).await;
+                            self.record_no_answer_agent(agent_id.clone());
+
+                            // Terminal CDR trace: closes the "Offering call
+                            // to agent X" entry so the timeline shows the
+                            // assignment was made and refused.
+                            let state_mismatch = outcome.state_mismatch();
+                            let outcome_detail =
+                                serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+                            ctrl.record_trace(
+                                crate::call_errors::TraceEvent::new(
+                                    crate::call_errors::TraceKind::Queue,
+                                    format!(
+                                        "Agent {} rejected the assignment (486 Busy)",
+                                        &agent_id
+                                    ),
+                                )
+                                .severity(crate::call_errors::ErrSeverity::Warn)
+                                .detail(serde_json::json!({
+                                    "agent_id": &agent_id,
+                                    "sip_status": 486,
+                                    "attempt": self.dial_attempts,
+                                    "queue_id": self.config.name,
+                                    "outcome": outcome_detail,
+                                    "state_mismatch": state_mismatch,
+                                })),
+                            );
+
+                            // Instant "assigned but not answered" alert —
+                            // a burned ring slot is immediately actionable.
+                            registry
+                                .emit_assign_failed_alert(&AssignFailedAlert {
+                                    call_id: self.call_id.clone(),
+                                    queue_id: self.config.name.clone(),
+                                    agent_id: agent_id.clone(),
+                                    attempt: self.dial_attempts as u32,
+                                    reason: AssignFailReason::Rejected,
+                                    sip_status: Some(486),
+                                    outcome: Some(outcome),
+                                })
+                                .await;
                         }
                     }
                     self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy, leg_id.as_deref())
@@ -3206,7 +3266,7 @@ impl CallApp for QueueApp {
                         return Ok(AppAction::Continue);
                     }
                     if !agent_id.is_empty()
-                        && let Some(ref registry) = self.agent_registry
+                        && let Some(registry) = self.agent_registry.clone()
                     {
                         // Same no-answer policy as the ring-timeout handler:
                         // the agent did not answer, so release them per
@@ -3218,6 +3278,35 @@ impl CallApp for QueueApp {
                             .await;
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
                         self.record_no_answer_agent(agent_id.clone());
+
+                        // Terminal CDR trace for the missed assignment
+                        // (mirrors the 486 reject entry).
+                        ctrl.record_trace(
+                            crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Queue,
+                                format!("Agent {} did not answer (ring timeout)", &agent_id),
+                            )
+                            .severity(crate::call_errors::ErrSeverity::Warn)
+                            .detail(serde_json::json!({
+                                "agent_id": &agent_id,
+                                "attempt": self.dial_attempts,
+                                "queue_id": self.config.name,
+                            })),
+                        );
+
+                        // Instant "assigned but not answered" alert — same
+                        // plane as the 486 reject path.
+                        registry
+                            .emit_assign_failed_alert(&AssignFailedAlert {
+                                call_id: self.call_id.clone(),
+                                queue_id: self.config.name.clone(),
+                                agent_id: agent_id.clone(),
+                                attempt: self.dial_attempts as u32,
+                                reason: AssignFailReason::NoAnswer,
+                                sip_status: None,
+                                outcome: None,
+                            })
+                            .await;
                     }
                     self.handle_agent_unavailable(
                         ctrl,
@@ -3332,6 +3421,32 @@ impl CallApp for QueueApp {
                             .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
                             .await;
                         timed_out_agent_ids.push(agent_id.clone());
+
+                        // Terminal CDR trace + instant alert for the missed
+                        // assignment (mirrors the 486 reject entry).
+                        ctrl.record_trace(
+                            crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Queue,
+                                format!("Agent {} did not answer (ring timeout)", &agent_id),
+                            )
+                            .severity(crate::call_errors::ErrSeverity::Warn)
+                            .detail(serde_json::json!({
+                                "agent_id": &agent_id,
+                                "attempt": self.dial_attempts,
+                                "queue_id": self.config.name,
+                            })),
+                        );
+                        registry
+                            .emit_assign_failed_alert(&AssignFailedAlert {
+                                call_id: self.call_id.clone(),
+                                queue_id: self.config.name.clone(),
+                                agent_id: agent_id.clone(),
+                                attempt: self.dial_attempts as u32,
+                                reason: AssignFailReason::NoAnswer,
+                                sip_status: None,
+                                outcome: None,
+                            })
+                            .await;
 
                         ctrl.notify_event(
                             "queue.agent_no_answer",
