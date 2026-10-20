@@ -4,9 +4,11 @@ use crate::call::{
     TrunkContext, build_sip_uri,
 };
 use crate::config::{
-    HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
+    DialplanHints, HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy,
+    RtpConfig,
 };
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
+use crate::proxy::routing::TrunkConfig;
 use super::RetryPolicy;
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
@@ -16,6 +18,7 @@ use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
@@ -26,6 +29,9 @@ pub struct HttpCallRouter {
     pub enable_latching: bool,
     pub probation_max_packets: Option<u8>,
     pub client: reqwest::Client,
+    /// Trunk registry, wired at server build (after the proxy data context is
+    /// resolved) so structured targets can name a trunk explicitly.
+    pub data_context: Arc<crate::proxy::data::ProxyDataContext>,
 }
 
 impl HttpCallRouter {
@@ -35,6 +41,7 @@ impl HttpCallRouter {
         default_media_proxy_mode: ArcSwap<MediaProxyMode>,
         enable_latching: bool,
         probation_max_packets: Option<u8>,
+        data_context: Arc<crate::proxy::data::ProxyDataContext>,
     ) -> Self {
         let mut builder = reqwest::Client::builder();
         builder = builder
@@ -53,7 +60,226 @@ impl HttpCallRouter {
             enable_latching,
             probation_max_packets,
             client: builder.build().unwrap_or_default(),
+            data_context,
         }
+    }
+
+    /// Resolve a named trunk for a structured target the way the RWI
+    /// originate path does (`resolve_originate_trunk` in rwi/processor.rs):
+    /// unknown or disabled trunks are config errors, fail-closed.
+    fn resolve_router_trunk(&self, name: &str) -> Result<TrunkConfig, String> {
+        let trunk = self
+            .data_context
+            .get_trunk(name)
+            .ok_or_else(|| format!("unknown trunk '{name}'"))?;
+        if trunk.disabled.unwrap_or(false) {
+            return Err(format!("trunk '{name}' is disabled"));
+        }
+        Ok(trunk)
+    }
+
+    /// String/config targets stay bare Locations (the original schema, kept
+    /// verbatim so existing decision services are unaffected). Ok(None):
+    /// malformed target URI — preserved legacy behavior, skip it.
+    fn build_uri_attempt(
+        uri: String,
+        retry_policy: Option<RetryPolicy>,
+        headers: Option<Vec<rsipstack::sip::Header>>,
+    ) -> Result<Option<DialAttempt>, RouteError> {
+        if let Some(policy) = &retry_policy {
+            policy.validate().map_err(|error| RouteError {
+                error,
+                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                extensions: None,
+            }.with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED))?;
+        }
+        // Preserve legacy HTTP routing: skip malformed target URIs.
+        let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
+            return Ok(None);
+        };
+        Ok(Some(DialAttempt {
+            retry_policy,
+            ..Location {
+                aor: uri,
+                headers,
+                ..Default::default()
+            }.into()
+        }))
+    }
+
+    /// Build a dial attempt from one structured target. A target naming a
+    /// `trunk` is resolved against the trunk registry and stamped the same
+    /// way the static matcher stamps its selected trunk: `apply_trunk_config`
+    /// (destination next-hop, transport, credentials, host rewrite,
+    /// P-Asserted-Identity), `merge_trunk_media_hints` (media), and outbound
+    /// trunk metadata (CDR attribution) — plus the trunk's CPS /
+    /// concurrent-call gates.
+    ///
+    /// A bare-user callee qualifies against the trunk's destination host when
+    /// a trunk names the route, else the original request's host — so
+    /// `{"callee": "6001", "trunk": "gw"}` dials `sip:6001@<trunk dest>`.
+    ///
+    /// Ok(None): the target trunk's call budget is exhausted — transient;
+    /// routing advances to the next target (use_next_gw semantics). Err:
+    /// unknown/disabled trunk or an unparsable target — a decision-response /
+    /// config error, fail-closed.
+    #[allow(clippy::too_many_arguments)]
+    fn build_trunk_attempt(
+        &self,
+        callee: Option<String>,
+        trunk: Option<String>,
+        caller: Option<String>,
+        retry_policy: Option<RetryPolicy>,
+        target_headers: Option<HashMap<String, String>>,
+        route_headers: Option<Vec<rsipstack::sip::Header>>,
+        callee_realm: &str,
+        caller_uri: rsipstack::sip::Uri,
+        call_id: &str,
+    ) -> Result<Option<DialAttempt>, RouteError> {
+        let parse_error = |message: String| {
+            RouteError {
+                error: anyhow!("{message}"),
+                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                extensions: None,
+            }
+            .with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED)
+        };
+        let clean = |value: Option<String>| -> Option<String> {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+
+        // Per-target headers merge into (and override) the route-level ones.
+        let mut headers = route_headers.unwrap_or_default();
+        if let Some(target_headers) = &target_headers {
+            headers.extend(target_headers.iter().map(|(k, v)| {
+                rsipstack::sip::Header::Other(k.clone(), v.clone())
+            }));
+        }
+
+        let (callee, trunk_name, caller_override) =
+            (clean(callee), clean(trunk), clean(caller));
+
+        // Resolve the named trunk first — its destination host qualifies a
+        // bare-user callee.
+        let trunk = match trunk_name.as_deref() {
+            Some(name) => Some(
+                self.resolve_router_trunk(name)
+                    .map_err(|e| parse_error(format!("HTTP router target trunk: {e}")))?,
+            ),
+            None => None,
+        };
+        let callee = callee.ok_or_else(|| {
+            parse_error("HTTP router structured target is missing a callee".to_string())
+        })?;
+
+        let qualify_realm = match &trunk {
+            Some(trunk) => {
+                let dest_uri: rsipstack::sip::Uri = trunk.dest.as_str().try_into().map_err(|e| {
+                    parse_error(format!(
+                        "trunk '{}' has invalid destination '{}': {:?}",
+                        trunk_name.as_deref().unwrap_or_default(),
+                        trunk.dest,
+                        e
+                    ))
+                })?;
+                dest_uri.host_with_port.to_string()
+            }
+            None => callee_realm.to_string(),
+        };
+        let callee_uri: rsipstack::sip::Uri =
+            rsipstack::sip::Uri::try_from(build_sip_uri(&callee, &qualify_realm))
+                .map_err(|e| parse_error(format!("invalid callee '{callee}': {e}")))?;
+
+        let mut option = rsipstack::dialog::invitation::InviteOption {
+            callee: callee_uri,
+            caller: caller_uri,
+            headers: Some(headers),
+            ..Default::default()
+        };
+
+        let mut hints: Option<DialplanHints> = None;
+        if let Some(trunk) = &trunk {
+            let name = trunk_name.as_deref().unwrap_or_default();
+            // Destination-trunk CPS / concurrent-call gates — the same gates
+            // the static matcher enforces before stamping (matcher.rs). On
+            // reject the target is skipped: transient overload, routing
+            // advances (use_next_gw semantics).
+            if let Some(limiter) = &trunk.cps_limiter {
+                if let Err(reason) = limiter.try_acquire() {
+                    info!(
+                        call_id = %call_id,
+                        trunk = %name,
+                        reason = %reason,
+                        "target trunk CPS limit exceeded, skipping target"
+                    );
+                    return Ok(None);
+                }
+            }
+            if let Some(limiter) = &trunk.concurrent_call_limiter {
+                match limiter.try_acquire() {
+                    Ok(permit) => {
+                        hints
+                            .get_or_insert_with(DialplanHints::default)
+                            .concurrent_call_lease
+                            .push(permit);
+                    }
+                    Err(reason) => {
+                        info!(
+                            call_id = %call_id,
+                            trunk = %name,
+                            reason = %reason,
+                            "target trunk concurrent-call limit exceeded, skipping target"
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+            crate::proxy::routing::matcher::apply_trunk_config(&mut option, trunk)
+                .map_err(|e| parse_error(format!("trunk '{name}' config failed: {e}")))?;
+            crate::proxy::routing::matcher::merge_trunk_media_hints(&mut hints, trunk);
+            crate::proxy::routing::matcher::attach_outbound_trunk_metadata(
+                &mut hints,
+                name,
+                trunk,
+            );
+            info!(
+                call_id = %call_id,
+                trunk = %name,
+                dest = ?option.destination,
+                "target trunk resolved for http-routed call"
+            );
+        }
+
+        let mut attempt = DialAttempt {
+            location: Location {
+                aor: option.callee,
+                destination: option.destination,
+                credential: option.credential,
+                headers: option.headers,
+                ..Default::default()
+            },
+            caller: None,
+            hints: hints.map(Arc::new),
+            retry_policy,
+        };
+        // A trunk fixes the leg the same way the static path does: the
+        // (possibly rewritten) caller becomes the per-attempt override
+        // (plan_for_attempt prefers attempt.caller over the shared one).
+        if trunk.is_some() {
+            attempt.caller = Some(option.caller);
+        }
+        if let Some(caller_override) = caller_override {
+            let uri = rsipstack::sip::Uri::try_from(build_sip_uri(&caller_override, callee_realm))
+                .map_err(|e| {
+                    parse_error(format!("invalid caller override '{caller_override}': {e}"))
+                })?;
+            attempt.caller = Some(uri);
+        }
+        Ok(Some(attempt))
     }
 }
 
@@ -68,6 +294,10 @@ struct HttpRequestPayload {
     pub from: String,
     pub to: String,
     pub source_addr: Option<String>,
+    /// Trunk the call arrived on (inbound only), resolved by the proxy from
+    /// its own trunk registry — the decision service classifies by source
+    /// trunk name instead of guessing from source IPs.
+    pub source_trunk: Option<String>,
     pub direction: String,
     pub method: String,
     pub uri: String,
@@ -92,7 +322,10 @@ enum HttpRouteStrategy {
     Parallel,
 }
 
-/// String targets remain compatible with existing routing services.
+/// One route-decision target. URI-string targets remain compatible with
+/// existing routing services; the structured object form adds an explicit
+/// trunk name plus per-target callee/caller/header/retry overrides. Untagged,
+/// so both forms deserialize and existing decision services keep working.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum HttpRouteTarget {
@@ -100,6 +333,13 @@ enum HttpRouteTarget {
     Config {
         uri: String,
         retry_policy: Option<RetryPolicy>,
+    },
+    Structured {
+        callee: Option<String>,
+        trunk: Option<String>,
+        caller: Option<String>,
+        retry_policy: Option<RetryPolicy>,
+        headers: Option<HashMap<String, String>>,
     },
 }
 
@@ -161,7 +401,11 @@ impl CallRouter for HttpCallRouter {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let direction = if cookie.get_extension::<TrunkContext>().is_some() {
+        // One trunk-registry lookup drives both the direction flag and the
+        // `source_trunk` payload field — inbound calls carry the trunk name
+        // the call arrived on.
+        let source_trunk = cookie.get_extension::<TrunkContext>().map(|ctx| ctx.name.clone());
+        let direction = if source_trunk.is_some() {
             DialDirection::Inbound
         } else {
             DialDirection::Internal
@@ -205,6 +449,7 @@ impl CallRouter for HttpCallRouter {
             from,
             to,
             source_addr,
+            source_trunk,
             direction: direction.to_string(),
             method: original.method.to_string(),
             uri: original.uri.to_string(),
@@ -305,46 +550,61 @@ impl CallRouter for HttpCallRouter {
                 .with_code(&crate::proxy::routing::http_error_catalog::NOT_HANDLED));
             }
             HttpRouteAction::Forward => {
-                let mut attempts = Vec::new();
                 let custom_headers = result.headers.map(|h| {
                     h.iter()
                         .map(|(k, v)| rsipstack::sip::Header::Other(k.clone(), v.clone()))
                         .collect::<Vec<_>>()
                 });
 
+                // Bare-user callees qualify against the original request's host;
+                // structured targets naming a trunk qualify against the trunk dest.
+                let callee_realm = original.uri.host().to_string();
+                let caller_uri = caller.from.clone().unwrap_or_default();
+                let mut attempts: Vec<DialAttempt> = Vec::new();
                 if let Some(targets) = result.targets {
                     for target in targets {
-                        let (uri, retry_policy) = match target {
-                            HttpRouteTarget::Uri(uri) => (uri, None),
-                            HttpRouteTarget::Config { uri, retry_policy } =>
-                                (uri, retry_policy),
+                        let attempt = match target {
+                            HttpRouteTarget::Uri(uri) => {
+                                Self::build_uri_attempt(uri, None, custom_headers.clone())?
+                            }
+                            HttpRouteTarget::Config { uri, retry_policy } => {
+                                Self::build_uri_attempt(uri, retry_policy, custom_headers.clone())?
+                            }
+                            HttpRouteTarget::Structured {
+                                callee,
+                                trunk,
+                                caller,
+                                retry_policy,
+                                headers,
+                            } => self.build_trunk_attempt(
+                                callee,
+                                trunk,
+                                caller,
+                                retry_policy,
+                                headers,
+                                custom_headers.clone(),
+                                &callee_realm,
+                                caller_uri.clone(),
+                                &call_id,
+                            )?,
                         };
-                        if let Some(policy) = &retry_policy {
-                            policy.validate().map_err(|error| RouteError {
-                                error,
-                                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
-                                extensions: None,
-                            }.with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED))?;
+                        if let Some(attempt) = attempt {
+                            attempts.push(attempt);
                         }
-                        // Preserve legacy HTTP routing: skip malformed target URIs.
-                        let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
-                            continue;
-                        };
-                        attempts.push(DialAttempt {
-                            retry_policy,
-                            ..Location {
-                                aor: uri,
-                                headers: custom_headers.clone(),
-                                ..Default::default()
-                            }.into()
-                        });
                     }
                 }
 
                 let strategy = match result.strategy {
-                    Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(
-                        attempts.into_iter().map(|attempt| attempt.location).collect(),
-                    ),
+                    Some(HttpRouteStrategy::Parallel) => {
+                        // DialStrategy::Parallel carries bare Locations (no
+                        // per-attempt hints channel yet): trunk stamps on the
+                        // Location (destination/transport/credential) still
+                        // apply, media hints / CDR attribution / CPS permits
+                        // are sequential-only for now.
+                        DialStrategy::Parallel(
+                            attempts.into_iter().map(|attempt| attempt.location).collect(),
+                        )
+                    }
                     _ => DialStrategy::Sequential(attempts),
                 };
 

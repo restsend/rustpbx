@@ -1016,18 +1016,6 @@ impl SipServerBuilder {
             }
         });
 
-        let mut call_router = self.call_router;
-        if call_router.is_none()
-            && let Some(http_router_config) = &self.config.http_router
-        {
-            call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
-                http_router_config.clone(),
-                ArcSwap::new(Arc::new(rtp_config.clone())),
-                ArcSwap::new(Arc::new(self.config.media_proxy)),
-                self.config.enable_latching,
-                self.config.latching_probation_max_packets,
-            )));
-        }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
         let database = self.database.clone();
@@ -1043,6 +1031,22 @@ impl SipServerBuilder {
             self.data_context = Some(dc.clone());
             dc
         };
+
+        // Built after the data context is resolved: structured route targets
+        // name trunks explicitly, which needs the trunk registry.
+        let mut call_router = self.call_router;
+        if call_router.is_none()
+            && let Some(http_router_config) = &self.config.http_router
+        {
+            call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
+                http_router_config.clone(),
+                ArcSwap::new(Arc::new(rtp_config.clone())),
+                ArcSwap::new(Arc::new(self.config.media_proxy)),
+                self.config.enable_latching,
+                self.config.latching_probation_max_packets,
+                data_context.clone(),
+            )));
+        }
         // Wire up the SIP endpoint for trunk registration BEFORE reconciling,
         // so trunks with register_enabled=true are registered on startup.
         data_context

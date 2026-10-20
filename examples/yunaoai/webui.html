@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RustPBX 事件查看器</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f5f6fa; color: #1a1a2e; font-size: 14px; }
+  header { background: linear-gradient(135deg,#1e3c72,#2a5298); color:#fff;
+           padding: 16px 24px; display:flex; align-items:center; gap:24px; }
+  header h1 { margin:0; font-size:18px; font-weight:600; letter-spacing:.5px; }
+  .stats { display:flex; gap:20px; margin-left:auto; }
+  .stat { background:rgba(255,255,255,.15); padding:6px 14px; border-radius:20px; font-size:13px; }
+  .stat b { font-size:16px; margin-right:4px; }
+  toolbar { display:flex; gap:12px; padding:12px 24px; background:#fff;
+           border-bottom:1px solid #e1e4ea; align-items:center; position:sticky; top:0; z-index:10; }
+  toolbar input { flex:1; max-width:400px; padding:8px 14px; border:1px solid #d0d4dc;
+                  border-radius:8px; font-size:14px; outline:none; transition:border .2s; }
+  toolbar input:focus { border-color:#2a5298; }
+  toolbar button { padding:8px 16px; border:1px solid #d0d4dc; background:#fff;
+                   border-radius:8px; cursor:pointer; font-size:13px; transition:all .15s; }
+  toolbar button:hover { border-color:#2a5298; color:#2a5298; }
+  toolbar button.primary { background:#2a5298; color:#fff; border-color:#2a5298; }
+  toolbar button.primary:hover { background:#1e3c72; }
+  .refresh-indicator { display:flex; align-items:center; gap:6px; font-size:12px; color:#6b7280; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#22c55e; animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  main { padding:16px 24px; display:flex; flex-direction:column; gap:10px; }
+  .call-card { background:#fff; border-radius:10px; border:1px solid #e1e4ea;
+               overflow:hidden; transition:box-shadow .15s; }
+  .call-card:hover { box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .call-head { padding:10px 16px; display:flex; align-items:center; gap:12px;
+               cursor:pointer; user-select:none; background:#fafbfe; }
+  .call-head:hover { background:#f0f3fa; }
+  .chevron { font-size:10px; color:#9ca3af; transition:transform .2s; }
+.call-card.open .chevron { transform:rotate(90deg); }
+.call-ts { font-family:"SF Mono",Menlo,monospace; font-size:13px; font-weight:600; color:#1e3c72; width:185px; flex-shrink:0; white-space:nowrap; }
+  .call-ani { color:#059669; font-weight:500; }
+  .call-arrow { color:#9ca3af; }
+  .call-dnis { color:#dc2626; font-weight:500; }
+  .call-xcid { margin-left:auto; font-family:"SF Mono",Menlo,monospace; font-size:12px;
+               color:#6b7280; background:#f3f4f6; padding:2px 8px; border-radius:10px; max-width:260px;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .call-states { display:flex; gap:4px; }
+  .state-pill { font-size:11px; padding:2px 8px; border-radius:10px; font-weight:500; }
+  .st-invite   { background:#dbeafe; color:#1d4ed8; }
+  .st-180      { background:#e0e7ff; color:#4338ca; }
+  .st-200      { background:#dcfce7; color:#15803d; }
+  .st-bye      { background:#f3f4f6; color:#6b7280; }
+  .st-no_answer{ background:#fef3c7; color:#b45309; }
+  .st-busy     { background:#fee2e2; color:#b91c1c; }
+  .st-error    { background:#fee2e2; color:#b91c1c; }
+  .card-body { display:none; padding:12px 16px; border-top:1px solid #e1e4ea; background:#fff; }
+  .call-card.open .card-body { display:block; }
+  .event-row { display:flex; align-items:flex-start; gap:10px; padding:6px 0;
+             border-bottom:1px dashed #eef0f5; font-size:13px; }
+.event-row:last-child { border-bottom:none; }
+.event-ts { flex-shrink:0; font-family:"SF Mono",Menlo,monospace; font-size:12px; color:#6b7280; width:125px; white-space:nowrap; }
+.event-badge { flex-shrink:0; width:104px; text-align:center; }
+  .event-badge .state-pill { display:inline-block; }
+  .event-json { flex:1; font-family:"SF Mono",Menlo,monospace; font-size:12px;
+                color:#4b5563; word-break:break-all; background:#f9fafb; padding:6px 10px;
+                border-radius:6px; line-height:1.6; }
+  .empty { text-align:center; padding:60px 20px; color:#9ca3af; }
+  .empty .big { font-size:48px; margin-bottom:10px; }
+  .dl-pill { font-size:11px; padding:2px 8px; border-radius:10px; font-weight:500; white-space:nowrap; }
+  .dl-l1 { background:#dcfce7; color:#15803d; }
+  .dl-l2 { background:#dbeafe; color:#1d4ed8; }
+  .dl-l3 { background:#e0e7ff; color:#4338ca; }
+  .dl-l4 { background:#fef3c7; color:#b45309; }
+  .dl-reject { background:#fee2e2; color:#b91c1c; }
+  /* JSON 格式化浮窗：点击行内 JSON 打开，展示缩进+高亮的完整记录 */
+  .event-json.clickable { cursor:pointer; }
+  .event-json.clickable:hover { background:#eef2fb; }
+  .json-modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,.55);
+                z-index:100; align-items:center; justify-content:center; padding:40px; }
+  .json-modal.open { display:flex; }
+  .json-panel { background:#fff; border-radius:12px; max-width:860px; width:100%;
+                max-height:80vh; display:flex; flex-direction:column;
+                box-shadow:0 20px 60px rgba(0,0,0,.3); overflow:hidden; }
+  .json-panel-head { padding:10px 16px; background:#1e3c72; color:#fff; flex-shrink:0;
+                     display:flex; align-items:center; gap:12px; font-size:13px; }
+  .json-panel-head .json-close { margin-left:auto; cursor:pointer;
+                     background:rgba(255,255,255,.15); border:none; color:#fff;
+                     padding:4px 12px; border-radius:6px; font-size:12px; }
+  .json-panel-head .json-close:hover { background:rgba(255,255,255,.3); }
+  .json-panel pre { margin:0; padding:16px; overflow:auto; font-family:"SF Mono",Menlo,monospace;
+                    font-size:12px; line-height:1.6; color:#374151; }
+  .jk { color:#1d4ed8; }   /* JSON key */
+  .js { color:#15803d; }   /* string 值 */
+  .jn { color:#b45309; }   /* number 值 */
+  .jb { color:#b91c1c; }   /* true/false/null */
+</style>
+</head>
+<body>
+<header>
+  <h1>📞 RustPBX 呼叫事件查看器</h1>
+  <div class="stats">
+    <div class="stat">呼叫 <b id="s-calls">0</b>/<span id="s-cap">0</span></div>
+    <div class="stat">记录 <b id="s-events">0</b></div>
+    <div class="stat" id="s-latest">—</div>
+  </div>
+</header>
+<toolbar>
+  <input id="q" type="text" placeholder="搜索 callId / xcid / ani / dnis..." />
+  <button id="btn-refresh" class="primary">🔄 立即刷新</button>
+  <button id="btn-toggle">⏸ 暂停自动刷新</button>
+  <button id="btn-clear">🗑 清空记录</button>
+  <div class="refresh-indicator"><span class="dot"></span><span id="auto-label">自动刷新 3s</span></div>
+</toolbar>
+<main id="list"><div class="empty"><div class="big">📭</div>暂无事件，发起一通呼叫看看</div></main>
+
+<!-- JSON 格式化浮窗：点击行内 JSON 打开（ESC / 点击遮罩 / 关闭按钮均可退出） -->
+<div class="json-modal" id="json-modal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="json-panel">
+    <div class="json-panel-head"><span id="json-modal-title"></span>
+      <button class="json-close" onclick="document.getElementById('json-modal').classList.remove('open')">✕ 关闭</button>
+    </div>
+    <pre id="json-modal-pre"></pre>
+  </div>
+</div>
+
+<script>
+let autoRefresh = true;
+let refreshInterval = 3000;
+let timer = null;
+let countdown = null;
+let countdownVal = 0;
+let expanded = new Set();
+
+function stateClass(s) {
+  const m = {invite:'st-invite', '180':'st-180', '200':'st-200', bye:'st-bye',
+    no_answer:'st-no_answer', busy:'st-busy', error:'st-error'};
+  return m[s] || 'st-bye';
+}
+
+function fmtTime(us, withDate) {
+  if (!us) return '';
+  const d = new Date(Math.floor(us / 1000));       // 微秒 → 毫秒给 Date
+  const pad = n => String(n).padStart(2, '0');
+  const pad3 = n => String(n).padStart(3, '0');
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad3(d.getMilliseconds())}${String(us % 1000).padStart(3, '0')}`;
+  if (withDate === false) return time;
+  return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${time}`;
+}
+
+async function load() {
+  try {
+    const r = await fetch('/events');
+    const d = await r.json();
+    render(d);
+  } catch(e) { console.error(e); }
+  if (autoRefresh) startCountdown();
+}
+
+function render(d) {
+  document.getElementById('s-calls').textContent = d.call_count;
+  window._events = d.calls;    // JSON 浮窗数据源（按 cid+行号定位原始记录）
+  document.getElementById('s-cap').textContent = d.call_cap;
+  document.getElementById('s-events').textContent = d.total_events;
+
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const main = document.getElementById('list');
+  const callIds = Object.keys(d.calls);
+
+  if (callIds.length === 0) {
+    main.innerHTML = '<div class="empty"><div class="big">📭</div>暂无事件，发起一通呼叫看看</div>';
+    return;
+  }
+
+  const sortedIds = Object.keys(d.calls).sort((a, b) => {
+    const ta = (d.calls[a][0] || {}).ts || 0;
+    const tb = (d.calls[b][0] || {}).ts || 0;
+    return tb - ta;
+  });
+
+  const items = [];
+  for (const cid of sortedIds) {
+    const recs = d.calls[cid];
+    // 统一视图：决策行（kind=decision）+ 事件行，同一呼叫卡片内展示
+    const decisions = recs.filter(e => e.kind === 'decision');
+    const evts = recs.filter(e => e.kind !== 'decision');
+    const first = evts[0] || decisions[0] || {};
+    const last = decisions[decisions.length-1] || evts[evts.length-1] || {};
+    // 折叠重复状态：统计各 status 出现次数，`180×2` 一目了然。
+    const stateCounts = {};
+    evts.forEach(e => { stateCounts[e.status] = (stateCounts[e.status]||0) + 1; });
+    const xcid = first.xcid || '';
+    const ani = first.ani || first.caller || '';
+    const dnis = first.dnis || first.callee || '';
+    const rg = (decisions.filter(x => x.route_group).slice(-1)[0] || {}).route_group || '';
+
+    if (q) {
+      const hay = (cid + xcid + ani + dnis + rg).toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+
+    const isOpen = expanded.has(cid);
+    const statesHtml = Object.keys(stateCounts).map(s =>
+      `<span class="state-pill ${stateClass(s)}" title="出现 ${stateCounts[s]} 次">${s}${stateCounts[s] > 1 ? '×' + stateCounts[s] : ''}</span>`).join(' ');
+    const rgHtml = rg ? `<span class="dl-pill dl-l2" title="路由组">${rg}</span>` : '';
+    // 层级徽标（末条决策）：L1:主被叫匹配 / L2:被叫匹配 / L3:主叫匹配 / L4:兜底 / 拒绝
+    const lastDec = decisions[decisions.length-1] || {};
+    const layerHtml = lastDec.layer ? `<span class="dl-pill ${layerClass(lastDec.layer)}">${layerLabel(lastDec.layer)}</span>` : '';
+
+    const startTime = fmtTime(first.ts);
+
+    let bodyHtml = '';
+    if (isOpen) {
+      bodyHtml = '<div class="card-body">' + recs.map((e,i) => {
+        const j = {...e}; delete j.source; delete j.ts; delete j.kind;
+        const isDec = e.kind === 'decision';
+        return `<div class="event-row">
+          <div class="event-ts">${fmtTime(e.ts, false)}</div>
+          <div class="event-badge">${isDec
+            ? `<span class="dl-pill ${layerClass(e.layer)}">Decision</span>`
+            : `<span class="state-pill ${stateClass(e.status)}">${e.status}</span>`}</div>
+          <div class="event-json clickable" title="点击查看格式化 JSON"
+               data-cid="${cid}" data-idx="${i}"
+               onclick="openJson(event, '${cid}', ${i})">${isDec ? decBrief(e) : JSON.stringify(j)}</div>
+        </div>`;
+      }).join('') + '</div>';
+    }
+
+    items.push(`
+      <div class="call-card ${isOpen ? 'open' : ''}" data-cid="${cid}">
+        <div class="call-head" onclick="toggle('${cid}')">
+          <span class="chevron">▶</span>
+          <span class="call-ts">${startTime}</span>
+          <span class="call-ani">${ani}</span>
+          <span class="call-arrow">→</span>
+          <span class="call-dnis">${dnis}</span>
+          <span class="call-xcid" title="${xcid}">${xcid}</span>
+          <div class="call-states">${rgHtml} ${layerHtml} ${statesHtml}</div>
+        </div>
+        ${bodyHtml}
+      </div>`);
+  }
+
+  main.innerHTML = items.length ? items.join('') :
+    '<div class="empty"><div class="big">🔍</div>没有匹配的呼叫</div>';
+
+  // 显示最新一通呼叫的状态（sortedIds 已按时间倒序，首条即最新）
+  const latestCid = sortedIds[0];
+  const latestRecs = d.calls[latestCid] || [];
+  const latest = latestRecs[latestRecs.length - 1] || {};
+  if (latest && Object.keys(latest).length) {
+    const desc = latest.status || layerLabel(latest.layer) || '';
+    document.getElementById('s-latest').textContent =
+      '最新: ' + desc + ' ' + latestCid + ' (' + latestRecs.length + '条)';
+  }
+}
+
+function toggle(cid) {
+  if (expanded.has(cid)) expanded.delete(cid);
+  else expanded.add(cid);
+  load();
+}
+
+function tickCountdown() {
+  const el = document.getElementById('auto-label');
+  if (!el) return;
+  countdownVal--;
+  if (countdownVal <= 0) {
+    el.textContent = '刷新中...';
+  } else {
+    el.textContent = countdownVal + 's 后刷新';
+  }
+}
+function startCountdown() {
+  stopCountdown();
+  countdownVal = Math.ceil(refreshInterval / 1000);
+  tickCountdown();
+  countdown = setInterval(tickCountdown, 1000);
+}
+function stopCountdown() {
+  if (countdown) clearInterval(countdown);
+  countdown = null;
+}
+
+function startAuto() {
+  stopAuto();
+  timer = setInterval(load, refreshInterval);
+  startCountdown();
+  document.getElementById('btn-toggle').textContent = '⏸ 暂停自动刷新';
+}
+function stopAuto() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  stopCountdown();
+  document.getElementById('auto-label').textContent = '已暂停';
+  document.getElementById('btn-toggle').textContent = '▶ 开启自动刷新';
+}
+
+document.getElementById('btn-refresh').onclick = load;
+document.getElementById('btn-toggle').onclick = () => {
+  autoRefresh = !autoRefresh;
+  if (autoRefresh) startAuto(); else stopAuto();
+};
+document.getElementById('btn-clear').onclick = async () => {
+  if (!confirm('确定清空所有事件记录？')) return;
+  const r = await fetch('/events/clear', {method:'POST'});
+  if (r.ok) { expanded.clear(); load(); }
+};
+let searchTimer;
+document.getElementById('q').oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(load, 200);
+};
+
+load();
+if (autoRefresh) startAuto();
+
+// 统一视图辅助：决策行（kind=decision，服务端按 session_id 关联进同一呼叫）
+// 用层徽标，事件行用状态徽标；决策 ts 与事件 ts 同为微秒整数。
+function layerLabel(l) {
+  const m = {'L1':'L1:主被叫匹配', 'L2':'L2:被叫匹配', 'L3':'L3:主叫匹配',
+    'L4-internal':'L4:兜底(呼出)', 'L4-external':'L4:兜底(呼入)', 'reject':'拒绝'};
+  return m[l] || l || '';
+}
+function layerClass(l) {
+  if (l === 'L1') return 'dl-l1';
+  if (l === 'L2') return 'dl-l2';
+  if (l === 'L3') return 'dl-l3';
+  if (l && l.startsWith('L4')) return 'dl-l4';
+  return 'dl-reject';
+}
+
+// 决策行紧凑显示：与事件行同样的一行 JSON，仅基础字段（层/动作/路由组/
+// 主被叫/出口/结果）；判断细节（主叫组命中/命中规则/方向判定/号码变换/
+// 计算过程轨迹）不占行内空间，点击浮窗查看完整记录。
+function decBrief(e) {
+  const b = {layer: layerLabel(e.layer), action: e.action || 'decision'};
+  if (e.route_group) b.route_group = e.route_group;
+  if (e.callee !== undefined) b.callee = e.callee;
+  if (e.caller !== undefined) b.caller = e.caller;
+  if (e.targets) b.targets = e.targets;
+  if (e.status) b.status = e.status;
+  if (e.reason) b.reason = e.reason;
+  return JSON.stringify(b);
+}
+
+// JSON 格式化浮窗：点击行内 JSON 打开，展示缩进+语法高亮的完整记录
+// （kind/ts 等全字段，与 /events 返回一致）。
+function highlightJson(obj) {
+  const raw = JSON.stringify(obj, null, 2)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return raw.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
+    let cls = 'jn';                                       // number
+    if (/^"/.test(m)) cls = /:$/.test(m) ? 'jk' : 'js';   // key / string
+    else if (/^(true|false|null)$/.test(m)) cls = 'jb';
+    return `<span class="${cls}">${m}</span>`;
+  });
+}
+function openJson(ev, cid, idx) {
+  ev.stopPropagation();   // 不触发外层卡片折叠
+  const rec = (window._events || {})[cid];
+  if (!rec || !rec[idx]) return;
+  const r = rec[idx];
+  // 层值带中文语义显示（L3 → "L3:主叫匹配"），非专业读者也能看懂；
+  // 其余字段保持 /events 返回的原始值
+  const show = (r.kind === 'decision' && r.layer) ? {...r, layer: layerLabel(r.layer)} : r;
+  document.getElementById('json-modal-title').textContent =
+    (r.kind === 'decision' ? '决策记录' : '事件记录') + ' · ' + fmtTime(r.ts);
+  document.getElementById('json-modal-pre').innerHTML = highlightJson(show);
+  document.getElementById('json-modal').classList.add('open');
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.getElementById('json-modal').classList.remove('open');
+});
+
+// 服务名动态化：两服务共用本页面，按各自 /health 返回的 service_name 显示
+// （中继路由服务 / 分机注册服务），无该字段时保持默认标题。
+(async () => {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    if (d.service_name) {
+      document.title = d.service_name;
+      const h1 = document.querySelector('header h1');
+      if (h1) h1.textContent = '📞 ' + d.service_name;
+    }
+  } catch (e) { /* 保持默认标题 */ }
+})();
+</script>
+</body>
+</html>

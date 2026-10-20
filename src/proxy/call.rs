@@ -1738,6 +1738,32 @@ impl CallModule {
 
         let mut dialplan = dialplan;
 
+        // Inbound from a trunk: apply that trunk's network profile and
+        // per-trunk media overrides — the same source-trunk treatment the
+        // static matcher gives via `merge_trunk_media_hints` (matcher.rs).
+        // The HTTP router's dialplan starts from global defaults only
+        // (http.rs), so a cross-network trunk peer (e.g. a cloud FS)
+        // otherwise receives SDP advertising our default interface IP —
+        // unreachable from its network. The trunk's own `external_ip` /
+        // `bind_ip` override the profile values, mirroring the hints
+        // order in the static path; idempotent there (same values).
+        if let Some(ctx) = cookie.get_extension::<TrunkContext>()
+            && let Some(trunk) = self.inner.server.data_context.get_trunk(&ctx.name)
+        {
+            let server = &self.inner.server;
+            if let Some(id) = trunk.profile.as_deref()
+                && let Some(profile) = server.network_profile(id)
+            {
+                server.apply_network_profile_to_media(&profile, &mut dialplan.media);
+            }
+            if let Some(ip) = trunk.external_ip.as_ref() {
+                dialplan.media.external_ip = Some(ip.clone());
+            }
+            if let Some(ip) = trunk.bind_ip.as_ref() {
+                dialplan.media.bind_ip = Some(ip.clone());
+            }
+        }
+
         let inspectors: Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>> =
             self.inner
                 .server
