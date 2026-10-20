@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "addon-cc")]
 mod recording_stop_tests;
 
+mod child_event_tests;
 mod session_id_tests;
 
 #[tokio::test]

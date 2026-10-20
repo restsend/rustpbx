@@ -551,9 +551,7 @@ impl SipSession {
             // Child-leg session: the callee slot IS the agent dialog — the
             // declared role rides it (the dispatcher-hop caller leg keeps
             // its positional role). Non-child sessions: the leg's own role.
-            leg_role: self
-                .child_role_for_leg(leg_id.as_deref())
-                .or_else(|| leg_id.as_deref().and_then(|id| self.leg_role_of(id))),
+            leg_role: leg_id.as_deref().and_then(|id| self.leg_role_of(id)),
             leg_id,
             call_id: self.context.session_id.clone(),
             early_media,
@@ -564,6 +562,8 @@ impl SipSession {
 
     /// RWI `leg_role` for a leg id — `None` (omitted) for unknown legs or
     /// session-scoped events. See [`crate::call::domain::Leg::leg_role`].
+    /// The peer's child role belongs only to the original callee slot;
+    /// added consult/transfer legs keep their own identity and ownership.
     ///
     /// Home-proxy-routed legs (`Leg::remote_registered`) yield `None`: the
     /// INVITE left for the endpoint's registration node, which owns the
@@ -585,29 +585,6 @@ impl SipSession {
                 }
                 leg.leg_role().to_string()
             })
-    }
-
-    /// Child-leg session role attribution, scoped to the legs it may claim.
-    ///
-    /// A child-leg session (cluster-dispatched queue agent / consult /
-    /// transfer dialog) exists solely as the AGENT dialog's relay: every leg
-    /// it dials IS part of that dialog, so the dispatcher-declared role rides
-    /// those legs' events and every session-scoped event. The single foreign
-    /// leg is the `caller` slot — the DISPATCHER HOP (the peer node's
-    /// in-dialog leg, From = the original caller). Stamping the agent role
-    /// on its events made one agent answer produce TWO
-    /// `call_answered{leg_role: "agent"}` events ~µs apart (caller + callee
-    /// both transition Connected when the agent picks up). The hop keeps its
-    /// positional role.
-    fn child_role_for_leg(&self, leg_id: Option<&str>) -> Option<String> {
-        match leg_id {
-            // Session-scoped events speak for the whole (agent) dialog.
-            None => self.meta.child_leg_role.clone(),
-            // The dispatcher hop: positional role only.
-            Some("caller") => None,
-            // Any dialed leg of the child dialog carries the declared role.
-            Some(_) => self.meta.child_leg_role.clone(),
-        }
     }
 
     /// Established CC-role legs (agent / consult / transfer) still registered
@@ -8690,19 +8667,11 @@ impl SipSession {
                         if !callee_sdp.is_empty() && callee_sdp.contains("v=0") {
                             if !self.media.early_media_sent {
                                 self.media.early_media_sent = true;
-                                // Child-leg session: pin the dialed agent BEFORE
-                                // the leg-scoped ringing so it carries
-                                // agent_id (→ client_ip).
+                                // Pin the home-node agent and publish addon identity
+                                // before emitting the first leg-scoped ringing event.
                                 self.ensure_child_agent_pinned().await;
-                                self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
-
-                                // Provisional response carried SDP — fire the
-                                // ringing session hooks first (the CC addon
-                                // resolves + publishes the agent attribution)
-                                // and then emit the core ringing event with
-                                // early_media = true, enriched with the agent
-                                // context.
                                 self.fire_on_call_ringing_hooks(true).await;
+                                self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
                                 self.emit_call_ringing(None, true, None);
 
                                 if self.media_profile.path == MediaPathMode::Anchored {
@@ -8753,6 +8722,7 @@ impl SipSession {
                                 }
                             }
                         } else {
+                            self.fire_on_call_ringing_hooks(false).await;
                             if !self.media.early_media_sent {
                                 // Child-leg session: pin the dialed agent
                                 // BEFORE the leg-scoped ringing (see the
@@ -8770,10 +8740,6 @@ impl SipSession {
                             }
                             }
 
-                            // Fire on_call_ringing hooks first (plain 180, no
-                            // SDP) so agent attribution is published, then
-                            // emit the enriched core ringing event.
-                            self.fire_on_call_ringing_hooks(false).await;
                             self.emit_call_ringing(None, false, None);
                         }
                         self.update_snapshot_cache();
@@ -13870,6 +13836,17 @@ impl SipSession {
                 let early_media = self
                     .media_leg(&leg_id)
                     .is_some_and(|peer| peer.negotiated().is_some());
+                let dial_source = self
+                    .legs
+                    .get(&leg_id)
+                    .and_then(|leg| leg.source_leg.clone());
+                if self.legs.contains_key(&leg_id)
+                    && !self.pending_refers.contains_key(&leg_id)
+                    && dial_source.is_none()
+                    && leg_id.as_str() != "consult"
+                {
+                    self.fire_on_call_ringing_hooks(false).await;
+                }
                 self.update_leg_state(
                     &leg_id,
                     if early_media {
@@ -13886,10 +13863,6 @@ impl SipSession {
                 if self.pending_refers.contains_key(&leg_id) {
                     return CommandResult::success();
                 }
-                let dial_source = self
-                    .legs
-                    .get(&leg_id)
-                    .and_then(|leg| leg.source_leg.clone());
                 if dial_source.is_some() || leg_id.as_str() == "consult" {
                     if early_media {
                         self.update_media_path().await;
@@ -13926,7 +13899,6 @@ impl SipSession {
                     self.emit_call_ringing(None, early_media, None);
                     return CommandResult::success();
                 }
-                self.fire_on_call_ringing_hooks(false).await;
                 // Notify the running queue app that the agent is ringing so
                 // it can track per-leg state and emit QueueAgentOffered.
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
@@ -15124,8 +15096,13 @@ impl SipSession {
         } else {
             None
         };
-        let child_role = self.child_role_for_leg(Some(id.as_str()));
-        if child_role.is_some() {
+        let leg_role = self.leg_role_of(id.as_str());
+        if self
+            .meta
+            .child_leg_role
+            .as_ref()
+            .is_some_and(|role| leg_role.as_ref() == Some(role))
+        {
             // Latch the report: the session-level teardown must not re-claim
             // the role (the leg is reported here and removed).
             self.child_role_hangup_reported
@@ -15139,7 +15116,7 @@ impl SipSession {
             // teardown carries the declared role (positional "callee" lost
             // the agent attribution, s17 A1); the dispatcher-hop caller leg
             // keeps its positional role (one agent teardown, not two).
-            leg_role: child_role.or_else(|| self.leg_role_of(id.as_str())),
+            leg_role,
             reason,
             sip_status,
             hangup_by,
@@ -15189,9 +15166,7 @@ impl SipSession {
                                 // caller leg keeps its positional role — one
                                 // agent answer, not two. Non-child sessions:
                                 // unchanged.
-                                leg_role: self
-                                    .child_role_for_leg(Some(leg_id.as_str()))
-                                    .or_else(|| self.leg_role_of(leg_id.as_str())),
+                                leg_role: self.leg_role_of(leg_id.as_str()),
                                 call_id: self.context.session_id.clone(),
                             });
                         }
@@ -15280,17 +15255,13 @@ impl SipSession {
         // role (same scoping as answered/hangup).
         if entered_hold {
             self.emit_typed_rwi_event(&crate::rwi::CallHeld {
-                leg_role: self
-                    .child_role_for_leg(Some(&leg_id_str))
-                    .or_else(|| self.leg_role_of(&leg_id_str)),
+                leg_role: self.leg_role_of(&leg_id_str),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
         } else {
             self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
-                leg_role: self
-                    .child_role_for_leg(Some(&leg_id_str))
-                    .or_else(|| self.leg_role_of(&leg_id_str)),
+                leg_role: self.leg_role_of(&leg_id_str),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
