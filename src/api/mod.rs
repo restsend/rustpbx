@@ -102,11 +102,16 @@ async fn api_auth_middleware(
 ) -> Response {
     let headers = req.headers().clone();
 
-    // Release reads (version check / list / download) are intentionally
-    // public: desktop update clients cannot authenticate. Mutations under
-    // `/release` (POST/PUT/DELETE) still fall through to the checks below.
+    // Release reads (version check / list / artifact download) are
+    // intentionally public: desktop update clients cannot authenticate.
+    // The list is exact so that other GETs under `/release` (e.g. the
+    // storage settings) still require credentials. Mutations under
+    // `/release` always fall through to the checks below.
+    let path = req.uri().path();
     if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
-        && req.uri().path().starts_with("/release")
+        && (path == "/release"
+            || path == "/release/list"
+            || (path.starts_with("/release/") && path.ends_with("/download")))
     {
         return next.run(req).await;
     }

@@ -12,6 +12,113 @@
             </p>
         </header>
 
+        <!-- Storage settings -->
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5"
+            x-init="loadStorage()">
+            <div class="mb-4 flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "releases_page.storage_title" | t }}</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">{{ "releases_page.storage_subtitle" | t }}</p>
+                </div>
+                <span class="shrink-0 rounded-full bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500 ring-1 ring-slate-100">
+                    <span x-show="storageSource === 'stored'" x-cloak>{{ "releases_page.storage_source_stored" | t }}</span>
+                    <span x-show="storageSource === 'config'" x-cloak>{{ "releases_page.storage_source_config" | t }}</span>
+                    <span x-show="storageSource === 'default'" x-cloak>{{ "releases_page.storage_source_default" | t }}</span>
+                </span>
+            </div>
+            <div class="space-y-4">
+                <div class="flex items-center gap-4 text-sm text-slate-600">
+                    <span class="text-xs font-medium text-slate-500">{{ "releases_page.storage_type" | t }}</span>
+                    <label class="flex items-center gap-2">
+                        <input type="radio" value="local" x-model="storageDraft.type"
+                            class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.storage_local" | t }}
+                    </label>
+                    <label class="flex items-center gap-2">
+                        <input type="radio" value="s3" x-model="storageDraft.type"
+                            class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.storage_s3" | t }}
+                    </label>
+                </div>
+
+                <!-- local fields -->
+                <div x-show="storageDraft.type === 'local'" x-cloak class="max-w-md">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_path" | t }}</span>
+                        <input type="text" x-model="storageDraft.path"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                </div>
+
+                <!-- s3 fields -->
+                <div x-show="storageDraft.type === 's3'" x-cloak class="space-y-4">
+                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_vendor" | t }}</span>
+                            <select x-model="storageDraft.vendor"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                                <option value="aws">AWS S3</option>
+                                <option value="aliyun">Aliyun OSS</option>
+                                <option value="tencent">Tencent COS</option>
+                                <option value="minio">MinIO</option>
+                                <option value="gcp">Google GCS</option>
+                                <option value="azure">Azure Blob</option>
+                                <option value="digitalocean">DigitalOcean Spaces</option>
+                            </select>
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_bucket" | t }}</span>
+                            <input type="text" x-model="storageDraft.bucket" placeholder="releases"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_region" | t }}</span>
+                            <input type="text" x-model="storageDraft.region" placeholder="us-east-1"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block sm:col-span-2">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_endpoint" | t }}</span>
+                            <input type="text" x-model="storageDraft.endpoint" placeholder="https://s3.amazonaws.com"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_prefix" | t }}</span>
+                            <input type="text" x-model="storageDraft.prefix"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_access_key" | t }}</span>
+                            <input type="password" x-model="storageDraft.access_key" autocomplete="off"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_secret_key" | t }}</span>
+                            <input type="password" x-model="storageDraft.secret_key" autocomplete="off"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-4 text-xs text-slate-500">
+                        <span x-show="storageDraft.has_credentials" x-cloak>{{ "releases_page.storage_has_credentials" | t }}</span>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" x-model="storageDraft.clear_credentials"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_clear_credentials" | t }}
+                        </label>
+                        <span>{{ "releases_page.storage_s3_required_hint" | t }}</span>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                    <button type="button" @click="resetStorage()"
+                        class="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-50">{{ "releases_page.storage_reset" | t }}</button>
+                    <button type="button" @click="saveStorage()" :disabled="storageSaving"
+                        class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        {{ "releases_page.storage_save" | t }}
+                    </button>
+                </div>
+            </div>
+        </section>
+
         <!-- Upload form -->
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <h2 class="mb-4 text-sm font-semibold text-slate-900">{{ "releases_page.upload_title" | t }}</h2>
@@ -27,6 +134,21 @@
                         <input type="file" name="file" required
                             class="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-sky-50 file:px-3 file:py-1.5 file:text-sky-600 hover:file:bg-sky-100" />
                     </label>
+                </div>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_storage" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="radio" name="storage_choice" value="local" x-model="uploadStorage"
+                                class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_local" | t }}
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="radio" name="storage_choice" value="s3" x-model="uploadStorage"
+                                class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_s3" | t }}
+                        </label>
+                    </div>
                 </div>
                 <label class="block">
                     <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_notes" | t }}</span>
@@ -93,6 +215,11 @@
                         <td class="px-4 py-3">
                             <span class="font-semibold text-slate-900">{{ r.version }}</span>
                             {% if r.force %}<span class="ml-1 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                            {% if r.storage_is_s3 %}
+                            <span class="ml-1 rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
+                            {% else %}
+                            <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.badge_local" | t }}</span>
+                            {% endif %}
                             {% if r.environments %}
                             {% for e in r.environments %}<span class="ml-1 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{{ e }}</span>{% endfor %}
                             {% else %}
@@ -151,6 +278,14 @@
     function releasesPage() {
         return {
             uploading: false,
+            storageSaving: false,
+            storageSource: 'default',
+            storageDraft: {
+                type: 'local', path: 'storage/releases',
+                vendor: 'minio', bucket: '', region: '', endpoint: '', prefix: '',
+                access_key: '', secret_key: '', has_credentials: false, clear_credentials: false,
+            },
+            uploadStorage: 'local',
             formatBytes(bytes) {
                 if (!bytes || bytes <= 0) return '-';
                 const units = ['B', 'KB', 'MB', 'GB'];
@@ -158,10 +293,56 @@
                 while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
                 return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
             },
+            async loadStorage() {
+                try {
+                    const s = await apiGet('/release/storage');
+                    this.storageSource = s.source || 'default';
+                    this.uploadStorage = s.type === 's3' ? 's3' : 'local';
+                    this.storageDraft = {
+                        type: s.type === 's3' ? 's3' : 'local',
+                        path: s.path || 'storage/releases',
+                        vendor: s.vendor || 'minio',
+                        bucket: s.bucket || '',
+                        region: s.region || '',
+                        endpoint: s.endpoint || '',
+                        prefix: s.prefix || '',
+                        access_key: '',
+                        secret_key: '',
+                        has_credentials: !!s.has_credentials,
+                        clear_credentials: false,
+                    };
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            async saveStorage() {
+                const d = this.storageDraft;
+                const body = d.type === 'local'
+                    ? { type: 'local', path: d.path }
+                    : {
+                        type: 's3', vendor: d.vendor, bucket: d.bucket, region: d.region,
+                        endpoint: d.endpoint, prefix: d.prefix,
+                        access_key: d.access_key, secret_key: d.secret_key,
+                        clear_credentials: d.clear_credentials,
+                    };
+                this.storageSaving = true;
+                try {
+                    await apiPut('/release/storage', body);
+                    location.reload();
+                } catch (e) {
+                    this.storageSaving = false;
+                }
+            },
+            async resetStorage() {
+                if (!confirm('{{ "releases_page.storage_reset_confirm" | t }}')) return;
+                try {
+                    await apiDelete('/release/storage');
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
             async upload(event) {
                 const form = event.target;
                 const fd = new FormData(form);
                 fd.set('published', form.querySelector('[name=published]').checked ? 'true' : 'false');
+                fd.set('storage', this.uploadStorage);
                 this.uploading = true;
                 try {
                     await apiPost('/release', fd);

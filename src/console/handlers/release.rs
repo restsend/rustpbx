@@ -5,10 +5,23 @@
 //! a plain file under the config directory, or a row in the `config_entry`
 //! table when `proxy.use_db_config()` is enabled — no dedicated DB table.
 //!
-//! Artifacts are stored through the `[release].storage` backend (local
-//! directory or S3-compatible bucket). S3 objects are recorded as
-//! `s3://{bucket}/{key}`; download endpoints rewrite them into presigned
-//! URLs on demand (default 24h, see `[release].signed_url_expiry_secs`).
+//! Artifacts are stored through a local directory or an S3-compatible
+//! bucket — the release pipeline has its **own** storage configuration,
+//! independent from call-recording storage, while sharing the same
+//! [`crate::storage`] engine underneath. The backend comes from (highest
+//! priority first):
+//!
+//! 1. the storage saved on the console releases page — persisted as
+//!    `release/storage.toml` in the generated-config store (auth-required
+//!    `GET/PUT/DELETE {api_prefix}/release/storage`);
+//! 2. `[release].storage` in `config.toml`;
+//! 3. the default local `storage/releases` directory.
+//!
+//! Each upload may pick `local` or `s3` explicitly (multipart field
+//! `storage`); without the field the effective default above applies.
+//! S3 objects are recorded as `s3://{bucket}/{key}`; download endpoints
+//! rewrite them into presigned URLs on demand (default 24h, see
+//! `[release].signed_url_expiry_secs`).
 //!
 //! Public (unauthenticated) endpoints, consumed by desktop update clients
 //! (e.g. restsend-pc `update.rs`):
@@ -48,6 +61,10 @@ use std::sync::Arc;
 pub const RELEASE_CATEGORY: &str = "release";
 /// Config-store entry name for the release manifest.
 pub const RELEASE_ENTRY: &str = "release.toml";
+/// Config-store entry holding the storage backend saved on the releases
+/// page (`[storage]` table with a [`ArtifactStorage`] payload). Overrides
+/// `[release].storage` from `config.toml` when present.
+pub const RELEASE_STORAGE_ENTRY: &str = "storage.toml";
 
 /// Closed set of release environments. A release tagged with one or more
 /// environments is only served to update clients whose `env` query param
@@ -116,6 +133,45 @@ struct ReleaseFile {
     releases: Vec<ReleaseDoc>,
 }
 
+/// Root document of `release/storage.toml` — the storage backend saved from
+/// the console releases page. Wrapped in a table so the TOML file reads
+/// `[storage] type = "s3" …`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ReleaseStorageFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage: Option<ArtifactStorage>,
+}
+
+/// Which backend an upload targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKind {
+    Local,
+    S3,
+}
+
+impl StorageKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(Self::Local),
+            "s3" => Some(Self::S3),
+            _ => None,
+        }
+    }
+}
+
+fn storage_kind_of(cfg: &ArtifactStorage) -> StorageKind {
+    match cfg {
+        ArtifactStorage::Local { .. } => StorageKind::Local,
+        ArtifactStorage::S3 { .. } => StorageKind::S3,
+    }
+}
+
+fn default_local_storage() -> ArtifactStorage {
+    ArtifactStorage::Local {
+        path: "storage/releases".to_string(),
+    }
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────
 
 /// Console page routes (nested under base_path).
@@ -134,6 +190,12 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/release/{version}",
             axum::routing::put(update_release_handler).delete(delete_release_handler),
+        )
+        .route(
+            "/release/storage",
+            get(get_storage_handler)
+                .put(put_storage_handler)
+                .delete(delete_storage_handler),
         )
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }
@@ -221,11 +283,27 @@ pub async fn upload_handler(
     let mut published = true;
     let mut doc = ReleaseDoc::default();
     let mut envs: Vec<String> = Vec::new();
+    let mut storage_choice: Option<StorageKind> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name().unwrap_or_default() {
             "version" => {
                 version = field.text().await.ok().map(|v| v.trim().to_string());
+            }
+            "storage" => {
+                let raw = field.text().await.unwrap_or_default();
+                match StorageKind::parse(&raw) {
+                    Some(kind) => storage_choice = Some(kind),
+                    None if raw.trim().is_empty() => {}
+                    None => {
+                        return json_error(
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "unknown storage `{raw}` (allowed: local, s3)"
+                            ),
+                        )
+                    }
+                }
             }
             "release_notes" => {
                 notes = field.text().await.ok().map(|v| v.trim().to_string());
@@ -291,6 +369,14 @@ pub async fn upload_handler(
         }
     }
 
+    // Fail fast on an unusable backend choice before reading the whole
+    // manifest (an unconfigured S3 target is an operator error → 400).
+    if let Some(StorageKind::S3) = storage_choice
+        && let Err(e) = storage_of_kind(&state, StorageKind::S3).await
+    {
+        return json_error(StatusCode::BAD_REQUEST, e);
+    }
+
     match create_release(
         &state,
         CreateReleaseParams {
@@ -300,6 +386,7 @@ pub async fn upload_handler(
             release_notes: notes.filter(|n| !n.is_empty()),
             published,
             extra: doc,
+            storage: storage_choice,
         },
     )
     .await
@@ -388,7 +475,7 @@ pub async fn delete_release_handler(
         return json_error(StatusCode::NOT_FOUND, "release not found");
     };
     let doc = docs.remove(pos);
-    match release_storage(&state) {
+    match release_storage_for(&state, &doc.storage_path).await {
         Ok(storage) => {
             if let Some(key) = artifact_object_key(&storage, &doc.storage_path) {
                 if let Err(e) = storage.delete(&key).await {
@@ -413,18 +500,339 @@ pub async fn releases_page(
     let mut docs = load_docs(&config_store(&state)).await;
     sort_by_version_desc(&mut docs);
     let current_user = state.build_current_user_ctx(&user).await;
+    // Tera lacks a `starting_with` test — precompute the storage badge.
+    let releases: Vec<serde_json::Value> = docs
+        .iter()
+        .map(|d| {
+            let mut v = serde_json::to_value(d).unwrap_or(json!({}));
+            v["storage_is_s3"] = json!(d.storage_path.trim().starts_with("s3://"));
+            v
+        })
+        .collect();
     state.render_with_headers(
         "console/releases.html",
         json!({
             "nav_active": "releases",
-            "releases": docs,
+            "releases": releases,
             "current_user": current_user,
         }),
         &headers,
     )
 }
 
+// ── Storage settings (releases page) ────────────────────────────────────
+
+/// GET {api_prefix}/release/storage — the storage backend currently in
+/// effect for release artifacts, with a `source` marker (`stored` = saved on
+/// this page, `config` = `config.toml [release].storage`, `default` = built-in
+/// local directory). Credentials are never returned; only `has_credentials`.
+pub async fn get_storage_handler(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_user): AuthRequired,
+) -> Response {
+    let store = config_store(&state);
+    let stored = stored_storage(&store).await;
+    let from_toml = state
+        .config()
+        .release
+        .as_ref()
+        .and_then(|r| r.storage.clone());
+    let (cfg, source) = match (stored, from_toml) {
+        (Some(cfg), _) => (cfg, "stored"),
+        (None, Some(cfg)) => (cfg, "config"),
+        (None, None) => (default_local_storage(), "default"),
+    };
+    Json(storage_json(&cfg, source)).into_response()
+}
+
+/// PUT {api_prefix}/release/storage — save the storage backend on this page
+/// (overrides `config.toml [release].storage`). `type` selects `local`
+/// (`path`) or `s3` (`vendor`/`bucket`/`region`/`endpoint`/`prefix` +
+/// credentials). Blank credential fields keep the credentials already saved
+/// here; `clear_credentials: true` removes them (anonymous bucket access).
+pub async fn put_storage_handler(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_user): AuthRequired,
+    Json(body): Json<UpdateStorageBody>,
+) -> Response {
+    let store = config_store(&state);
+    let existing = stored_storage(&store).await;
+    let cfg = match storage_from_update_body(&body, existing.as_ref()) {
+        Ok(cfg) => cfg,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let content = match toml::to_string_pretty(&ReleaseStorageFile {
+        storage: Some(cfg.clone()),
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to encode storage.toml: {e}"),
+            )
+        }
+    };
+    if let Err(e) = store
+        .write(RELEASE_CATEGORY, RELEASE_STORAGE_ENTRY, &content)
+        .await
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist storage.toml: {e}"),
+        );
+    }
+    Json(storage_json(&cfg, "stored")).into_response()
+}
+
+/// DELETE {api_prefix}/release/storage — drop the page-saved storage config
+/// and fall back to `config.toml [release].storage` (or the default local
+/// directory).
+pub async fn delete_storage_handler(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_user): AuthRequired,
+) -> Response {
+    let store = config_store(&state);
+    if let Err(e) = store
+        .delete(RELEASE_CATEGORY, RELEASE_STORAGE_ENTRY)
+        .await
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to remove storage.toml: {e}"),
+        );
+    }
+    Json(json!({ "deleted": true })).into_response()
+}
+
 // ── Request bodies ──────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateStorageBody {
+    /// `local` or `s3`.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Local artifact directory (`type = "local"`).
+    pub path: Option<String>,
+    pub vendor: Option<String>,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    /// Optional key prefix inside the bucket.
+    pub prefix: Option<String>,
+    /// Non-empty values (re)set the credential; blank keeps what is already
+    /// saved on this page.
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    /// Drop both credentials → anonymous/public bucket access.
+    #[serde(default)]
+    pub clear_credentials: bool,
+}
+
+/// Parameters for [`create_release`] (kept non-multipart so tests and future
+/// callers can upload without building multipart bodies).
+pub struct CreateReleaseParams {
+    pub version: String,
+    pub file_name: String,
+    pub data: bytes::Bytes,
+    pub release_notes: Option<String>,
+    pub published: bool,
+    /// Policy passthrough fields collected from the upload form.
+    pub extra: ReleaseDoc,
+    /// Explicit backend for this artifact (`local` / `s3` from the upload
+    /// form). `None` = the effective default backend.
+    pub storage: Option<StorageKind>,
+}
+
+// ── Storage resolution ──────────────────────────────────────────────────
+
+/// The storage backend saved on the releases page, if any.
+async fn stored_storage(store: &GeneratedConfigStore) -> Option<ArtifactStorage> {
+    match store.read(RELEASE_CATEGORY, RELEASE_STORAGE_ENTRY).await {
+        Ok(Some(content)) => match toml::from_str::<ReleaseStorageFile>(&content) {
+            Ok(file) => file.storage,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse release storage.toml, ignoring");
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// Effective default backend: page-saved config → `config.toml
+/// [release].storage` → built-in local `storage/releases`.
+async fn effective_release_storage(state: &ConsoleState) -> ArtifactStorage {
+    if let Some(cfg) = stored_storage(&config_store(state)).await {
+        return cfg;
+    }
+    state
+        .config()
+        .release
+        .as_ref()
+        .and_then(|r| r.storage.clone())
+        .unwrap_or_else(default_local_storage)
+}
+
+/// Backend of a specific kind. Resolution walks the page-saved config then
+/// `config.toml`; `local` falls back to the built-in directory, `s3` fails
+/// with an actionable message when neither source configures a bucket.
+async fn storage_of_kind(state: &ConsoleState, kind: StorageKind) -> Result<ArtifactStorage, String> {
+    let stored = stored_storage(&config_store(state)).await;
+    let from_toml = state
+        .config()
+        .release
+        .as_ref()
+        .and_then(|r| r.storage.clone());
+    for cfg in [stored, from_toml].into_iter().flatten() {
+        if storage_kind_of(&cfg) == kind {
+            return Ok(cfg);
+        }
+    }
+    match kind {
+        StorageKind::Local => Ok(default_local_storage()),
+        StorageKind::S3 => Err(
+            "S3 storage is not configured — save it on the releases page or set [release].storage in config.toml"
+                .into(),
+        ),
+    }
+}
+
+/// Backend owning a stored artifact path: `s3://…` → the configured S3
+/// bucket, anything else → the local directory.
+async fn storage_for_path(state: &ConsoleState, storage_path: &str) -> Result<ArtifactStorage, String> {
+    if storage_path.trim().starts_with("s3://") {
+        storage_of_kind(state, StorageKind::S3).await
+    } else {
+        storage_of_kind(state, StorageKind::Local).await
+    }
+}
+
+/// Build the effective backend for an upload with an explicit choice.
+async fn resolve_upload_storage(
+    state: &ConsoleState,
+    choice: Option<StorageKind>,
+) -> Result<ArtifactStorage, String> {
+    match choice {
+        Some(kind) => storage_of_kind(state, kind).await,
+        None => Ok(effective_release_storage(state).await),
+    }
+}
+
+/// Console-facing JSON for a storage config. Secrets never leave the server;
+/// S3 configs report `has_credentials` instead.
+fn storage_json(cfg: &ArtifactStorage, source: &str) -> serde_json::Value {
+    match cfg {
+        ArtifactStorage::Local { path } => json!({
+            "type": "local",
+            "path": path,
+            "source": source,
+        }),
+        ArtifactStorage::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            prefix,
+        } => json!({
+            "type": "s3",
+            "vendor": vendor,
+            "bucket": bucket,
+            "region": region,
+            "endpoint": endpoint,
+            "prefix": prefix,
+            "has_credentials": access_key.is_some() || secret_key.is_some(),
+            "source": source,
+        }),
+    }
+}
+
+/// Materialize the page-saved backend from a PUT body. Blank credential
+/// fields inherit the credentials of the currently saved S3 config (so
+/// editing e.g. the region does not silently drop the keys);
+/// `clear_credentials` removes them.
+fn storage_from_update_body(
+    body: &UpdateStorageBody,
+    existing: Option<&ArtifactStorage>,
+) -> Result<ArtifactStorage, String> {
+    let kind = body
+        .kind
+        .as_deref()
+        .map(StorageKind::parse)
+        .unwrap_or(None);
+    match kind {
+        Some(StorageKind::Local) => {
+            let path = body
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .unwrap_or("storage/releases");
+            Ok(ArtifactStorage::Local {
+                path: path.to_string(),
+            })
+        }
+        Some(StorageKind::S3) => {
+            let field = |v: &Option<String>| -> Option<String> {
+                v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+            };
+            let vendor_raw =
+                field(&body.vendor).ok_or("S3 storage requires a vendor")?;
+            let vendor: crate::storage::S3Vendor = serde_json::from_value(json!(vendor_raw))
+                .map_err(|_| {
+                    format!(
+                        "unknown S3 vendor `{vendor_raw}` (expected aws/gcp/azure/aliyun/tencent/minio/digitalocean)"
+                    )
+                })?;
+            let bucket = field(&body.bucket).ok_or("S3 storage requires a bucket")?;
+            let region = field(&body.region).ok_or("S3 storage requires a region")?;
+            let endpoint = field(&body.endpoint).ok_or("S3 storage requires an endpoint")?;
+            let (prev_access, prev_secret) = match existing {
+                Some(ArtifactStorage::S3 {
+                    access_key,
+                    secret_key,
+                    ..
+                }) => (access_key.clone(), secret_key.clone()),
+                _ => (None, None),
+            };
+            let merge = |provided: &Option<String>,
+                         previous: Option<String>|
+             -> Option<String> {
+                if body.clear_credentials {
+                    return None;
+                }
+                match field(provided) {
+                    Some(v) => Some(v),
+                    None => previous,
+                }
+            };
+            let access_key = merge(&body.access_key, prev_access);
+            let secret_key = merge(&body.secret_key, prev_secret);
+            if access_key.is_some() != secret_key.is_some() {
+                return Err(
+                    "access_key and secret_key must be set together (or cleared together)"
+                        .into(),
+                );
+            }
+            Ok(ArtifactStorage::S3 {
+                vendor,
+                bucket: bucket.to_string(),
+                region: region.to_string(),
+                access_key,
+                secret_key,
+                endpoint: Some(endpoint.to_string()),
+                prefix: body
+                    .prefix
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
+            })
+        }
+        None => Err("storage `type` must be `local` or `s3`".into()),
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateReleaseBody {
@@ -442,18 +850,6 @@ pub struct UpdateReleaseBody {
     pub environments: Option<Vec<String>>,
 }
 
-/// Parameters for [`create_release`] (kept non-multipart so tests and future
-/// callers can upload without building multipart bodies).
-pub struct CreateReleaseParams {
-    pub version: String,
-    pub file_name: String,
-    pub data: bytes::Bytes,
-    pub release_notes: Option<String>,
-    pub published: bool,
-    /// Policy passthrough fields collected from the upload form.
-    pub extra: ReleaseDoc,
-}
-
 /// Store the artifact and upsert the manifest entry (same version replaces).
 pub async fn create_release(
     state: &Arc<ConsoleState>,
@@ -469,7 +865,10 @@ pub async fn create_release(
     }
     let key = format!("{}/{}", version, safe_name);
 
-    let storage_cfg = effective_release_storage(state);
+    let storage_cfg = match resolve_upload_storage(state, params.storage).await {
+        Ok(cfg) => cfg,
+        Err(e) => return Err(e),
+    };
     let storage = Storage::new(&storage_cfg).map_err(|e| format!("storage unavailable: {e}"))?;
     storage
         .write(&key, params.data.clone())
@@ -489,13 +888,26 @@ pub async fn create_release(
     let store = config_store(state);
     let mut docs = load_docs(&store).await;
     // Re-upload of the same version: drop the previous artifact if it now
-    // points somewhere else, then replace the entry.
+    // points somewhere else, then replace the entry. The old artifact may
+    // live in the other backend (local ↔ S3), so resolve its storage from
+    // the recorded path kind.
     if let Some(pos) = docs.iter().position(|d| d.version == version) {
         let old = docs.remove(pos);
         if old.storage_path != storage_path {
-            if let Some(old_key) = artifact_object_key(&storage, &old.storage_path) {
-                if let Err(e) = storage.delete(&old_key).await {
-                    tracing::warn!(version = %version, error = %e, "failed to clean previous artifact");
+            match storage_for_path(state, &old.storage_path).await {
+                Ok(old_cfg) => {
+                    if let Ok(old_storage) = Storage::new(&old_cfg) {
+                        if let Some(old_key) =
+                            artifact_object_key(&old_storage, &old.storage_path)
+                        {
+                            if let Err(e) = old_storage.delete(&old_key).await {
+                                tracing::warn!(version = %version, error = %e, "failed to clean previous artifact");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(version = %version, error = %e, "previous artifact backend unavailable");
                 }
             }
         }
@@ -541,10 +953,6 @@ fn config_store(state: &ConsoleState) -> GeneratedConfigStore {
 
 fn release_config(state: &ConsoleState) -> ReleaseConfig {
     state.config().release.clone().unwrap_or_default()
-}
-
-fn effective_release_storage(state: &ConsoleState) -> ArtifactStorage {
-    release_config(state).effective_storage()
 }
 
 async fn load_docs(store: &GeneratedConfigStore) -> Vec<ReleaseDoc> {
@@ -699,7 +1107,7 @@ async fn download_url_for(
         return Ok(raw.to_string());
     }
     if raw.starts_with("s3://") {
-        let storage = release_storage(state)?;
+        let storage = release_storage_for(state, raw).await?;
         return presign_artifact(&storage, raw, state)
             .await
             .map(|opt| opt.unwrap_or_else(|| local_download_url(state, &doc.version, headers)));
@@ -746,11 +1154,11 @@ async fn presign_artifact(
     }
     // Anonymous bucket: build the plain path-style URL when an endpoint is
     // configured; otherwise we cannot produce a fetchable URL.
-    if let ArtifactStorage::S3 {
+    if let Ok(ArtifactStorage::S3 {
         bucket,
         endpoint: Some(endpoint),
         ..
-    } = effective_release_storage(state)
+    }) = storage_of_kind(state, StorageKind::S3).await
     {
         let bucket = bucket.trim_matches('/');
         let base = endpoint.trim_end_matches('/');
@@ -767,7 +1175,7 @@ async fn serve_artifact(state: &Arc<ConsoleState>, doc: &ReleaseDoc) -> Result<R
     if raw.starts_with("http://") || raw.starts_with("https://") {
         return Ok((StatusCode::FOUND, [(header::LOCATION, raw.to_string())]).into_response());
     }
-    let storage = release_storage(state)?;
+    let storage = release_storage_for(state, raw).await?;
     if raw.starts_with("s3://") {
         return match presign_artifact(&storage, raw, state).await? {
             Some(url) => Ok((StatusCode::FOUND, [(header::LOCATION, url)]).into_response()),
@@ -820,8 +1228,11 @@ async fn serve_artifact(state: &Arc<ConsoleState>, doc: &ReleaseDoc) -> Result<R
         .into_response())
 }
 
-fn release_storage(state: &Arc<ConsoleState>) -> Result<Storage, String> {
-    Storage::new(&effective_release_storage(state)).map_err(|e| format!("storage unavailable: {e}"))
+/// Storage backend for a stored artifact path (`s3://…` → S3 bucket, else
+/// the local directory).
+async fn release_storage_for(state: &Arc<ConsoleState>, storage_path: &str) -> Result<Storage, String> {
+    let cfg = storage_for_path(state, storage_path).await?;
+    Storage::new(&cfg).map_err(|e| format!("storage unavailable: {e}"))
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────
@@ -1447,15 +1858,28 @@ mod tests {
                     ..doc("0.2.0", true)
                 },
                 doc("0.1.13", true), // untagged → "all environments" badge
+                ReleaseDoc {
+                    storage_path: "s3://rels/0.1.12/app.zip".into(),
+                    ..doc("0.1.12", true) // S3-uploaded → storage badge
+                },
             ],
         )
         .await;
         let mut docs = load_docs(&config_store(&state)).await;
         sort_by_version_desc(&mut docs);
+        // Mirror the page handler: precompute the storage badge flag.
+        let releases: Vec<serde_json::Value> = docs
+            .iter()
+            .map(|d| {
+                let mut v = serde_json::to_value(d).unwrap();
+                v["storage_is_s3"] = json!(d.storage_path.trim().starts_with("s3://"));
+                v
+            })
+            .collect();
 
         let resp = state.render_with_locale(
             "console/releases.html",
-            json!({ "nav_active": "releases", "releases": docs }),
+            json!({ "nav_active": "releases", "releases": releases }),
             "zh",
         );
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
@@ -1470,6 +1894,11 @@ mod tests {
         assert!(html.contains("不勾选 = 所有环境可见"), "hint missing");
         assert!(html.contains(">testing</span>"), "env badge missing");
         assert!(html.contains("全部"), "all-environments badge missing");
+        // Storage badges: S3 vs local, derived from the recorded path.
+        assert!(html.contains("存储位置"), "upload storage selector missing");
+        assert!(html.contains("存储配置"), "storage settings card missing");
+        assert!(html.contains(">S3</span>"), "s3 storage badge missing");
+        assert!(html.contains(">本地</span>"), "local storage badge missing");
     }
 
     /// Public reads pass without credentials; mutations stay behind auth.
@@ -1683,5 +2112,491 @@ mod tests {
         );
         let docs = load_docs(&config_store(&state)).await;
         assert!(docs.is_empty(), "manifest entry must be gone");
+    }
+
+    // ── storage settings: local + S3 on the releases page ───────────────
+
+    async fn authed(state: &Arc<ConsoleState>, method: &str, uri: &str, body: Body) -> Response {
+        crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_response()
+    }
+
+    #[test]
+    fn storage_kind_parse_is_closed_vocabulary() {
+        assert_eq!(StorageKind::parse("local"), Some(StorageKind::Local));
+        assert_eq!(StorageKind::parse(" S3 "), Some(StorageKind::S3));
+        assert_eq!(StorageKind::parse("oss"), None);
+        assert_eq!(StorageKind::parse(""), None);
+    }
+
+    #[test]
+    fn release_storage_toml_roundtrip() {
+        let file = ReleaseStorageFile {
+            storage: Some(ArtifactStorage::S3 {
+                vendor: crate::storage::S3Vendor::Minio,
+                bucket: "rels".into(),
+                region: "us-east-1".into(),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                endpoint: Some("http://127.0.0.1:9000".into()),
+                prefix: Some("pkgs".into()),
+            }),
+        };
+        let s = toml::to_string_pretty(&file).unwrap();
+        assert!(s.contains("[storage]"), "wrapped as a [storage] table: {s}");
+        let back: ReleaseStorageFile = toml::from_str(&s).unwrap();
+        match back.storage.unwrap() {
+            ArtifactStorage::S3 {
+                bucket,
+                prefix,
+                access_key,
+                ..
+            } => {
+                assert_eq!(bucket, "rels");
+                assert_eq!(prefix.as_deref(), Some("pkgs"));
+                assert_eq!(access_key.as_deref(), Some("ak"));
+            }
+            other => panic!("expected s3 config, got {other:?}"),
+        }
+
+        // storage: absent → None (back to config.toml / default).
+        let empty = toml::to_string_pretty(&ReleaseStorageFile { storage: None }).unwrap();
+        let back: ReleaseStorageFile = toml::from_str(&empty).unwrap();
+        assert!(back.storage.is_none());
+    }
+
+    #[test]
+    fn storage_update_body_validates_and_inherits_credentials() {
+        // local: default path when blank.
+        let cfg = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("local".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(storage_kind_of(&cfg), StorageKind::Local);
+        match cfg {
+            ArtifactStorage::Local { path } => assert_eq!(path, "storage/releases"),
+            other => panic!("expected local, got {other:?}"),
+        }
+
+        // type is mandatory.
+        assert!(storage_from_update_body(&UpdateStorageBody::default(), None).is_err());
+
+        // s3 requires vendor/bucket/region/endpoint (first miss reported).
+        let err = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("minio".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("bucket"), "got: {err}");
+
+        // Unknown vendor rejected with the closed list.
+        let err = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("oss9".into()),
+                bucket: Some("b".into()),
+                region: Some("r".into()),
+                endpoint: Some("http://ep".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown S3 vendor"), "got: {err}");
+
+        // Partial credential pair rejected.
+        let err = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("minio".into()),
+                bucket: Some("b".into()),
+                region: Some("r".into()),
+                endpoint: Some("http://ep".into()),
+                access_key: Some("ak".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("together"), "got: {err}");
+
+        let existing = ArtifactStorage::S3 {
+            vendor: crate::storage::S3Vendor::Minio,
+            bucket: "old".into(),
+            region: "us-east-1".into(),
+            access_key: Some("ak".into()),
+            secret_key: Some("sk".into()),
+            endpoint: Some("http://ep".into()),
+            prefix: None,
+        };
+
+        // Blank credentials keep the saved pair; other fields update.
+        let cfg = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("minio".into()),
+                bucket: Some("new".into()),
+                region: Some("us-east-1".into()),
+                endpoint: Some("http://ep".into()),
+                ..Default::default()
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        match cfg {
+            ArtifactStorage::S3 {
+                bucket, access_key, secret_key, ..
+            } => {
+                assert_eq!(bucket, "new");
+                assert_eq!(access_key.as_deref(), Some("ak"), "blank must inherit");
+                assert_eq!(secret_key.as_deref(), Some("sk"));
+            }
+            other => panic!("expected s3, got {other:?}"),
+        }
+
+        // clear_credentials drops both (anonymous bucket).
+        let cfg = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("minio".into()),
+                bucket: Some("new".into()),
+                region: Some("us-east-1".into()),
+                endpoint: Some("http://ep".into()),
+                clear_credentials: true,
+                ..Default::default()
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        match cfg {
+            ArtifactStorage::S3 {
+                access_key, secret_key, ..
+            } => {
+                assert!(access_key.is_none() && secret_key.is_none());
+            }
+            other => panic!("expected s3, got {other:?}"),
+        }
+
+        // Explicit non-empty credentials replace the saved pair.
+        let cfg = storage_from_update_body(
+            &UpdateStorageBody {
+                kind: Some("s3".into()),
+                vendor: Some("minio".into()),
+                bucket: Some("new".into()),
+                region: Some("us-east-1".into()),
+                endpoint: Some("http://ep".into()),
+                access_key: Some(" ak2 ".into()),
+                secret_key: Some("sk2".into()),
+                ..Default::default()
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        match cfg {
+            ArtifactStorage::S3 { access_key, .. } => {
+                assert_eq!(access_key.as_deref(), Some("ak2"), "trimmed replacement");
+            }
+            other => panic!("expected s3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn storage_json_never_leaks_secrets() {
+        let cfg = ArtifactStorage::S3 {
+            vendor: crate::storage::S3Vendor::Minio,
+            bucket: "rels".into(),
+            region: "us-east-1".into(),
+            access_key: Some("secret-ak".into()),
+            secret_key: Some("secret-sk".into()),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            prefix: None,
+        };
+        let v = storage_json(&cfg, "stored");
+        assert_eq!(v["type"], "s3");
+        assert_eq!(v["bucket"], "rels");
+        assert_eq!(v["has_credentials"], true);
+        assert_eq!(v["source"], "stored");
+        let s = v.to_string();
+        assert!(!s.contains("secret-ak") && !s.contains("secret-sk"), "secrets leaked: {s}");
+        assert!(v.get("access_key").is_none() && v.get("secret_key").is_none());
+
+        let local = ArtifactStorage::Local {
+            path: "storage/releases".into(),
+        };
+        let v = storage_json(&local, "default");
+        assert_eq!(v["type"], "local");
+        assert_eq!(v["path"], "storage/releases");
+        assert_eq!(v["source"], "default");
+    }
+
+    /// GET/PUT/DELETE `/release/storage`: masked reads, validation, blank
+    /// credentials inherit, clear drops, reset falls back to config.toml —
+    /// and the endpoint stays auth-required after the public-read exemption
+    /// was narrowed.
+    #[tokio::test]
+    async fn storage_settings_roundtrip_masks_secrets_and_requires_auth() {
+        let (state, _tmp) = setup_release_stack().await;
+
+        // Storage settings are not public even though /release reads are.
+        assert_eq!(
+            get(&state, "/api/release/storage").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // The narrowed exemption keeps the documented public reads open.
+        assert_eq!(get(&state, "/api/release/list").await.status(), StatusCode::OK);
+        assert_eq!(get(&state, "/api/release").await.status(), StatusCode::NOT_FOUND);
+
+        // Initial state: config.toml [release].storage (the test stack's
+        // local tmp dir).
+        let cfg = json_body(authed(&state, "GET", "/api/release/storage", Body::empty()).await).await;
+        assert_eq!(cfg["type"], "local");
+        assert_eq!(cfg["source"], "config");
+
+        // PUT with a missing mandatory field → 400, nothing stored.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(r#"{"type":"s3","vendor":"minio","region":"r","endpoint":"http://ep"}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let stored = stored_storage(&config_store(&state)).await;
+        assert!(stored.is_none(), "rejected save must not persist");
+
+        // PUT full s3 → stored; response carries has_credentials, no secrets.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(
+                r#"{"type":"s3","vendor":"minio","bucket":"rels","region":"us-east-1","endpoint":"http://127.0.0.1:9000","access_key":"ak","secret_key":"sk","prefix":"pkgs"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg = json_body(resp).await;
+        assert_eq!(cfg["type"], "s3");
+        assert_eq!(cfg["has_credentials"], true);
+        assert_eq!(cfg["source"], "stored");
+        assert!(cfg.get("access_key").is_none());
+
+        let cfg = json_body(authed(&state, "GET", "/api/release/storage", Body::empty()).await).await;
+        assert_eq!(cfg["source"], "stored");
+        assert_eq!(cfg["bucket"], "rels");
+        assert_eq!(cfg["prefix"], "pkgs");
+
+        // Re-save without credentials → the saved pair is kept.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(
+                r#"{"type":"s3","vendor":"minio","bucket":"rels2","region":"us-east-1","endpoint":"http://127.0.0.1:9000"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg = json_body(resp).await;
+        assert_eq!(cfg["bucket"], "rels2");
+        assert_eq!(
+            cfg["has_credentials"], true,
+            "blank credentials must keep the saved pair"
+        );
+
+        // Anonymous bucket: clear_credentials drops the pair.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(
+                r#"{"type":"s3","vendor":"minio","bucket":"rels","region":"us-east-1","endpoint":"http://127.0.0.1:9000","clear_credentials":true}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg = json_body(resp).await;
+        assert_eq!(cfg["has_credentials"], false);
+
+        // Switch to local.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(r#"{"type":"local","path":"storage/pkg-releases"}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg = json_body(resp).await;
+        assert_eq!(cfg["type"], "local");
+        assert_eq!(cfg["path"], "storage/pkg-releases");
+
+        // Reset → back to config.toml.
+        let resp = authed(&state, "DELETE", "/api/release/storage", Body::empty()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg = json_body(authed(&state, "GET", "/api/release/storage", Body::empty()).await).await;
+        assert_eq!(cfg["source"], "config");
+        assert_eq!(cfg["type"], "local");
+    }
+
+    /// The multipart `storage` field picks the backend per upload: unknown
+    /// values and an unconfigured S3 target are rejected up front (400),
+    /// explicit `local` and the default (no field) both land in the
+    /// configured local directory.
+    #[tokio::test]
+    async fn upload_storage_field_routes_local_and_rejects_bad_choices() {
+        let (state, tmp) = setup_release_stack().await;
+
+        let post = |fields: &[(&str, &str)]| {
+            let body = multipart_body(
+                "relboundary42",
+                fields,
+                Some(("file", "app.zip", b"payload".as_slice())),
+            );
+            crate::api::router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/release")
+                        .header(
+                            "content-type",
+                            "multipart/form-data; boundary=relboundary42",
+                        )
+                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+        };
+
+        // Unknown backend name → 400.
+        let resp = post(&[
+            ("version", "0.3.0"),
+            ("storage", "ceph"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // S3 chosen while unconfigured → 400 with the actionable message.
+        let resp = post(&[
+            ("version", "0.3.0"),
+            ("storage", "s3"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("not configured"), "got: {text}");
+        let docs = load_docs(&config_store(&state)).await;
+        assert!(docs.is_empty(), "failed uploads must not add entries");
+
+        // Explicit local → stored in the configured local dir.
+        let resp = post(&[
+            ("version", "0.3.0"),
+            ("storage", "local"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "explicit local must upload");
+        let saved = json_body(resp).await["release"].clone();
+        assert_eq!(saved["storage_path"], "0.3.0/app.zip");
+        assert!(tmp.path().join("0.3.0/app.zip").exists(), "file must land in the local dir");
+
+        // No field → effective default (config.toml local here) — same dir.
+        let resp = post(&[("version", "0.3.1")]).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let saved = json_body(resp).await["release"].clone();
+        assert_eq!(saved["storage_path"], "0.3.1/app.zip");
+        assert!(tmp.path().join("0.3.1/app.zip").exists());
+    }
+
+    /// An `s3://…` artifact is served through the page-saved S3 storage:
+    /// offline SigV4 presigning for both the check endpoint (bare UpdateMeta
+    /// `url`) and the download redirect — and fails with a clear error while
+    /// no S3 storage is configured.
+    #[tokio::test]
+    async fn s3_artifacts_presign_via_page_saved_storage() {
+        let (state, _tmp) = setup_release_stack().await;
+        seed(
+            &state,
+            vec![ReleaseDoc {
+                version: "0.1.13".into(),
+                published: true,
+                file_name: "app.zip".into(),
+                storage_path: "s3://rels/0.1.13/app.zip".into(),
+                sha256: "cafe".into(),
+                ..Default::default()
+            }],
+        )
+        .await;
+
+        // No S3 storage anywhere → the artifact is unreachable with a clear
+        // message (clients treat non-200 as "no update" and stay silent).
+        let resp = get(&state, "/api/release/0.1.13/download").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(get(&state, "/api/release").await.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Save the S3 backend on the page.
+        let resp = authed(
+            &state,
+            "PUT",
+            "/api/release/storage",
+            Body::from(
+                r#"{"type":"s3","vendor":"minio","bucket":"rels","region":"us-east-1","endpoint":"http://127.0.0.1:9000","access_key":"ak","secret_key":"sk"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Check endpoint: presigned URL built offline from the saved keys.
+        let resp = get(&state, "/api/release?version=0.1.9").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let meta = json_body(resp).await;
+        let url = meta["url"].as_str().unwrap().to_string();
+        assert!(
+            url.starts_with("http://127.0.0.1:9000/rels/0.1.13/app.zip"),
+            "presigned url: {url}"
+        );
+        assert!(url.contains("X-Amz-Signature"), "must be signed: {url}");
+
+        // Download endpoint: 302 to the same presigned URL.
+        let resp = get(&state, "/api/release/0.1.13/download").await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let loc = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(loc.contains("X-Amz-Signature"), "redirect: {loc}");
+
+        // Reset to config.toml (local) → unreachable again.
+        let resp = authed(&state, "DELETE", "/api/release/storage", Body::empty()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            get(&state, "/api/release/0.1.13/download").await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
