@@ -73,6 +73,14 @@ pub mod recording_trace_codes {
     /// client-reported busy (cluster/presence sync) had overwritten the
     /// dispatch-bound ringing state, and preserved the agent recording start.
     pub const AGENT_CONNECT_RACE_RESCUED: &str = "recording.agent_connect_race_rescued";
+    /// The queue's dispatch claim (recording reservation) was still held at the
+    /// agent answer even though the shared status showed a foreign/stale state —
+    /// the recording start was preserved and the binding repaired BEST-EFFORT.
+    /// `detail.binding` says what happened: `rebound` (foreign binding was dead
+    /// and was stolen back to this call), `kept_live_foreign` (a LIVE foreign
+    /// binding was left untouched — never steal a live call), or
+    /// `rebound_ringing` (a non-bound state was normalized to Ringing{this}).
+    pub const AGENT_CONNECT_REBOUND: &str = "recording.agent_connect_rebound";
     /// The on-demand agent segment start was skipped (recording disabled,
     /// policy full-call recording active, segment owned by an upstream peer,
     /// live session handle unavailable, ...). `detail.reason` says which.
