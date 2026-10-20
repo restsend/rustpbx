@@ -474,6 +474,14 @@ pub async fn report_handler(
     let decoded = decode_body(&body);
     let preview: String = decoded.text.chars().take(BODY_PREVIEW_BYTES).collect();
     let storage_key = store_telemetry_body(&state, &kind, &event, &body, is_gzip);
+    // Desktop uploaders use the HTTP status, not stored_body, as their receipt.
+    if storage_key.is_none() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": "report body could not be stored"})),
+        )
+            .into_response();
+    }
 
     let in_call = flag(&params, &headers, "in_call", "x-restsend-in-call");
     let safe_mode = flag(&params, &headers, "safe_mode", "x-restsend-safe-mode");
@@ -507,7 +515,7 @@ pub async fn report_handler(
         "body_preview": preview,
         "body_truncated": decoded.truncated,
         "body_is_gzip": is_gzip,
-        "received_by": std::env::var("RUSTPBX_INSTANCE_ID").ok().filter(|s| !s.is_empty()),
+        "received_by": crate::utils::instance_id(),
     });
 
     let db_err = if let Err(e) = ingest_row(
@@ -995,8 +1003,68 @@ async fn body_handler(
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
+    let local = body_response_local(&state, params.id, false).await;
+    if !matches!(local.status(), StatusCode::NOT_FOUND | StatusCode::GONE) {
+        return local;
+    }
+    let config = state.config();
+    let Some(cluster) = config.cluster.as_ref() else {
+        return local;
+    };
+    let ami_path = config
+        .proxy
+        .ami_path
+        .as_deref()
+        .unwrap_or(crate::config::DEFAULT_AMI_PATH);
+    let client = state.http_client();
+    // Only configured peers may serve a body. Their terminal handler never
+    // forwards again, and verifies the persisted owner before opening a file.
+    let responses = futures::future::join_all(cluster.peers.iter().map(|peer| {
+        let url = format!(
+            "{}/cluster/client-reports/body?id={}",
+            crate::proxy::cluster_forward::peer_ami_base(peer, ami_path),
+            params.id,
+        );
+        async move {
+            crate::proxy::cluster_forward::forward_json(client, &url, reqwest::Method::GET, None)
+                .await
+        }
+    }))
+    .await;
+    let mut unavailable = false;
+    for response in responses {
+        match response {
+            Some((status, body)) if status.is_success() => {
+                return (status, Json(body)).into_response();
+            }
+            Some((StatusCode::NOT_FOUND | StatusCode::GONE, _)) => {}
+            _ => unavailable = true,
+        }
+    }
+    if unavailable {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "report body node is unavailable"})),
+        )
+            .into_response();
+    }
+    local
+}
+
+/// AMI-authenticated terminal read: never consult or forward to other nodes.
+pub(crate) async fn cluster_body_handler(
+    State(app): State<crate::app::AppState>,
+    AxumQuery(params): AxumQuery<BodyParams>,
+) -> Response {
+    let Some(state) = app.console.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    body_response_local(state, params.id, true).await
+}
+
+async fn body_response_local(state: &ConsoleState, id: i64, require_owner: bool) -> Response {
     let Some(row) = SnapshotEntity::find()
-        .filter(SnapCol::Id.eq(params.id))
+        .filter(SnapCol::Id.eq(id))
         .one(state.db())
         .await
         .ok()
@@ -1015,6 +1083,20 @@ async fn body_handler(
         )
             .into_response();
     }
+    let owner = row.data.as_ref()
+        .and_then(|data| data.get("received_by"))
+        .and_then(|owner| owner.as_str());
+    // Legacy keys are not globally unique. Only local console reads may
+    // accept unowned rows; a peer must never claim a same-named local file.
+    if owner.is_some_and(|owner| owner != crate::utils::instance_id())
+        || (require_owner && owner.is_none())
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "report body belongs to another node"})),
+        )
+            .into_response();
+    }
     let Some(key) = row
         .data
         .as_ref()
@@ -1025,7 +1107,7 @@ async fn body_handler(
         return Json(json!({"id": row.id, "text": null, "reason": "body not stored"}))
             .into_response();
     };
-    match read_telemetry_body(&state, &key) {
+    match read_telemetry_body(state, &key) {
         Some(text) => {
             let truncated = text.len() > BODY_VIEW_BYTES;
             let text: String = text.chars().take(BODY_VIEW_BYTES).collect();
@@ -1041,7 +1123,7 @@ async fn body_handler(
 }
 
 #[derive(Debug, Deserialize)]
-struct BodyParams {
+pub(crate) struct BodyParams {
     id: i64,
 }
 
@@ -1098,6 +1180,178 @@ async fn export_handler(
 mod tests {
     use super::*;
 
+    async fn report_state(
+        root: &std::path::Path,
+        db: Option<sea_orm::DatabaseConnection>,
+        peers: Vec<crate::config::ClusterPeer>,
+    ) -> (Arc<ConsoleState>, crate::app::AppState) {
+        let config = crate::config::Config {
+            database_url: "sqlite::memory:".into(),
+            proxy: crate::config::ProxyConfig {
+                generated_db: true,
+                ..Default::default()
+            },
+            console: Some(Default::default()),
+            release: Some(crate::config::ReleaseConfig {
+                telemetry_dir: Some(root.to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+            cluster: (!peers.is_empty()).then_some(crate::config::ClusterConfig {
+                peers,
+                session_registry_backend: "memory".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = crate::app::AppStateBuilder::new()
+            .with_config(config)
+            .with_skip_sip_bind()
+            .build()
+            .await
+            .unwrap();
+        let state = match db {
+            Some(db) => ConsoleState::initialize(db, Default::default(), None)
+                .await
+                .unwrap(),
+            None => app.console.as_ref().unwrap().clone(),
+        };
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        (state, app)
+    }
+
+    async fn upload_report(state: Arc<ConsoleState>) -> Response {
+        use tower::ServiceExt;
+        crate::api::router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/report?kind=diag&event=diag_run&version=0.1.13")
+                    .header("content-type", "application/gzip")
+                    .body(axum::body::Body::from(gzip_bytes(
+                        b"complete diagnostic report",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_reports_storage_failure_to_the_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("not-a-directory");
+        std::fs::write(&blocked, b"occupied").unwrap();
+        let (state, _app) = report_state(&blocked, None, vec![]).await;
+        let response = upload_report(state).await;
+        // Desktop post_gzip treats every 2xx response as success.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn body_query_reads_the_uploading_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (owner, owner_app) = report_state(&tmp.path().join("owner"), None, vec![]).await;
+        let db = owner.db().clone();
+        assert_eq!(upload_report(owner.clone()).await.status(), StatusCode::OK);
+        let row = SnapshotEntity::find()
+            .filter(kind_like_cr())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = crate::handler::ami::ami_router(owner_app.clone()).with_state(owner_app);
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let peer = crate::config::ClusterPeer {
+            addr: "127.0.0.1".into(),
+            sip_port: 15060,
+            ami_port: port,
+        };
+        let (reader, _reader_app) =
+            report_state(&tmp.path().join("reader"), Some(db.clone()), vec![peer]).await;
+        let response = body_handler(
+            State(reader.clone()),
+            AuthRequired(crate::console::handlers::test_helpers::superuser()),
+            AxumQuery(BodyParams { id: row.id }),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["text"], "complete diagnostic report");
+
+        let denied = body_handler(
+            State(reader.clone()),
+            AuthRequired(crate::console::handlers::test_helpers::unprivileged_user()),
+            AxumQuery(BodyParams { id: row.id }),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        // A same-named local file must not be served for another node's row.
+        let mut data = row.data.clone().unwrap();
+        data["received_by"] = json!("another-node");
+        SnapshotEntity::update_many()
+            .col_expr(SnapCol::Data, sea_orm::sea_query::Expr::value(data).into())
+            .filter(SnapCol::Id.eq(row.id))
+            .exec(&db)
+            .await
+            .unwrap();
+        let url = format!(
+            "http://127.0.0.1:{port}{}/cluster/client-reports/body?id={}",
+            crate::config::DEFAULT_AMI_PATH,
+            row.id
+        );
+        let response = reqwest::get(&url).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Old rows have no owner. Local reads remain compatible, but a peer
+        // must not claim an unrelated file with the same historical key.
+        let mut legacy = row.data.clone().unwrap();
+        legacy["received_by"] = serde_json::Value::Null;
+        SnapshotEntity::update_many()
+            .col_expr(SnapCol::Data, sea_orm::sea_query::Expr::value(legacy).into())
+            .filter(SnapCol::Id.eq(row.id))
+            .exec(&db)
+            .await
+            .unwrap();
+        let response = body_handler(
+            State(owner),
+            AuthRequired(crate::console::handlers::test_helpers::superuser()),
+            AxumQuery(BodyParams { id: row.id }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(reqwest::get(&url).await.unwrap().status(), StatusCode::NOT_FOUND);
+        SnapshotEntity::update_many()
+            .col_expr(
+                SnapCol::Data,
+                sea_orm::sea_query::Expr::value(row.data).into(),
+            )
+            .filter(SnapCol::Id.eq(row.id))
+            .exec(&db)
+            .await
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        let unavailable = body_handler(
+            State(reader),
+            AuthRequired(crate::console::handlers::test_helpers::superuser()),
+            AxumQuery(BodyParams { id: row.id }),
+        )
+        .await;
+        assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
+    }
     #[test]
     fn sanitize_event_keeps_known_shapes_and_caps_length() {
         assert_eq!(sanitize_event("panic"), "panic");

@@ -137,6 +137,14 @@ gzip 压缩的日志纯文本。
 - **日志体不进 DB**：本地目录 `[release].telemetry_dir`（默认 `storage/telemetry`），
   `YYYY-MM-DD/*.gz` 原样保存；明细页按 `storage_key` 读取（路径穿越防护），与快照行
   共享 30 天保留（小时清理任务同时删过期天目录）。
+- Uploads return HTTP 5xx when the body cannot be persisted. Desktop clients
+  treat any 2xx response as an upload receipt; `stored_body: false` alone is insufficient.
+- New uploads persist the stable server identity in `data.received_by`. Body
+  queries can use configured peers' AMI-authenticated
+  `GET {ami_path}/cluster/client-reports/body?id=` endpoint; this endpoint only
+  reads locally owned bodies and never forwards. Upgrade all participating nodes
+  and retain stable, unique node identities. Legacy rows without an owner remain
+  readable on the receiving node, but cannot be safely claimed by another peer.
 - `GET {api_prefix}/release` 更新检查落一行 `cr:update_check`（原 debug log 升级为数据），
   版本分布因此包含"活跃客户端"。
 - **异常口径**（ABNORMAL_EVENTS）：login_fail / dial_fail / answer_fail / panic /

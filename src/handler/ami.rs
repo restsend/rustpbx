@@ -47,6 +47,11 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
         .route("/sipflow/media/{call_id}", get(query_sipflow_media));
+    #[cfg(feature = "console")]
+    let r = r.route(
+        "/cluster/client-reports/body",
+        get(crate::console::handlers::client_report::cluster_body_handler),
+    );
     #[cfg(feature = "commerce")]
     let r = r.route("/calls", get(calls_query_handler));
 
