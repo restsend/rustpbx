@@ -12,18 +12,29 @@
             </p>
         </header>
 
-        <!-- Page tabs: release management / client telemetry -->
-        <div class="flex gap-2 rounded-xl bg-slate-100/80 p-1" role="tablist" aria-label="{{ "releases_page.title" | t }}">
-            <button type="button" @click="pageTab = 'manage'" role="tab" :aria-selected="pageTab === 'manage'"
-                class="rounded-lg px-3.5 py-1.5 text-sm font-medium transition"
-                :class="pageTab === 'manage' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
-                {{ "client_reports.tab_manage" | t }}
-            </button>
-            <button type="button" @click="openTelemetry()" role="tab" :aria-selected="pageTab === 'telemetry'"
-                class="rounded-lg px-3.5 py-1.5 text-sm font-medium transition"
-                :class="pageTab === 'telemetry' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
-                {{ "client_reports.tab_telemetry" | t }}
-            </button>
+        <!-- Page tabs: release management / client telemetry (settings-style) -->
+        <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+            <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                role="tablist" aria-label="{{ "releases_page.title" | t }}">
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="pageTab === 'manage' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="pageTab === 'manage'" aria-controls="releases-tab-manage"
+                    @click="pageTab = 'manage'">
+                    <div class="flex flex-col">
+                        <span class="text-sm">{{ "client_reports.tab_manage" | t }}</span>
+                        <span class="text-[11px] font-normal text-slate-400">{{ "client_reports.tab_manage_desc" | t }}</span>
+                    </div>
+                </button>
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="pageTab === 'telemetry' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="pageTab === 'telemetry'" aria-controls="releases-tab-telemetry"
+                    @click="openTelemetry()">
+                    <div class="flex flex-col">
+                        <span class="text-sm">{{ "client_reports.tab_telemetry" | t }}</span>
+                        <span class="text-[11px] font-normal text-slate-400">{{ "client_reports.tab_telemetry_desc" | t }}</span>
+                    </div>
+                </button>
+            </nav>
         </div>
 
         <div x-show="pageTab === 'manage'" x-cloak class="space-y-6">
@@ -242,9 +253,8 @@
                 <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                     <tr>
                         <th class="px-4 py-3">{{ "releases_page.col_version" | t }}</th>
-                        <th class="px-4 py-3">{{ "releases_page.col_file" | t }}</th>
                         <th class="px-4 py-3">{{ "releases_page.col_size" | t }}</th>
-                        <th class="hidden px-4 py-3 md:table-cell">{{ "releases_page.col_sha256" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_window" | t }}</th>
                         <th class="px-4 py-3">{{ "releases_page.col_status" | t }}</th>
                         <th class="hidden px-4 py-3 lg:table-cell">{{ "releases_page.col_created" | t }}</th>
                         <th class="px-4 py-3 text-right">{{ "releases_page.col_actions" | t }}</th>
@@ -254,51 +264,96 @@
                     {% for r in releases %}
                     <tr class="hover:bg-slate-50/60">
                         <td class="px-4 py-3">
-                            <span class="font-semibold text-slate-900">{{ r.version }}</span>
-                            {% if r.force %}<span class="ml-1 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
-                            {% if r.window %}<span class="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">{{ r.window }}</span>{% endif %}
-                            {% if r.storage_is_s3 %}
-                            <span class="ml-1 rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
-                            {% else %}
-                            <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.badge_local" | t }}</span>
-                            {% endif %}
-                            {% if r.environments %}
-                            {% for e in r.environments %}<span class="ml-1 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{{ e }}</span>{% endfor %}
-                            {% else %}
-                            <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.env_all" | t }}</span>
-                            {% endif %}
+                            <div class="flex flex-col gap-1">
+                                <div class="flex flex-wrap items-center gap-1">
+                                    <span class="font-semibold text-slate-900">{{ r.version }}</span>
+                                    {% if r.force %}<span class="rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                                    {% if r.storage_is_s3 %}
+                                    <span class="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
+                                    {% else %}
+                                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.badge_local" | t }}</span>
+                                    {% endif %}
+                                    {% if r.environments %}
+                                    {% for e in r.environments %}<span class="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{{ e }}</span>{% endfor %}
+                                    {% else %}
+                                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.env_all" | t }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="max-w-56 truncate font-mono text-xs text-slate-500" title="{{ r.file_name }}">{{ r.file_name }}</div>
+                                <code class="w-fit rounded bg-slate-50 px-1.5 py-0.5 font-mono text-xs text-slate-400"
+                                    :title="'{{ r.sha256 }}'"
+                                    x-text="'{{ r.sha256 }}'.slice(0, 12) + '…'"></code>
+                            </div>
                         </td>
-                        <td class="max-w-48 truncate px-4 py-3 text-slate-600" title="{{ r.file_name }}">{{ r.file_name }}</td>
-                        <td class="px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
-                        <td class="hidden px-4 py-3 md:table-cell">
-                            <code class="rounded bg-slate-50 px-1.5 py-0.5 font-mono text-xs text-slate-500"
-                                :title="'{{ r.sha256 }}'"
-                                x-text="'{{ r.sha256 }}'.slice(0, 12) + '…'"></code>
+                        <td class="whitespace-nowrap px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
+                        <td class="whitespace-nowrap px-4 py-3">
+                            {% if r.window %}
+                            <span class="rounded bg-amber-50 px-1.5 py-0.5 text-xs font-semibold text-amber-700">{{ r.window }}</span>
+                            {% else %}
+                            <span class="text-xs text-slate-300">—</span>
+                            {% endif %}
                         </td>
                         <td class="px-4 py-3">
                             {% if r.published %}
-                            <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                                {{ "releases_page.status_published" | t }}
+                            <span title="{{ 'releases_page.status_published' | t }}" class="inline-flex">
+                                <svg class="h-5 w-5 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
                             </span>
                             {% else %}
-                            <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
-                                {{ "releases_page.status_draft" | t }}
+                            <span title="{{ 'releases_page.status_draft' | t }}" class="inline-flex">
+                                <svg class="h-5 w-5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
                             </span>
                             {% endif %}
                         </td>
                         <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell">{{ r.created_at | default(value='') }}</td>
                         <td class="px-4 py-3">
-                            <div class="flex items-center justify-end gap-2">
+                            <div class="flex items-center justify-end gap-1">
                                 <button type="button" @click="openEdit({{ loop.index0 }})"
-                                    class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "releases_page.action_edit" | t }}</button>
+                                    title="{{ 'releases_page.action_edit' | t }}" :aria-label="'{{ 'releases_page.action_edit' | t }}'"
+                                    class="rounded-md p-1.5 text-sky-600 transition hover:bg-sky-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+                                    </svg>
+                                </button>
                                 <a href="{{ api_prefix | safe }}/release/{{ r.version }}/download"
-                                    class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "releases_page.action_download" | t }}</a>
+                                    title="{{ 'releases_page.action_download' | t }}" :aria-label="'{{ 'releases_page.action_download' | t }}'"
+                                    class="rounded-md p-1.5 text-sky-600 transition hover:bg-sky-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                                    </svg>
+                                </a>
                                 <button type="button" @click="togglePublish('{{ r.version }}', {{ r.published }})"
-                                    class="rounded-md px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-50">
-                                    {{ ("releases_page.action_unpublish" | t) if r.published else ("releases_page.action_publish" | t) }}
+                                    title="{{ ('releases_page.action_unpublish' | t) if r.published else ('releases_page.action_publish' | t) }}"
+                                    :aria-label="'{{ ('releases_page.action_unpublish' | t) if r.published else ('releases_page.action_publish' | t) }}'"
+                                    class="rounded-md p-1.5 text-amber-600 transition hover:bg-amber-50">
+                                    {% if r.published %}
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243" />
+                                    </svg>
+                                    {% else %}
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    {% endif %}
                                 </button>
                                 <button type="button" @click="remove('{{ r.version }}')"
-                                    class="rounded-md px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50">{{ "releases_page.action_delete" | t }}</button>
+                                    title="{{ 'releases_page.action_delete' | t }}" :aria-label="'{{ 'releases_page.action_delete' | t }}'"
+                                    class="rounded-md p-1.5 text-rose-600 transition hover:bg-rose-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                                    </svg>
+                                </button>
                             </div>
                         </td>
                     </tr>
@@ -352,13 +407,13 @@
                     </select>
                 </label>
                 <label class="block">
-                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_agent" | t }}</span>
-                    <select x-model="tlAgent"
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_env" | t }}</span>
+                    <select x-model="tlEnv"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
                         <option value="">{{ "client_reports.filter_all" | t }}</option>
-                        <template x-for="a in (summary.by_agent || []).slice(0, 20)" :key="a.agent">
-                            <option :value="a.agent" x-text="a.agent + ' (' + a.count + ')'"></option>
-                        </template>
+                        <option value="testing">testing</option>
+                        <option value="stable">stable</option>
+                        <option value="preview">preview</option>
                     </select>
                 </label>
                 <button type="button" @click="loadTelemetry()"
@@ -417,7 +472,7 @@
                     <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
                         <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_event" | t }}</h2>
                         <table class="min-w-full text-sm">
-                            <tbody class="divide-y divide-slate-50">
+                            <tbody>
                                 <template x-for="e in (summary.by_event || []).slice(0, 8)" :key="e.event">
                                     <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlEvent = e.event; loadTelemetry()">
                                         <td class="py-1.5 pr-2">
@@ -434,10 +489,19 @@
                     <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
                         <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_version" | t }}</h2>
                         <table class="min-w-full text-sm">
-                            <tbody class="divide-y divide-slate-50">
+                            <tbody>
                                 <template x-for="v in (summary.by_version || []).slice(0, 6)" :key="v.version">
                                     <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlVersion = v.version; loadTelemetry()">
-                                        <td class="py-1.5 pr-2 font-mono text-xs text-slate-600" x-text="v.version"></td>
+                                        <td class="py-1.5 pr-2">
+                                            <span class="font-mono text-xs text-slate-600" x-text="v.version"></span>
+                                            <span class="whitespace-nowrap">
+                                                <template x-for="(cnt, envName) in (v.envs || {})" :key="envName">
+                                                    <span class="ml-1 rounded px-1 py-0.5 text-[10px] font-medium"
+                                                        :class="envBadgeClass(envName)"
+                                                        x-text="envName + ' ' + cnt"></span>
+                                                </template>
+                                            </span>
+                                        </td>
                                         <td class="py-1.5 text-right font-medium" x-text="v.count"></td>
                                         <td class="py-1.5 pl-2 text-right text-xs text-slate-400">
                                             <span x-show="v.update_checks" x-text="v.update_checks + ' ✓'"></span>
@@ -447,23 +511,6 @@
                             </tbody>
                         </table>
                         <p x-show="!(summary.by_version || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
-                    </div>
-                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
-                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_agent" | t }}</h2>
-                        <table class="min-w-full text-sm">
-                            <tbody class="divide-y divide-slate-50">
-                                <template x-for="a in (summary.by_agent || []).slice(0, 6)" :key="a.agent">
-                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlAgent = a.agent; loadTelemetry()">
-                                        <td class="py-1.5 pr-2 font-mono text-xs text-slate-600" x-text="a.agent"></td>
-                                        <td class="py-1.5 text-right font-medium" x-text="a.count"></td>
-                                        <td class="py-1.5 pl-2 text-right text-xs text-rose-500">
-                                            <span x-show="a.abnormal" x-text="a.abnormal"></span>
-                                        </td>
-                                    </tr>
-                                </template>
-                            </tbody>
-                        </table>
-                        <p x-show="!(summary.by_agent || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
                     </div>
                 </div>
             </section>
@@ -628,7 +675,7 @@
             tlTo: '',
             tlEvent: '',
             tlVersion: '',
-            tlAgent: '',
+            tlEnv: '',
             summary: {},
             trend: [],
             reports: [],
@@ -772,6 +819,7 @@
             // ── client telemetry ──
             tlQuery() {
                 const p = new URLSearchParams({ from: this.tlFrom, to: this.tlTo, bucket: 'day' });
+                if (this.tlEnv) p.set('env', this.tlEnv);
                 return p.toString();
             },
             async openTelemetry() {
@@ -798,7 +846,6 @@
                     const extra = new URLSearchParams(qs);
                     if (this.tlEvent) extra.set('event', this.tlEvent);
                     if (this.tlVersion) extra.set('version', this.tlVersion);
-                    if (this.tlAgent) extra.set('agent', this.tlAgent);
                     extra.set('limit', '50');
                     const list = await apiGet('/client-reports/list?' + extra.toString());
                     this.reports = list.data || [];
@@ -817,6 +864,13 @@
             },
             bucketLabel(p) {
                 return (p.bucket_start || '').slice(0, 10);
+            },
+            envBadgeClass(env) {
+                const e = (env || '').toLowerCase();
+                if (e === 'stable') return 'bg-emerald-50 text-emerald-700';
+                if (e === 'testing') return 'bg-amber-50 text-amber-700';
+                if (e === 'preview') return 'bg-violet-50 text-violet-700';
+                return 'bg-slate-100 text-slate-500';
             },
             fmtTime(ts) {
                 if (!ts) return '-';

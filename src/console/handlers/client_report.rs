@@ -480,6 +480,7 @@ pub async fn report_handler(
 
     let data = json!({
         "kind": kind,
+        "env": meta(&params, &headers, "env", "x-restsend-env", 16),
         "os": meta(&params, &headers, "os", "x-restsend-os", 32),
         "arch": meta(&params, &headers, "arch", "x-restsend-arch", 32),
         "agent_id": agent_id,
@@ -573,8 +574,38 @@ pub async fn record_update_check(
 // ── Stats queries ───────────────────────────────────────────────────────
 
 /// Shared window params (from/to/bucket/tz) — same parsing as the domain
-/// reports so the telemetry tab behaves identically.
+/// reports so the telemetry tab behaves identically, plus the optional env
+/// channel filter (`testing` / `stable` / `preview`, from client
+/// `Bootstrap::environment()`; arrives on update checks today, report rows
+/// once clients ship the field).
 pub(crate) use super::reports::DomainReportParams;
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+struct EnvReportParams {
+    #[serde(flatten)]
+    inner: DomainReportParams,
+    env: Option<String>,
+}
+
+impl EnvReportParams {
+    fn env(&self) -> Option<String> {
+        env_of(&self.env)
+    }
+}
+
+/// Normalized `env` filter value (`None` = all environments).
+fn env_of(raw: &Option<String>) -> Option<String> {
+    raw.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|e| sanitize(e, 16))
+}
+
+/// Optional `data.env` equality filter (JSON extraction — the column is not
+/// a real field until clients populate it).
+fn env_cond(backend: sea_orm::DatabaseBackend, env: &str) -> sea_orm::sea_query::SimpleExpr {
+    json_text_expr(backend, "data", "env").eq(env)
+}
 
 fn cr_window(q: &crate::report::domain_report::DomainQuery) -> sea_orm::sea_query::Condition {
     sea_orm::sea_query::Condition::all()
@@ -607,17 +638,19 @@ struct VersionRow {
     update_checks: i64,
 }
 
+/// One (version, env) cell of the update-check breakdown — folds into
+/// `VersionRow` env badges on the releases page.
 #[derive(Debug, sea_orm::FromQueryResult)]
-struct OsRow {
-    os: Option<String>,
+struct VersionEnvRow {
+    version: Option<String>,
+    env: Option<String>,
     count: i64,
 }
 
 #[derive(Debug, sea_orm::FromQueryResult)]
-struct AgentRow {
-    agent: Option<String>,
+struct OsRow {
+    os: Option<String>,
     count: i64,
-    abnormal: i64,
 }
 
 #[derive(Debug, sea_orm::FromQueryResult)]
@@ -644,19 +677,23 @@ async fn summary_access_denied(
     !super::reports::has_reports_access(state, user, false).await
 }
 
-/// GET /console/api/client-reports/summary?from=&to=&tz=
+/// GET /console/api/client-reports/summary?from=&to=&tz=&env=
 async fn summary_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
-    AxumQuery(params): AxumQuery<DomainReportParams>,
+    AxumQuery(params): AxumQuery<EnvReportParams>,
 ) -> Response {
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
-    let q = params.resolve();
+    let env = params.env();
+    let q = params.inner.resolve();
     let db = state.db();
     let backend = db.get_database_backend();
-    let window = cr_window(&q).add(kind_like_cr());
+    let mut window = cr_window(&q).add(kind_like_cr());
+    if let Some(ref env) = env {
+        window = window.add(env_cond(backend, env));
+    }
 
     let totals = SnapshotEntity::find()
         .select_only()
@@ -712,14 +749,16 @@ async fn summary_handler(
         .await
         .unwrap_or_default();
 
-    let by_agent: Vec<AgentRow> = SnapshotEntity::find()
+    // Env channel breakdown per version (update-check rows carry `env`;
+    // report rows will too once clients ship the field).
+    let version_envs: Vec<VersionEnvRow> = SnapshotEntity::find()
         .select_only()
-        .column_as(json_text_expr(backend, "data", "agent_id"), "agent")
+        .column_as(SnapCol::InstanceId, "version")
+        .column_as(json_text_expr(backend, "data", "env"), "env")
         .column_as(SnapCol::Id.count(), "count")
-        .column_as(count_when(SnapCol::Kind.is_in(abnormal_kinds())), "abnormal")
-        .filter(window)
-        .group_by(json_text_expr(backend, "data", "agent_id"))
-        .order_by_desc(SnapCol::Id.count())
+        .filter(window.clone().add(SnapCol::Kind.eq(CR_UPDATE_CHECK)))
+        .group_by(SnapCol::InstanceId)
+        .group_by(json_text_expr(backend, "data", "env"))
         .into_model()
         .all(db)
         .await
@@ -752,29 +791,31 @@ async fn summary_handler(
             })
         })
         .collect();
-    let by_version: Vec<serde_json::Value> = by_version
-        .into_iter()
-        .map(|r| {
-            json!({
-                "version": r.version.unwrap_or_else(|| "unknown".into()),
-                "count": r.count,
-                "update_checks": r.update_checks,
-            })
-        })
-        .collect();
     let by_os: Vec<serde_json::Value> = by_os
         .into_iter()
         .map(|r| json!({"os": r.os.unwrap_or_else(|| "unknown".into()), "count": r.count}))
         .collect();
-    let by_agent: Vec<serde_json::Value> = by_agent
+    // Fold (version, env) cells into the version rows as an envs map.
+    let by_version: Vec<serde_json::Value> = by_version
         .into_iter()
-        .filter_map(|r| {
-            let agent = r.agent?;
-            Some(json!({
-                "agent": agent,
+        .map(|r| {
+            let version = r.version.unwrap_or_else(|| "unknown".into());
+            let mut envs = std::collections::BTreeMap::new();
+            for cell in &version_envs {
+                if cell.version.as_deref() == Some(version.as_str()) {
+                    let env = cell
+                        .env
+                        .clone()
+                        .unwrap_or_else(|| "unknown".into());
+                    *envs.entry(env).or_insert(0i64) += cell.count;
+                }
+            }
+            json!({
+                "version": version,
                 "count": r.count,
-                "abnormal": r.abnormal,
-            }))
+                "update_checks": r.update_checks,
+                "envs": envs,
+            })
         })
         .collect();
 
@@ -789,28 +830,31 @@ async fn summary_handler(
             "by_event": by_event,
             "by_version": by_version,
             "by_os": by_os,
-            "by_agent": by_agent,
         },
         "meta": {"from": q.from.to_rfc3339(), "to": q.to.to_rfc3339()},
     }))
     .into_response()
 }
 
-/// GET /console/api/client-reports/trend?from=&to=&bucket=&tz=
+/// GET /console/api/client-reports/trend?from=&to=&bucket=&tz=&env=
 async fn trend_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
-    AxumQuery(params): AxumQuery<DomainReportParams>,
+    AxumQuery(params): AxumQuery<EnvReportParams>,
 ) -> Response {
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
-    let q = params.resolve();
+    let env = params.env();
+    let q = params.inner.resolve();
     let db = state.db();
     let backend = db.get_database_backend();
     let bucket_expr =
         bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
-    let window = cr_window(&q).add(kind_like_cr());
+    let mut window = cr_window(&q).add(kind_like_cr());
+    if let Some(ref env) = env {
+        window = window.add(env_cond(backend, env));
+    }
 
     let rows: Vec<TrendPoint> = SnapshotEntity::find()
         .select_only()
@@ -870,6 +914,7 @@ async fn list_handler(
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
+    let env = params.env();
     let q = params.inner.resolve();
     let event = params.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let version = params
@@ -877,7 +922,6 @@ async fn list_handler(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let agent = params.agent.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let limit = params.limit.unwrap_or(50).clamp(1, 200) as u64;
 
     let mut cond = cr_window(&q).add(kind_like_cr());
@@ -887,12 +931,9 @@ async fn list_handler(
     if let Some(version) = version {
         cond = cond.add(SnapCol::InstanceId.eq(sanitize(version, 32)));
     }
-    if let Some(agent) = agent {
+    if let Some(env) = env {
         let backend = state.db().get_database_backend();
-        cond = cond.add(
-            json_text_expr(backend, "data", "agent_id")
-                .eq(sanitize(agent, 64)),
-        );
+        cond = cond.add(env_cond(backend, &env));
     }
 
     let rows = SnapshotEntity::find()
@@ -928,13 +969,19 @@ async fn list_handler(
     Json(json!({"data": items})).into_response()
 }
 
+impl ListParams {
+    fn env(&self) -> Option<String> {
+        env_of(&self.env)
+    }
+}
+
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 struct ListParams {
     #[serde(flatten)]
     inner: DomainReportParams,
     event: Option<String>,
     version: Option<String>,
-    agent: Option<String>,
+    env: Option<String>,
     limit: Option<u32>,
 }
 
@@ -1004,17 +1051,21 @@ use serde::Deserialize;
 async fn export_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
-    AxumQuery(params): AxumQuery<DomainReportParams>,
+    AxumQuery(params): AxumQuery<EnvReportParams>,
 ) -> Response {
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
-    let q = params.resolve();
+    let env = params.env();
+    let q = params.inner.resolve();
     let db = state.db();
     let backend = db.get_database_backend();
     let bucket_expr =
         bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
-    let window = cr_window(&q).add(kind_like_cr());
+    let mut window = cr_window(&q).add(kind_like_cr());
+    if let Some(ref env) = env {
+        window = window.add(env_cond(backend, env));
+    }
 
     let rows: Vec<TrendPoint> = SnapshotEntity::find()
         .select_only()
