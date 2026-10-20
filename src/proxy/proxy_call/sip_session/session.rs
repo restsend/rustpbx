@@ -524,6 +524,15 @@ impl SipSession {
         early_media: bool,
         leg_agent_id: Option<String>,
     ) {
+        // Child-leg session: the AGENT dialog rings on its `callee` leg —
+        // that leg-level event (role = the declared child role) is the one
+        // authoritative ringing. The session-level emission would duplicate
+        // it (~µs apart, both role-attributed) — consumers counting agent
+        // ringings saw two. Mirrors the answered shape (session-level
+        // `call_answered` is suppressed for child sessions already).
+        if leg_id.is_none() && self.meta.child_leg_role.is_some() {
+            return;
+        }
         let agent_id = leg_agent_id.or_else(|| self.pinned_agent_id());
         let agent_name = agent_id.as_deref().and_then(|id| {
             let published = self.session_ext_get("agent_id")?;
@@ -532,16 +541,11 @@ impl SipSession {
                 .flatten()
         });
         self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-            // Child-leg session (cluster-dispatched queue agent / consult /
-            // transfer): the UUI role rides EVERY lifecycle event of this
-            // dialog, leg-level ringing included — the positional role
-            // ("callee") lost the agent attribution, same as answered/held/
-            // hangup before 824ace12. Non-child sessions: the leg's own
-            // role, session-level events carry none.
+            // Child-leg session: the callee slot IS the agent dialog — the
+            // declared role rides it (the dispatcher-hop caller leg keeps
+            // its positional role). Non-child sessions: the leg's own role.
             leg_role: self
-                .meta
-                .child_leg_role
-                .clone()
+                .child_role_for_leg(leg_id.as_deref())
                 .or_else(|| leg_id.as_deref().and_then(|id| self.leg_role_of(id))),
             leg_id,
             call_id: self.context.session_id.clone(),
@@ -565,6 +569,29 @@ impl SipSession {
             .get(&LegId::from(leg_id))
             .filter(|leg| !leg.remote_registered)
             .map(|leg| leg.leg_role().to_string())
+    }
+
+    /// Child-leg session role attribution, scoped to the legs it may claim.
+    ///
+    /// A child-leg session (cluster-dispatched queue agent / consult /
+    /// transfer dialog) exists solely as the AGENT dialog's relay: every leg
+    /// it dials IS part of that dialog, so the dispatcher-declared role rides
+    /// those legs' events and every session-scoped event. The single foreign
+    /// leg is the `caller` slot — the DISPATCHER HOP (the peer node's
+    /// in-dialog leg, From = the original caller). Stamping the agent role
+    /// on its events made one agent answer produce TWO
+    /// `call_answered{leg_role: "agent"}` events ~µs apart (caller + callee
+    /// both transition Connected when the agent picks up). The hop keeps its
+    /// positional role.
+    fn child_role_for_leg(&self, leg_id: Option<&str>) -> Option<String> {
+        match leg_id {
+            // Session-scoped events speak for the whole (agent) dialog.
+            None => self.meta.child_leg_role.clone(),
+            // The dispatcher hop: positional role only.
+            Some("caller") => None,
+            // Any dialed leg of the child dialog carries the declared role.
+            Some(_) => self.meta.child_leg_role.clone(),
+        }
     }
 
     /// Established CC-role legs (agent / consult / transfer) still registered
@@ -15017,12 +15044,12 @@ impl SipSession {
             scope: crate::rwi::CallHangupScope::Leg,
             call_id: self.context.session_id.clone(),
             leg_id: Some(id.to_string()),
-            // Child-leg session: the UUI role rides the leg-scoped teardown
-            // too (positional "callee" lost the agent attribution, s17 A1).
+            // Child-leg session: the callee slot IS the agent dialog — its
+            // teardown carries the declared role (positional "callee" lost
+            // the agent attribution, s17 A1); the dispatcher-hop caller leg
+            // keeps its positional role (one agent teardown, not two).
             leg_role: self
-                .meta
-                .child_leg_role
-                .clone()
+                .child_role_for_leg(Some(id.as_str()))
                 .or_else(|| self.leg_role_of(id.as_str())),
             reason,
             sip_status,
@@ -15065,15 +15092,16 @@ impl SipSession {
                             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                                 leg_id: Some(leg_id.to_string()),
                                 // Child-leg session (cluster-dispatched queue
-                                // agent / consult / transfer): the UUI role
-                                // rides EVERY lifecycle event of this dialog —
-                                // positional "callee" here made consumers
-                                // filtering leg_role="agent" lose answered
-                                // (s17 A1/A10). Non-child sessions: unchanged.
+                                // agent / consult / transfer): the callee slot
+                                // IS the agent dialog — its answer carries the
+                                // declared role (positional "callee" here made
+                                // consumers filtering leg_role="agent" lose
+                                // answered, s17 A1/A10). The dispatcher-hop
+                                // caller leg keeps its positional role — one
+                                // agent answer, not two. Non-child sessions:
+                                // unchanged.
                                 leg_role: self
-                                    .meta
-                                    .child_leg_role
-                                    .clone()
+                                    .child_role_for_leg(Some(leg_id.as_str()))
                                     .or_else(|| self.leg_role_of(leg_id.as_str())),
                                 call_id: self.context.session_id.clone(),
                             });
@@ -15158,14 +15186,13 @@ impl SipSession {
         }
         // Core hold/unheld events (agent attribution comes from the meta
         // already published at ringing/connected time). Child-leg session:
-        // the UUI role rides hold/unheld too (positional "callee" lost the
-        // agent attribution, same as answered/hangup).
+        // the callee slot (the agent dialog) carries the declared role on
+        // hold/unheld; the dispatcher-hop caller leg keeps its positional
+        // role (same scoping as answered/hangup).
         if entered_hold {
             self.emit_typed_rwi_event(&crate::rwi::CallHeld {
                 leg_role: self
-                    .meta
-                    .child_leg_role
-                    .clone()
+                    .child_role_for_leg(Some(&leg_id_str))
                     .or_else(|| self.leg_role_of(&leg_id_str)),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
@@ -15173,9 +15200,7 @@ impl SipSession {
         } else {
             self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
                 leg_role: self
-                    .meta
-                    .child_leg_role
-                    .clone()
+                    .child_role_for_leg(Some(&leg_id_str))
                     .or_else(|| self.leg_role_of(&leg_id_str)),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,

@@ -12619,15 +12619,17 @@ async fn child_leg_session_event_shape() {
     assert_eq!(answered.event.event_type, "call_answered");
     assert!(answered.event.payload.get("leg_id").is_none());
 
-    // Session-level ringing of the child leg carries leg_role, no leg_id.
+    // Session-level ringing of the child leg is SUPPRESSED — the leg-level
+    // ringing below is the one authoritative agent ringing (a session-level
+    // twin µs apart double-counted agent ringings).
     session.meta.child_leg_role = Some("agent".into());
     session.emit_call_ringing(None, false, None);
-    let ringing = events.try_recv().expect("child ringing");
-    assert_eq!(ringing.event.event_type, "call_ringing");
-    assert_eq!(ringing.event.payload["leg_role"], "agent");
-    assert!(ringing.event.payload.get("leg_id").is_none());
+    assert!(
+        events.try_recv().is_err(),
+        "child session must not emit a session-level ringing twin"
+    );
 
-    // Leg-level ringing of the child session rides the child role too — the
+    // Leg-level ringing of the child dialog rides the child role — the
     // positional "callee" lost the agent attribution (same fix family as
     // answered/held/hangup).
     session.emit_call_ringing(Some("callee".into()), false, None);
@@ -12637,6 +12639,21 @@ async fn child_leg_session_event_shape() {
     assert_eq!(
         leg_ringing.event.payload["leg_role"], "agent",
         "child dialog's leg events must carry the declared role: {leg_ringing:?}"
+    );
+
+    // The DISPATCHER HOP (caller leg of the child session) keeps its
+    // positional role — one agent answer must not produce two
+    // role-attributed events (caller + callee both transition Connected
+    // when the agent picks up).
+    session.emit_call_ringing(Some("caller".into()), false, None);
+    let hop_ringing = events.try_recv().expect("hop leg ringing");
+    assert_eq!(hop_ringing.event.payload["leg_role"], "caller");
+    session.update_leg_state(&LegId::from("caller"), crate::call::domain::LegState::Connected);
+    let hop_answered = events.try_recv().expect("hop leg answered");
+    assert_eq!(hop_answered.event.event_type, "call_answered");
+    assert_eq!(
+        hop_answered.event.payload["leg_role"], "caller",
+        "the dispatcher hop must NOT claim the agent role: {hop_answered:?}"
     );
 
     // Non-child sessions keep the positional role for leg events.
