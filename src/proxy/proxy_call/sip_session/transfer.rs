@@ -1619,6 +1619,29 @@ impl SipSession {
             leg.agent_id = None;
             leg.purpose = None;
         }
+        // Pre-stamp the NEW target's agent identity BEFORE the dial when the
+        // target resolves to a registered agent: the INVITE builder declares
+        // the dial intent on the wire (RFC 7433 UUI `leg=agent`) so the
+        // registration's home node — in a cluster the INVITE's terminator —
+        // treats the dialog as a child leg of THIS call and stamps
+        // `leg_role: "agent"` + `client_ip` on its events instead of starting
+        // a fresh root call. Non-agent targets (IVR / extension / trunk) keep
+        // the parked (empty) identity.
+        let target_agent = match (
+            Self::uri_user_part(&location.aor.to_string()),
+            self.server.agent_registry.as_ref(),
+        ) {
+            (Some(user), Some(registry)) => {
+                registry.get_agent(&user).await.is_some().then(|| user)
+            }
+            _ => None,
+        };
+        if let Some(user) = target_agent
+            && let Some(leg) = self.legs.get_mut(&LegId::from("callee"))
+        {
+            leg.agent_id = Some(user);
+            leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+        }
         let result = self
             .try_single_target(
                 &location,
@@ -1817,12 +1840,27 @@ impl SipSession {
             .iter()
             .map(|(name, value)| rsipstack::sip::headers::make_header(name.as_str(), value.clone()))
             .collect();
+        // Agent-facing dial intent ONLY for registered agent targets: the
+        // INVITE then declares the RFC 7433 `leg=agent` marker so the
+        // registration's home node (cluster) treats the dialog as a child
+        // leg and stamps `leg_role: "agent"` + `client_ip` on its events.
+        // A plain extension / trunk target keeps `purpose = None` — the
+        // agent-leg Call-ID scheme and marker must not leak onto it (and it
+        // must not inherit the departing agent's attribution).
+        let target_is_agent = match (
+            Self::uri_user_part(&location.aor.to_string()),
+            self.server.agent_registry.as_ref(),
+        ) {
+            (Some(user), Some(registry)) => registry.get_agent(&user).await.is_some(),
+            _ => false,
+        };
+        let transfer_purpose = target_is_agent.then_some(crate::call::domain::LegPurpose::Agent);
         self.handle_add_leg_routed(
             target.to_string(),
             Some(target_leg.clone()),
             sip_headers,
             Some(customer_leg.clone()),
-            None,
+            transfer_purpose,
             location,
         )
         .await?;

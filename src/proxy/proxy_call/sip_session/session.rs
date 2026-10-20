@@ -532,14 +532,17 @@ impl SipSession {
                 .flatten()
         });
         self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-            // Leg events carry the leg's own role; a session-level event of a
-            // child-leg session (cluster-dispatched queue agent / consult /
-            // transfer) carries the child role so consumers can tell the
-            // agent leg's ringing apart from the customer call's.
-            leg_role: leg_id
-                .as_deref()
-                .and_then(|id| self.leg_role_of(id))
-                .or_else(|| self.meta.child_leg_role.clone()),
+            // Child-leg session (cluster-dispatched queue agent / consult /
+            // transfer): the UUI role rides EVERY lifecycle event of this
+            // dialog, leg-level ringing included — the positional role
+            // ("callee") lost the agent attribution, same as answered/held/
+            // hangup before 824ace12. Non-child sessions: the leg's own
+            // role, session-level events carry none.
+            leg_role: self
+                .meta
+                .child_leg_role
+                .clone()
+                .or_else(|| leg_id.as_deref().and_then(|id| self.leg_role_of(id))),
             leg_id,
             call_id: self.context.session_id.clone(),
             early_media,
@@ -3555,7 +3558,7 @@ impl SipSession {
 
     /// Extract the user-part of a SIP URI string (`sip:bob@host` → `bob`).
     /// Returns `None` when the URI has no usable user part.
-    fn uri_user_part(uri: &str) -> Option<String> {
+    pub(super) fn uri_user_part(uri: &str) -> Option<String> {
         uri.strip_prefix("sip:")
             .or_else(|| uri.strip_prefix("sips:"))
             .and_then(|s| s.split('@').next())
@@ -4319,6 +4322,56 @@ impl SipSession {
                 self_ident = ?self_ident,
                 "target leg routed via remote home_proxy: leg_role suppressed on this node"
             );
+        }
+        // Declare the dial intent on the wire when the leg is agent-facing
+        // (pre-stamped purpose, e.g. a blind transfer to a registered agent):
+        // the terminator — in a cluster the registration's home node — then
+        // treats the dialog as a CHILD LEG of this logical call (lifecycle
+        // suppression + `leg_role: "agent"` + `client_ip`), not a new root
+        // call. Mirrors `initiate_sip_leg_with_deadline`; an existing CC UUI
+        // (queue enricher screen-pop context) is MERGED with the leg param
+        // instead of duplicated. Old peers ignore the unknown UUI param.
+        if self
+            .legs
+            .get(&id)
+            .is_some_and(|leg| leg.purpose == Some(crate::call::domain::LegPurpose::Agent))
+        {
+            let mut uui_bag = rsipstack::sip::Headers::default();
+            let uui_existing: Vec<_> = headers
+                .iter()
+                .filter(|h| h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME))
+                .cloned()
+                .collect();
+            uui_bag.extend(uui_existing);
+            let existing = crate::call::uui::extract_cc_uui(&uui_bag);
+            let needs_marker = !matches!(existing.as_ref(), Some(uui) if uui.leg.is_some());
+            if needs_marker {
+                let (base, queue_id, queue_name, skill) = match existing {
+                    Some(uui) => (
+                        uui.session_id,
+                        uui.queue_id,
+                        uui.queue_name,
+                        uui.skill_group,
+                    ),
+                    None => (
+                        self.session_id_for_outgoing_leg()
+                            .unwrap_or_else(|| self.id.0.clone()),
+                        None,
+                        None,
+                        None,
+                    ),
+                };
+                headers.retain(|h| {
+                    !h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME)
+                });
+                headers.push(crate::call::uui::build_uui_header(
+                    &base,
+                    queue_id.as_deref(),
+                    queue_name.as_deref(),
+                    skill.as_deref(),
+                    Some("agent"),
+                ));
+            }
         }
         self.legs.set_transport(
             crate::call::domain::LegId::from(leg_id),
@@ -6908,45 +6961,6 @@ impl SipSession {
 
         // Store resolved plan in context for the queue app factory
         if let Some(ctx) = self.app_runtime.app_context() {
-            // Dial-target locality checker: resolves the URI's registration
-            // through the locator and applies the SAME criterion as the
-            // session's INVITE routing (`Location::routes_via_remote_home_proxy`)
-            // — a remote `home_proxy` means the dial (and the dialog) leave
-            // for another node, which owns the leg_role attribution. The
-            // queue app uses it to keep its `queue_agent_*` events role-free
-            // for remote-registered agents.
-            let realm = self.server.proxy_config.load().select_realm("");
-            let locality_checker: crate::call::app::queue::QueueLocalityChecker = {
-                let locator = self.server.locator.clone();
-                let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
-                let self_ident = self.self_ident_addr();
-                Arc::new(move |target: &str| {
-                    let locator = locator.clone();
-                    let self_ident = self_ident.clone();
-                    let realm = realm.clone();
-                    Box::pin(async move {
-                        let normalized = crate::call::build_sip_uri(target, &realm);
-                        let uri = match parse_dial_target(&normalized)
-                            .or_else(|_| parse_dial_target(target))
-                        {
-                            Ok(uri) => uri,
-                            Err(_) => return true,
-                        };
-                        match locator.lookup(&uri).await {
-                            Ok(locations) => match locations.first() {
-                                Some(location) => !location.routes_via_remote_home_proxy(
-                                    cluster_enabled,
-                                    self_ident.as_ref(),
-                                ),
-                                // No registration (external / trunk target):
-                                // nothing is remote — keep the role.
-                                None => true,
-                            },
-                            Err(_) => true,
-                        }
-                    })
-                })
-            };
             *ctx.pending_queue.lock() = Some(PendingQueuePlan {
                 plan: plan.clone(),
                 agent_uris,
@@ -6955,7 +6969,6 @@ impl SipSession {
                 overflow_overrides,
                 joined_emitted,
                 queue_enricher: queue_enricher_setup,
-                locality_checker: Some(locality_checker),
             });
         }
 
@@ -15428,10 +15441,24 @@ impl SipSession {
         leg.purpose = purpose;
         match purpose {
             Some(crate::call::domain::LegPurpose::Agent) => {
-                // Snapshot the pinned agent attribution at insert time — the
-                // queue pins before LegAdd, so this is the dialed leg's own
-                // agent.
-                leg.agent_id = self.pinned_agent_id();
+                // Resolve the DIALED TARGET's own identity against the agent
+                // registry first: transfer paths (CC API blind transfer) dial
+                // an agent target WITHOUT the session pin pointing at it — the
+                // departing agent may still be pinned at this moment. Falls
+                // back to the session pin (queue dispatch pins the dialed
+                // agent before LegAdd, so behavior there is unchanged).
+                let target_agent = match (
+                    Self::uri_user_part(target.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    (Some(user), Some(registry)) => registry
+                        .get_agent(&user)
+                        .await
+                        .is_some()
+                        .then(|| user.clone()),
+                    _ => None,
+                };
+                leg.agent_id = target_agent.or_else(|| self.pinned_agent_id());
             }
             Some(crate::call::domain::LegPurpose::Consult) => {
                 // A consult leg dials target C — do NOT inherit the pinned

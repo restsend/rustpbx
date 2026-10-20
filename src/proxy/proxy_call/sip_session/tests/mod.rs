@@ -12626,6 +12626,153 @@ async fn child_leg_session_event_shape() {
     assert_eq!(ringing.event.event_type, "call_ringing");
     assert_eq!(ringing.event.payload["leg_role"], "agent");
     assert!(ringing.event.payload.get("leg_id").is_none());
+
+    // Leg-level ringing of the child session rides the child role too — the
+    // positional "callee" lost the agent attribution (same fix family as
+    // answered/held/hangup).
+    session.emit_call_ringing(Some("callee".into()), false, None);
+    let leg_ringing = events.try_recv().expect("child leg ringing");
+    assert_eq!(leg_ringing.event.event_type, "call_ringing");
+    assert_eq!(leg_ringing.event.payload["leg_id"], "callee");
+    assert_eq!(
+        leg_ringing.event.payload["leg_role"], "agent",
+        "child dialog's leg events must carry the declared role: {leg_ringing:?}"
+    );
+
+    // Non-child sessions keep the positional role for leg events.
+    session.meta.child_leg_role = None;
+    session.legs.insert(
+        LegId::from("callee"),
+        crate::call::domain::Leg::new(LegId::from("callee")),
+    );
+    session.emit_call_ringing(Some("callee".into()), false, None);
+    let plain_ringing = events.try_recv().expect("plain leg ringing");
+    assert_eq!(plain_ringing.event.payload["leg_role"], "callee");
+}
+
+/// Agent-facing dial intent on the wire: `build_target_invite_option`
+/// declares the RFC 7433 `leg=agent` marker when the target leg was
+/// pre-stamped `LegPurpose::Agent` (blind transfer to a registered agent) so
+/// the terminator — in a cluster the registration's home node — treats the
+/// dialog as a child leg of this call instead of a fresh root call. A
+/// non-agent target keeps no marker, and an existing CC UUI (queue enricher)
+/// is MERGED with the leg param rather than duplicated.
+#[tokio::test]
+async fn target_invite_declares_agent_leg_marker_when_purpose_agent() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "agent-marker-sess".into(),
+        dialplan: Arc::new(
+            Dialplan::new(
+                "agent-marker-sess".into(),
+                request,
+                DialDirection::Inbound,
+            )
+            .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+        ),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    let target = Location {
+        aor: "sip:agent@example.test".parse().unwrap(),
+        ..Default::default()
+    };
+
+    // Non-agent target (no pre-stamped purpose): no marker.
+    let (invite, _, _, _) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .unwrap();
+    let headers = invite.headers.unwrap_or_default();
+    assert!(
+        !headers
+            .iter()
+            .any(|h| h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME)),
+        "plain target must not declare a leg marker"
+    );
+
+    // Pre-stamped agent purpose (blind transfer to a registered agent): the
+    // INVITE carries the `leg=agent` marker rooted at the session id.
+    if let Some(leg) = session.legs.get_mut(&LegId::from("callee")) {
+        leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    }
+    let (invite, _, _, _) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .unwrap();
+    let headers = invite.headers.unwrap_or_default();
+    let mut uui_bag = rsipstack::sip::Headers::default();
+    uui_bag.extend(
+        headers
+            .iter()
+            .filter(|h| h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let uui = crate::call::uui::extract_cc_uui(&uui_bag)
+        .expect("agent-facing dial must declare the UUI marker");
+    assert_eq!(uui.leg.as_deref(), Some("agent"));
+    assert!(
+        uui.session_id == "agent-marker-sess",
+        "correlation root must be the session id, got {}",
+        uui.session_id
+    );
+
+    // An existing CC UUI (queue screen-pop context) MERGES with the leg
+    // param — exactly one UUI header, both the queue id and leg survive.
+    let mut enriched = target.clone();
+    enriched.headers = Some(vec![crate::call::uui::build_uui_header(
+        "agent-marker-sess",
+        Some("sales"),
+        Some("Sales Hotline"),
+        None,
+        None,
+    )]);
+    let (invite, _, _, _) = session
+        .build_target_invite_option(&enriched, None, None)
+        .await
+        .unwrap();
+    let headers = invite.headers.unwrap_or_default();
+    let uui_count = headers
+        .iter()
+        .filter(|h| h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME))
+        .count();
+    assert_eq!(uui_count, 1, "existing UUI must be merged, not duplicated");
+    let mut uui_bag = rsipstack::sip::Headers::default();
+    uui_bag.extend(
+        headers
+            .iter()
+            .filter(|h| h.name().eq_ignore_ascii_case(crate::call::uui::UUI_HEADER_NAME))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let uui = crate::call::uui::extract_cc_uui(&uui_bag).expect("merged UUI must parse");
+    assert_eq!(uui.leg.as_deref(), Some("agent"));
+    assert_eq!(uui.queue_id.as_deref(), Some("sales"));
+    assert_eq!(uui.queue_name.as_deref(), Some("Sales Hotline"));
 }
 
 /// REPRO (cluster child-leg double report): a cluster-dispatched agent leg

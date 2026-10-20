@@ -133,12 +133,26 @@ impl ClusterLocatorMessage {
             .registered_aor
             .as_deref()
             .and_then(|value| value.parse().ok());
+        // Preserve the registration socket across the relay: the CC
+        // registrar bridge derives the agent's `client_ip` from
+        // `Location.destination` (stamped on cc_*/queue_* events). Dropping
+        // it here used to clear the peer's registry entry on every relayed
+        // register/refresh, so non-home nodes emitted agent events without
+        // `client_ip`.
+        let destination = self.destination.as_deref().and_then(|value| {
+            rsipstack::sip::HostWithPort::try_from(value)
+                .ok()
+                .map(|addr| rsipstack::transport::SipAddr {
+                    r#type: None,
+                    addr,
+                })
+        });
         let loc = Location {
             aor,
             expires: self.expires,
             registered_aor,
             contact_raw: self.contact_raw.clone(),
-            destination: None, // not needed for presence/CC logic
+            destination,
             ..Default::default()
         };
         match self.event.as_str() {
@@ -660,6 +674,57 @@ mod tests {
                 assert_eq!(m.destination.as_deref(), Some("10.0.0.1:5060"));
             }
             _ => panic!("expected Locator variant"),
+        }
+    }
+
+    /// The relayed `LocatorEvent` must KEEP the registration socket: the CC
+    /// registrar bridge derives the agent's `client_ip` from
+    /// `Location.destination` on the peer, so `to_event()` dropping it
+    /// cleared the peer's registry entry on every relayed register/refresh
+    /// and non-home nodes emitted agent events without `client_ip`.
+    #[test]
+    fn test_locator_message_to_event_preserves_destination() {
+        let msg = ClusterLocatorMessage {
+            event: "registered".to_string(),
+            aor: "sip:1001@pbx.local".to_string(),
+            registered_aor: Some("sip:1001@pbx.local".to_string()),
+            contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
+            expires: 3600,
+            destination: Some("192.168.3.21:51200".to_string()),
+            reason: None,
+        };
+
+        match msg.to_event() {
+            Some(LocatorEvent::Registered(loc)) => {
+                let dest = loc
+                    .destination
+                    .as_ref()
+                    .expect("destination must survive the relay");
+                assert_eq!(dest.addr.to_string(), "192.168.3.21:51200");
+                // The bridge's source-IP extraction sees the client IP.
+                assert_eq!(
+                    crate::proxy::routing::source_addr_ip(dest).map(|ip| ip.to_string()),
+                    Some("192.168.3.21".to_string())
+                );
+            }
+            other => panic!("expected Registered, got {other:?}"),
+        }
+
+        // Absent destination (older peer / no socket) stays `None`.
+        let bare = ClusterLocatorMessage {
+            event: "registered".to_string(),
+            aor: "sip:1001@pbx.local".to_string(),
+            registered_aor: None,
+            contact_raw: None,
+            expires: 3600,
+            destination: None,
+            reason: None,
+        };
+        match bare.to_event() {
+            Some(LocatorEvent::Registered(loc)) => {
+                assert!(loc.destination.is_none());
+            }
+            other => panic!("expected Registered, got {other:?}"),
         }
     }
 

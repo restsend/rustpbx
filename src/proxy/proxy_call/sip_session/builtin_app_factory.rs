@@ -537,13 +537,6 @@ impl BuiltinAppFactory {
                 if let Some(setup) = pending.queue_enricher {
                     app = app.with_location_enricher(setup);
                 }
-                // Cluster agent locality: `queue_agent_*` events keep
-                // `leg_role` only for agents registered on THIS node —
-                // remote-registered targets are attributed by their home
-                // node's child-leg session.
-                if let Some(checker) = pending.locality_checker.clone() {
-                    app = app.with_locality_checker(checker);
-                }
                 // The primary skill-group id must be visible to post-call
                 // hooks (CSAT/wrapup/hold-music) even when no agent registry
                 // is attached — QueueApp writes it to CallMeta via SipSession.
@@ -625,7 +618,6 @@ mod tests {
             overflow_overrides: None,
             joined_emitted: false,
             queue_enricher: None,
-            locality_checker: None,
         });
 
         let app = BuiltinAppFactory::new(None, None)
@@ -723,7 +715,6 @@ mod tests {
                         overflow_overrides: None,
                         joined_emitted: false,
                         queue_enricher: None,
-                        locality_checker: None,
                     });
                     let app = BuiltinAppFactory::new(None, None)
                         .create_app("queue", None, &ctx)

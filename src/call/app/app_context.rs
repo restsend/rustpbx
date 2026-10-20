@@ -177,12 +177,6 @@ pub struct PendingQueuePlan {
     /// paths build bare locations — without the setup the agent INVITE
     /// loses the screen-pop `Call-Info` / `User-to-User` headers.
     pub queue_enricher: Option<crate::call::app::queue::QueueLocationEnricherSetup>,
-    /// Dial-target locality check (see
-    /// [`crate::call::app::queue::QueueLocalityChecker`]): `true` when the
-    /// target's registration resolves to this node. The queue app gates its
-    /// `queue_agent_*` `leg_role` stamping on it so remote-registered
-    /// agents are attributed only by their home node.
-    pub locality_checker: Option<crate::call::app::queue::QueueLocalityChecker>,
 }
 
 impl ApplicationContext {
