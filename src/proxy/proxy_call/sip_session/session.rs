@@ -10723,10 +10723,6 @@ impl SipSession {
         self.timer_queue.clear();
         self.timer_keys.clear();
 
-        self.server
-            .active_call_registry
-            .remove(&self.context.session_id);
-
         // Resolve the final hangup reason BEFORE the CDR snapshot is reported:
         // enrich with IVR end reason and queue abandon detection so the call
         // record (trace + hangup reason), session hooks and RWI webhook all
@@ -10810,6 +10806,12 @@ impl SipSession {
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0)
         };
+
+        // Keep liveness until ended hooks release their bindings; removing it earlier
+        // lets recovery mistake normal teardown for a dead call.
+        self.server
+            .active_call_registry
+            .remove(&self.context.session_id);
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());

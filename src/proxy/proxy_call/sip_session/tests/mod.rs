@@ -6,6 +6,194 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "addon-cc")]
 mod recording_stop_tests;
 
+#[tokio::test]
+async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::callrecord::{CallRecordHook, recording_upload::RecordingUploadHook};
+    use crate::config::{RecordingPolicy, RecordingType};
+    use crate::proxy::active_call_registry::{
+        ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
+    };
+    use crate::proxy::proxy_call::session_hooks::{CallSessionContext, CallSessionHook};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    use crate::proxy::tests::test_sip_session_regressions::setup_recording_test_media;
+    use rustrtc::peer_connection::RtpObserver;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use std::sync::atomic::AtomicBool;
+
+    struct ObserveEnded {
+        live: Arc<ActiveProxyCallRegistry>,
+        observed_live: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl CallSessionHook for ObserveEnded {
+        async fn on_call_ended(
+            &self,
+            ctx: &CallSessionContext,
+            _: Option<&CallRecordHangupReason>,
+            _: u64,
+        ) {
+            self.observed_live.store(
+                self.live.get_handle(&ctx.session_id).is_some(),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    let (mut server, _) = create_test_server().await;
+    let live = server.active_call_registry.clone();
+    let observed_live = Arc::new(AtomicBool::new(false));
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(ObserveEnded {
+        live: live.clone(),
+        observed_live: observed_live.clone(),
+    })]);
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new("cleanup-watchdog".into(), request, DialDirection::Inbound)
+        .with_media(
+            crate::call::MediaConfig::new().with_proxy_mode(crate::config::MediaProxyMode::All),
+        );
+    let (mut session, handle, _commands) =
+        build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+    let session_id = handle.session_id().to_string();
+    live.upsert(
+        ActiveProxyCallEntry {
+            session_id: session_id.clone(),
+            caller: None,
+            callee: None,
+            direction: "inbound".into(),
+            started_at: chrono::Utc::now(),
+            answered_at: None,
+            status: ActiveProxyCallStatus::Talking,
+        },
+        handle,
+    );
+    live.touch_heartbeat(&session_id);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cleanup.wav");
+    let recording_id = "33333333-3333-4333-8333-333333333333";
+    setup_recording_test_media(&mut session).await;
+    let started = session
+        .execute_command(
+            CallCommand::StartRecording {
+                config: crate::call::domain::RecordConfig {
+                    path: path.to_string_lossy().into_owned(),
+                    unique_id: Some(recording_id.into()),
+                    notify_app: Some(false),
+                    ..Default::default()
+                },
+            },
+            None,
+        )
+        .await;
+    assert!(started.success, "{started:?}");
+    let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+    let tap = peer.ingress_tap();
+    let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    for seq in 0..10u16 {
+        let packet = RtpPacket::new(
+            RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+            encoder.encode(&vec![8000; 160]).to_vec(),
+        );
+        tap.on_ingress(&packet, "127.0.0.1:12345".parse().unwrap());
+    }
+    let (records, mut received) = mpsc::channel(1);
+    session.reporter = Some(CallReporter {
+        server: server.clone(),
+        context: session.context.clone(),
+        call_record_sender: Some(records),
+    });
+
+    session.cleanup().await;
+
+    assert!(
+        observed_live.load(Ordering::SeqCst),
+        "normal teardown must stay live while ended hooks release their bindings"
+    );
+    assert!(
+        live.get_handle(&session_id).is_none(),
+        "completed teardown must remove its live handle"
+    );
+    assert!(
+        live.get(&session_id).is_none(),
+        "completed teardown must remove its active-call row"
+    );
+    assert!(
+        !session
+            .media
+            .recording
+            .recorder_status()
+            .await
+            .unwrap()
+            .active
+    );
+    let wav = std::fs::read(&path).unwrap();
+    assert!(
+        wav.len() > 44
+            && wav[44..]
+                .chunks_exact(2)
+                .any(|s| i16::from_le_bytes([s[0], s[1]]) != 0),
+        "cleanup must finalize actual RTP audio, not only a WAV header"
+    );
+    let mut record = received.try_recv().expect("cleanup must publish its CDR");
+    assert_eq!(record.call_id, session_id);
+    assert_eq!(record.recorder.len(), 1);
+    assert_eq!(record.recorder[0].unique_id.as_deref(), Some(recording_id));
+    assert_eq!(record.recorder[0].size, wav.len() as u64);
+    assert_eq!(
+        record.recorder[0].extra.as_ref().unwrap()["session_id"],
+        session_id
+    );
+
+    let body = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = body.clone();
+    let upload = axum::Router::new().route(
+        "/recording",
+        axum::routing::post(move |bytes: bytes::Bytes| {
+            let captured = captured.clone();
+            async move {
+                *captured.lock().unwrap() = bytes.to_vec();
+                "https://recordings.example/cleanup.wav"
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let uploader = tokio::spawn(async move {
+        axum::serve(listener, upload).await.unwrap();
+    });
+    let (hook, _, _) = RecordingUploadHook::new(RecordingPolicy {
+        enabled: Some(true),
+        recording_type: Some(RecordingType::Http),
+        url: Some(format!("http://{address}/recording")),
+        ..Default::default()
+    })
+    .unwrap();
+    hook.on_record_completed(std::slice::from_mut(&mut record))
+        .await
+        .unwrap();
+    uploader.abort();
+    assert!(
+        body.lock()
+            .unwrap()
+            .windows(wav.len())
+            .any(|bytes| bytes == wav)
+    );
+    assert_eq!(
+        record.details.recording_url.as_deref(),
+        Some("https://recordings.example/cleanup.wav")
+    );
+    assert_eq!(record.call_id, session_id);
+    assert_eq!(record.recorder[0].unique_id.as_deref(), Some(recording_id));
+}
+
 struct InvocationHeadersRuntime {
     invocation: crate::call::app::AppInvocationContext,
 }
