@@ -19,11 +19,9 @@ pub async fn reports_page(
         json!({
             "nav_active": "reports",
             "current_user": current_user,
-            // The voicemail addon is commerce-gated — its tables (and data)
-            // only exist when the feature build is on, so the tab is hidden
-            // otherwise.
+            // Voicemail reports are available in commercial builds.
             "features": {
-                "voicemail": cfg!(feature = "addon-voicemail"),
+                "voicemail": cfg!(feature = "commerce"),
             },
         }),
         &headers,

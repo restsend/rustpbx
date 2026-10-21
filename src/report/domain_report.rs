@@ -465,24 +465,37 @@ pub async fn voicemail_report<C>(
 where
     C: ConnectionTrait,
 {
+    use sea_orm::sea_query::{Alias, Asterisk, Order, Query};
+
     let backend = conn.get_database_backend();
     let mut summary = VoicemailSummary::default();
+    let msg = || Alias::new("rustpbx_voicemail_message");
+    let col = |name: &str| Expr::col(Alias::new(name));
+    let window = |table: &str| {
+        let created_at = || Expr::col((Alias::new(table), Alias::new("created_at")));
+        sea_orm::sea_query::Condition::all()
+            .add(created_at().gte(q.from))
+            .add(created_at().lt(q.to))
+    };
 
-    // Summary (single aggregate query). Any error (table missing = addon
-    // disabled) degrades to the disabled default.
-    let sql = "SELECT COUNT(*) AS c, \
-               SUM(CASE WHEN \"read\" = FALSE OR \"read\" = 0 THEN 1 ELSE 0 END) AS unread, \
-               AVG(duration) AS avg_dur, \
-               SUM(CASE WHEN transcript IS NOT NULL AND transcript <> '' THEN 1 ELSE 0 END) AS with_ts \
-               FROM rustpbx_voicemail_message WHERE created_at >= ? AND created_at < ?";
-    let row = match conn
-        .query_one_raw(sea_orm::Statement::from_sql_and_values(
-            backend,
-            sql,
-            [q.from.into(), q.to.into()],
-        ))
-        .await
-    {
+    // Summary (single aggregate query), built per backend so placeholders and
+    // the boolean `read` column work on SQLite, MySQL and PostgreSQL. Any
+    // error (table missing = addon disabled) degrades to the disabled default.
+    let summary_query = Query::select()
+        .expr_as(Expr::col(Asterisk).count(), Alias::new("c"))
+        .expr_as(count_when(col("read").eq(false)), Alias::new("unread"))
+        .expr_as(
+            crate::report::avg_f64(backend, col("duration").into()),
+            Alias::new("avg_dur"),
+        )
+        .expr_as(
+            count_when(col("transcript").is_not_null().and(col("transcript").ne(""))),
+            Alias::new("with_ts"),
+        )
+        .from(msg())
+        .cond_where(window("rustpbx_voicemail_message"))
+        .to_owned();
+    let row = match conn.query_one_raw(backend.build(&summary_query)).await {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "voicemail tables unavailable; reporting disabled");
@@ -502,22 +515,19 @@ where
     summary.transcript_coverage_pct = pct(with_ts as f64, total as f64);
 
     // Trend (bucketed counts).
-    let bucket_expr = crate::report::bucket_index_sql(
-        backend,
-        "created_at",
-        q.bucket.secs(),
-        q.tz_offset_secs,
-    );
-    let trend_sql = format!(
-        "SELECT {bucket_expr} AS bucket, COUNT(*) AS c FROM rustpbx_voicemail_message \
-         WHERE created_at >= ? AND created_at < ? GROUP BY bucket ORDER BY bucket ASC"
-    );
+    let trend_query = Query::select()
+        .expr_as(
+            bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs),
+            Alias::new("bucket"),
+        )
+        .expr_as(Expr::col(Asterisk).count(), Alias::new("c"))
+        .from(msg())
+        .cond_where(window("rustpbx_voicemail_message"))
+        .group_by_col(Alias::new("bucket"))
+        .order_by(Alias::new("bucket"), Order::Asc)
+        .to_owned();
     let trend_rows = conn
-        .query_all_raw(sea_orm::Statement::from_sql_and_values(
-            backend,
-            trend_sql,
-            [q.from.into(), q.to.into()],
-        ))
+        .query_all_raw(backend.build(&trend_query))
         .await
         .unwrap_or_default();
     let mut trend = Vec::new();
@@ -531,18 +541,30 @@ where
     }
 
     // Per-mailbox backlog Top10.
-    let box_sql = "SELECT b.extension AS extension, COUNT(m.id) AS c, \
-                   SUM(CASE WHEN m.\"read\" = FALSE OR m.\"read\" = 0 THEN 1 ELSE 0 END) AS unread \
-                   FROM rustpbx_voicemail_message m \
-                   JOIN rustpbx_voicemail_box b ON b.id = m.box_id \
-                   WHERE m.created_at >= ? AND m.created_at < ? \
-                   GROUP BY b.extension ORDER BY unread DESC, c DESC LIMIT 10";
+    let m = || Alias::new("m");
+    let b = || Alias::new("b");
+    let box_query = Query::select()
+        .expr_as(Expr::col((b(), Alias::new("extension"))), Alias::new("extension"))
+        .expr_as(Expr::col((m(), Alias::new("id"))).count(), Alias::new("c"))
+        .expr_as(
+            count_when(Expr::col((m(), Alias::new("read"))).eq(false)),
+            Alias::new("unread"),
+        )
+        .from_as(msg(), m())
+        .join_as(
+            sea_orm::sea_query::JoinType::InnerJoin,
+            Alias::new("rustpbx_voicemail_box"),
+            b(),
+            Expr::col((b(), Alias::new("id"))).equals((m(), Alias::new("box_id"))),
+        )
+        .cond_where(window("m"))
+        .group_by_col((b(), Alias::new("extension")))
+        .order_by(Alias::new("unread"), Order::Desc)
+        .order_by(Alias::new("c"), Order::Desc)
+        .limit(10)
+        .to_owned();
     let box_rows = conn
-        .query_all_raw(sea_orm::Statement::from_sql_and_values(
-            backend,
-            box_sql,
-            [q.from.into(), q.to.into()],
-        ))
+        .query_all_raw(backend.build(&box_query))
         .await
         .unwrap_or_default();
     let mut boxes = Vec::new();
@@ -795,4 +817,158 @@ where
         loss: avg(&loss, &loss_cells),
         jitter: avg(&jitter, &jitter_cells),
     })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use sea_orm::sea_query::{Alias, ColumnDef, Query, Table};
+    use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+
+    /// Midnight UTC of the fixture day.
+    pub(crate) fn fixture_day() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 19, 0, 0, 0).unwrap()
+    }
+
+    /// Minimal voicemail addon tables: mailboxes 100 and 101; mailbox 100
+    /// holds two messages on the fixture day (one unread with a transcript)
+    /// and one the day before.
+    pub(crate) async fn seed_voicemail(db: &DatabaseConnection) {
+        let backend = db.get_database_backend();
+        let boxes = Table::create()
+            .table(Alias::new("rustpbx_voicemail_box"))
+            .col(ColumnDef::new(Alias::new("id")).big_integer().primary_key())
+            .col(ColumnDef::new(Alias::new("extension")).string().not_null())
+            .to_owned();
+        let messages = Table::create()
+            .table(Alias::new("rustpbx_voicemail_message"))
+            .col(ColumnDef::new(Alias::new("id")).big_integer().primary_key())
+            .col(ColumnDef::new(Alias::new("box_id")).big_integer().not_null())
+            .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+            .col(ColumnDef::new(Alias::new("read")).boolean().not_null())
+            .col(ColumnDef::new(Alias::new("duration")).integer().not_null())
+            .col(ColumnDef::new(Alias::new("transcript")).text().null())
+            .to_owned();
+        db.execute_raw(backend.build(&boxes)).await.unwrap();
+        db.execute_raw(backend.build(&messages)).await.unwrap();
+
+        let insert_boxes = Query::insert()
+            .into_table(Alias::new("rustpbx_voicemail_box"))
+            .columns([Alias::new("id"), Alias::new("extension")])
+            .values_panic([1.into(), "100".into()])
+            .values_panic([2.into(), "101".into()])
+            .to_owned();
+        db.execute_raw(backend.build(&insert_boxes)).await.unwrap();
+        let day = fixture_day();
+        let insert_messages = Query::insert()
+            .into_table(Alias::new("rustpbx_voicemail_message"))
+            .columns(
+                ["id", "box_id", "created_at", "read", "duration", "transcript"].map(Alias::new),
+            )
+            .values_panic([
+                1.into(),
+                1.into(),
+                (day + chrono::Duration::hours(1)).into(),
+                true.into(),
+                10.into(),
+                None::<String>.into(),
+            ])
+            .values_panic([
+                2.into(),
+                1.into(),
+                (day + chrono::Duration::hours(2)).into(),
+                false.into(),
+                20.into(),
+                "hello".into(),
+            ])
+            .values_panic([
+                3.into(),
+                1.into(),
+                (day - chrono::Duration::hours(1)).into(),
+                false.into(),
+                30.into(),
+                None::<String>.into(),
+            ])
+            .to_owned();
+        db.execute_raw(backend.build(&insert_messages)).await.unwrap();
+    }
+
+    pub(crate) async fn sqlite_db() -> DatabaseConnection {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1);
+        Database::connect(options).await.unwrap()
+    }
+
+    /// Connects to `RUSTPBX_POSTGRES_TEST_URL` inside a fresh `schema`.
+    pub(crate) async fn postgres_db(schema: &str) -> DatabaseConnection {
+        let mut options = ConnectOptions::new(std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap());
+        options.max_connections(1);
+        let db = Database::connect(options).await.unwrap();
+        db.execute_unprepared(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .await
+            .unwrap();
+        db.execute_unprepared(&format!("CREATE SCHEMA {schema}")).await.unwrap();
+        db.execute_unprepared(&format!("SET search_path TO {schema}")).await.unwrap();
+        db
+    }
+
+    /// Connects to `RUSTPBX_MYSQL_TEST_URL` inside a fresh `database`.
+    pub(crate) async fn mysql_db(database: &str) -> DatabaseConnection {
+        let mut options = ConnectOptions::new(std::env::var("RUSTPBX_MYSQL_TEST_URL").unwrap());
+        options.max_connections(1);
+        let db = Database::connect(options).await.unwrap();
+        db.execute_unprepared(&format!("DROP DATABASE IF EXISTS {database}"))
+            .await
+            .unwrap();
+        db.execute_unprepared(&format!("CREATE DATABASE {database}")).await.unwrap();
+        db.execute_unprepared(&format!("USE {database}")).await.unwrap();
+        db
+    }
+
+    async fn assert_voicemail_report(db: &DatabaseConnection) {
+        seed_voicemail(db).await;
+        let q = DomainQuery {
+            from: fixture_day(),
+            to: fixture_day() + chrono::Duration::days(1),
+            bucket: TimeBucket::Day,
+            tz_offset_secs: 0,
+            direction: None,
+        };
+        let (summary, trend, boxes) = voicemail_report(db, &q).await.unwrap();
+        assert!(summary.enabled);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.unread, 1);
+        assert_eq!(summary.read_ratio_pct, 50.0);
+        assert_eq!(summary.avg_duration_secs, 15.0);
+        assert_eq!(summary.transcript_coverage_pct, 50.0);
+        assert_eq!(trend.len(), 1);
+        assert_eq!(trend[0].count, 2);
+        assert_eq!(trend[0].bucket_start, fixture_day().to_rfc3339());
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].extension, "100");
+        assert_eq!(boxes[0].total, 2);
+        assert_eq!(boxes[0].unread, 1);
+    }
+
+    #[tokio::test]
+    async fn test_voicemail_report_sqlite() {
+        assert_voicemail_report(&sqlite_db().await).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+    async fn test_voicemail_report_postgres() {
+        let db = postgres_db("voicemail_report_test").await;
+        assert_voicemail_report(&db).await;
+        db.execute_unprepared("DROP SCHEMA voicemail_report_test CASCADE").await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_MYSQL_TEST_URL pointing to a MySQL test server"]
+    async fn test_voicemail_report_mysql() {
+        let db = mysql_db("rustpbx_voicemail_report_test").await;
+        assert_voicemail_report(&db).await;
+        db.execute_unprepared("DROP DATABASE rustpbx_voicemail_report_test").await.unwrap();
+    }
 }

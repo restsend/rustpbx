@@ -277,7 +277,7 @@ pub fn detect_shortcode_conflicts(
             warnings.push(RoutingStackWarning {
                 code: "shortcode_route_overlap".to_string(),
                 message: format!(
-                    "User route \"{name}\" may match check-voicemail shortcode \"{shortcode}\" before the *97 inspector runs"
+                    "User route \"{name}\" may match check-voicemail shortcode \"{shortcode}\" before the check-voicemail inspector runs"
                 ),
                 route_id: Some(*id),
                 route_name: Some(name.clone()),
@@ -325,7 +325,7 @@ pub fn detect_route_pattern_conflicts(
             warnings.push(RoutingStackWarning {
                 code: "shortcode_route_overlap".to_string(),
                 message: format!(
-                    "User route \"{name}\" pattern may match check-voicemail shortcode \"{shortcode}\" before the *97 inspector runs"
+                    "User route \"{name}\" pattern may match check-voicemail shortcode \"{shortcode}\" before the check-voicemail inspector runs"
                 ),
                 route_id: Some(*id),
                 route_name: Some(name.clone()),

@@ -106,12 +106,22 @@ async fn load_routing_stack_warnings(
 }
 
 fn check_voicemail_shortcode(config: &crate::config::Config) -> String {
-    #[cfg(feature = "addon-voicemail")]
+    #[cfg(feature = "commerce")]
     {
+        // Read the shared settings contract without depending on the external
+        // addon crate. Missing or invalid settings use the addon's defaults.
+        #[derive(Default, Deserialize)]
+        struct VoicemailShortcode {
+            check_voicemail_number: Option<String>,
+        }
         let path = config.config_dir().join("voicemail.toml");
-        crate::addons::voicemail::settings::FileConfig::load(&path).check_voicemail_number
+        let settings = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| toml::from_str::<VoicemailShortcode>(&content).ok())
+            .unwrap_or_default();
+        settings.check_voicemail_number.unwrap_or_else(|| "*97".into())
     }
-    #[cfg(not(feature = "addon-voicemail"))]
+    #[cfg(not(feature = "commerce"))]
     {
         let _ = config;
         "*97".to_string()
@@ -1872,6 +1882,28 @@ mod tests {
     use super::*;
     use crate::console::middleware::AuthRequired;
     use axum::{Json, extract::State, http::StatusCode};
+
+    #[test]
+    fn voicemail_shortcode_respects_commerce_and_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.proxy.generated_dir = dir.path().to_string_lossy().into_owned();
+        let path = config.config_dir().join("voicemail.toml");
+        assert_eq!(check_voicemail_shortcode(&config), "*97");
+        for (content, expected) in [
+            ("", "*97"),
+            ("check_voicemail_number = \"*98\"", "*98"),
+            ("check_voicemail_enabled = false", "*97"),
+            ("check_voicemail_number = \"*98\"\ncheck_voicemail_enabled = false", "*98"),
+            ("invalid toml", "*97"),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(
+                check_voicemail_shortcode(&config),
+                if cfg!(feature = "commerce") { expected } else { "*97" }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn create_routing_denied_without_permission() {

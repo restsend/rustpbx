@@ -65,29 +65,15 @@ impl AddonRegistry {
         #[cfg(feature = "addon-archive")]
         addons.push(Arc::new(super::archive::ArchiveAddon::new()));
 
-        // Wholesale Addon
-        #[cfg(feature = "addon-wholesale")]
-        addons.push(Arc::new(super::wholesale::WholesaleAddon::new()));
-
         // Transcript Addon
         #[cfg(feature = "addon-transcript")]
         addons.push(Arc::new(super::transcript::TranscriptAddon::new()));
 
-        // Voicemail Addon (Commercial)
-        #[cfg(feature = "addon-voicemail")]
-        addons.push(Arc::new(super::voicemail::VoicemailAddon::new()));
-
-        // IVR Editor Addon (Commercial)
-        #[cfg(feature = "addon-ivr-editor")]
-        addons.push(Arc::new(super::ivr_editor::IvrEditorAddon::new()));
-
         // Queue Addon
         addons.push(Arc::new(super::queue::QueueAddon::new()));
 
-        // CC Addon (Contact Center)
-        #[cfg(feature = "addon-cc")]
-        addons.push(Arc::new(super::cc::CcAddon::new()));
-
+        // External addons (including voicemail, IVR, CC and wholesale) are
+        // supplied by the edition's entry point.
         addons.extend(extra);
 
         // Collect export/reload handlers from addons (not gated by feature)
