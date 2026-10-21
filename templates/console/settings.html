@@ -5935,14 +5935,16 @@
                     external_ip: this.platformDraft.external_ip_mode === 'manual'
                         ? this.normalizeOptionalString(this.platformDraft.external_ip)
                         : null,
+                    // A blank URL means the default lookup service (the placeholder).
                     auto_external_ip: this.platformDraft.external_ip_mode === 'auto'
-                        ? this.normalizeOptionalString(this.platformDraft.auto_external_ip)
+                        ? this.normalizeOptionalString(this.platformDraft.auto_external_ip) ?? 'http://ifconfig.me'
                         : null,
                     sip_external_ip: this.platformDraft.sip_external_ip_mode === 'manual'
                         ? this.normalizeOptionalString(this.platformDraft.sip_external_ip)
                         : null,
+                    // A blank URL means the default lookup service (the placeholder).
                     auto_sip_external_ip: this.platformDraft.sip_external_ip_mode === 'auto'
-                        ? this.normalizeOptionalString(this.platformDraft.auto_sip_external_ip)
+                        ? this.normalizeOptionalString(this.platformDraft.auto_sip_external_ip) ?? 'http://ifconfig.me'
                         : null,
                     local_networks: (() => {
                         const lines = (this.platformDraft.local_networks || '')

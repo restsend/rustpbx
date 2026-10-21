@@ -1646,13 +1646,13 @@ pub(crate) struct PlatformSettingsPayload {
     log_level: Option<Option<String>>,
     #[serde(default)]
     log_file: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, with = "serde_with::rust::double_option")]
     external_ip: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, with = "serde_with::rust::double_option")]
     auto_external_ip: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, with = "serde_with::rust::double_option")]
     sip_external_ip: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, with = "serde_with::rust::double_option")]
     auto_sip_external_ip: Option<Option<String>>,
     #[serde(default)]
     local_networks: Option<Option<Vec<String>>>,
@@ -4142,6 +4142,55 @@ mod tests {
 
     use super::*;
     use crate::models::rbac;
+
+    #[tokio::test]
+    async fn platform_external_ip_modes_can_be_cleared() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let config = crate::config::Config {
+            database_url: "sqlite::memory:".into(),
+            external_ip: Some("203.0.113.10".into()),
+            sip_external_ip: Some("203.0.113.11".into()),
+            ..Default::default()
+        };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let app = crate::app::AppStateBuilder::new()
+            .with_config(config)
+            .with_config_metadata(Some(path.to_string_lossy().into_owned()), chrono::Utc::now())
+            .with_skip_sip_bind()
+            .build().await.unwrap();
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+
+        // Omitted fields preserve existing values; explicit null clears them.
+        for body in [
+            json!({}),
+            json!({"external_ip": null, "auto_external_ip": null,
+                   "sip_external_ip": null, "auto_sip_external_ip": null}),
+            json!({"external_ip": "203.0.113.10", "sip_external_ip": "203.0.113.11"}),
+            json!({"external_ip": null, "auto_external_ip": "http://127.0.0.1:9/ip",
+                   "sip_external_ip": null, "auto_sip_external_ip": "http://127.0.0.1:9/ip"}),
+            json!({"external_ip": null, "auto_external_ip": null,
+                   "sip_external_ip": null, "auto_sip_external_ip": null}),
+        ] {
+            let response = update_platform_settings(
+                State(state.clone()), AuthRequired(superuser()),
+                Json(serde_json::from_value(body.clone()).unwrap()),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if body.as_object().unwrap().is_empty() {
+                assert_eq!(saved["external_ip"].as_str(), Some("203.0.113.10"));
+                assert_eq!(saved["sip_external_ip"].as_str(), Some("203.0.113.11"));
+            }
+            for key in ["external_ip", "auto_external_ip", "sip_external_ip", "auto_sip_external_ip"] {
+                if let Some(expected) = body.get(key) {
+                    assert_eq!(saved.get(key).and_then(toml::Value::as_str), expected.as_str(), "{key}");
+                }
+            }
+        }
+        app.token().cancel();
+    }
 
     #[tokio::test]
     async fn list_roles_returns_seeded_roles() {
