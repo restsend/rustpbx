@@ -39,6 +39,10 @@
   .btn.hang { background: #dc2626; border-color: #dc2626; color: #fff; }
   .btn.hang:hover:not(:disabled) { background: #b91c1c; }
   .btn.gray { background: #f5f6fa; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-width: 220px; }
+  .dpad .dkey { padding: 12px 0; border: 1px solid #d0d4dc; border-radius: 10px;
+    background: #fff; font-size: 16px; cursor: pointer; }
+  .dpad .dkey:active { background: #e8ecf3; }
   .meta { font-size: 11px; color: #6b7280; margin: 2px 0 8px; font-family: "SF Mono", Menlo, monospace; }
   .meta b { color: #0891b2; }
   .logs { background: #f8fafc; border: 1px solid #e1e4ea; border-radius: 8px; padding: 8px;
@@ -84,6 +88,11 @@
   <div class="btn-row">
     <button id="callBtn" class="btn call">发起呼叫</button>
     <button id="hangBtn" class="btn hang" disabled>挂断</button>
+  </div>
+
+  <div class="field">
+    <label>拨号盘（通话中按键发送 DTMF·RFC2833；空闲时按键输入被叫号码）</label>
+    <div class="dpad" id="dpad"></div>
   </div>
 
   <div class="logs-title">
@@ -327,6 +336,18 @@ function bindSession(session) {
   session.on('progress', function (e) { if (!isCurrent()) return; setStatus('呼叫中(100/180/183)...', 'busy'); callBtn.disabled = true; hangBtn.disabled = false; log('响应: ' + (e.response && e.response.status_code) + ' ' + (e.response && e.response.reason_phrase), 'log-info'); });
   session.on('accepted', function (e) { if (!isCurrent()) return; setStatus('通话中', 'ok'); callBtn.disabled = true; hangBtn.disabled = false; log('已应答: ' + (e.response && e.response.status_code), 'log-ok'); });
   session.on('confirmed', function () { if (!isCurrent()) return; setStatus('通话中', 'ok'); callBtn.disabled = true; hangBtn.disabled = false; log('通话建立(confirmed)', 'log-ok'); });
+  // 收到远端按键 DTMF（RFC2833/telephone-event 落 RTCPeerConnection，JsSIP
+  // 以 newDTMF 事件抛出）。JsSIP 该事件的 e.dtmf 是对象 {tone, duration}，
+  // tone 为本次按键字符('0'-'9'/'#'/'*')，duration 为时长(ms)；兼容 e.dtmf.value。
+  session.on('newDTMF', function (e) {
+    if (!isCurrent()) { return; }
+    var t = e && e.dtmf;
+    var k = (t && t.tone) || (t && t.value) || '';
+    var dur = t && t.duration;
+    log('收到 DTMF: ' + (k ? k : '(解析失败)') +
+        ' duration=' + (typeof dur === 'number' ? dur + 'ms' : 'n/a'),
+        'log-ok');
+  });
   session.on('failed', function (e) { if (!isCurrent()) { log('忽略旧会话失败事件 cause=' + (e.cause || ''), 'log-info'); return; } setStatus('呼叫失败: ' + (e.cause || ''), 'err'); currentSession = null; hangBtn.disabled = true; log('呼叫失败 cause=' + e.cause + ' code=' + (e.status_code !== undefined ? e.status_code : (e.response && e.response.status_code)), 'log-err'); disconnectUA(); });
   session.on('ended', function (e) { if (!isCurrent()) { log('忽略旧会话结束事件 cause=' + (e.cause || ''), 'log-info'); return; } setStatus('呼叫已结束', 'warn'); currentSession = null; hangBtn.disabled = true; log('呼叫结束 cause=' + (e.cause || ''), ''); disconnectUA(); });
 }
@@ -391,6 +412,53 @@ $('hangBtn').addEventListener('click', hangup);
 $('clearLogsBtn').addEventListener('click', function () {
   while (logsEl.firstChild) { logsEl.removeChild(logsEl.firstChild); }
 });
+
+/* ---------- DTMF：拨号盘 + 键盘 ---------- */
+var DTMF_KEYS = '0123456789#*';
+function inCall() {
+  return !!(currentSession && typeof currentSession.isEstablished === 'function' && currentSession.isEstablished());
+}
+// 通话中 → 经 JsSIP 发 DTMF（协商到 RFC 2833 则由浏览器走 telephone-event RTP）；
+// 空闲 → 点击的键填入被叫号码框。
+function dtmfKey(d) {
+  if (d === '' || DTMF_KEYS.indexOf(d) < 0) { return; }
+  if (inCall()) {
+    try {
+      currentSession.sendDTMF(d);
+      log('发送 DTMF: ' + d + ' （通话中，RFC2833/telephone-event）', 'log-ok');
+    } catch (e) {
+      log('DTMF 发送失败: ' + e, 'log-err');
+    }
+  } else {
+    $('callee').value += d;
+    $('callee').focus();
+  }
+}
+(function buildDpad() {
+  var layout = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+  var box = $('dpad');
+  layout.forEach(function (k) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dkey';
+    b.textContent = k;
+    b.addEventListener('click', function () { dtmfKey(k); });
+    box.appendChild(b);
+  });
+})();
+document.addEventListener('keydown', function (ev) {
+  var key = ev.key;
+  if (key === 'Enter') { return; }   // 回车交给按钮/表单
+  if (!DTMF_KEYS.includes(key)) { return; }   // 只拦数字/#/*
+  ev.preventDefault();
+  // 光标若在可编辑框里且处于输入被叫/WS 地址等场景，通话中仍发 DTMF；空闲则回填到被叫框
+  if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) {
+    if (!inCall()) { return; }   // 空闲时不让键盘打断被叫输入；用拨号盘点
+  }
+  dtmfKey(key);
+});
+/* ---------- DTMF end ---------- */
+
 window.addEventListener('beforeunload', function () { try { if (ua) { ua.stop(); } } catch (e) {} });
 
 $('wsServer').placeholder = defaultWsUrl();

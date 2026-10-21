@@ -523,24 +523,19 @@ def validate_config(cfg: dict) -> list:
         if not str(svc.get("user_agent") or "").strip():
             errors.append(f"internal_services[{i}] missing user_agent")
 
-    # WebRTC 呼叫（方案 B）：向 route_points 完全看齐的列表模型。一条 = 一个
-    # 账号组点位，逐条配置多账号（account/accounts）、white-list 入口
-    # rule_list（每条 rule 独立 prefix/strip/pri_prefix）、出口 gw_list（多网关）、
-    # 来源准入 allowed_ips，不走 L1~L4 裁决。
-    seen_webrtc_accounts = set()
+    # WebRTC 呼叫（方案 A）：webrtc 段与 route_points 完全同构（point_id/
+    # group_type/gw_list/rule_list），仅额外多 allowed_ips 来源准入；不再有
+    # account/accounts —— 主叫 → 位点的归属靠规则 rule_list 的 caller_group
+    # （组内为主叫号码/前缀记录），走独立白名单路由，不参与 L1~L4 裁决。
     seen_webrtc_points = set()
     for w in webrtc_entries(cfg):
         wid = webrtc_entry_tag(w)
         if wid in seen_webrtc_points:
             errors.append(f"webrtc point '{wid}' duplicated")
         seen_webrtc_points.add(wid)
-        accs = webrtc_entry_accounts(w)
-        if not accs:
-            errors.append(f"webrtc point '{wid}' missing account/accounts")
-        for a in accs:
-            if a in seen_webrtc_accounts:
-                errors.append(f"webrtc account '{a}' duplicated across points")
-            seen_webrtc_accounts.add(a)
+        if not webrtc_entry_groups(w):
+            errors.append(f"webrtc point '{wid}' must define caller_group in "
+                          "rule_list (webrtc mirrors route_points)")
         rl = w.get("rule_list")
         if not isinstance(rl, list) or not rl:
             errors.append(f"webrtc point '{wid}' rule_list must be a non-empty list")
@@ -559,6 +554,10 @@ def validate_config(cfg: dict) -> list:
                 except (TypeError, ValueError):
                     errors.append(f"webrtc point '{wid}' rule_list[{i}] "
                                   "strip must be an integer")
+                cg = (r.get("caller_group") or "").strip()
+                if cg and cg not in caller_groups:
+                    errors.append(f"webrtc point '{wid}' rule_list[{i}] references "
+                                  f"unknown caller_group '{cg}'")
         aips = w.get("allowed_ips")
         if aips is not None and not isinstance(aips, list):
             errors.append(f"webrtc point '{wid}' allowed_ips must be a list")
@@ -1306,36 +1305,57 @@ def webrtc_entries(cfg: dict) -> list:
 
 
 def webrtc_entry_tag(entry: dict) -> str:
-    return str(entry.get("point_id") or entry.get("account") or "webrtc")
+    """webrtc 位点标识：与 route_points 同构用 point_id；无则退回 group_type。"""
+    return str(entry.get("point_id") or entry.get("group_type") or "webrtc")
 
 
-def webrtc_entry_accounts(entry: dict) -> list:
-    """条目命中的 WebRTC 账号集合：account 单值 或 accounts 数组（多账号）。"""
-    accs = entry.get("accounts")
-    if isinstance(accs, list):
-        return [str(a).strip() for a in accs if str(a).strip()]
-    a = str(entry.get("account") or "").strip()
-    return [a] if a else []
+def webrtc_entry_groups(entry: dict) -> list:
+    """该 webrtc 位点 rule_list 引用的 caller_group 名（去重保留顺序）。
+
+    方案 A：webrtc 段完全照抄 route_points（无 account/accounts），主叫 → 位点
+    的归属判定靠规则 rule_list 的 caller_group（组内为主叫号码/前缀记录）。"""
+    out, seen = [], set()
+    for r in entry.get("rule_list") or []:
+        g = (r.get("caller_group") or "").strip()
+        if g and g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out
+
+
+def webrtc_entry_callers(cfg: dict, entry: dict) -> list:
+    """该 webrtc 位点可接纳的主叫集合：各 rule.caller_group 组内记录并集（去重）。"""
+    out, seen = [], set()
+    cg = cfg.get("caller_groups") or {}
+    for g in webrtc_entry_groups(entry):
+        for rec in cg.get(g) or []:
+            rec = str(rec)
+            if rec and rec not in seen:
+                seen.add(rec)
+                out.append(rec)
+    return out
 
 
 def find_webrtc_entry(cfg: dict, caller: str):
-    """按主叫定位 webrtc 条目（多 account × 多条点位）。命中且启用则返回条目，
-    否则 None（走普通 L1~L4 路由裁决）。"""
+    """按主叫归属定位 webrtc 位点（方案 A）：主叫命中该位点任一 rule 的
+    caller_group → 归属此 WebRTC 位点；否则 None（走普通 L1~L4 路由裁决）。"""
+    hits = resolve_caller_groups(caller, cfg)
     for entry in webrtc_entries(cfg):
         if entry.get("enabled") is False:
             continue
-        if caller in webrtc_entry_accounts(entry):
-            return entry
+        for g in webrtc_entry_groups(entry):
+            if hits.get(g, 0):
+                return entry
     return None
 
 
 def default_webrtc_account(cfg: dict = None) -> str:
-    """签发 JWT 的默认账号：配置里第一个可用条目的账号，回退环境变量。"""
+    """签发 JWT 的默认 WebRTC 账号：第一个可用位点的首名主叫，回退环境变量。"""
     cfg = CONFIG if cfg is None else cfg
     for entry in webrtc_entries(cfg):
-        accs = webrtc_entry_accounts(entry)
-        if accs:
-            return accs[0]
+        c = webrtc_entry_callers(cfg, entry)
+        if c:
+            return c[0]
     return WEBRTC_ACCOUNT
 
 
@@ -1368,21 +1388,25 @@ def webrtc_match_rule(entry: dict, callee: str):
 
 def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
                           entry: dict) -> dict:
-    """WebRTC 呼叫的独立路由策略（方案 B）。
+    """WebRTC 呼叫的独立路由策略（方案 A）。
 
     与普通呼叫不同：WebRTC 会话（临时 JWT 认证）的主叫【不走 L1~L4 路由
     裁决】，而是按配置段 `webrtc` 的白名单直接决策：
+      - webrtc 段与 route_points **完全同构**：point_id/group_type/rule_list
+        /gw_list，仅额外多 allowed_ips=来源准入；不含 account/accounts。
+      - 主叫 → 位点归属靠位点 rule_list 的 caller_group（组内为主叫号码/
+        前缀记录），命中该位点即由 entry 驱动后续决策；
       - callee 命中 rule_list（白名单前缀）→ 转发到 gw_list（通常指向注册
         分机 / 出局中继），仅此一条出口，不做任何默认兜底；
       - callee 未命中任何白名单前缀 → 拒绝，防止 WebRTC 会话被用于拨打
         任意号码（仅放行配置前缀，其余一律 4xx）。
-    该分支在 route_decision() 入口处按主叫命中 webrtc 条目（account/accounts）
-    触发，返回结构与普通 forward/reject 一致，RustPBX 无需区分。
+    该分支在 route_decision() 入口处按主叫归属命中 webrtc 条目触发，返回
+    结构与普通 forward/reject 一致，RustPBX 无需区分。
 
     entry 为当前命中的 webrtc 点位，完全对齐 route_points：rule_list=白名单
-    入口（每条 rule 独立 prefix/strip/pri_prefix 号码变换），gw_list=出口
-    （多网关），外加 allowed_ips=来源准入。命中 rule 后用该 rule 的
-    strip/pri_prefix 变换被叫，再经条目 gw_list 出口。"""
+    入口（每条 rule 独立 prefix/strip/pri_prefix/caller_group 号码变换与主叫
+    过滤），gw_list=出口（多网关），外加 allowed_ips=来源准入。命中 rule 后
+    用该 rule 的 strip/pri_prefix 变换被叫，再经条目 gw_list 出口。"""
     entry_tag = webrtc_entry_tag(entry)
     matched_rule = webrtc_match_rule(entry, callee)
     matched = (matched_rule.get("prefix") or "").strip() if matched_rule else None
@@ -1420,6 +1444,26 @@ def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
     if matched_rule is None:
         return {"action": "reject", "status": 403,
                 "reason": "prefix not allowed for webrtc calls"}
+
+    # caller_group 主叫组过滤（对齐 route_points：命中规则可带 caller_group，
+    # 组内为主叫号码/前缀记录；仅放行属于该组的主叫，否则 403，语义与
+    # route_points 的主叫过滤完全一致）。
+    _cg = (matched_rule.get("caller_group") or "").strip()
+    if _cg:
+        _hits = resolve_caller_groups(caller, cfg)
+        if not _hits.get(_cg, 0):
+            log("decision", f"webrtc caller={caller} callee={callee} "
+                            f"entry={entry_tag} caller_group={_cg} → 主叫组未命中")
+            trace_record(payload.get("call_id") or "", "decision",
+                         session_id=payload.get("session_id"),
+                         layer="webrtc", callee=callee, caller=caller,
+                         entry=entry_tag, matched_prefix=matched,
+                         caller_group=_cg, group_hits=_hits,
+                         corr_id=resolve_webrtc_xtag(payload),
+                         action="reject", status=403,
+                         reason="caller not allowed by caller_group")
+            return {"action": "reject", "status": 403,
+                    "reason": "caller not allowed by caller_group"}
 
     # 号码变换：取该命中 rule 的 strip/pri_prefix（对齐 route_points），
     # 然后经该条目 gw_list 出口（多网关按序展开）。
@@ -1478,8 +1522,9 @@ def route_decision(payload: dict) -> dict:
                      layer="reject", status=484, callee=callee, caller=caller)
         return {"action": "reject", "status": 484, "reason": "address incomplete"}
 
-    # WebRTC 呼叫：主叫命中 webrtc 条目（account/accounts 多账号）→ 走独立
-    # 白名单 + 准入策略，跳过 L1~L4 路由裁决（仅允许指定前缀，其余拒绝）。
+    # WebRTC 呼叫（方案 A）：主叫命中 webrtc 位点（规则 rule_list 的
+    # caller_group 归属，webrtc 段与 route_points 完全同构）→ 走独立白名单
+    # + 准入策略，跳过 L1~L4 路由裁决（仅允许指定前缀，其余拒绝）。
     webrtc_entry = find_webrtc_entry(cfg, caller)
     if webrtc_entry is not None:
         trace_record(payload.get("call_id") or "", "decision",
@@ -1638,8 +1683,9 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
             except ValueError:
                 want = None
             if want is not None:
-                known = {a for e in webrtc_entries(CONFIG)
-                         for a in webrtc_entry_accounts(e)}
+                known = set()
+                for e in webrtc_entries(CONFIG):
+                    known.update(webrtc_entry_callers(CONFIG, e))
                 if want not in known:
                     return self._json(403, {"ok": False,
                                             "reason": f"unknown webrtc account '{want}'"})
@@ -1738,7 +1784,7 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
             # 顺序=配置 items 展开；配置外账号由前端自行追加测试项。
             accounts, dflt = [], default_webrtc_account(cfg)
             for entry in webrtc_entries(cfg):
-                for acc in webrtc_entry_accounts(entry):
+                for acc in webrtc_entry_callers(cfg, entry):
                     if acc not in accounts:
                         accounts.append(acc)
             if accounts and dflt not in accounts:
