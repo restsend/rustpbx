@@ -261,12 +261,16 @@ async fn collect_media_metrics(state: &ConsoleState) -> MediaMetrics {
     metrics
 }
 
-/// Voicemail counters read from the voicemail addon tables (best-effort: the
-/// addon may be disabled or its tables absent — defaults stay zero).
+/// Voicemail counters read from the voicemail addon tables. Zero unless the
+/// voicemail addon is enabled: its tables only exist once it has run, and
+/// querying them otherwise fails (Postgres logs every such attempt).
 async fn collect_voicemail_metrics(state: &ConsoleState) -> VoicemailMetrics {
     let Some(app) = state.app_state() else {
         return VoicemailMetrics::default();
     };
+    if !app.addon_registry.is_enabled("voicemail", app.config()) {
+        return VoicemailMetrics::default();
+    }
     let today_start = chrono::Utc::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)

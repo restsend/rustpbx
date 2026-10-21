@@ -321,7 +321,12 @@ impl AddonRegistry {
             .any(|a| a.category() == crate::addons::AddonCategory::Commercial)
     }
 
+    /// Whether addon `id` is registered with this registry (supplied by the
+    /// edition's entry point), listed in `[proxy] addons`, and licensed.
     pub fn is_enabled(&self, id: &str, config: &crate::config::Config) -> bool {
+        if self.get_addon(id).is_none() {
+            return false;
+        }
         let listed = config
             .proxy
             .addons
@@ -990,6 +995,21 @@ mod asset_path_tests {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    #[test]
+    fn enabled_requires_registered_and_listed() {
+        let _guard = license_store_lock();
+        crate::license::record_startup_results(std::collections::HashMap::new());
+        let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
+        assert!(registry.is_enabled("pathaddon", &enabled_config()));
+        // Listed but not registered (e.g. a config shared with another edition).
+        let mut config = enabled_config();
+        config.proxy.addons = Some(vec!["voicemail".into()]);
+        assert!(registry.get_addon("voicemail").is_none());
+        assert!(!registry.is_enabled("voicemail", &config));
+        // Registered but not listed.
+        assert!(!registry.is_enabled("pathaddon", &Config::default()));
     }
 
     #[test]

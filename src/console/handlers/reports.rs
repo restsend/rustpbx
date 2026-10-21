@@ -19,9 +19,9 @@ pub async fn reports_page(
         json!({
             "nav_active": "reports",
             "current_user": current_user,
-            // Voicemail reports are available in commercial builds.
+            // Voicemail reports are available when the voicemail addon is enabled.
             "features": {
-                "voicemail": cfg!(feature = "commerce"),
+                "voicemail": voicemail_active(&state),
             },
         }),
         &headers,
@@ -357,6 +357,14 @@ async fn domain_route_export(
 
 // ── voicemail ───────────────────────────────────────────────────────────
 
+/// The voicemail report reads the voicemail addon's tables, which only exist
+/// once the addon has run; skip the queries unless it is enabled.
+fn voicemail_active(state: &ConsoleState) -> bool {
+    state
+        .app_state()
+        .is_some_and(|app| app.addon_registry.is_enabled("voicemail", app.config()))
+}
+
 async fn domain_voicemail(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -366,7 +374,12 @@ async fn domain_voicemail(
         return crate::console::config_helpers::permission_denied();
     }
     let q = params.resolve();
-    match crate::report::domain_report::voicemail_report(state.db(), &q).await {
+    let report = if voicemail_active(&state) {
+        crate::report::domain_report::voicemail_report(state.db(), &q).await
+    } else {
+        Ok(Default::default())
+    };
+    match report {
         Ok((summary, trend, boxes)) => Json(json!({
             "data": {"summary": summary, "trend": trend, "boxes": boxes},
             "meta": {"from": q.from.to_rfc3339(), "to": q.to.to_rfc3339(), "bucket": bucket_label(&q)},
@@ -385,9 +398,13 @@ async fn domain_voicemail_export(
         return crate::console::config_helpers::permission_denied();
     }
     let q = params.resolve();
-    let (_, trend, boxes) = crate::report::domain_report::voicemail_report(state.db(), &q)
-        .await
-        .unwrap_or_default();
+    let (_, trend, boxes) = if voicemail_active(&state) {
+        crate::report::domain_report::voicemail_report(state.db(), &q)
+            .await
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
     let mut csv = String::from("section,bucket_or_extension,count,unread\n");
     for t in trend {
         csv.push_str(&format!("trend,{},{},\n", t.bucket_start, t.count));
