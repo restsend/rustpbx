@@ -1415,7 +1415,15 @@ pub(crate) async fn create_call_record_table(
             .col(Alias::new("status"))
             .to_owned(),
     ];
+    let manager = sea_orm_migration::SchemaManager::new(db);
     for index in indexes {
+        // This runs on every start and MySQL has no CREATE INDEX IF NOT
+        // EXISTS, so skip indexes the table already has.
+        if let Some(name) = index.get_index_spec().get_name()
+            && manager.has_index(table_name, name).await.unwrap_or(false)
+        {
+            continue;
+        }
         let stmt = db.get_database_backend().build(&index);
         if let Err(e) = db.execute_raw(stmt).await {
             warn!("failed to create index on {}: {}", table_name, e);

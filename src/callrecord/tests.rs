@@ -153,6 +153,70 @@ async fn test_create_call_record_table() {
     assert!(rows.is_ok(), "table should exist");
 }
 
+/// The table is created on every start: the first call creates the four
+/// indexes, later calls find them and skip, and a missing one is recreated.
+async fn assert_call_record_indexes_created_once(db: &DatabaseConnection, table: &str) {
+    use sea_orm::ConnectionTrait;
+    let names = ["call_id", "session_id", "started_at", "status"].map(|c| format!("idx_{table}_{c}"));
+    let manager = sea_orm_migration::SchemaManager::new(db);
+    create_call_record_table(db, table).await.unwrap();
+    for name in &names {
+        assert!(manager.has_index(table, name).await.unwrap(), "{name}");
+    }
+    create_call_record_table(db, table).await.unwrap();
+
+    let drop = sea_orm::sea_query::Index::drop()
+        .name(names[3].as_str())
+        .table(sea_orm::sea_query::Alias::new(table))
+        .to_owned();
+    db.execute_raw(db.get_database_backend().build(&drop)).await.unwrap();
+    assert!(!manager.has_index(table, &names[3]).await.unwrap());
+    create_call_record_table(db, table).await.unwrap();
+    for name in &names {
+        assert!(manager.has_index(table, name).await.unwrap(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn test_call_record_indexes_created_once_sqlite() {
+    assert_call_record_indexes_created_once(&in_memory_db().await, "test_cdrs").await;
+}
+
+#[tokio::test]
+#[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+async fn test_call_record_indexes_created_once_postgres() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+    let mut options = ConnectOptions::new(std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap());
+    options.max_connections(1);
+    let db = Database::connect(options).await.unwrap();
+    db.execute_unprepared(
+        "DROP SCHEMA IF EXISTS cdr_index_test CASCADE; CREATE SCHEMA cdr_index_test; \
+         SET search_path TO cdr_index_test",
+    )
+    .await
+    .unwrap();
+    assert_call_record_indexes_created_once(&db, "test_cdrs").await;
+    db.execute_unprepared("DROP SCHEMA cdr_index_test CASCADE").await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires RUSTPBX_MYSQL_TEST_URL pointing to a MySQL test server"]
+async fn test_call_record_indexes_created_once_mysql() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+    let mut options = ConnectOptions::new(std::env::var("RUSTPBX_MYSQL_TEST_URL").unwrap());
+    options.max_connections(1);
+    let db = Database::connect(options).await.unwrap();
+    for sql in [
+        "DROP DATABASE IF EXISTS rustpbx_cdr_index_test",
+        "CREATE DATABASE rustpbx_cdr_index_test",
+        "USE rustpbx_cdr_index_test",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    assert_call_record_indexes_created_once(&db, "test_cdrs").await;
+    db.execute_unprepared("DROP DATABASE rustpbx_cdr_index_test").await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
 async fn test_custom_cdr_postgres_timestamptz_upgrade() {
