@@ -333,9 +333,16 @@ function bindSession(session) {
 function placeCall(callee) {
   var domain = domainFromWs($('wsServer').value.trim() || defaultWsUrl());
   var destination = callee.indexOf('sip:') === 0 ? callee : 'sip:' + callee + '@' + domain;
-  log('拨打 ' + destination);
+  // 网页侧为本次呼叫生成唯一关联标识（X-CID 自定义 SIP 头），随 INVITE 透传。
+  // 决策服务 resolve_webrtc_xtag 优先沿用该值（而非本地 KRTC_<session_id>），
+  // 使决策 corr_id、RWI 事件 xcid、追踪全链路以网页 xcid 为同一关联键。
+  var xcid = 'WRTC_' + (window.crypto && crypto.randomUUID
+    ? crypto.randomUUID().replace(/-/g, '')
+    : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
+  log('拨打 ' + destination + '  X-CID=' + xcid);
   try {
     currentSession = ua.call(destination, {
+      extraHeaders: xcid ? ['X-CID: ' + xcid] : [],
       mediaConstraints: { audio: true, video: false },
       rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
     });

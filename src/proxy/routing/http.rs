@@ -415,6 +415,13 @@ impl CallRouter for HttpCallRouter {
             .call_id_header()
             .map(|h| h.value().to_string())
             .unwrap_or_default();
+
+        // RFC 7989 唯一入向确立点：整条 resolve 内（决策请求、Dialplan，以及经
+        // Dialplan 继承的 RWI 事件）共用这一份 session。WebRTC 的 JsSIP Call-ID
+        // （uuid@host）非 UUID 形且无 Session-ID 头，若两处各自 resolve_incoming
+        // 都会 new_v4() 生成不同随机值，导致决策与拨号分裂成两张卡——这里一次
+        // 确立后全局继承，不再重复生成。
+        let session_id = crate::call::session_id::resolve_incoming(&original, &call_id);
         let from = original
             .from_header()
             .map(|h| h.value().to_string())
@@ -445,11 +452,7 @@ impl CallRouter for HttpCallRouter {
 
         let payload = HttpRequestPayload {
             call_id: call_id.clone(),
-            // 与 RWI 事件 call_info.session_id 同源（resolve_incoming，优先 Session-ID
-            // 头继承、否则归一/生成）。决策请求、Dialplan、RWI 事件因此拿到同一个
-            // 全局 session_id —— WebRTC 的 JsSIP Call-ID（uuid@host）不再被现场
-            // 生成新 UUID，决策与事件可同 key 合并。
-            session_id: crate::call::session_id::resolve_incoming(&original, &call_id),
+            session_id: session_id.clone(),
             from,
             to,
             source_addr,
@@ -612,13 +615,10 @@ impl CallRouter for HttpCallRouter {
                     _ => DialStrategy::Sequential(attempts),
                 };
 
-                // Global session id (RFC 7989): HTTP-routed calls always
-                // participate (UUID-shaped Call-ID > fresh UUID) — the HTTP
-                // router is an explicit routing deployment, never a plain
-                // P2P dial. Root inheritance rides the Session-ID header in
-                // the session constructor. 用 resolve_incoming 与决策请求/RWI
-                // 事件保持同一全局 session_id。
-                let session_id = crate::call::session_id::resolve_incoming(&original, &call_id);
+                // Global session id (RFC 7989): 复用函数开头唯一确立的那一份，不再
+                // 重新 resolve_incoming，确保 Dialplan（进而 RWI 事件）与决策请求
+                // 的 session 完全一致。
+                let session_id = session_id.clone();
                 let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
                     .with_session_id_enabled(true);
 

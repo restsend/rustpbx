@@ -304,6 +304,9 @@ TRACE_SESSION: dict = {}    # session_id -> call_id（RWI 事件 envelope 的 ca
 TRACE_CORR: dict = {}       # corr_id/xcid -> call_id（决策 corr_id 与 RWI 事件 xcid
                             #   同值桥接 —— WebRTC/JsSIP 的随机 Call-ID 与 RustPBX 的
                             #   session 号不同，靠 X-cid 这一对同值把它们并入同一卡片）
+CALL_XCID: dict = {}        # call_id -> xcid（决策阶段 /route 沿用网页 X-CID 确立，
+                            #   供后续每条 RWI 事件沿用；防 200/bye 等事件头缺 X-CID
+                            #   时掉回 KTM_ 造成同呼叫 xcid 跳变）
 TRACE_MAX_CALLS = 2000      # 最多保留的呼叫数（内存保护）
 TRACE_MAX_RECORDS = 64      # 单呼叫最多记录数
 
@@ -323,6 +326,7 @@ def trace_record(call_id: str, kind: str, session_id=None, **fields) -> None:
     corr = fields.get("corr_id")
     if corr:
         TRACE_CORR[corr] = call_id
+        CALL_XCID[call_id] = corr
     records = TRACE.setdefault(call_id, [])
     records.append({"kind": kind, "ts": time.time_ns() // 1_000,
                     "session_id": session_id, **fields})
@@ -419,11 +423,16 @@ def handle_rwi(payload: dict) -> None:
     # 优先认它；否则用与 /route 阶段相同的 KTM_<session_id> 确定性推导，
     # 无需任何状态存储。
     sip_headers = payload.get("sip_headers")
-    xcid = None
+    header_xcid = None
     if isinstance(sip_headers, dict):
         xcid_key = next((k for k in sip_headers if k.lower() == "x-cid"), None)
-        xcid = sip_headers.get(xcid_key) if xcid_key else None
-    xcid = xcid or f"KTM_{session_id}"
+        header_xcid = sip_headers.get(xcid_key) if xcid_key else None
+    # 网页传入的 X-CID 优先；事件头若未带（如 200/bye），则沿用决策阶段 /route
+    # 已确立的同值 xcid，最后才回落到统一的 session_id 确定性推导 —— 保证同呼叫
+    # 内所有事件 xcid 不跳变。
+    xcid = header_xcid or CALL_XCID.get(call_id) or f"KTM_{session_id}"
+    if header_xcid and xcid != f"KTM_{session_id}":
+        CALL_XCID[call_id] = header_xcid
 
     ccm_event = {
         "xcid": xcid,
