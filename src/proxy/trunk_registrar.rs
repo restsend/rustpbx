@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::time::sleep;
+use tokio::{sync::Mutex, task::JoinHandle, time::{sleep, timeout}};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -43,10 +43,18 @@ pub struct TrunkRegistrationStatus {
     pub remote_addr: Option<String>,
 }
 
+struct ActiveRegistration {
+    config: TrunkConfig,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
 /// Manages outbound trunk registrations.
 pub struct TrunkRegistrar {
     statuses: Arc<DashMap<String, TrunkRegistrationStatus>>,
-    cancel_tokens: Arc<DashMap<String, CancellationToken>>,
+    registrations: DashMap<String, ActiveRegistration>,
+    /// Serialize reloads and shutdown while old tasks are being stopped.
+    lifecycle: Mutex<()>,
     /// Global cancel token for the registrar (parent for all per-trunk tokens).
     parent_cancel: CancellationToken,
     /// SIP endpoint reference for creating transactions (set after server build).
@@ -69,7 +77,8 @@ impl TrunkRegistrar {
     pub fn new() -> Self {
         Self {
             statuses: Arc::new(DashMap::new()),
-            cancel_tokens: Arc::new(DashMap::new()),
+            registrations: DashMap::new(),
+            lifecycle: Mutex::new(()),
             parent_cancel: CancellationToken::new(),
             endpoint: RwLock::new(None),
         }
@@ -100,6 +109,10 @@ impl TrunkRegistrar {
     /// - Sends un-REGISTER for trunks that were removed or had registration disabled.
     /// - Re-starts registration for trunks whose config changed.
     pub async fn reconcile(&self, trunks: &HashMap<String, TrunkConfig>) {
+        let _guard = self.lifecycle.lock().await;
+        if self.parent_cancel.is_cancelled() {
+            return;
+        }
         let endpoint = { self.endpoint.read().unwrap().clone() };
         let Some(endpoint) = endpoint else {
             debug!("trunk registrar: no endpoint set yet, skipping reconcile");
@@ -107,7 +120,7 @@ impl TrunkRegistrar {
         };
 
         let current_names: Vec<String> =
-            { self.cancel_tokens.iter().map(|r| r.key().clone()).collect() };
+            { self.registrations.iter().map(|r| r.key().clone()).collect() };
 
         // Determine which trunks need registration.
         let mut desired: HashMap<String, &TrunkConfig> = HashMap::new();
@@ -129,8 +142,19 @@ impl TrunkRegistrar {
 
         // Start / restart registrations for desired trunks.
         for (name, config) in &desired {
-            let already_running = self.cancel_tokens.contains_key(name.as_str());
-            if !already_running {
+            let unchanged = self.registrations.get(name.as_str()).is_some_and(|active| {
+                let previous = &active.config;
+                !active.task.is_finished()
+                    && previous.dest == config.dest
+                    && previous.outbound_proxy == config.outbound_proxy
+                    && previous.username == config.username
+                    && previous.password == config.password
+                    && previous.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
+                        == config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
+                    && previous.register_extra_headers == config.register_extra_headers
+            });
+            if !unchanged {
+                self.stop_registration(name).await;
                 info!(trunk = %name, dest = %config.dest, "starting trunk registration");
                 self.start_registration(name.clone(), (*config).clone(), endpoint.clone());
             }
@@ -140,7 +164,8 @@ impl TrunkRegistrar {
     /// Stop all registrations (used on shutdown).
     pub async fn stop_all(&self) {
         self.parent_cancel.cancel();
-        let names: Vec<String> = self.cancel_tokens.iter().map(|r| r.key().clone()).collect();
+        let _guard = self.lifecycle.lock().await;
+        let names: Vec<String> = self.registrations.iter().map(|r| r.key().clone()).collect();
         for name in names {
             self.stop_registration(&name).await;
         }
@@ -148,9 +173,15 @@ impl TrunkRegistrar {
 
     /// Stop registration for a single trunk, sending un-REGISTER.
     async fn stop_registration(&self, name: &str) {
-        let token = self.cancel_tokens.remove(name).map(|(_, v)| v);
-        if let Some(token) = token {
-            token.cancel();
+        if let Some((_, mut active)) = self.registrations.remove(name) {
+            active.cancel.cancel();
+            // Allow a best-effort un-REGISTER, but do not block reload indefinitely
+            // when the previous registrar is unreachable. Join before replacing it
+            // so the old task cannot overwrite the new registration's status.
+            if timeout(Duration::from_secs(3), &mut active.task).await.is_err() {
+                active.task.abort();
+                let _ = active.task.await;
+            }
         }
         self.statuses.remove(name);
     }
@@ -158,12 +189,18 @@ impl TrunkRegistrar {
     /// Spawn a background task for trunk registration.
     fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef) {
         let child_token = self.parent_cancel.child_token();
-        self.cancel_tokens.insert(name.clone(), child_token.clone());
-
+        let task_config = config.clone();
+        let task_name = name.clone();
+        let task_cancel = child_token.clone();
         let statuses = self.statuses.clone();
 
-        crate::utils::spawn(async move {
-            registration_loop(name, config, child_token, statuses, endpoint).await;
+        let task = crate::utils::spawn(async move {
+            registration_loop(task_name, task_config, task_cancel, statuses, endpoint).await;
+        });
+        self.registrations.insert(name, ActiveRegistration {
+            config,
+            cancel: child_token,
+            task,
         });
     }
 }
@@ -377,6 +414,106 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn test_reconcile_restarts_changed_registration() {
+        use rsipstack::transport::{TransportLayer, udp::UdpConnection};
+        use rsipstack::transaction::endpoint::EndpointBuilder;
+        use tokio::net::UdpSocket;
+
+        let cancel = CancellationToken::new();
+        let transports = TransportLayer::new(cancel.clone());
+        let connection = UdpConnection::create_connection(
+            "127.0.0.1:0".parse().unwrap(), None, Some(cancel.clone()),
+        ).await.unwrap();
+        transports.add_transport(connection.into());
+        let endpoint = EndpointBuilder::new()
+            .with_cancel_token(cancel.clone())
+            .with_transport_layer(transports)
+            .build();
+        let _incoming = endpoint.incoming_transactions().unwrap();
+        let registrar = TrunkRegistrar::new();
+        registrar.set_endpoint(endpoint.inner.clone());
+        let endpoint_task = tokio::spawn(async move { endpoint.serve().await });
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut addresses = Vec::new();
+        let mut servers = Vec::new();
+        for index in 0..2 {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            addresses.push(socket.local_addr().unwrap());
+            let sent = sent.clone();
+            servers.push(tokio::spawn(async move {
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                    let request = String::from_utf8(buffer[..size].to_vec()).unwrap();
+                    let mut response = String::from("SIP/2.0 200 OK\r\n");
+                    for line in request.lines().skip(1) {
+                        let Some((name, _)) = line.split_once(':') else { continue };
+                        if ["via", "from", "to", "call-id", "cseq", "contact", "expires"]
+                            .contains(&name.to_ascii_lowercase().as_str())
+                        {
+                            response.push_str(line);
+                            response.push_str("\r\n");
+                        }
+                    }
+                    response.push_str("Content-Length: 0\r\n\r\n");
+                    socket.send_to(response.as_bytes(), peer).await.unwrap();
+                    if sent.send((index, request)).is_err() { break; }
+                }
+            }));
+        }
+        let mut trunks = HashMap::from([("trunk".to_string(), TrunkConfig {
+            dest: addresses[0].to_string(),
+            username: Some("alice".into()),
+            register_enabled: Some(true),
+            register_expires: Some(300),
+            ..Default::default()
+        })]);
+        registrar.reconcile(&trunks).await;
+        let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert_eq!(server, 0);
+        assert!(request.starts_with(&format!("REGISTER sip:{} ", addresses[0])));
+        // Unrelated call-routing changes must not churn registrations.
+        trunks.get_mut("trunk").unwrap().max_calls = Some(10);
+        registrar.reconcile(&trunks).await;
+        assert!(timeout(Duration::from_millis(100), received.recv()).await.is_err());
+
+        trunks.get_mut("trunk").unwrap().dest = addresses[1].to_string();
+        registrar.reconcile(&trunks).await;
+        let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert_eq!(server, 0);
+        assert!(request.contains("Expires: 0\r\n"));
+        let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert_eq!(server, 1);
+        assert!(request.starts_with(&format!("REGISTER sip:{} ", addresses[1])));
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if registrar.get_status("trunk").is_some_and(|status| {
+                    status.registered && status.remote_addr == Some(format!("sip:{}", addresses[1]))
+                }) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        // Credentials also belong to the registration task's configuration.
+        trunks.get_mut("trunk").unwrap().username = Some("bob".into());
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("sip:bob@"));
+
+        trunks.get_mut("trunk").unwrap().disabled = Some(true);
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        assert!(registrar.get_status("trunk").is_none());
+        assert!(registrar.registrations.is_empty());
+        registrar.stop_all().await;
+        cancel.cancel();
+        endpoint_task.abort();
+        for server in servers { server.abort(); }
+    }
+
+    #[tokio::test]
     async fn test_resolve_outbound_proxy() {
         assert_eq!(resolve_outbound_proxy(None).await.unwrap(), None);
         assert_eq!(resolve_outbound_proxy(Some("  ")).await.unwrap(), None);
@@ -477,7 +614,7 @@ mod tests {
         // Without endpoint set, reconcile should be a no-op.
         registrar.reconcile(&trunks).await;
         {
-            assert!(registrar.cancel_tokens.is_empty());
+            assert!(registrar.registrations.is_empty());
         }
     }
 
@@ -501,7 +638,7 @@ mod tests {
         // First call without endpoint — must be silent no-op.
         registrar.reconcile(&trunks).await;
         assert!(
-            registrar.cancel_tokens.is_empty(),
+            registrar.registrations.is_empty(),
             "no token should be created before set_endpoint"
         );
 
@@ -529,7 +666,7 @@ mod tests {
 
         registrar.reconcile(&trunks).await;
         assert!(
-            registrar.cancel_tokens.is_empty(),
+            registrar.registrations.is_empty(),
             "disabled trunk must not spawn a registration task"
         );
     }
