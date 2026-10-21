@@ -445,7 +445,11 @@ impl CallRouter for HttpCallRouter {
 
         let payload = HttpRequestPayload {
             call_id: call_id.clone(),
-            session_id: crate::call::session_id::normalize_or_generate(&call_id),
+            // 与 RWI 事件 call_info.session_id 同源（resolve_incoming，优先 Session-ID
+            // 头继承、否则归一/生成）。决策请求、Dialplan、RWI 事件因此拿到同一个
+            // 全局 session_id —— WebRTC 的 JsSIP Call-ID（uuid@host）不再被现场
+            // 生成新 UUID，决策与事件可同 key 合并。
+            session_id: crate::call::session_id::resolve_incoming(&original, &call_id),
             from,
             to,
             source_addr,
@@ -612,8 +616,9 @@ impl CallRouter for HttpCallRouter {
                 // participate (UUID-shaped Call-ID > fresh UUID) — the HTTP
                 // router is an explicit routing deployment, never a plain
                 // P2P dial. Root inheritance rides the Session-ID header in
-                // the session constructor.
-                let session_id = crate::call::session_id::normalize_or_generate(&call_id);
+                // the session constructor. 用 resolve_incoming 与决策请求/RWI
+                // 事件保持同一全局 session_id。
+                let session_id = crate::call::session_id::resolve_incoming(&original, &call_id);
                 let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
                     .with_session_id_enabled(true);
 

@@ -11,9 +11,29 @@
                   "ringback": {"offline": "sounds/failure-offline-zh.wav",
                                "notfound": "sounds/failure-notfound-zh.wav"}},
     "lvcx": {"dest": "sip:100.88.0.35:5080", "transport": "udp",
-             "type": "internal", "max_load": -1}
+             "type": "internal", "max_load": -1},
+    "ya-pbx": {"dest": "sip:ya-pbx.meshcc.cn:38896", "transport": "udp",
+               "type": "external", "max_load": -1,
+               "direction": "bidirectional",
+               "register_enabled": true,
+               "username": "8195",
+               "password": "995018",
+               "register_expires": 60,
+               "display_name": "YA PBX (register 8195)"},
+    "8798fs": {"dest": "sip:0.0.0.0", "transport": "udp",
+               "type": "external", "max_load": -1,
+               "direction": "bidirectional",
+               "register_enabled": true,
+               "username": "8798fs",
+               "password": "reg-demo-8798",
+               "register_expires": 60,
+               "display_name": "Demo FS (被动注册进 8798fs)"}
   },
-  "caller_groups": {"cg-8120": ["8120"], "cg-8196": ["8196"]},
+  "caller_groups":
+    {
+      "cg-8120": ["8120"],
+      "cg-8196": ["8196"]
+    },
   "route_points": [
     {"point_id": "internal-8120", "group_type": "internal",
      "gw_list": ["lvcx"], "rule_list": [{"prefix": "", "strip": 0, "caller_group": "cg-8120"}]},
@@ -23,10 +43,27 @@
      "gw_list": ["lvcx"], "rule_list": [{"prefix": "6000", "strip": 0}]},
     {"point_id": "internal-default", "group_type": "internal", "default_for": "external",
      "gw_list": ["lvcx"], "rule_list": [{"prefix": "", "strip": 0}]},
-    {"point_id": "external-default", "group_type": "external", "default_for": "internal", "enabled": false,
-     "gw_list": ["yacc55-fs"], "rule_list": [{"prefix": "", "strip": 0}]}
+    {"point_id": "external-default", "group_type": "external", "default_for": "internal",
+     "gw_list": ["8798fs"], "rule_list": [{"prefix": "", "strip": 0}]}
   ],
-  "internal_services": [
+  "webrtc": [
+    {"account": "8899",
+     "rule_list": [ {"prefix": "13", "strip": 0},
+      {"prefix": "15", "strip": 0},
+      {"prefix": "18", "strip": 0},
+      {"prefix": "178", "strip": 0}],
+     "gw_list": ["lvcx"],
+     "allowed_ips": ["100.88.0.0/24", "127.0.0.1/32"]},
+
+    {"point_id": "webrtc-8810", "accounts": ["8810", "8811"],
+     "rule_list": [ {"prefix": "13", "strip": 0},
+      {"prefix": "15", "strip": 0},
+      {"prefix": "18", "strip": 0},
+      {"prefix": "178", "strip": 0, "pri_prefix": "0"}],
+     "gw_list": ["lvcx", "ya-pbx"],
+     "allowed_ips": ["100.88.0.0/24", "127.0.0.1/32"]}
+  ],
+  "internal_services":[
     {"user_agent": "CCM", "source_cidrs": ["100.88.0.0/24"]},
     {"user_agent": "kubePhone", "source_cidrs": ["100.88.0.0/24"]}
   ]

@@ -14,6 +14,10 @@
   .stats { display:flex; gap:20px; margin-left:auto; }
   .stat { background:rgba(255,255,255,.15); padding:6px 14px; border-radius:20px; font-size:13px; }
   .stat b { font-size:16px; margin-right:4px; }
+  .webrtc-link { color:#fff; text-decoration:none; background:rgba(255,255,255,.15);
+                 padding:7px 14px; border-radius:20px; font-size:13px; white-space:nowrap;
+                 transition:background .15s; }
+  .webrtc-link:hover { background:rgba(255,255,255,.3); }
   toolbar { display:flex; gap:12px; padding:12px 24px; background:#fff;
            border-bottom:1px solid #e1e4ea; align-items:center; position:sticky; top:0; z-index:10; }
   toolbar input { flex:1; max-width:400px; padding:8px 14px; border:1px solid #d0d4dc;
@@ -97,6 +101,7 @@
 <body>
 <header>
   <h1>📞 RustPBX 呼叫事件查看器</h1>
+  <a class="webrtc-link" href="/webrtc" target="_blank" title="打开 WebRTC 匿名呼叫页">📞 WebRTC 呼叫</a>
   <div class="stats">
     <div class="stat">呼叫 <b id="s-calls">0</b>/<span id="s-cap">0</span></div>
     <div class="stat">记录 <b id="s-events">0</b></div>
@@ -116,6 +121,8 @@
 <div class="json-modal" id="json-modal" onclick="if(event.target===this)this.classList.remove('open')">
   <div class="json-panel">
     <div class="json-panel-head"><span id="json-modal-title"></span>
+      <button class="json-close" id="json-modal-copy"
+        onclick="copyJson()">📋 复制 JSON</button>
       <button class="json-close" onclick="document.getElementById('json-modal').classList.remove('open')">✕ 关闭</button>
     </div>
     <pre id="json-modal-pre"></pre>
@@ -188,8 +195,14 @@ function render(d) {
     const stateCounts = {};
     evts.forEach(e => { stateCounts[e.status] = (stateCounts[e.status]||0) + 1; });
     const xcid = first.xcid || '';
-    const ani = first.ani || first.caller || '';
-    const dnis = first.dnis || first.callee || '';
+    // 主/被叫：跨全部记录取第一个非空值（事件行的 ani/dnis 优先于决策行的
+    // caller/callee；被拦截的 webrtc 决策无 INVITE 事件，仍能从决策行取到）。
+    let ani = '', dnis = '';
+    for (const e of recs) {
+      if (!ani) ani = e.ani || e.caller || '';
+      if (!dnis) dnis = e.dnis || e.callee || '';
+      if (ani && dnis) break;
+    }
     const rg = (decisions.filter(x => x.route_group).slice(-1)[0] || {}).route_group || '';
 
     if (q) {
@@ -354,6 +367,18 @@ function highlightJson(obj) {
     return `<span class="${cls}">${m}</span>`;
   });
 }
+let _currentJson = null;   // 浮窗当前展示的记录，供"复制 JSON"按原格式复制
+async function copyJson() {
+  const btn = document.getElementById('json-modal-copy');
+  const text = JSON.stringify(_currentJson ?? null, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '已复制 ✓';
+  } catch (e) {
+    btn.textContent = '复制失败';
+  }
+  setTimeout(() => { btn.textContent = '📋 复制 JSON'; }, 1200);
+}
 function openJson(ev, cid, idx) {
   ev.stopPropagation();   // 不触发外层卡片折叠
   const rec = (window._events || {})[cid];
@@ -362,6 +387,7 @@ function openJson(ev, cid, idx) {
   // 层值带中文语义显示（L3 → "L3:主叫匹配"），非专业读者也能看懂；
   // 其余字段保持 /events 返回的原始值
   const show = (r.kind === 'decision' && r.layer) ? {...r, layer: layerLabel(r.layer)} : r;
+  _currentJson = show;   // 供"复制 JSON"复制当前记录（含 layer 中文换算结果）
   document.getElementById('json-modal-title').textContent =
     (r.kind === 'decision' ? '决策记录' : '事件记录') + ' · ' + fmtTime(r.ts);
   document.getElementById('json-modal-pre').innerHTML = highlightJson(show);

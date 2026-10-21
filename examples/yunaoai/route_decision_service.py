@@ -1,130 +1,119 @@
 #!/usr/bin/env python3
 """
-kubeTrunk 中继路由服务（route_decision）参考实现 —— 样例脚本。
+kubeTrunk 中继路由服务（route_decision）参考实现 —— 独立 HTTP 服务。
 
 对应《基于RustPBX的kubeTrunk服务(RTM)技术方案》§4.3：以独立 HTTP 服务
 实现 kubeTrunk 分层路由裁决，作为后续 KubeTrunkDaemon（Java）落地时的
-裁决语义/配置模型参考原型 —— 本脚本仅依赖标准库，无第三方依赖。
+裁决语义/配置模型参考原型；仅依赖标准库，无第三方依赖。
 
-配置模型对齐真实前端数据格式（rtm-web-lite RULES_MAP，2026-10-16 生产数据）：
-以 dr_carrier（中继组表）为核心 —— 配置字段命名 route_points（路由点位）/
-rule_list（carriers/rules 是 OpenSIPS 术语，对非专业人员不友好，已改名）；
-rule_list 为入口过滤条件、gw_list 为出口值。
-dr_rules 入口过滤含主被叫两个条件：主叫 = 主叫组引用（组内为主叫号码或
-主叫号码前缀记录，支持多组命中）或直接主叫记录；被叫 = 必须单条前缀记录
-（不支持数组）。pri_prefix 为出局码（命中后加到被叫前发往网关，
-drouting.c push_gw_for_usage/build_ruri 证实），不是主叫匹配条件。
+【配置强制外部化】本脚本【不内置任何默认配置】：启动必须以 ROUTE_CONFIG
+（或 --config）指定 JSON 配置文件，否则直接退出（fail-fast）。避免内置
+兜底配置在误启/忘配时悄悄接管路由。号段表（aaa_phone_prefix，cfg_phone_prifix
+等价）为独立文件：与主配置同目录 aaa_phone_prefix.json。
+
+配置模型（{sitecode}.json，以 route_group 为核心，字段对齐 rtm-web-lite
+RULES_MAP 前端生产数据）：
+    gateways          网关表：gw_list 的出口解析目标。分三种类型（关键特性）：
+                        · IP 对等连接型：dest=sip:<host>:<port>，双端直接对接
+                        · 主动注册型：dest=sip:<host>:<port> + register_enabled/
+                          username/password，本端主动注册出去，正常同步 trunk
+                        · 被动注册型：dest=sip:0.0.0.0（对端注册进本端即本机
+                          分机）；网关名=分机号、password=入呼注册密码，自动
+                          进 USERS 分机账本，不进 trunk 注册表
+    caller_groups     主叫组（dr_groups 等价）：组内为主叫号码/前缀记录
+    route_points      路由点位（dr_carriers 等价，核心）：point_id 标记、
+                      rule_list=入口过滤（主叫过滤 + 被叫前缀），gw_list=出口
+    internal_services 已知内部发起 INVITE 的服务（第 4 层 UA 识别）
+    area_codes        区号表（cfg_phone_prifix 等价）：手机号前 7 位 → 区号
+    webrtc            WebRTC 匿名呼叫段（向 route_points 看齐的列表模型）：
+                      一条 = 一个账号组点位，account/accounts 多账号、
+                      rule_list 白名单入口（每条 rule 独立 prefix/strip/
+                      pri_prefix）、gw_list 出口多网关、allowed_ips 来源准入
+
+WebRTC JWT 匿名呼叫（方案 B，HttpTokenAuthBackend）：
+    预设的 WebRTC 账号（webrtc 列表条目内的 account/accounts，默认单账号 8899）
+    不存静态密码；呼叫前由 POST /token/webrtc 现场签发短期 JWT 作为"密码"，
+    经 X-Auth-Token 头随 REGISTER/INVITE 携带。JWT 特性：HS256 签名、userId
+    绑定 WebRTC 账号、exp 短时效（默认 60s，由服务端统一控制，客户端不可
+    指定）、jti 一次性防重放（/auth 消费后登记，重放拒绝）。WebRTC 外呼按
+    命中的 webrtc 条目决策：先过 allowed_ips 来源准入 → 仅放行 rule_list
+    白名单前缀并完全跳过 L1~L4 路由决策（不允许其他路由兜底）→ 命中后
+    做该 rule 的 strip/pri_prefix 号码变换 → 转发到该条目 gw_list 出口
+    （多网关）。
 
 接入方式（RustPBX 现有协议，无需改 Rust 代码）：
-
     [proxy.http_router]
     url = "http://127.0.0.1:9612/route/decision"
     timeout_ms = 500
     fallback_to_static = false      # fail-closed 全动态路由（方案 §4.1）
 
-呼叫跟踪（本服务附加能力）：[rwi_webhook] url 指向本服务 POST /rwi ——
-接收 RustPBX 推送的 RWI 呼叫事件（call_created/call_hangup/call_error 等，
-协议 {rwi, event_id, timestamp, call_id, event_type, event{...}}，2xx 送达、
-event_id 幂等），与路由决策按 call_id 聚合；GET /trace/<call_id> 查询单次
-呼叫的合并跟踪记录（决策层/命中中继/出局目标 + 事件时间线）。
-
-事件链展示（与 examples/yunaoai/extension_decision_service.py 完全一致）：/rwi 同时
-把事件归一成 CCM 风格（status_map + KTM_<session_id> X-cid 推导）存入
-CCM_CALLS，GET /events 供共享前端（本目录 webui.html，"RustPBX 呼叫事件
-查看器"）轮询展示；GET / 与 /ui 出同一份页面，POST /events/clear 清空。
-
 请求体（HttpCallRouter，src/proxy/routing/http.rs）：
-
-    {
-      "call_id": "...", "session_id": "...",
-      "from": "\"cc9803280017\" <sip:cc9803280017@localhost>;tag=...",
-      "to": "<sip:13800000000@localhost>",
-      "source_addr": "172.28.5.223:38910",      # 对端 ip:port（ Via received ）
-      "direction": "inbound" | "internal",      # RustPBX 视角：中继来话/本地发起
-      "method": "INVITE", "uri": "sip:13800000000@localhost",
-      "headers": {...}, "body": "..."
-    }
+    { "call_id", "session_id", "from", "to", "source_addr",
+      "direction": "inbound"|"internal", "method": "INVITE", "uri",
+      "headers", "body" }
 
 响应体（HttpResponsePayload）：
-
     forward: { action, targets: [{"callee": "..", "trunk": ".."} | URI],
                strategy: "sequential", caller?, headers?, allow_codecs?,
                timeout?, max_ring_time?, media_proxy?, rtp_config? }
     reject:  { action: "reject", status, reason }
 
-网关 → trunk 注册表自动同步（本服务附加能力）：启动时（与 POST
-/config/reload 时）先把 RustPBX trunk 数据库里的当前网关清掉（同名或同
-dest 的旧条目、网关改名残留一并删除），再按配置全新写入（console API
-Bearer 认证，PUT 创建）+ AMI POST /ami/v1/reload/trunks 强制生效（DB 重生成
-trunks.generated.toml + 更新注册表）。网关名即 trunk 名（结构化 targets
-的前提，两配置文件统一命名）；字段全量映射：dest→sip_server、transport→sip_transport、
-direction（默认 bidirectional）、max_load→max_concurrent（-1 不限省略）、
-max_cps、allowed_ips、username/password→auth_、outbound_proxy，
-profile/external_ip/bind_ip/codec/ringback/media_mode 等进 metadata.sbc
-（整体替换，组装完整 {"sbc": {...}}）。同步失败非致命：targets 降级纯
-URI（呼叫仍可达，trunk 盖章不生效），/health 可见同步状态。
+网关 → trunk 注册表自动同步（附加能力）：启动时（与 POST /config/reload）
+先把 RustPBX trunk 数据库里旧的网关条目清理（同名/同 dest 旧条目、改名残留
+一并删除），再按配置全新写入（console API Bearer 认证，PUT 创建）+ AMI
+POST /ami/v1/reload/trunks 强制生效。仅"非被动型"网关参与同步；被动型网关
+（分机）不进 trunk 注册表，其历史同名 trunk 一并清理。网关名即 trunk 名；
+同步失败非致命：targets 降级纯 URI（呼叫仍可达，trunk 盖章不生效），
+/health 可见同步状态。
 
-裁决流程（分层匹配，2026-10-16 设计确认 —— 取代 rtmsip 的"主叫组优先"顺序）：
-
-    来源准入不在本服务：由 RustPBX [proxy.acl] / trunk inbound_hosts 在路由
-    前拒绝（等价 rtmsip auth_check 的防盗打职能），本服务只做路由裁决，
-    不再做核心网/接入网分类。
-
-    1. 主被叫都符合：主叫命中规则的主叫过滤（主叫组记录或直接主叫记录）
-       且 被叫前缀命中
-    2. 被叫符合：无主叫过滤的规则中被叫前缀命中（跨主叫，不预筛方向）
-    3. 主叫符合：主叫命中主叫过滤的空前缀规则（组内兜底，等价 rtmsip
-       noprefix；主叫多组命中时按主叫记录最长优先）
+裁决流程（分层匹配，2026-10-16 设计确认，仅普通出局呼叫走此流程；WebRTC
+呼叫不走，见上）：
+    1. 主被叫都符合：主叫命中规则主叫过滤 且 被叫前缀命中
+    2. 被叫符合：无主叫过滤的规则中被叫前缀命中（跨主叫）
+    3. 主叫符合：主叫命中空前缀规则（组内兜底，等价 rtmsip noprefix）
        —— 层内：被叫前缀最长 → priority 降序 → 主叫记录最长 → 配置顺序
-    4. 默认路由（主被叫均未命中才走，等价 rtmsip 方向默认组 cr1/cr2 的
-       职责替换）：按发起方 User-Agent 识别内部服务（internal_services，
-       配置了 source_cidrs 的条目要求 UA+IP 双命中，防白名单来源伪造 UA
-       走默认出局）→ default_for="internal" 的兜底组；否则 →
-       default_for="external" 的兜底组。兜底组内按被叫前缀选规则
-       （空前缀规则匹配全部被叫）。UA 未识别记日志，运营侧可见。
-    5. 号码变换：strip 剥码、pri_prefix 出局码加到被叫前、区号加 0
-       （add_prefix0，可选默认关）、主叫 sitecode 循环剥离。
-    6. targets：出口 gw_list → 结构化 targets（{"callee", "trunk"}，网关名
-       即 RustPBX trunk 名，启动时自动同步写入见上） +
-       strategy="sequential"（等价 use_next_gw 失败换下一网关；停用网关
-       跳过；max_load 并发控制由 RustPBX trunk 配置承接）。同步失败降级
-       纯 URI targets（呼叫仍可达，trunk 盖章不生效）。
+    4. 默认路由（主被叫均未命中）：按发起方 User-Agent 识别内部服务
+       （internal_services，防白名单来源伪造 UA 走默认出局）→ internal/
+       external 兜底组；兜底组内按被叫前缀选规则
+    5. 号码变换：strip 剥码、pri_prefix 出局码加被叫前、区号加 0、主叫
+       sitecode 循环剥离
+    6. targets：出口 gw_list → 结构化 targets + strategy="sequential"
 
-rtmsip 语义对照（drouting.c do_routing，源码核实 2026-10-16）：
+呼叫跟踪（附加能力）：[rwi_webhook] url 指向本服务 POST /rwi，接收 RustPBX
+推送的 RWI 呼叫事件（call_created/call_hangup/call_error 等，2xx 送达、event_id
+幂等），按 call_id 与路由决策聚合；GET /trace/<call_id> 查询单次呼叫跟踪。
 
-    rtmsip 组内为两级匹配 —— "//优先主叫 + 被叫前缀 匹配"（get_prefix）→
-    "//被叫前缀没有，则主叫 + 空被叫前缀 匹配"（new_check_rt / noprefix），
-    失败回退方向默认组（呼出 1 / 呼入 2）。本设计将"主叫符合"（空前缀）
-    排到"被叫符合"之后（被叫精确度优先），并用 User-Agent 兜底替代方向
-    默认组 —— 方向判定只发生在主被叫均未命中的第 4 层。
-
-配置模型（方案 §5.3 {sitecode}.json）：ROUTE_CONFIG 环境变量指定 JSON 文件，
-未指定用内置样例配置（字段值取自 3201 站点生产数据）；POST /config/reload
-热加载（等价 dbt_reload）。号段表（aaa_phone_prefix，cfg_phone_prifix 等价）
-单独文件：与主配置同目录 aaa_phone_prefix.json，主配置不内联 area_codes
-（默认空，文件缺失/非法时区号查询直接落空）。
+事件链展示（与 extension_decision_service.py 一致）：/rwi 同时把事件归一成
+CCM 风格存入 CCM_CALLS，GET /events 供 webui.html 轮询展示；共享前端
+GET / 与 /ui 出同一份页面，POST /events/clear 清空；WebRTC 呼叫前端
+GET /webrtc（webrtc_phone.html），同源 JsSIP 于 GET /static/jssip.min.js。
 
 用法：
-
-    python3 examples/yunaoai/route_decision_service.py [--listen 127.0.0.1:9612]
-    ROUTE_CONFIG=/path/to/trunk.json python3 examples/yunaoai/route_decision_service.py
+    python3 examples/yunaoai/route_decision_service.py --config examples/yunaoai/config/3201.json
+    ROUTE_CONFIG=/path/to/{sitecode}.json python3 examples/yunaoai/route_decision_service.py
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# --------------------------------------------------------------------------- #
-# 内置样例配置（{sitecode}.json 等价物，字段值取自 3201 站点生产数据）。
-# 真实部署由 KubeTrunkDaemon 从 S3 /config/trunk/{sitecode}.json 拉取后渲染，
-# 本脚本经 ROUTE_CONFIG 指向同一份 JSON。以 route_group 为核心：
+# 路由配置（{sitecode}.json 等价物）一律由外部文件提供，本脚本【不内置任何
+# 默认配置】：启动时必须以 ROUTE_CONFIG（或 --config）指定 JSON 文件，否则
+# 直接退出（fail-fast），避免内置兜底配置在误启/忘配时悄悄接管路由。
+# 以 route_group 为核心：
 #
 #   gateways          网关表（sbc_dr_gateways 等价）：gw_list 的出口解析目标
 #   caller_groups     主叫组（sbc_dr_groups 等价）：组内为主叫号码/前缀记录
@@ -132,109 +121,177 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 #                     rule_list=入口过滤（主叫过滤 + 被叫单前缀），gw_list=出口
 #   internal_services 已知内部发起 INVITE 的服务（第 4 层 UA 识别）
 #   area_codes        区号表（cfg_phone_prifix 等价）：手机号前 7 位 → 区号
-# --------------------------------------------------------------------------- #
-DEFAULT_CONFIG = {
-    "sitecode": "3201",
-    # 网关表（sbc_dr_gateways 等价）：type=internal(对内)/external(对外)；
-    # max_load 并发上限（-1 不限，等价 RTM maxLoad）；enabled=False 停用
-    # （等价探测摘除）
-    "gateways": {
-        "gw-ccm": {"dest": "sip:172.28.5.223:38910", "transport": "udp",
-                   "type": "internal", "max_load": -1},
-        "gw-clpss": {"dest": "sip:172.28.5.223:8880", "transport": "udp",
-                     "type": "internal", "max_load": -1},
-        "gw3299": {"dest": "sip:100.88.0.36:38897", "transport": "udp",
-                   "type": "external", "max_load": 100, "enabled": False},
-        "gw-vos": {"dest": "sip:8.136.48.226:5566", "transport": "udp",
-                   "type": "external", "max_load": 100,
-                   "area_code": "025", "add_prefix0": False},
-        "gw-digital": {"dest": "sip:100.88.9.9:5060", "transport": "udp",
-                       "type": "external", "max_load": 1, "enabled": False},
-        "gw-jinhua": {"dest": "sip:100.88.8.8:5060", "transport": "udp",
-                      "type": "external", "max_load": 100},
-    },
-    # 主叫组（sbc_dr_groups 等价）：组内为主叫号码或主叫号码前缀记录，
-    # 一个主叫可同时命中多个组（等价 get_all_group_id 多组返回）
-    "caller_groups": {
-        "848": ["cc98032"],          # vos中国：cc98032 前缀段
-        "850": ["cc9803280017"],     # 内部测试：精确号码（比 848 前缀更具体）
-        "851": ["cc9803298016"],     # 北京固话
-        "854": ["cc9803298014"],     # 内部测试手机号
-    },
-    # 路由组（sbc_dr_carriers 等价，以 route_group 为核心）：
-    #   rule_list = 入口过滤条件 —— caller_group（主叫组引用）或 caller（直接
-    #           主叫记录）+ prefix（被叫，必须单条前缀记录，不支持数组；
-    #           空 = 匹配全部被叫）；pri_prefix=出局码；priority 同层排序
-    #   gw_list = 出口值（按 gateways 解析，sequential 依次尝试）
-    #   default_for = 兜底组标记（external=外部来话兜底，internal=内部来话
-    #           兜底；等价 rtmsip cr1/cr2 方向默认组的职责替换）
-    #   group_type = internal（gw_list 连接 internal 网关）/ external（连接
-    #           external 网关），与 gateway type 同一词汇
-    # 样例 values 取自 3201 生产数据（cr4/cr6/cr7/cr10 等）
-    "route_points": [
-        # —— 呼入被叫规则（等价 groupid=0 规则：无主叫过滤 + 被叫前缀）——
-        {"point_id": "net_beijing_3201", "group_type": "internal",
-         "gw_list": ["gw-ccm"],
-         "rule_list": [{"prefix": "3201", "strip": 4}]},
-        {"point_id": "conference", "group_type": "internal",
-         "gw_list": ["gw-ccm"],
-         "rule_list": [{"prefix": "30", "strip": 0}]},
-        {"point_id": "ivr", "group_type": "internal",
-         "gw_list": ["gw-ccm"],
-         "rule_list": [{"prefix": "31", "strip": 0}]},
-        {"point_id": "agent_gw2", "group_type": "internal",
-         "gw_list": ["gw-clpss"],
-         "rule_list": [{"prefix": "87", "strip": 0},
-                   {"prefix": "320187", "strip": 4},
-                   {"prefix": "1133", "strip": 0},
-                   {"prefix": "32011133", "strip": 4}]},
-        # 出局码 33 删码（KubePhone 分机呼出 → 33+号码 → 剥 2 位转发）；
-        # gw3299 停用 → 自动跳过（等价探测摘除）
-        {"point_id": "outbound-33", "group_type": "external",
-         "gw_list": ["gw3299", "gw-vos"],
-         "rule_list": [{"prefix": "33", "strip": 2}]},
-        # —— 自定义业务组（等价 cr4/cr6/cr7/cr10）：主叫组过滤 + 空被叫前缀
-        #    + 出局码（pri_prefix 加到被叫前发给网关）——
-        {"point_id": "vos", "group_type": "external",
-         "gw_list": ["gw-vos"],
-         "rule_list": [{"prefix": "", "caller_group": "848",
-                    "pri_prefix": "cc98032", "priority": 9}]},
-        {"point_id": "internal-test", "group_type": "external",
-         "gw_list": ["gw-vos"],
-         "rule_list": [{"prefix": "", "caller_group": "850",
-                    "pri_prefix": "cc9803280017", "priority": 9}]},
-        {"point_id": "bj-fixed", "group_type": "external",
-         "gw_list": ["gw-vos"],
-         "rule_list": [{"prefix": "", "caller_group": "851",
-                    "pri_prefix": "cc9803298016", "priority": 9}]},
-        {"point_id": "test-mobile", "group_type": "external",
-         "gw_list": ["gw-vos"],
-         "rule_list": [{"prefix": "", "caller_group": "854",
-                    "pri_prefix": "cc9803298014", "priority": 9}]},
-        # —— 兜底组（等价 rtmsip cr1/cr2 方向默认组的职责替换）——
-        # 外部来话兜底 → 转核心（等价 cr2：空被叫前缀匹配全部被叫）
-        {"point_id": "internal-default", "group_type": "internal",
-         "default_for": "external",
-         "gw_list": ["gw-ccm"],
-         "rule_list": [{"prefix": "", "strip": 0}]},
-        # 内部服务来话兜底 → 默认出局（生产可置空 gw_list 实现 fail-closed，
-        # 等价真实 cr1：接入网默认组无网关 → 500）
-        {"point_id": "external-default", "group_type": "external",
-         "default_for": "internal",
-         "gw_list": ["gw-vos", "gw-jinhua"],
-         "rule_list": [{"prefix": "", "strip": 0}]},
-    ],
-    # 第 4 层内部服务识别：user_agent 大小写不敏感子串匹配；source_cidrs
-    # 可选加固（UA 与来源 IP 双命中才认内部，防白名单来源伪造 UA 防盗打）
-    "internal_services": [
-        {"user_agent": "CCM", "source_cidrs": ["172.28.5.0/24"]},
-        {"user_agent": "kubePhone"},
-    ],
-}
+#   webrtc            向 route_points 看齐的列表：一条 = 一个账号组点位，
+#                     account/accounts 多账号、rule_list 白名单入口、
+#                     gw_list 出口多网关、allowed_ips 来源准入、
+#                     strip + pri_prefix 号码变换
 
 # 生效配置（load_config() 填充）。模块级单例：与 KubeTrunkDaemon 内存裁决
 # 配置一致的形态（方案 §4.3 "全动态：内存裁决，无静态兜底"）。
 CONFIG: dict = {}
+# 当前装载配置文件路径（/config/reload 复用；用 --config 启动时 ROUTE_CONFIG
+# 环境变量可能为空，必须记下确切实参）。
+CONFIG_FILE: str = ""
+
+# 分机账本（{extension: password}）：来自 gateways 表中"被动注册型"网关
+# （dest=sip:0.0.0.0，对方注册进来即本机分机），供 `/auth`（HttpUserBackend，
+# REGISTER/INVITE Digest 鉴权）使用。load_config()/reload 时经
+# `_apply_extensions()` 从 cfg["gateways"] 同步。
+USERS: dict[str, str] = {}
+# 本地 realm：RustPBX /auth 应答里返回，PBX 用它做 Digest 挑战域。
+LOCAL_REALM = "localhost"
+
+# ---- WebRTC 会话（方案 B：HttpTokenAuthBackend 一次性 JWT） ----
+# WebRTC 账号：一个预设的特殊电话号码，自身不存静态密码；WebRTC 呼叫时由
+# POST /token/webrtc 现场签发短期 JWT 作为"密码"。RustPBX 在 REGISTER/
+# INVITE 检测到 X-Auth-Token 时不再发 401/407，而是把 token 转发给本服务
+# /auth（校验该字段），认证即通过。JWT 声明：userId=WebRTC 账号、exp=有效期、
+# jti=一次性 nonce（/auth 消费后记入 KEYED_NONCES 防重放）。
+WEBRTC_ACCOUNT = os.environ.get("RUSTPBX_WEBRTC_ACCOUNT", "8899")
+JWT_SECRET = os.environ.get("RUSTPBX_JWT_SECRET", "change-me-webrtc-jwt-secret")
+JWT_ISSUER = os.environ.get("RUSTPBX_JWT_ISSUER", "yunaoai-webrtc")
+JWT_AUDIENCE = os.environ.get("RUSTPBX_JWT_AUDIENCE", "rustpbx-webrtc")
+# WebRTC JWT 默认存活秒数，默认 60s（覆盖 1 次 REGISTER + 1 次 INVITE 窗口即可；
+# 且配合下方 KEYED_NONCES 的 jti 一次性防重放，保证"短时效 + 单次有效"）。
+JWT_MAX_AGE = int(os.environ.get("RUSTPBX_JWT_MAX_AGE", "60"))
+# 一次性 nonce 防重放登记表（{jti: 消费时间戳}），上限 KEYED_ONCE_MAX 条。
+KEYED_NONCES: dict[str, float] = {}
+KEYED_ONCE_MAX = 10000
+# X-Auth-Token 转发到 /auth 的 form 字段名（= config.toml sip_headers 元素）。
+WEBRTC_TOKEN_FIELD = "X-Auth-Token"
+
+
+def _b64url_decode(s: str) -> bytes:
+    """Base64URL 解码，RFC 7515 规范补齐 padding。失败返回 b""。"""
+    pad = "=" * (-len(s) % 4)
+    try:
+        return base64.urlsafe_b64decode((s + pad).encode("utf-8"))
+    except Exception:
+        return b""
+
+
+def _b64url_encode(raw: bytes) -> str:
+    """Base64URL 编码（无 padding），RFC 7515。"""
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("utf-8")
+
+
+def decode_jwt(token: str):
+    """解析并校验 HS256 JWT，返回 (claims_dict | None)。
+
+    校验内容：三段结构、HS256 签名（共享 JWT_SECRET）、exp/tiat/nbf、
+    iss/aud 白名单、WebRTC 账号号绑定。任何一步失败返回 None。"""
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        header_b64, payload_b64, sig_b64 = token.split(".")
+    except ValueError:
+        return None
+    header = _b64url_decode(header_b64)
+    payload = _b64url_decode(payload_b64)
+    signature = _b64url_decode(sig_b64)
+    if not header or not payload or not signature:
+        return None
+    try:
+        header = json.loads(header)
+        claims = json.loads(payload)
+    except ValueError:
+        return None
+    # 仅接受 HS256 签名算法（防 alg='none'/HS384 混淆攻击）。
+    if header.get("alg") != "HS256":
+        return None
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    expect = hmac.new(JWT_SECRET.encode("utf-8"), signing_input,
+                      hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expect):
+        return None
+    now = time.time()
+    if claims.get("exp") is not None and float(claims["exp"]) <= now:
+        return None
+    if claims.get("nbf") is not None and float(claims["nbf"]) > now + 60:
+        return None
+    if claims.get("iat") is not None and now - float(claims["iat"]) > JWT_MAX_AGE * 2:
+        return None
+    if JWT_ISSUER and claims.get("iss") != JWT_ISSUER:
+        return None
+    if JWT_AUDIENCE and claims.get("aud") != JWT_AUDIENCE:
+        return None
+    if str(claims.get("userId") or "") != str(WEBRTC_ACCOUNT):
+        return None
+    return claims
+
+
+def mint_webrtc_jwt(ttl: int = JWT_MAX_AGE, account: str = None) -> dict:
+    """签发现场一次性 WebRTC JWT（HS256）。返回 {token, account, expires_in}。
+
+    account 未指定时取配置里第一个可用 WebRTC 账号（向后兼容 WEBRTC_ACCOUNT）。
+    有效期固定由 ttl（服务端）决定，不接受客户端指定。"""
+    if not account:
+        account = default_webrtc_account()
+    account = str(account).strip()
+    now = int(time.time())
+    jti = secrets.token_hex(12)
+    claims = {
+        "userId": account, "sub": account,
+        "iss": JWT_ISSUER, "aud": JWT_AUDIENCE,
+        "jti": jti, "iat": now, "exp": now + ttl,
+    }
+    header = json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
+    payload = json.dumps(claims, separators=(",", ":")).encode()
+    signing_input = f"{_b64url_encode(header)}.{_b64url_encode(payload)}"
+    sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input.encode(),
+                   hashlib.sha256).digest()
+    token = f"{signing_input}.{_b64url_encode(sig)}"
+    return {"token": token, "account": account,
+            "expires_in": ttl, "expires_at": now + ttl}
+
+
+def consume_webrtc_nonce(claims: dict) -> bool:
+    """一次性 nonce（jti）防重放：已消费则拒绝，未消费则登记。
+
+    返回 True 表示首次使用允许；False 表示重放。登记表超上限时只清老化项。
+    """
+    jti = str(claims.get("jti") or "")
+    if not jti:
+        return False
+    now = time.time()
+    if jti in KEYED_NONCES:
+        return False
+    if len(KEYED_NONCES) >= KEYED_ONCE_MAX:
+        cutoff = now - JWT_MAX_AGE * 4
+        for k in [k for k, v in KEYED_NONCES.items() if v < cutoff]:
+            KEYED_NONCES.pop(k, None)
+    KEYED_NONCES[jti] = now
+    return True
+
+
+def is_passive_gateway(gw: dict) -> bool:
+    """判定"被动注册型"网关：无真实对端地址（dest 为空，或 sip:0.0.0.0）。
+
+    网关分三种类型：
+      - IP 对等：dest=sip:host:port，双端直接对接（如 yacc55-fs / lvcx）；
+      - 主动注册：dest=sip:host:port + register_enabled/username/password，
+        本端注册出去（如 ya-pbx）；
+      - 被动注册：dest=sip:0.0.0.0（或留空），对端注册进本端 → 本服务扫描到
+        后把它解析为该网关名对应的分机号（进 USERS 账本），供入呼鉴权与
+        出口转发使用，且不进 RustPBX trunk 注册表。
+    """
+    dest = ((gw or {}).get("dest") or "").strip()
+    return not dest or dest == "sip:0.0.0.0"
+
+
+def _apply_extensions(cfg: dict) -> None:
+    """把 gateways 表中"被动注册型"网关解析成本地分机账本 USERS。
+
+    不再使用独立的 `extensions` 字段：被动注册型网关（dest=sip:0.0.0.0）
+    即代表一台对方注册进来的分机，网关名=分机号，网关 password=入呼注册密码。
+    /auth（分机鉴权）与路由裁决共用同一份配置单例，/config/reload 热加载后
+    账本一并更新。"""
+    USERS.clear()
+    for name, gw in (cfg.get("gateways") or {}).items():
+        if is_passive_gateway(gw):
+            USERS[str(name).strip()] = str(gw.get("password") or "")
+    if USERS:
+        log("auth", f"被动注册分机账本已同步: {len(USERS)} 个 {sorted(USERS)}")
 
 # 呼叫跟踪：路由决策 + RWI 呼叫事件按 call_id 聚合（内存环形上限）。
 # RustPBX [rwi_webhook] url 指向本服务 POST /rwi，推送 call_created/
@@ -244,6 +301,9 @@ CONFIG: dict = {}
 TRACE: dict = {}            # call_id -> [record]
 TRACE_SESSION: dict = {}    # session_id -> call_id（RWI 事件 envelope 的 call_id
                             #   是 RFC 7989 session_id，需二次索引关联）
+TRACE_CORR: dict = {}       # corr_id/xcid -> call_id（决策 corr_id 与 RWI 事件 xcid
+                            #   同值桥接 —— WebRTC/JsSIP 的随机 Call-ID 与 RustPBX 的
+                            #   session 号不同，靠 X-cid 这一对同值把它们并入同一卡片）
 TRACE_MAX_CALLS = 2000      # 最多保留的呼叫数（内存保护）
 TRACE_MAX_RECORDS = 64      # 单呼叫最多记录数
 
@@ -258,6 +318,11 @@ def trace_record(call_id: str, kind: str, session_id=None, **fields) -> None:
         return
     if session_id and session_id != call_id:
         TRACE_SESSION[session_id] = call_id
+    # corr_id（= 出口 X-cid，与 RWI 事件 xcid 同值）登记桥接，供 /events 和
+    # /trace 按 corr_id/xcid 把决策与事件并入同一呼叫。
+    corr = fields.get("corr_id")
+    if corr:
+        TRACE_CORR[corr] = call_id
     records = TRACE.setdefault(call_id, [])
     records.append({"kind": kind, "ts": time.time_ns() // 1_000,
                     "session_id": session_id, **fields})
@@ -276,6 +341,11 @@ CCM_CALLS_ORDER: list = []  # callId 插入序 FIFO，用于淘汰最旧的完�
 # 共享前端（webui.html）：从 extension_decision_service.py 剥离，两服务公用同一份
 # （GET / 与 /ui 出该页面，数据端点 GET /events、POST /events/clear）。
 WEBUI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui.html")
+# WebRTC 呼叫前端（webrtc_phone.html）：GET /webrtc 出该页面。自包含：自动向
+# /token/webrtc 申请 JWT，带 X-Auth-Token 完成注册并发起/挂断呼叫。
+WEBRTC_PHONE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc_phone.html")
+# WebRTC 呼叫前端同源 JsSIP（本地化，避免依赖外部 CDN）：GET /static/jssip.min.js
+JSSIP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "jssip.min.js")
 
 
 def post_ccm_event(event: dict):
@@ -386,8 +456,13 @@ def validate_config(cfg: dict) -> list:
     errors = []
     gateways = cfg.get("gateways") or {}
     for name, g in gateways.items():
-        if not g.get("dest"):
-            errors.append(f"gateway '{name}' missing dest")
+        if is_passive_gateway(g):
+            # 被动注册型（dest 为空 或 sip:0.0.0.0 = 对方注册进来当分机）：
+            # 无需真实对端地址，只等对方 REGISTER 进来；必须带入呼密码。
+            if not g.get("register_enabled"):
+                errors.append(f"passive gateway '{name}' needs register_enabled=true")
+            if not str(g.get("password") or "").strip():
+                errors.append(f"passive gateway '{name}' missing password (inbound register)")
         elif not str(g["dest"]).startswith("sip:"):
             errors.append(f"gateway '{name}' dest must be a sip: URI: {g['dest']}")
 
@@ -438,6 +513,50 @@ def validate_config(cfg: dict) -> list:
     for i, svc in enumerate(cfg.get("internal_services") or []):
         if not str(svc.get("user_agent") or "").strip():
             errors.append(f"internal_services[{i}] missing user_agent")
+
+    # WebRTC 呼叫（方案 B）：向 route_points 完全看齐的列表模型。一条 = 一个
+    # 账号组点位，逐条配置多账号（account/accounts）、white-list 入口
+    # rule_list（每条 rule 独立 prefix/strip/pri_prefix）、出口 gw_list（多网关）、
+    # 来源准入 allowed_ips，不走 L1~L4 裁决。
+    seen_webrtc_accounts = set()
+    seen_webrtc_points = set()
+    for w in webrtc_entries(cfg):
+        wid = webrtc_entry_tag(w)
+        if wid in seen_webrtc_points:
+            errors.append(f"webrtc point '{wid}' duplicated")
+        seen_webrtc_points.add(wid)
+        accs = webrtc_entry_accounts(w)
+        if not accs:
+            errors.append(f"webrtc point '{wid}' missing account/accounts")
+        for a in accs:
+            if a in seen_webrtc_accounts:
+                errors.append(f"webrtc account '{a}' duplicated across points")
+            seen_webrtc_accounts.add(a)
+        rl = w.get("rule_list")
+        if not isinstance(rl, list) or not rl:
+            errors.append(f"webrtc point '{wid}' rule_list must be a non-empty list")
+        else:
+            for i, r in enumerate(rl):
+                px = r.get("prefix")
+                if not isinstance(px, str) or not str(px).strip():
+                    if isinstance(px, list):
+                        errors.append(f"webrtc point '{wid}' rule_list[{i}] "
+                                      "prefix must be a single string, not a list")
+                    else:
+                        errors.append(f"webrtc point '{wid}' rule_list[{i}] "
+                                      "missing/blank prefix")
+                try:
+                    int(r.get("strip") or 0)
+                except (TypeError, ValueError):
+                    errors.append(f"webrtc point '{wid}' rule_list[{i}] "
+                                  "strip must be an integer")
+        aips = w.get("allowed_ips")
+        if aips is not None and not isinstance(aips, list):
+            errors.append(f"webrtc point '{wid}' allowed_ips must be a list")
+        for g in w.get("gw_list") or []:
+            if g not in gateways:
+                errors.append(f"webrtc point '{wid}' gw_list references "
+                              f"unknown gateway '{g}'")
     return errors
 
 
@@ -495,34 +614,37 @@ def load_phone_prefix(config_path: str) -> dict:
     return table
 
 
-def load_config() -> dict:
-    """从 ROUTE_CONFIG 指定的 JSON 文件加载配置，未指定用内置样例。
+def load_config(path: str = None) -> dict:
+    """从外部 JSON 文件加载配置（强制）。
+
+    配置来源：优先显式 path（--config），否则 ROUTE_CONFIG 环境变量。两者
+    都未指定/文件缺失/校验非法 → 抛 ValueError（fail-fast，无内置兜底），
+    由调用方（main() 启动即退出；/config/reload 返回 4xx 保留旧配置）。
 
     手机号段表单独文件：同目录 aaa_phone_prefix.json，主配置不再内联
     area_codes 字段（默认空，号段表是唯一来源）。
     等价 rtm-daemon 的 TDB 生成 + dbt_reload 链路收敛为一次文件读取。"""
-    path = os.environ.get("ROUTE_CONFIG", "")
-    if path:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError) as exc:
-            log("config", f"failed to load {path}: {exc} — keep current config")
-            return CONFIG or DEFAULT_CONFIG
-    else:
-        cfg = DEFAULT_CONFIG
+    path = (path or "").strip() or os.environ.get("ROUTE_CONFIG", "").strip()
+    if not path:
+        raise ValueError("no route config: set ROUTE_CONFIG or pass --config")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"failed to load {path}: {exc}") from exc
     # 号段表（aaa_phone_prefix）单独文件，存在则覆盖内联字段
     # 号段表（aaa_phone_prefix）单独文件是唯一来源，主配置不内联（默认空）
     cfg["area_codes"] = load_phone_prefix(path)
     errors = validate_config(cfg)
     if errors:
-        for e in errors:
-            log("config", f"invalid: {e}")
-        log("config", f"REJECTED config from {path or '<embedded>'} — keep current")
-        return CONFIG or DEFAULT_CONFIG  # 非法配置拒绝加载，保留旧配置（§8）
-    log("config", f"loaded {path or '<embedded>'} sitecode={cfg.get('sitecode')} "
+        raise ValueError("invalid config %s: %s"
+                         % (path, "; ".join(errors)))
+    log("config", f"loaded {path} sitecode={cfg.get('sitecode')} "
                   f"route_points={len(cfg.get('route_points') or [])} "
-                  f"gateways={len(cfg.get('gateways') or {})}")
+                  f"gateways={len(cfg.get('gateways') or {})} "
+                  f"extensions={sum(1 for g in (cfg.get('gateways') or {}).values() if is_passive_gateway(g))}")
+    # 同步分机账本（/auth 鉴权用），与路由裁决共用同一份配置单例
+    _apply_extensions(cfg)
     return cfg
 
 
@@ -702,13 +824,16 @@ def sync_trunks_to_rustpbx(cfg: dict) -> dict:
         log("trunk-sync", f"skipped (console unreachable): {exc}")
         return SYNC_STATE
 
-    # 清掉当前网关：与配置网关同名，或 dest 指向同一台对端（改名残留）
-    cfg_dests = {_dest_host_port(gw.get("dest", "")) for gw in gateways.values()}
+    # 清掉当前网关：与配置网关同名（含被动注册型残留），或 dest 指向同一台
+    # 对端（改名残留）。被动注册型（dest=0.0.0.0）只作分机用、不进 trunk，
+    # 因此排除在"需建 trunk"集合外——其历史同名 trunk 一并清理。
+    active = {n: g for n, g in gateways.items() if not is_passive_gateway(g)}
+    cfg_dests = {_dest_host_port(g.get("dest", "")) for g in active.values()}
     deleted, created, failed = [], [], []
     skip_create = set()
     for name, item in existing.items():
         item_dest = _dest_host_port(item.get("sip_server") or "")
-        if name not in gateways and not (item_dest and item_dest in cfg_dests):
+        if name not in active and not (item_dest and item_dest in cfg_dests):
             continue
         trunk_id = item.get("id")
         if trunk_id is None:
@@ -722,13 +847,13 @@ def sync_trunks_to_rustpbx(cfg: dict) -> dict:
             failed.append(f"{name}: delete {exc}")
             log("trunk-sync", f"delete '{name}' failed: {exc} {detail}")
             # 删除失败时不再重建（同名牌仍在，必撞唯一约束）
-            if name in gateways:
+            if name in active:
                 skip_create.add(name)
             continue
         deleted.append(name)
         log("trunk-sync", f"cleared trunk '{name}' (id={trunk_id})")
 
-    for name, gw in gateways.items():
+    for name, gw in active.items():
         if name in skip_create:
             continue
         form = trunk_form_from_gateway(name, gw)
@@ -775,6 +900,67 @@ def sync_trunks_with_retry(cfg: dict) -> None:
 # 工具函数（与 examples/yunaoai/extension_decision_service.py 保持同源实现）
 # --------------------------------------------------------------------------- #
 _SIP_USER_RE = re.compile(r"sip:([^@;\s<>]+)", re.IGNORECASE)
+
+
+def handle_auth(form: dict) -> tuple:
+    """HttpUserBackend / HttpTokenAuthBackend 端点：RustPBX 在 REGISTER/INVITE
+    时 POST username/realm/request_uri（有 X-Auth-Token 时额外转发），应答
+    SipUser（含 Digest 密码种子）或 not_found。返回 (status_code, payload_dict)。
+
+    两条分支：
+    1. form 带 `X-Auth-Token`（WebRTC JWT 一次性认证）：校验 JWT + 消费一次性
+       nonce 后直接放行，不再走静态密码。对应 RustPBX `[[proxy.user_backends]]
+       type="http" + token_header="X-Auth-Token" + sip_headers=["X-Auth-Token"]`。
+    2. 普通分机：账本（USERS）来自 gateways 中"被动注册型"网关（对方注册
+       进来当分机），走 Digest 挑战。
+
+    与 examples/yunaoai/extension_decision_service.py 的 handle_auth 契约
+    一致，只是账本（USERS）改由被动注册型网关解析而来。"""
+    token = (form.get(WEBRTC_TOKEN_FIELD) or "").strip()
+    if token:
+        return handle_webrtc_token(token, form)
+    user = (form.get("username") or "").strip()
+    password = USERS.get(user)
+    if password is None:
+        log("auth", f"user '{user}' NOT FOUND")
+        return 404, {"reason": "not_found"}
+    ordered = list(USERS)
+    log("auth", f"user '{user}' FOUND (realm={form.get('realm')!r})")
+    return 200, {
+        "id": ordered.index(user) + 1,
+        "enabled": True,
+        "username": user,
+        "password": password,
+        "realm": LOCAL_REALM,
+        "allow_guest_calls": False,
+    }
+
+
+def handle_webrtc_token(token: str, form: dict) -> tuple:
+    """WebRTC 临时 JWT 一次性认证分支：验签 + exp/iss/aud + 绑定 WebRTC 账号
+    + 消费 nonce。
+
+    返回 (status, {SipUser}) 形态与 handle_auth 一致。JWT 有效则"以 JWT 里的
+    userId 为主叫"返回 SipUser；异常返回 not_found / 401 让 RustPBX 回退或拒绝。
+    """
+    claims = decode_jwt(token)
+    if claims is None:
+        log("auth", "webrtc JWT 校验失败（签名/过期/iss/aud 不符）")
+        return 404, {"reason": "not_found"}
+    if not consume_webrtc_nonce(claims):
+        log("auth", f"webrtc JWT 重放拒绝(jti={claims.get('jti')})")
+        return 401, {"reason": "invalid_credentials"}
+    webrtc = str(claims["userId"])
+    realm = form.get("realm") or LOCAL_REALM
+    log("auth", f"webrtc JWT 通过 → WebRTC 账号 {webrtc} (realm={realm!r})")
+    return 200, {
+        "id": 0,
+        "enabled": True,
+        "username": webrtc,
+        "password": "",
+        "realm": realm,
+        "allow_guest_calls": False,
+    }
 
 
 def parse_user(uri: str):
@@ -1041,6 +1227,18 @@ def gateway_targets(callee: str, gwlist, cfg: dict):
     纯 URI targets —— 呼叫仍按 host:port 可达，trunk 盖章不生效。"""
     targets = []
     for name in gwlist or []:
+        # 分机型出口：gw_list 名字命中分机账本 USERS（被动注册型网关，
+        # 即对方注册进来当分机）时，把呼叫转发给该注册分机 —— 生成结构化
+        # target 但【不带 trunk】：RustPBX 会以原请求 realm 解析 callee
+        # （core.extension_locator），拨到该分机注册的 contact（例如 demo
+        # 服务器注册进来的分机）。这区别于 gateways/trunk：trunk 走对端
+        # 网关盖章，分机走注册表定位本机端点。
+        if name in USERS:
+            if SYNC_STATE.get("ok"):
+                targets.append({"callee": name})
+            else:
+                targets.append(f"sip:{name}@{LOCAL_REALM or 'localhost'}")
+            continue
         gw = (cfg.get("gateways") or {}).get(name)
         if not gw:
             log("targets", f"gateway '{name}' missing, skip")
@@ -1068,9 +1266,187 @@ def resolve_xcid(payload: dict) -> str:
     return f"KTM_{session_id}"
 
 
+def resolve_webrtc_xtag(payload: dict) -> str:
+    """WebRTC 发起呼叫的关联标识（X-cid / User-to-User 共用）。前缀 KRTC_，
+    与普通路由的 KTM_ 区隔；优先沿用上游已带 X-cid（跨节点转发），否则本地
+    生成 KRTC_<call_id|session_id>（保证与决策 trace/corr_id 可关联）。"""
+    xcid = header_value(payload, "X-cid")
+    if xcid:
+        return xcid
+    key = payload.get("call_id") or payload.get("session_id")
+    if not key:
+        import time as _t
+        key = f"{int(_t.time() * 1000)}-{int(_t.monotonic() * 1e6) % 100000}"
+    return f"KRTC_{key}"
+
+
+def uui_business_value() -> str:
+    """User-to-User（UUI）头值：仅业务保留默认字段（RFC 7433 分号参数）。
+    默认 vdn=52000111，可通过配置项 uui_vdn 覆盖；呼叫关联由独立的 X-cid
+    头承担，不在此混入关联标识。下游业务系统读取该默认值用于呼入路由。"""
+    return str(CONFIG.get("uui_vdn") or "52000111")
+
+
+def webrtc_entries(cfg: dict) -> list:
+    """webrtc 配置归一（向 route_points 看齐的列表模型）：每条 level 一个账号
+    组点位；兼容旧单对象格式（dict 视为单元素列表）。"""
+    webrtc = cfg.get("webrtc")
+    if isinstance(webrtc, dict):          # 旧格式：单 account 对象
+        return [webrtc]
+    return list(webrtc or [])
+
+
+def webrtc_entry_tag(entry: dict) -> str:
+    return str(entry.get("point_id") or entry.get("account") or "webrtc")
+
+
+def webrtc_entry_accounts(entry: dict) -> list:
+    """条目命中的 WebRTC 账号集合：account 单值 或 accounts 数组（多账号）。"""
+    accs = entry.get("accounts")
+    if isinstance(accs, list):
+        return [str(a).strip() for a in accs if str(a).strip()]
+    a = str(entry.get("account") or "").strip()
+    return [a] if a else []
+
+
+def find_webrtc_entry(cfg: dict, caller: str):
+    """按主叫定位 webrtc 条目（多 account × 多条点位）。命中且启用则返回条目，
+    否则 None（走普通 L1~L4 路由裁决）。"""
+    for entry in webrtc_entries(cfg):
+        if entry.get("enabled") is False:
+            continue
+        if caller in webrtc_entry_accounts(entry):
+            return entry
+    return None
+
+
+def default_webrtc_account(cfg: dict = None) -> str:
+    """签发 JWT 的默认账号：配置里第一个可用条目的账号，回退环境变量。"""
+    cfg = CONFIG if cfg is None else cfg
+    for entry in webrtc_entries(cfg):
+        accs = webrtc_entry_accounts(entry)
+        if accs:
+            return accs[0]
+    return WEBRTC_ACCOUNT
+
+
+def webrtc_entry_allows_source(entry: dict, ip: str) -> bool:
+    """准入策略：allowed_ips 为空 = 不限制来源；否则来源 IP 必须命中其一网段。"""
+    aips = entry.get("allowed_ips") or []
+    if not aips:
+        return True
+    return any(ip_in_cidr(ip, c) for c in aips if str(c).strip())
+
+
+def webrtc_match_rule(entry: dict, callee: str):
+    """webrtc 条目内 rule_list 白名单匹配（对齐 route_points：rule_list=入口过滤，
+    gw_list=出口）。逐条按前缀匹配，取最长前缀（相同长度按配置顺序）；
+    命中返回该 rule（其 strip/pri_prefix 用于号码变换），未命中 None。"""
+    best = None
+    best_len = -1
+    for i, rule in enumerate(entry.get("rule_list") or []):
+        prefix = (rule.get("prefix") or "").strip()
+        if not prefix or not callee.startswith(prefix):
+            continue
+        if len(prefix) > best_len:
+            best, best_len = rule, len(prefix)
+        elif len(prefix) == best_len and best is None:
+            best = rule
+        elif len(prefix) == best_len and best is not None:
+            pass  # 等长保留先命中（配置顺序）
+    return best
+
+
+def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
+                          entry: dict) -> dict:
+    """WebRTC 呼叫的独立路由策略（方案 B）。
+
+    与普通呼叫不同：WebRTC 会话（临时 JWT 认证）的主叫【不走 L1~L4 路由
+    裁决】，而是按配置段 `webrtc` 的白名单直接决策：
+      - callee 命中 rule_list（白名单前缀）→ 转发到 gw_list（通常指向注册
+        分机 / 出局中继），仅此一条出口，不做任何默认兜底；
+      - callee 未命中任何白名单前缀 → 拒绝，防止 WebRTC 会话被用于拨打
+        任意号码（仅放行配置前缀，其余一律 4xx）。
+    该分支在 route_decision() 入口处按主叫命中 webrtc 条目（account/accounts）
+    触发，返回结构与普通 forward/reject 一致，RustPBX 无需区分。
+
+    entry 为当前命中的 webrtc 点位，完全对齐 route_points：rule_list=白名单
+    入口（每条 rule 独立 prefix/strip/pri_prefix 号码变换），gw_list=出口
+    （多网关），外加 allowed_ips=来源准入。命中 rule 后用该 rule 的
+    strip/pri_prefix 变换被叫，再经条目 gw_list 出口。"""
+    entry_tag = webrtc_entry_tag(entry)
+    matched_rule = webrtc_match_rule(entry, callee)
+    matched = (matched_rule.get("prefix") or "").strip() if matched_rule else None
+
+    # 来源信息诊断：raw_addr = RustPBX 捕获的 WS 对端原始地址（可能含端口），
+    # src_ip   = 从中解析出的 IP（准入判定的依据），xff = 透传的真实客户端
+    # 来源（仅记录展示，不参与准入判定，避免伪造 XFF 绕过白名单）。
+    raw_addr = payload.get("source_addr") or ""
+    src_ip = source_ip(raw_addr)
+    xff = (header_value(payload, "X-Forwarded-For")
+           or str(payload.get("x-forwarded-for") or "")).split(",")[0].strip()
+
+    # 准入策略：来源 IP 未命中 allowed_ips → 拒绝（防盗打，防外部借 Webrtc
+    # 会话发起任意呼叫）。
+    if not webrtc_entry_allows_source(entry, src_ip):
+        log("decision", f"webrtc caller={caller} raw_addr={raw_addr!r} "
+                        f"src={src_ip} xff={xff!r} entry={entry_tag} → 准入拒绝")
+        trace_record(payload.get("call_id") or "", "decision",
+                     session_id=payload.get("session_id"),
+                     layer="webrtc", callee=callee, caller=caller,
+                     entry=entry_tag, source_addr=raw_addr, src_ip=src_ip,
+                     xff=xff, corr_id=resolve_webrtc_xtag(payload), action="reject",
+                     status=403, reason="source not allowed for webrtc calls")
+        return {"action": "reject", "status": 403,
+                "reason": "source not allowed for webrtc calls"}
+
+    log("decision", f"webrtc caller={caller} raw_addr={raw_addr!r} src={src_ip} "
+                    f"xff={xff!r} callee={callee} matched_rule={matched!r}")
+    trace_record(payload.get("call_id") or "", "decision",
+                 session_id=payload.get("session_id"),
+                 layer="webrtc", callee=callee, caller=caller,
+                 entry=entry_tag, source_addr=raw_addr, src_ip=src_ip, xff=xff,
+                 corr_id=resolve_webrtc_xtag(payload),
+                 rule_list=entry.get("rule_list"), matched_prefix=matched)
+    if matched_rule is None:
+        return {"action": "reject", "status": 403,
+                "reason": "prefix not allowed for webrtc calls"}
+
+    # 号码变换：取该命中 rule 的 strip/pri_prefix（对齐 route_points），
+    # 然后经该条目 gw_list 出口（多网关按序展开）。
+    callee2 = apply_rule_transforms(matched_rule, callee)
+    targets = gateway_targets(callee2, entry.get("gw_list"), cfg)
+    if not targets:
+        trace_record(payload.get("call_id") or "", "decision",
+                     session_id=payload.get("session_id"),
+                     layer="webrtc", status=500, callee=callee2, caller=caller,
+                     entry=entry_tag, reason="no usable gateway")
+        return {"action": "reject", "status": 500, "reason": "No GW Route found"}
+
+    resp = {
+        "action": "forward",
+        "targets": targets,
+        "strategy": "sequential",
+        # X-cid：跨节点自定义呼叫关联；User-to-User（UUI）是标准 SIP 头，
+        # 出口 trunk 的 INVITE 会带它，被叫侧 PBX 可凭同一值关联回主叫判定。
+        # WebRTC 发起统一用 KRTC_ 前缀（区别于普通路由的 KTM_）。
+        "headers": {"X-cid": resolve_webrtc_xtag(payload),
+                    "User-to-User": uui_business_value()},
+    }
+    _corr = resolve_webrtc_xtag(payload)
+    trace_record(payload.get("call_id") or "", "decision",
+                 session_id=payload.get("session_id"),
+                 layer="webrtc", action="forward",
+                 callee=callee2, caller=caller, entry=entry_tag, targets=targets,
+                 corr_id=_corr, matched_prefix=matched,
+                 strip=matched_rule.get("strip"),
+                 pri_prefix=matched_rule.get("pri_prefix"))
+    return resp
+
+
 def route_decision(payload: dict) -> dict:
     """主流程：分层匹配 + 默认路由 + 号码变换 + targets。"""
-    cfg = CONFIG or DEFAULT_CONFIG
+    cfg = CONFIG or {}
 
     method = (payload.get("method") or "").upper()
     if method and method != "INVITE":
@@ -1092,6 +1468,14 @@ def route_decision(payload: dict) -> dict:
                      session_id=payload.get("session_id"),
                      layer="reject", status=484, callee=callee, caller=caller)
         return {"action": "reject", "status": 484, "reason": "address incomplete"}
+
+    # WebRTC 呼叫：主叫命中 webrtc 条目（account/accounts 多账号）→ 走独立
+    # 白名单 + 准入策略，跳过 L1~L4 路由裁决（仅允许指定前缀，其余拒绝）。
+    webrtc_entry = find_webrtc_entry(cfg, caller)
+    if webrtc_entry is not None:
+        trace_record(payload.get("call_id") or "", "decision",
+                     session_id=payload.get("session_id"), layer="webrtc-branch")
+        return webrtc_route_decision(payload, cfg, caller, callee, webrtc_entry)
 
     # 第 1~3 层：主被叫都符合 → 被叫符合 → 主叫符合
     group_hits = resolve_caller_groups(caller, cfg)
@@ -1160,7 +1544,10 @@ def route_decision(payload: dict) -> dict:
         "action": "forward",
         "targets": targets,
         "strategy": "sequential",
-        "headers": {"X-cid": resolve_xcid(payload)},
+        # UUI（User-to-User）标准头随出口 trunk INVITE 下发，被叫侧能凭同一
+        # KTM_<session_id> 关联回主叫侧 /trace；X-cid 为自定义关联头。
+        "headers": {"X-cid": resolve_xcid(payload),
+                    "User-to-User": uui_business_value()},
     }
     if caller2 and caller2 != caller:
         resp["caller"] = caller2
@@ -1171,12 +1558,13 @@ def route_decision(payload: dict) -> dict:
 
     log("decision", f"forward layer={layer} route_group={route_group.get('point_id')} "
                     f"callee={callee2} targets={targets} caller={resp.get('caller')}")
+    _corr = resolve_xcid(payload)
     trace_record(payload.get("call_id") or "", "decision",
                  session_id=payload.get("session_id"),
                  layer=layer, action="forward",
                  route_group=route_group.get("point_id"),
                  callee=callee2, caller=resp.get("caller") or caller,
-                 targets=targets, **details)
+                 targets=targets, corr_id=_corr, **details)
     return resp
 
 
@@ -1188,9 +1576,21 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        # 预检：允许跨域读取（页面在 file:// 或异域托管时也能调 /token、/auth）
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _read_body(self) -> bytes:
         """兼容 Content-Length 与 chunked 两种编码（reqwest 可能发 chunked）。"""
@@ -1212,7 +1612,46 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def do_POST(self):
+        global CONFIG  # config/reload 及 /token/webrtc 读取/赋值，须先声明再引用
         path = self.path.split("?")[0].rstrip("/")
+        if path.endswith("/token/webrtc"):
+            # WebRTC 会话：向 (预) 客户端签发一次性短期 JWT 作为密码。
+            # 支持多账号：body 可带 {"account": "..."} 指定签发给哪个 WebRTC
+            # 账号（必须是某条 webrtc 条目内账号），缺省取第一条目的默认账号。
+            # 有效期由服务器统一指定（JWT_MAX_AGE / RUSTPBX_JWT_MAX_AGE），
+            # 不接受客户端传入，避免前端自行拉长授权窗口。
+            raw = self._read_body()
+            want = None
+            try:
+                data = json.loads(raw.decode("utf-8")) if raw else {}
+                if isinstance(data, dict):
+                    want = str(data.get("account") or "").strip() or None
+            except ValueError:
+                want = None
+            if want is not None:
+                known = {a for e in webrtc_entries(CONFIG)
+                         for a in webrtc_entry_accounts(e)}
+                if want not in known:
+                    return self._json(403, {"ok": False,
+                                            "reason": f"unknown webrtc account '{want}'"})
+            return self._json(200, mint_webrtc_jwt(JWT_MAX_AGE, account=want))
+        if path.endswith("/auth"):
+            # HttpUserBackend：分机 REGISTER/INVITE 鉴权。兼容 reqwest 发的
+            # application/json 与 form-urlencoded 两种 body（对齐
+            # extension_decision_service.py 的 _handle_auth）。账本来自
+            # gateways 中"被动注册型"网关（_apply_extensions 已同步进 USERS）。
+            raw = self._read_body()
+            ctype = self.headers.get("Content-Type", "")
+            if ctype.startswith("application/json"):
+                try:
+                    data = json.loads(raw.decode("utf-8")) or {}
+                except ValueError:
+                    data = {}
+            else:
+                data = {k: v[0] if v else "" for k, v in
+                        urllib.parse.parse_qs(raw.decode("utf-8")).items()}
+            status, payload = handle_auth(data)
+            return self._json(status, payload)
         if path.endswith("/events/clear"):
             # 共享前端 "清空记录" 按钮（与 http_router_service.py 同一契约）。
             # 统一视图数据源有两处：呼叫事件（CCM_CALLS）+ 路由决策
@@ -1240,8 +1679,13 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
                 return self._json(200, {"action": "reject", "status": 500,
                                         "reason": f"decision error: {exc}"})
         if path.endswith("/config/reload"):
-            global CONFIG
-            CONFIG = load_config()
+            try:
+                new_cfg = load_config(CONFIG_FILE or None)
+            except ValueError as exc:
+                # 加载/校验失败：保留旧配置（运行中不崩溃），显式 400 告警
+                log("config", f"reload REJECTED: {exc}")
+                return self._json(400, {"ok": False, "reason": str(exc)})
+            CONFIG = new_cfg
             # 配置变更后重新同步网关表（upsert 幂等；新增网关自动入 ACL）
             sync_trunks_to_rustpbx(CONFIG)
             return self._json(200, {"ok": True, "sitecode": CONFIG.get("sitecode"),
@@ -1279,7 +1723,44 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
-        cfg = CONFIG or DEFAULT_CONFIG
+        cfg = CONFIG or {}
+        if path == "/webrtc/accounts":
+            # WebRTC 可用账号列表（供前端下拉选择）。默认=第一可用账号，
+            # 顺序=配置 items 展开；配置外账号由前端自行追加测试项。
+            accounts, dflt = [], default_webrtc_account(cfg)
+            for entry in webrtc_entries(cfg):
+                for acc in webrtc_entry_accounts(entry):
+                    if acc not in accounts:
+                        accounts.append(acc)
+            if accounts and dflt not in accounts:
+                accounts.insert(0, dflt)
+            return self._json(200, {"accounts": accounts, "default": dflt})
+        if path in ("/static/jssip.min.js", "/jssip.min.js"):
+            # WebRTC 呼叫前端同源 JsSIP：本地加载，不依赖外部 CDN
+            try:
+                body = open(JSSIP_PATH, "rb").read()
+            except OSError:
+                return self._json(404, {"reason": "jssip.min.js missing"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path in ("/webrtc", "/phone"):
+            # WebRTC 呼叫前端（webrtc_phone.html）
+            try:
+                body = open(WEBRTC_PHONE_PATH, "rb").read()
+            except OSError:
+                return self._json(404, {"reason": "webrtc_phone.html missing"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in ("", "/ui"):
             # 共享前端（webui.html）：与 http_router_service.py 公用同一份页面
             try:
@@ -1303,6 +1784,7 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
                 "route_points": len(cfg.get("route_points") or []),
                 "gateways": sorted((cfg.get("gateways") or {}).keys()),
                 "internal_services": len(cfg.get("internal_services") or []),
+                "extensions": len(USERS),
                 "trunk_sync_ok": SYNC_STATE.get("ok"),
                 "trunk_sync_detail": SYNC_STATE.get("detail"),
             })
@@ -1315,12 +1797,20 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
             # （时间序）。分机服务无决策跟踪，同构响应自然只出事件行，
             # 两服务共用同一前端渲染。
             calls = {}
+            corr2cid = {}
             for key, recs in TRACE.items():
                 for r in recs:
                     if r.get("kind") == "decision":
                         calls.setdefault(key, []).append(r)
+                        cr = r.get("corr_id")
+                        if cr:
+                            corr2cid.setdefault(cr, key)
             for sid, evts in CCM_CALLS.items():
-                cid = TRACE_SESSION.get(sid) or sid
+                # 先按 session_id，再按 corr_id/xcid 桥接（决策 corr_id 与 RWI
+                # 事件 xcid 同值；WebRTC 的 JsSIP Call-ID ≠ RustPBX session 号，
+                # 只能靠后者合并进同一卡片）。
+                cid = (TRACE_SESSION.get(sid)
+                       or corr2cid.get((evts[0] or {}).get("xcid")) or sid)
                 calls.setdefault(cid, []).extend(
                     {"kind": "event", **e} for e in evts)
             return self._json(200, {
@@ -1332,15 +1822,41 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
         if path.endswith("/config"):
             return self._json(200, cfg)
         if path == "/trace" or path.startswith("/trace/"):
-            # 呼叫跟踪查询：/trace/<call_id> 或 /trace?call_id=<id>
+            # 呼叫跟踪查询：
+            #   按关联键：/trace/<call_id|session_id|corr_id>
+            #   按主被叫：/trace?caller=&callee=&corr_id=（支持只填其一，用于在
+            #             未发起呼叫、仅决策被拦截时仍能按主/被叫查到记录并显示主被叫）
             call_id = path[len("/trace"):].strip("/")
-            if not call_id and "?" in self.path:
+            qs = {}
+            if "?" in self.path:
                 from urllib.parse import parse_qs
                 qs = parse_qs(self.path.split("?", 1)[1])
-                call_id = (qs.get("call_id") or [""])[0]
-            records = (TRACE.get(call_id)
-                       or TRACE.get(TRACE_SESSION.get(call_id) or "") or [])
-            return self._json(200, {"call_id": call_id, "records": records})
+            if call_id:
+                return self._json(200, {"call_id": call_id,
+                                        "records": (TRACE.get(call_id)
+                                                    or TRACE.get(TRACE_SESSION.get(call_id) or "") or [])})
+            want_caller = (qs.get("caller") or [""])[0]
+            want_callee = (qs.get("callee") or [""])[0]
+            want_corr = (qs.get("corr_id") or [""])[0]
+            if not (want_caller or want_callee or want_corr):
+                return self._json(200, {"call_id": "", "records": []})
+            hits = []
+            for cid, recs in TRACE.items():
+                for r in recs:
+                    caller = str(r.get("caller") or "")
+                    callee = str(r.get("callee") or "")
+                    cr = str(r.get("corr_id") or "")
+                    if want_caller and caller != want_caller:
+                        continue
+                    if want_callee and callee != want_callee:
+                        continue
+                    if want_corr and cr != want_corr:
+                        continue
+                    hits.append({"call_id": cid, **r})
+            hits.sort(key=lambda h: h.get("ts") or 0, reverse=True)
+            return self._json(200, {"call_id": "", "search": True,
+                                    "caller": want_caller, "callee": want_callee,
+                                    "corr_id": want_corr, "records": hits})
         return self._json(404, {"reason": "not found"})
 
     def log_message(self, fmt, *args):
@@ -1351,11 +1867,23 @@ def main():
     parser = argparse.ArgumentParser(description="kubeTrunk route_decision 样例服务")
     parser.add_argument("--listen",
                         default=os.environ.get("ROUTE_LISTEN", "127.0.0.1:9612"))
+    parser.add_argument("--config", default=os.environ.get("ROUTE_CONFIG", ""),
+                        help="路由配置文件（{sitecode}.json），必填；也可用 ROUTE_CONFIG 环境变量")
     args = parser.parse_args()
     host, _, port = args.listen.rpartition(":")
 
     global CONFIG
-    CONFIG = load_config()
+    # 记录启动使用的确切配置路径，供 /config/reload 复用（reload 不再回退
+    # 到 ROUTE_CONFIG 环境变量 —— 用 --config 启动时它可能为空）。
+    global CONFIG_FILE
+    CONFIG_FILE = (args.config or os.environ.get("ROUTE_CONFIG", "")).strip()
+    # 配置强制外部提供：缺省/缺失/非法 → fail-fast 退出，不启动
+    # （避免内置兜底配置在误启/忘配时悄悄接管路由）。
+    try:
+        CONFIG = load_config(CONFIG_FILE or None)
+    except ValueError as exc:
+        sys.stderr.write(f"[route-decision] FATAL: {exc}\n")
+        sys.exit(1)
 
     # 网关 → RustPBX trunk 注册表自动同步（结构化 targets + 自动 ACL 的
     # 前提；失败非致命，targets 降级纯 URI，/health 可见）
