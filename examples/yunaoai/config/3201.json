@@ -32,7 +32,9 @@
   "caller_groups":
     {
       "cg-8120": ["8120"],
-      "cg-8196": ["8196"]
+      "cg-8196": ["8196"],
+      "cg-webrtc-a": ["8899"],
+      "cg-webrtc-b": ["8810", "8811"]
     },
   "route_points": [
     {"point_id": "internal-8120", "group_type": "internal",
@@ -47,20 +49,21 @@
      "gw_list": ["8798fs"], "rule_list": [{"prefix": "", "strip": 0}]}
   ],
   "webrtc": [
-    {"account": "8899",
-     "rule_list": [ {"prefix": "13", "strip": 0},
-      {"prefix": "15", "strip": 0},
-      {"prefix": "18", "strip": 0},
-      {"prefix": "178", "strip": 0}],
-     "gw_list": ["lvcx"],
+    {"point_id": "webrtc-8899",
+     "group_type": "external",
+     "rule_list": [ {"prefix": "13", "strip": 0, "caller_group": "cg-webrtc-a"},
+      {"prefix": "98088", "strip": 0, "caller_group": "cg-webrtc-a"}],
+     "gw_list": ["ya-pbx", "yacc55-fs"],
      "allowed_ips": ["100.88.0.0/24", "127.0.0.1/32"]},
 
-    {"point_id": "webrtc-8810", "accounts": ["8810", "8811"],
-     "rule_list": [ {"prefix": "13", "strip": 0},
-      {"prefix": "15", "strip": 0},
-      {"prefix": "18", "strip": 0},
-      {"prefix": "178", "strip": 0, "pri_prefix": "0"}],
-     "gw_list": ["lvcx", "ya-pbx"],
+    {"point_id": "webrtc-8810",
+     "group_type": "external",
+     "rule_list": [
+       {"prefix": "13", "strip": 0, "caller_group": "cg-webrtc-b"},
+       {"prefix": "15", "strip": 0, "caller_group": "cg-webrtc-b"},
+       {"prefix": "18", "strip": 0, "caller_group": "cg-webrtc-b"},
+       {"prefix": "178", "strip": 0, "caller_group": "cg-webrtc-b"}],
+     "gw_list": ["lvcx"],
      "allowed_ips": ["100.88.0.0/24", "127.0.0.1/32"]}
   ],
   "internal_services":[
