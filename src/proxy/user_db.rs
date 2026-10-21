@@ -40,6 +40,26 @@ impl Default for DbBackendConfig {
 pub struct DbBackend {
     db: AnyPool,
     config: DbBackendConfig,
+    /// The Any driver passes SQL through unchanged, so placeholders must use
+    /// the backend's own syntax: `$1, $2, ...` on Postgres, `?` elsewhere.
+    numbered_placeholders: bool,
+}
+
+/// Hands out bind placeholders in the backend's syntax.
+struct Placeholders {
+    numbered: bool,
+    next: usize,
+}
+
+impl Placeholders {
+    fn next(&mut self) -> String {
+        self.next += 1;
+        if self.numbered {
+            format!("${}", self.next)
+        } else {
+            "?".to_string()
+        }
+    }
 }
 
 impl DbBackend {
@@ -68,7 +88,19 @@ impl DbBackend {
             .await
             .map_err(|e| anyhow!("Database connection error: {}", e))?;
 
-        Ok(Self { db, config })
+        let numbered_placeholders = url.starts_with("postgres");
+        Ok(Self {
+            db,
+            config,
+            numbered_placeholders,
+        })
+    }
+
+    fn placeholders(&self) -> Placeholders {
+        Placeholders {
+            numbered: self.numbered_placeholders,
+            next: 0,
+        }
     }
 }
 
@@ -82,9 +114,14 @@ impl UserBackend for DbBackend {
         };
 
         if let Some(ref realm_col) = self.config.realm_column {
+            let mut ph = self.placeholders();
             let query = format!(
-                "SELECT COUNT(*) FROM {} WHERE {} = ? OR {} = ?",
-                self.config.table_name, realm_col, realm_col
+                "SELECT COUNT(*) FROM {} WHERE {} = {} OR {} = {}",
+                self.config.table_name,
+                realm_col,
+                ph.next(),
+                realm_col,
+                ph.next()
             );
             let count = sqlx::query(sqlx::AssertSqlSafe(query))
                 .bind(realm)
@@ -125,7 +162,8 @@ impl UserBackend for DbBackend {
         let select_clause = select_columns.join(", ");
 
         // Build WHERE clause
-        let mut where_clause = format!("{} = ?", self.config.username_column);
+        let mut ph = self.placeholders();
+        let mut where_clause = format!("{} = {}", self.config.username_column, ph.next());
         let mut bind_params: Vec<&str> = vec![username];
 
         if let Some(realm) = realm
@@ -137,11 +175,17 @@ impl UserBackend for DbBackend {
                 realm
             };
             if host != realm {
-                where_clause.push_str(&format!(" AND ({} = ? OR {} = ?)", realm_col, realm_col));
+                where_clause.push_str(&format!(
+                    " AND ({} = {} OR {} = {})",
+                    realm_col,
+                    ph.next(),
+                    realm_col,
+                    ph.next()
+                ));
                 bind_params.push(realm);
                 bind_params.push(host);
             } else {
-                where_clause.push_str(&format!(" AND {} = ?", realm_col));
+                where_clause.push_str(&format!(" AND {} = {}", realm_col, ph.next()));
                 bind_params.push(realm);
             }
         }

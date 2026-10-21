@@ -130,3 +130,70 @@ async fn test_db_backend() {
     assert_eq!(user_with_realm.username, "customuser");
     assert_eq!(user_with_realm.realm, Some("rustpbx.com".to_string()));
 }
+
+/// Runs the backend's lookups against `url` using a throwaway `table`:
+/// user found with its password, realm matched (also as `host:port`),
+/// unknown user and realm rejected.
+async fn assert_db_backend_lookups(url: &str, table: &str) {
+    use sqlx::Executor;
+    sqlx::any::install_default_drivers();
+    let setup = sqlx::AnyPool::connect(url).await.unwrap();
+    setup.execute(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}"))).await.unwrap();
+    setup
+        .execute(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, username VARCHAR(64) NOT NULL, \
+             password VARCHAR(64) NOT NULL, realm VARCHAR(64))"
+        )))
+        .await
+        .unwrap();
+    setup
+        .execute(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {table} (id, username, password, realm) VALUES \
+             (1, 'alice', 'alicepass', 'rustpbx.com'), (2, 'bob', 'bobpass', 'other.com')"
+        )))
+        .await
+        .unwrap();
+    let config = DbBackendConfig {
+        table_name: table.to_string(),
+        id_column: Some("id".to_string()),
+        realm_column: Some("realm".to_string()),
+        ..Default::default()
+    };
+    let backend = DbBackend::new(url.to_string(), config, None).await.unwrap();
+
+    let alice = backend.get_user("alice", None, None).await.unwrap().expect("alice");
+    assert_eq!((alice.id, alice.password.as_deref()), (1, Some("alicepass")));
+    let alice = backend
+        .get_user("alice", Some("rustpbx.com:5060"), None)
+        .await
+        .unwrap()
+        .expect("alice by host:port");
+    assert_eq!(alice.username, "alice");
+    assert!(backend.get_user("alice", Some("other.com"), None).await.unwrap().is_none());
+    assert!(backend.get_user("nobody", None, None).await.unwrap().is_none());
+    assert!(backend.is_same_realm("rustpbx.com:5060").await);
+    assert!(!backend.is_same_realm("unknown.com").await);
+
+    setup.execute(sqlx::AssertSqlSafe(format!("DROP TABLE {table}"))).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_db_backend_lookups_sqlite() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite:{}", file.path().to_str().unwrap());
+    assert_db_backend_lookups(&url, "sip_users").await;
+}
+
+#[tokio::test]
+#[ignore = "requires RUSTPBX_POSTGRES_TEST_URL pointing to a PostgreSQL test database"]
+async fn test_db_backend_lookups_postgres() {
+    let url = std::env::var("RUSTPBX_POSTGRES_TEST_URL").unwrap();
+    assert_db_backend_lookups(&url, "rustpbx_user_db_test").await;
+}
+
+#[tokio::test]
+#[ignore = "requires RUSTPBX_MYSQL_TEST_URL pointing to a MySQL test server"]
+async fn test_db_backend_lookups_mysql() {
+    let url = std::env::var("RUSTPBX_MYSQL_TEST_URL").unwrap();
+    assert_db_backend_lookups(&url, "rustpbx_user_db_test").await;
+}
