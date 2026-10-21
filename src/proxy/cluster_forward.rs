@@ -111,7 +111,9 @@ pub enum OwnerOpOutcome {
     ApplyLocally,
     /// The owner node answered — pass the (status, body) through.
     Applied(reqwest::StatusCode, serde_json::Value),
-    /// The registry has no record of the call: it does not exist anywhere.
+    /// The registry has no record of the call AND one bounded fan-out round
+    /// over the peers found no node hosting it — the call does not exist
+    /// anywhere.
     UnknownCall,
     /// The registry backend failed: the owner's location is unknowable right
     /// now.  Retryable — the call may well be alive on a peer.
@@ -258,8 +260,14 @@ impl OwnerRoutedOp for ConsoleCommandOp {
 /// 3. **Replication never loops** — the owner's `user_data_sync` hook
 ///    broadcasts to peers, and peers apply via `apply_remote_user_data`
 ///    which neither re-broadcasts nor emits events.
-/// 4. **Bounded fallback** — the fan-out below is a fixed single round over
-///    the configured peer list, never recursive.
+/// 4. **Bounded fallback** — every fan-out below is a fixed single round over
+///    the configured peer list, never recursive.  This applies both when the
+///    registry resolved a stale/unmatched owner AND when the registry has no
+///    record at all (see `OwnerLocation::Unknown`): a recordless registry
+///    (per-node sqlite backend, noop, or an expired row) must never stop an
+///    operation that a peer could still apply — historically this is how
+///    cluster command routing worked before the registry existed
+///    (`forward_command_to_peers`).
 pub async fn routed_op_on_owner(
     registry: &SessionRegistryRef,
     peers: &[ClusterPeer],
@@ -282,7 +290,20 @@ pub async fn routed_op_on_owner(
             .unwrap_or_else(|| session_id.to_string());
 
     match locate_owner(registry, session_id).await {
-        OwnerLocation::Unknown => OwnerOpOutcome::UnknownCall,
+        OwnerLocation::Unknown => {
+            // The registry has no record (per-node backend, noop, or a row
+            // lost to TTL/expiry) — but the call may still be ALIVE on a
+            // peer.  A recordless registry must not silently kill the
+            // operation: fall back to ONE bounded fan-out round over the
+            // peers (the pre-registry `forward_command_to_peers` behavior).
+            // Terminal endpoints apply locally and never re-resolve, so a
+            // forwarded request cannot loop; every peer answering 404 means
+            // the call truly exists nowhere → the caller answers its 404.
+            match fan_out_to_peers(peers, ami_path, client, &forward_id, op).await {
+                Some((status, resp)) => OwnerOpOutcome::Applied(status, resp),
+                None => OwnerOpOutcome::UnknownCall,
+            }
+        }
         OwnerLocation::Unavailable(e) => OwnerOpOutcome::RegistryUnavailable(e),
         OwnerLocation::Found(owner) => {
             // Invariant 2: never HTTP ourselves — apply locally instead.
@@ -317,30 +338,49 @@ pub async fn routed_op_on_owner(
 
             // 2. Fan-out fallback (registry stale / node_id mismatch): first
             //    non-404 response wins.  Bounded: one round, no recursion.
-            let mut handles = Vec::new();
-            for peer in peers {
-                let url = format!(
-                    "{}/{}",
-                    peer_ami_base(peer, ami_path),
-                    op.relative_path(&forward_id)
-                );
-                let client = client.clone();
-                let body = op.body(&forward_id);
-                let method = method.clone();
-                handles.push(tokio::spawn(async move {
-                    forward_json(&client, &url, method, has_body.then_some(&body)).await
-                }));
+            match fan_out_to_peers(peers, ami_path, client, &forward_id, op).await {
+                Some((status, resp)) => OwnerOpOutcome::Applied(status, resp),
+                None => OwnerOpOutcome::OwnerUnreachable,
             }
-            for handle in handles {
-                if let Ok(Some((status, resp))) = handle.await
-                    && status != reqwest::StatusCode::NOT_FOUND
-                {
-                    return OwnerOpOutcome::Applied(status, resp);
-                }
-            }
-            OwnerOpOutcome::OwnerUnreachable
         }
     }
+}
+
+/// ONE bounded fan-out round: every peer receives exactly one request
+/// (concurrently); the first non-404 response wins.  Loop-safe by
+/// construction — the terminal `cluster/*` endpoints apply locally and never
+/// re-resolve (invariant 1), so a forwarded request always terminates.
+async fn fan_out_to_peers(
+    peers: &[ClusterPeer],
+    ami_path: &str,
+    client: &reqwest::Client,
+    session_id: &str,
+    op: &impl OwnerRoutedOp,
+) -> Option<(reqwest::StatusCode, serde_json::Value)> {
+    let method = op.method();
+    let has_body = method != reqwest::Method::GET;
+    let mut handles = Vec::new();
+    for peer in peers {
+        let url = format!(
+            "{}/{}",
+            peer_ami_base(peer, ami_path),
+            op.relative_path(session_id)
+        );
+        let client = client.clone();
+        let body = op.body(session_id);
+        let method = method.clone();
+        handles.push(tokio::spawn(async move {
+            forward_json(&client, &url, method, has_body.then_some(&body)).await
+        }));
+    }
+    for handle in handles {
+        if let Ok(Some((status, resp))) = handle.await
+            && status != reqwest::StatusCode::NOT_FOUND
+        {
+            return Some((status, resp));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -613,16 +653,18 @@ mod tests {
         assert_eq!(count(&hits), 0, "must not HTTP to itself");
     }
 
-    /// Registry has no record → UnknownCall, zero HTTP (the caller answers a
-    /// plain 404; the call does not exist anywhere).
+    /// Registry has no record AND every peer answers 404 → UnknownCall (the
+    /// caller answers a plain 404; the call exists nowhere).  Bounded:
+    /// at most one request per peer — never a retry loop.
     #[tokio::test]
     async fn userdata_op_unknown_call_short_circuits() {
-        let (peer, _rx, hits) = spawn_peer(axum::http::StatusCode::OK).await;
+        let (peer_a, _rx_a, hits_a) = spawn_peer(axum::http::StatusCode::NOT_FOUND).await;
+        let (peer_b, _rx_b, hits_b) = spawn_peer(axum::http::StatusCode::NOT_FOUND).await;
         let registry = MockRegistry::new(MockPlan::NoRow);
 
         let outcome = routed_op_on_owner(
             &registry,
-            &[peer],
+            &[peer_a, peer_b],
             Some("this-node:5060"),
             "",
             &reqwest::Client::new(),
@@ -632,7 +674,64 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, OwnerOpOutcome::UnknownCall), "{outcome:?}");
-        assert_eq!(count(&hits), 0);
+        assert!(count(&hits_a) <= 1, "peer A hit {} times", count(&hits_a));
+        assert!(count(&hits_b) <= 1, "peer B hit {} times", count(&hits_b));
+    }
+
+    /// REGRESSION (zhongan zapbx test env, 2026-10-21): a console `play`
+    /// command landed on a node whose session registry had no record of the
+    /// call (per-node sqlite backend — no shared `database_url`) while the
+    /// call was alive on the OTHER node.  The old code answered a clean,
+    /// instant 404 and the command was lost.  A recordless registry must
+    /// NOT stop routing: one bounded fan-out round must find the peer that
+    /// holds the session and deliver the command.
+    #[tokio::test]
+    async fn console_command_unknown_owner_delivers_via_peer_fanout() {
+        let (holder, mut rx, holder_hits) = spawn_peer(axum::http::StatusCode::OK).await;
+        let (bystander, _rx, bystander_hits) =
+            spawn_peer(axum::http::StatusCode::NOT_FOUND).await;
+        let registry = MockRegistry::new(MockPlan::NoRow);
+
+        let op = ConsoleCommandOp {
+            payload: serde_json::json!({
+                "action": "play",
+                "params": {"source": {"type": "url", "url": "https://pbx.example/prompt.wav"}}
+            }),
+        };
+        let outcome = routed_op_on_owner(
+            &registry,
+            &[bystander, holder],
+            Some("this-node:5060"),
+            "",
+            &reqwest::Client::new(),
+            "cau2qi16vv8827emtc1h",
+            &op,
+        )
+        .await;
+
+        match outcome {
+            OwnerOpOutcome::Applied(status, _) => {
+                assert_eq!(status, reqwest::StatusCode::OK);
+            }
+            other => panic!("command must reach the holder peer, got {other:?}"),
+        }
+        // Bounded: at most one request per peer (a single fan-out round).
+        assert!(
+            count(&holder_hits) <= 1,
+            "holder hit {} times",
+            count(&holder_hits)
+        );
+        assert!(
+            count(&bystander_hits) <= 1,
+            "bystander hit {} times",
+            count(&bystander_hits)
+        );
+        let body = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("holder must capture the command")
+            .expect("body");
+        assert_eq!(body["session_id"], "cau2qi16vv8827emtc1h");
+        assert_eq!(body["payload"]["action"], "play");
     }
 
     /// Registry outage → RegistryUnavailable (retryable 503 upstream), never
