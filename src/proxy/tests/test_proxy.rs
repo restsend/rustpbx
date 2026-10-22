@@ -412,3 +412,490 @@ fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsipsta
 
     request
 }
+
+// Two real endpoints: the original dialog remains on A while the same
+// registered Contact moves to B. A successful BYE transaction alone is not
+// evidence of delivery: B's CallModule can answer 200 without the phone.
+#[tokio::test]
+async fn registered_wss_dialog_bye_reaches_reconnected_flow_on_other_node() {
+    cross_node_wss_bye(
+        true,
+        false,
+        PhoneByeBehavior::Reply(rsipstack::sip::StatusCode::OK),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn registered_wss_dialog_bye_relays_phone_failure_on_other_node() {
+    cross_node_wss_bye(
+        true,
+        false,
+        PhoneByeBehavior::Reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn registered_wss_dialog_bye_rejects_untrusted_node_relay() {
+    cross_node_wss_bye(
+        false,
+        false,
+        PhoneByeBehavior::Reply(rsipstack::sip::StatusCode::OK),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn registered_wss_dialog_bye_does_not_treat_wss_client_as_node_relay() {
+    cross_node_wss_bye(
+        true,
+        true,
+        PhoneByeBehavior::Reply(rsipstack::sip::StatusCode::OK),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn registered_wss_dialog_bye_reports_missing_cached_flow() {
+    cross_node_wss_bye(true, false, PhoneByeBehavior::MissingFlow).await;
+}
+
+#[tokio::test]
+async fn registered_wss_dialog_bye_reports_phone_response_timeout() {
+    cross_node_wss_bye(true, false, PhoneByeBehavior::Silent).await;
+}
+
+#[derive(Clone)]
+enum PhoneByeBehavior {
+    Reply(rsipstack::sip::StatusCode),
+    MissingFlow,
+    Silent,
+}
+
+async fn cross_node_wss_bye(trusted: bool, source_wss: bool, phone_behavior: PhoneByeBehavior) {
+    use crate::proxy::locator::{Locator, MemoryLocator};
+    use crate::proxy::locator_db::DbLocator;
+
+    let memory: Arc<Box<dyn Locator>> = Arc::new(Box::new(MemoryLocator::new()));
+    let sqlite: Arc<Box<dyn Locator>> = Arc::new(Box::new(
+        DbLocator::new("sqlite::memory:".into()).await.unwrap(),
+    ));
+    for (backend, locator) in [("memory", memory), ("sqlite", sqlite)] {
+        // Keep the selected backend visible if one parameterized case fails.
+        eprintln!("cross-node WSS BYE locator={backend}");
+        cross_node_wss_bye_with_locator(trusted, source_wss, phone_behavior.clone(), locator).await;
+    }
+}
+
+async fn cross_node_wss_bye_with_locator(
+    trusted: bool,
+    source_wss: bool,
+    phone_behavior: PhoneByeBehavior,
+    locator: Arc<Box<dyn crate::proxy::locator::Locator>>,
+) {
+    use crate::call::{Location, TransactionCookie};
+    use crate::proxy::ProxyModule;
+    use crate::proxy::locator::DialogTargetLocator;
+    use crate::proxy::nat::NatInspector;
+    use crate::proxy::tests::common::create_test_server_with_config_and_locator;
+    use rsipstack::dialog::{dialog::Dialog, dialog_layer::DialogLayer, invitation::InviteOption};
+    use rsipstack::sip::{Header, Method, Response, SipMessage, StatusCode, Transport, Version};
+    use rsipstack::transport::{
+        SipAddr, SipConnection, TransportEvent, channel::ChannelConnection,
+    };
+
+    let addr = |value: &str, transport| SipAddr {
+        r#type: Some(transport),
+        addr: value.try_into().unwrap(),
+    };
+    let node_a = addr(
+        "192.0.2.10:5060",
+        if source_wss {
+            Transport::Wss
+        } else {
+            Transport::Udp
+        },
+    );
+    let node_b = addr("192.0.2.11:5060", Transport::Udp);
+    let old_flow = addr("198.51.100.10:21760", Transport::Wss);
+    let new_flow = addr("198.51.100.10:31760", Transport::Wss);
+    let contact: rsipstack::sip::Uri = "sip:alice@192.168.1.50:60558;transport=wss"
+        .try_into()
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let endpoint_a = Arc::new(
+        rsipstack::EndpointBuilder::new()
+            .with_cancel_token(cancel.child_token())
+            .with_inspector(Box::new(NatInspector::new()))
+            .with_target_locator(DialogTargetLocator::new(
+                locator.clone(),
+                vec![node_a.clone()],
+                true,
+            ))
+            .build(),
+    );
+    let dialogs_a = DialogLayer::new(endpoint_a.inner.clone());
+    let (mut server_b, config_b) =
+        create_test_server_with_config_and_locator(ProxyConfig::default(), locator.clone()).await;
+    {
+        let inner = Arc::get_mut(&mut server_b).unwrap();
+        inner.endpoint = rsipstack::EndpointBuilder::new()
+            .with_cancel_token(cancel.child_token())
+            .with_inspector(Box::new(NatInspector::new()))
+            .with_target_locator(DialogTargetLocator::new(
+                locator.clone(),
+                vec![node_b.clone()],
+                true,
+            ))
+            .build();
+        inner.dialog_layer = Arc::new(DialogLayer::new(inner.endpoint.inner.clone()));
+        inner.cluster_self_addr = Some(node_b.clone());
+        inner.cluster_peer_ips = if trusted {
+            vec!["192.0.2.10".parse().unwrap()]
+        } else {
+            vec![]
+        };
+    }
+    let mut incoming_b = server_b.endpoint.incoming_transactions().unwrap();
+    let module_b = CallModule::new(config_b, server_b.clone());
+    let (node_bye_tx, mut node_bye_rx) = mpsc::unbounded_channel();
+    let processing_b = tokio::spawn(async move {
+        while let Some(mut tx) = incoming_b.recv().await {
+            if tx.original.method == Method::Bye {
+                node_bye_tx.send(tx.original.clone()).unwrap();
+            }
+            module_b
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut tx,
+                    TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    // A's outgoing peer messages enter B with A as the transport source,
+    // and B's responses return to A with B as their transport source.
+    let (a_in_tx, a_in_rx) = mpsc::unbounded_channel();
+    let (a_out_tx, mut a_out_rx) = mpsc::unbounded_channel();
+    let (b_in_tx, b_in_rx) = mpsc::unbounded_channel();
+    let (b_out_tx, mut b_out_rx) = mpsc::unbounded_channel();
+    let peer_a: SipConnection = ChannelConnection::create_connection(
+        a_in_rx,
+        a_out_tx,
+        node_b.clone(),
+        Some(cancel.child_token()),
+    )
+    .await
+    .unwrap()
+    .into();
+    let peer_b: SipConnection = ChannelConnection::create_connection(
+        b_in_rx,
+        b_out_tx,
+        node_a.clone(),
+        Some(cancel.child_token()),
+    )
+    .await
+    .unwrap()
+    .into();
+    endpoint_a
+        .inner
+        .transport_layer
+        .add_connection(peer_a.clone());
+    server_b
+        .endpoint
+        .inner
+        .transport_layer
+        .add_connection(peer_b.clone());
+    let to_b = tokio::spawn(async move {
+        while let Some(TransportEvent::Incoming(msg, _, _)) = a_out_rx.recv().await {
+            b_in_tx
+                .send(TransportEvent::Incoming(
+                    msg,
+                    peer_b.clone(),
+                    node_a.clone(),
+                ))
+                .unwrap();
+        }
+    });
+    let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+    let to_a = tokio::spawn(async move {
+        while let Some(TransportEvent::Incoming(msg, _, _)) = b_out_rx.recv().await {
+            if let SipMessage::Response(response) = &msg {
+                if response.cseq_header().unwrap().value().contains("BYE")
+                    && response.status_code.code() >= 200
+                {
+                    response_tx.send(response.status_code.clone()).unwrap();
+                }
+            }
+            a_in_tx
+                .send(TransportEvent::Incoming(
+                    msg,
+                    peer_a.clone(),
+                    node_b.clone(),
+                ))
+                .unwrap();
+        }
+    });
+    let serving_a = tokio::spawn({
+        let endpoint = endpoint_a.clone();
+        async move { endpoint.serve().await }
+    });
+    let serving_b = tokio::spawn({
+        let server = server_b.clone();
+        async move { server.endpoint.serve().await }
+    });
+    let (phone_bye_tx, mut phone_bye_rx) = mpsc::unbounded_channel();
+    let mut phones = Vec::new();
+    let mut old_token: Option<CancellationToken> = None;
+    let mut dialog = None;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    for (flow, endpoint, home) in [
+        (
+            old_flow.clone(),
+            endpoint_a.inner.clone(),
+            addr("192.0.2.10:5060", Transport::Udp),
+        ),
+        (
+            new_flow.clone(),
+            server_b.endpoint.inner.clone(),
+            addr("192.0.2.11:5060", Transport::Udp),
+        ),
+    ] {
+        if let Some(token) = old_token.take() {
+            token.cancel();
+            endpoint_a.inner.transport_layer.del_connection(&old_flow);
+        }
+        let flow_token = cancel.child_token();
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+        let connection: SipConnection = ChannelConnection::create_connection(
+            incoming_rx,
+            outgoing_tx,
+            flow.clone(),
+            Some(flow_token.clone()),
+        )
+        .await
+        .unwrap()
+        .into();
+        endpoint.transport_layer.add_connection(connection.clone());
+        let phone_bye_tx = phone_bye_tx.clone();
+        let phone_contact = contact.clone();
+        let phone_flow = flow.clone();
+        let phone_behavior = phone_behavior.clone();
+        phones.push(tokio::spawn(async move {
+            while let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                outgoing_rx.recv().await
+            {
+                if request.method == Method::Ack {
+                    continue;
+                }
+                if request.method == Method::Bye {
+                    phone_bye_tx
+                        .send((phone_flow.clone(), request.clone()))
+                        .unwrap();
+                    if matches!(phone_behavior, PhoneByeBehavior::Silent) {
+                        continue;
+                    }
+                }
+                let mut headers: Vec<_> = request
+                    .headers
+                    .iter()
+                    .filter(|header| {
+                        matches!(
+                            header,
+                            Header::Via(_) | Header::From(_) | Header::CallId(_) | Header::CSeq(_)
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let to = request.to_header().unwrap().value();
+                headers.push(Header::To(if request.method == Method::Invite {
+                    format!("{to};tag=phone").into()
+                } else {
+                    to.to_owned().into()
+                }));
+                if request.method == Method::Invite {
+                    headers.push(Header::Contact(format!("<{phone_contact}>").into()));
+                }
+                headers.push(Header::ContentLength("0".into()));
+                incoming_tx
+                    .send(TransportEvent::Incoming(
+                        SipMessage::Response(Response {
+                            version: Version::V2,
+                            status_code: if request.method == Method::Bye {
+                                match &phone_behavior {
+                                    PhoneByeBehavior::Reply(status) => status.clone(),
+                                    PhoneByeBehavior::MissingFlow | PhoneByeBehavior::Silent => {
+                                        panic!("this phone must not answer BYE")
+                                    }
+                                }
+                            } else {
+                                StatusCode::OK
+                            },
+                            headers: headers.into(),
+                            body: vec![],
+                        }),
+                        connection.clone(),
+                        phone_flow.clone(),
+                    ))
+                    .unwrap();
+            }
+        }));
+        locator
+            .register(
+                "alice",
+                Some("example.com"),
+                Location {
+                    aor: contact.clone(),
+                    registered_aor: Some("sip:alice@example.com".try_into().unwrap()),
+                    destination: Some(flow.clone()),
+                    home_proxy: Some(home),
+                    transport: Some(Transport::Wss),
+                    expires: 3600,
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if flow == old_flow {
+            let (established, response) = timeout(
+                Duration::from_secs(2),
+                dialogs_a.do_invite(
+                    InviteOption {
+                        caller: "sip:pbx@192.0.2.10:5060".try_into().unwrap(),
+                        callee: "sip:alice@example.com".try_into().unwrap(),
+                        contact: "sip:pbx@192.0.2.10:5060".try_into().unwrap(),
+                        destination: Some(old_flow.clone()),
+                        call_id: Some("cross-node-wss-reconnect-server-bye".into()),
+                        ..Default::default()
+                    },
+                    state_tx.clone(),
+                ),
+            )
+            .await
+            .expect("INVITE must establish on node A")
+            .unwrap();
+            assert_eq!(response.unwrap().status_code, StatusCode::OK);
+            dialog = Some(Dialog::Invite(established));
+            old_token = Some(flow_token);
+        }
+    }
+    // A different terminal of the same account has a newer binding and a
+    // live flow. Routing must use the original dialog's exact Contact.
+    let other_flow = addr("198.51.100.10:41760", Transport::Wss);
+    let (_other_in, other_in_rx) = mpsc::unbounded_channel();
+    let (other_out, mut other_out_rx) = mpsc::unbounded_channel();
+    let other_connection: SipConnection = ChannelConnection::create_connection(
+        other_in_rx,
+        other_out,
+        other_flow.clone(),
+        Some(cancel.child_token()),
+    )
+    .await
+    .unwrap()
+    .into();
+    server_b
+        .endpoint
+        .inner
+        .transport_layer
+        .add_connection(other_connection);
+    locator
+        .register(
+            "alice",
+            Some("example.com"),
+            Location {
+                aor: "sip:alice@192.168.1.50:60559;transport=wss"
+                    .try_into()
+                    .unwrap(),
+                registered_aor: Some("sip:alice@example.com".try_into().unwrap()),
+                destination: Some(other_flow),
+                home_proxy: Some(addr("192.0.2.11:5060", Transport::Udp)),
+                transport: Some(Transport::Wss),
+                expires: 3600,
+                last_modified: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        server_b.dialog_layer.is_empty(),
+        "B must not own the original dialog"
+    );
+    if matches!(phone_behavior, PhoneByeBehavior::MissingFlow) {
+        // The registration still points here, but the connection cache no
+        // longer contains the reconnected flow. Do not dial its NAT address.
+        server_b
+            .endpoint
+            .inner
+            .transport_layer
+            .del_connection(&new_flow);
+    }
+    let hangup = timeout(Duration::from_secs(5), dialog.unwrap().hangup()).await;
+    let reached_b = timeout(Duration::from_secs(2), node_bye_rx.recv()).await;
+    let reached_phone = timeout(Duration::from_millis(500), phone_bye_rx.recv()).await;
+    let response = timeout(Duration::from_secs(2), response_rx.recv()).await;
+    cancel.cancel();
+    for task in [processing_b, to_b, to_a] {
+        task.abort();
+    }
+    serving_a.abort();
+    serving_b.abort();
+    for phone in phones {
+        phone.abort();
+    }
+    let node_bye = reached_b
+        .expect("A's BYE must reach B's real CallModule")
+        .unwrap();
+    assert_eq!(node_bye.uri, contact);
+    assert!(hangup.is_ok(), "A's BYE transaction timed out");
+    hangup.unwrap().unwrap();
+    assert!(
+        other_out_rx.try_recv().is_err(),
+        "another Contact must never receive this BYE"
+    );
+    let response = response
+        .expect("B must return a BYE response to A")
+        .unwrap();
+    if !trusted || source_wss {
+        assert!(
+            reached_phone.is_err(),
+            "a client or untrusted source must not relay BYE to the phone"
+        );
+        assert_eq!(response, StatusCode::OK);
+        return;
+    }
+    let expected = match &phone_behavior {
+        PhoneByeBehavior::Reply(status) => status.clone(),
+        PhoneByeBehavior::MissingFlow => StatusCode::TemporarilyUnavailable,
+        PhoneByeBehavior::Silent => StatusCode::from(504_u16),
+    };
+    assert_eq!(
+        response, expected,
+        "B must return the actual delivery result"
+    );
+    if matches!(phone_behavior, PhoneByeBehavior::MissingFlow) {
+        assert!(
+            reached_phone.is_err(),
+            "an uncached flow must not receive BYE"
+        );
+        return;
+    }
+    let (flow, bye) = reached_phone
+        .expect("B answered BYE but never delivered it to the reconnected WSS phone")
+        .expect("reconnected WSS phone disappeared");
+    assert_eq!(flow, new_flow);
+    assert_eq!(bye.uri, contact);
+    assert_eq!(
+        bye.call_id_header().unwrap(),
+        node_bye.call_id_header().unwrap()
+    );
+    assert_eq!(bye.from_header().unwrap(), node_bye.from_header().unwrap());
+    assert_eq!(bye.to_header().unwrap(), node_bye.to_header().unwrap());
+    assert_eq!(bye.cseq_header().unwrap(), node_bye.cseq_header().unwrap());
+    assert_eq!(bye.body, node_bye.body);
+}

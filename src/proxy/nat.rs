@@ -214,6 +214,17 @@ impl MessageInspector for NatInspector {
         let mut msg = msg;
         let Some(from) = from else { return msg };
 
+        // WebSocket clients keep their registered Contact across reconnects;
+        // the locator stores the current reachable flow separately. Rewriting
+        // a dialog Contact to this flow's peer address breaks that identity and
+        // strands in-dialog requests at the old address after a reconnect.
+        if matches!(
+            from.r#type,
+            Some(rsipstack::sip::Transport::Ws | rsipstack::sip::Transport::Wss)
+        ) {
+            return msg;
+        }
+
         // ── Request side: fix Caller Contact for INVITE ────────────────
         if let SipMessage::Request(ref mut req) = msg {
             let source_port = from.addr.port.map(|p| p.0);
@@ -330,6 +341,52 @@ mod tests {
             panic!("expected request")
         };
         req
+    }
+
+    #[test]
+    fn websocket_contacts_preserve_registration_identity() {
+        use rsipstack::sip::{Response, StatusCode, Transport, Version};
+
+        for transport in [
+            Transport::Ws,
+            Transport::Wss,
+            Transport::Udp,
+            Transport::Tcp,
+        ] {
+            let from = SipAddr {
+                r#type: Some(transport),
+                addr: "198.51.100.24:15060".try_into().unwrap(),
+            };
+            let mut request = nated_invite();
+            // The actual transport determines whether a Contact is rewritten;
+            // a peer-supplied transport parameter must not select this policy.
+            *request.contact_header_mut().unwrap() =
+                "<sip:41111112222@10.10.10.10:15060;transport=wss>".into();
+            let original = request.contact_header().unwrap().value().to_owned();
+            let response = Response {
+                version: Version::V2,
+                status_code: StatusCode::OK,
+                headers: request.headers.clone(),
+                body: vec![],
+            };
+            for message in [SipMessage::Request(request), SipMessage::Response(response)] {
+                let inspected = NatInspector::new().after_received(message, Some(&from));
+                let contact = match &inspected {
+                    SipMessage::Request(request) => request.contact_header().unwrap(),
+                    SipMessage::Response(response) => response.contact_header().unwrap(),
+                };
+                let expected = if matches!(transport, Transport::Ws | Transport::Wss) {
+                    original.as_str()
+                } else {
+                    "<sip:41111112222@198.51.100.24:15060;transport=wss>"
+                };
+                assert_eq!(
+                    contact.value(),
+                    expected,
+                    "transport={transport}, message={inspected}"
+                );
+            }
+        }
     }
 
     #[test]

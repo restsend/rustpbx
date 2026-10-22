@@ -2245,12 +2245,155 @@ impl CallModule {
         }
     }
 
+    /// A peer that owns an old dialog may reach the phone through its new
+    /// registration home. This is terminal delivery, not a request from the
+    /// phone to be forwarded back to the dialog owner.
+    async fn try_deliver_peer_bye_to_local_ws(
+        &self,
+        tx: &mut Transaction,
+        dialog_id: &DialogId,
+    ) -> Result<bool> {
+        use rsipstack::sip::{Header, Method, SipMessage, StatusCode, Transport};
+        use rsipstack::transaction::key::TransactionKey;
+
+        let server = &self.inner.server;
+        if tx.original.method != Method::Bye
+            || dialog_id.local_tag.is_empty()
+            || dialog_id.remote_tag.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(source) = tx
+            .connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr())
+        else {
+            return Ok(false);
+        };
+        if matches!(source.r#type, Some(Transport::Ws | Transport::Wss))
+            || !source
+                .addr
+                .host
+                .clone()
+                .try_into()
+                .ok()
+                .is_some_and(|ip: std::net::IpAddr| server.cluster_peer_ips.contains(&ip))
+        {
+            return Ok(false);
+        }
+        let Some(home) = server.cluster_self_addr.as_ref() else {
+            return Ok(false);
+        };
+        let location = server
+            .locator
+            .lookup(&tx.original.uri)
+            .await?
+            .into_iter()
+            .find(|loc| {
+                loc.aor == tx.original.uri
+                    && loc
+                        .home_proxy
+                        .as_ref()
+                        .is_some_and(|owner| owner.addr == home.addr)
+                    && loc.destination.as_ref().is_some_and(|dest| {
+                        matches!(dest.r#type, Some(Transport::Ws | Transport::Wss))
+                    })
+            });
+        let Some(destination) = location.and_then(|loc| loc.destination) else {
+            return Ok(false);
+        };
+        // Avoid dialing a client's NAT address when no registered flow is
+        // cached. Resolution and sending remain bounded if a close races this check.
+        if !server
+            .endpoint
+            .inner
+            .transport_layer
+            .get_addrs()
+            .contains(&destination)
+        {
+            tx.reply(StatusCode::TemporarilyUnavailable).await?;
+            return Ok(true);
+        }
+        let original = tx.original.clone();
+        let original_vias: Vec<_> = original
+            .headers
+            .iter()
+            .filter(|header| matches!(header, Header::Via(_)))
+            .cloned()
+            .collect();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (connection, _) = server
+                .endpoint
+                .inner
+                .transport_layer
+                .lookup(&destination, None)
+                .await?;
+            if connection
+                .cancel_token()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return Err(anyhow!("registered WebSocket flow is closed"));
+            }
+            let mut via_addr = home.clone();
+            via_addr.r#type = destination.r#type;
+            let via = server.endpoint.inner.get_via(Some(via_addr), None)?;
+            let mut request = original;
+            request.headers = std::iter::once(Header::from(via))
+                .chain(request.headers.iter().cloned())
+                .collect::<Vec<_>>()
+                .into();
+            let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
+            let mut relay = Transaction::new_client(
+                key,
+                request,
+                server.endpoint.inner.clone(),
+                Some(connection),
+            );
+            relay.destination = Some(destination);
+            relay.send().await?;
+            while let Some(message) = relay.receive().await {
+                if let SipMessage::Response(mut response) = message
+                    && response.status_code.code() >= 200
+                {
+                    // Remove this hop's Via while retaining the source peer's
+                    // transaction routing, including received/rport parameters.
+                    response.headers = original_vias
+                        .iter()
+                        .cloned()
+                        .chain(
+                            response
+                                .headers
+                                .iter()
+                                .filter(|h| !matches!(h, Header::Via(_)))
+                                .cloned(),
+                        )
+                        .collect::<Vec<_>>()
+                        .into();
+                    return Ok(response);
+                }
+            }
+            Err(anyhow!(
+                "registered WebSocket BYE transaction ended without a response"
+            ))
+        })
+        .await;
+        match response {
+            Ok(Ok(response)) => tx.respond(response).await?,
+            Ok(Err(_)) => tx.reply(StatusCode::ServiceUnavailable).await?,
+            Err(_) => tx.reply(StatusCode::from(504_u16)).await?,
+        }
+        Ok(true)
+    }
+
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
+                if self.try_deliver_peer_bye_to_local_ws(tx, &dialog_id).await? {
+                    return Ok(());
+                }
                 // Cluster: if this node has no dialog, try forwarding in-dialog
                 // BYE/INFO to the session owner (agent may have re-registered
                 // here after a mid-call WS reconnect).

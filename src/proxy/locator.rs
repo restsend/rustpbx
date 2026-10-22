@@ -1829,6 +1829,207 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registered_wss_dialog_bye_reaches_reconnected_flow() {
+        use crate::proxy::nat::NatInspector;
+        use rsipstack::dialog::{
+            dialog::Dialog, dialog_layer::DialogLayer, invitation::InviteOption,
+        };
+        use rsipstack::sip::{
+            Header, Method, Response, SipMessage, StatusCode, Version, prelude::HeadersExt,
+        };
+        use rsipstack::transport::{SipConnection, TransportEvent, channel::ChannelConnection};
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        let contact: rsipstack::sip::Uri = "sip:alice@192.168.1.50:60558;transport=wss"
+            .try_into()
+            .unwrap();
+        let old_flow = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: "198.51.100.10:21760".try_into().unwrap(),
+        };
+        let new_flow = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: "198.51.100.10:31760".try_into().unwrap(),
+        };
+        let locator: Arc<Box<dyn Locator>> = Arc::new(Box::new(MemoryLocator::new()));
+        // Another terminal for this account must never receive this dialog's BYE.
+        locator
+            .register(
+                "alice",
+                Some("example.com"),
+                Location {
+                    aor: "sip:alice@192.168.1.50:60559;transport=wss"
+                        .try_into()
+                        .unwrap(),
+                    registered_aor: Some("sip:alice@example.com".try_into().unwrap()),
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Wss),
+                        addr: "198.51.100.10:41760".try_into().unwrap(),
+                    }),
+                    expires: 3600,
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let endpoint = Arc::new(
+            rsipstack::EndpointBuilder::new()
+                .with_cancel_token(cancel.clone())
+                .with_inspector(Box::new(NatInspector::new()))
+                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false))
+                .build(),
+        );
+        let serving = {
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move { endpoint.serve().await })
+        };
+        let dialogs = DialogLayer::new(endpoint.inner.clone());
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let mut dialog = None;
+        let mut old_token: Option<CancellationToken> = None;
+        let (bye_tx, mut bye_rx) = mpsc::unbounded_channel();
+        let mut peers = Vec::new();
+
+        for flow in [&old_flow, &new_flow] {
+            if let Some(token) = old_token.take() {
+                // Axum's WSS adapter cancels the old flow and removes its
+                // cached connection before a replacement is registered.
+                token.cancel();
+                endpoint.inner.transport_layer.del_connection(&old_flow);
+            }
+            let flow_token = cancel.child_token();
+            let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+            let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+            let connection = SipConnection::Channel(
+                ChannelConnection::create_connection(
+                    incoming_rx,
+                    outgoing_tx,
+                    flow.clone(),
+                    Some(flow_token.clone()),
+                )
+                .await
+                .unwrap(),
+            );
+            endpoint
+                .inner
+                .transport_layer
+                .add_connection(connection.clone());
+            let peer_connection = connection.clone();
+            let peer_flow = flow.clone();
+            let bye_tx = bye_tx.clone();
+            peers.push(tokio::spawn(async move {
+                while let Some(event) = outgoing_rx.recv().await {
+                    let TransportEvent::Incoming(SipMessage::Request(request), _, _) = event else {
+                        continue;
+                    };
+                    if request.method == Method::Ack {
+                        continue;
+                    }
+                    if request.method == Method::Bye {
+                        bye_tx.send((peer_flow.clone(), request.clone())).unwrap();
+                    }
+                    let mut headers: Vec<_> = request
+                        .headers
+                        .iter()
+                        .filter(|header| {
+                            matches!(
+                                header,
+                                Header::Via(_)
+                                    | Header::From(_)
+                                    | Header::CallId(_)
+                                    | Header::CSeq(_)
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    let to = request.to_header().unwrap().value();
+                    headers.push(Header::To(if request.method == Method::Invite {
+                        format!("{to};tag=phone").into()
+                    } else {
+                        to.to_owned().into()
+                    }));
+                    if request.method == Method::Invite {
+                        headers.push(Header::Contact(
+                            "<sip:alice@192.168.1.50:60558;transport=wss>".into(),
+                        ));
+                    }
+                    headers.push(Header::ContentLength("0".into()));
+                    incoming_tx
+                        .send(TransportEvent::Incoming(
+                            SipMessage::Response(Response {
+                                version: Version::V2,
+                                status_code: StatusCode::OK,
+                                headers: headers.into(),
+                                body: vec![],
+                            }),
+                            peer_connection.clone(),
+                            peer_flow.clone(),
+                        ))
+                        .unwrap();
+                }
+            }));
+            locator
+                .register(
+                    "alice",
+                    Some("example.com"),
+                    Location {
+                        aor: contact.clone(),
+                        registered_aor: Some("sip:alice@example.com".try_into().unwrap()),
+                        destination: Some(flow.clone()),
+                        expires: 3600,
+                        last_modified: Some(Instant::now()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            if flow == &old_flow {
+                let established = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    dialogs.do_invite(
+                        InviteOption {
+                            caller: "sip:pbx@127.0.0.1:5060".try_into().unwrap(),
+                            callee: "sip:alice@example.com".try_into().unwrap(),
+                            contact: "sip:pbx@127.0.0.1:5060".try_into().unwrap(),
+                            destination: Some(old_flow.clone()),
+                            call_id: Some("wss-reconnect-server-bye".into()),
+                            ..Default::default()
+                        },
+                        state_tx.clone(),
+                    ),
+                )
+                .await
+                .expect("INVITE must finish on the original flow")
+                .unwrap();
+                assert_eq!(established.1.unwrap().status_code, StatusCode::OK);
+                dialog = Some(Dialog::Invite(established.0));
+                old_token = Some(flow_token);
+            }
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), dialog.unwrap().hangup()).await;
+        let received = bye_rx.try_recv();
+        cancel.cancel();
+        serving.abort();
+        for peer in peers {
+            peer.abort();
+        }
+        assert!(
+            result.is_ok(),
+            "BYE must finish over the replacement flow instead of dialing the stale peer address"
+        );
+        result.unwrap().unwrap();
+        let (destination, bye) = received.expect("the reconnected phone must receive BYE");
+        assert_eq!(destination, new_flow);
+        assert_eq!(
+            bye.uri, contact,
+            "dialog target must retain the registered Contact identity"
+        );
+    }
+
+    #[tokio::test]
     async fn dialog_target_locator_does_not_replace_an_unregistered_explicit_contact() {
         let locator = MemoryLocator::new();
         let registered_contact: rsipstack::sip::Uri =
