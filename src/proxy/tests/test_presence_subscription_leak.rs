@@ -1116,10 +1116,14 @@ impl PresenceWireUa {
     }
 
     async fn request(&mut self, method: &str, from: &str, to: &str, body: &str) {
+        self.request_event(method, from, to, body, "presence").await;
+    }
+
+    async fn request_event(&mut self, method: &str, from: &str, to: &str, body: &str, event: &str) {
         let local = self.socket.local_addr().unwrap();
         let id = rsipstack::transaction::random_text(12);
         let request = format!(
-            "{method} sip:{to}@{server} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK{id}\r\nFrom: <sip:{from}@127.0.0.1>;tag={id}\r\nTo: <sip:{to}@127.0.0.1>\r\nCall-ID: {id}\r\nCSeq: 1 {method}\r\nContact: <sip:{from}@{local}>\r\nMax-Forwards: 70\r\nEvent: presence\r\nExpires: 3600\r\nContent-Type: application/pidf+xml\r\nContent-Length: {length}\r\n\r\n{body}",
+            "{method} sip:{to}@{server} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK{id}\r\nFrom: <sip:{from}@127.0.0.1>;tag={id}\r\nTo: <sip:{to}@127.0.0.1>\r\nCall-ID: {id}\r\nCSeq: 1 {method}\r\nContact: <sip:{from}@{local}>\r\nMax-Forwards: 70\r\nEvent: {event}\r\nExpires: 3600\r\nContent-Type: application/pidf+xml\r\nContent-Length: {length}\r\n\r\n{body}",
             server = self.address,
             length = body.len(),
         );
@@ -1283,4 +1287,221 @@ async fn oc_publish_offline_survives_register_keepalive() {
         PresenceStatus::Offline,
         "a SIP keepalive must not undo the user's PUBLISH logout"
     );
+}
+
+
+// Pause an actual locator consumer at its business-state boundary, so an old
+// Offline stays queued while a replacement registration and SIP subscriptions land.
+#[derive(Default)]
+struct PausedLocatorPresence {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    drained: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::proxy::presence::BusinessStatusProvider for PausedLocatorPresence {
+    async fn business_status(&self, identity: &str) -> Option<PresenceState> {
+        if identity == "gate" {
+            self.entered.notify_one();
+            self.release.notified().await;
+        } else if identity == "sentinel" {
+            self.drained.notify_one();
+        }
+        Some(PresenceState {
+            status: PresenceStatus::Away("0".into()),
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn queued_offline_after_reconnect_preserves_new_subscriptions_and_delivery() {
+    use crate::proxy::locator::LocatorOfflineReason;
+    for (reason, remote) in [
+        (LocatorOfflineReason::TransportClosed, false),
+        (LocatorOfflineReason::Expired, false),
+        (LocatorOfflineReason::TransportClosed, true),
+        (LocatorOfflineReason::Expired, true),
+    ] {
+        let mut ua = PresenceWireUa::start().await;
+        let manager = ua.server.presence_manager.clone();
+        let barrier = Arc::new(PausedLocatorPresence::default());
+        manager.set_business_status_provider(barrier.clone());
+        manager
+            .update_state(
+                "alice",
+                PresenceState {
+                    status: PresenceStatus::Away("0".into()),
+                    ..Default::default()
+                },
+                &EventSource::Local,
+            )
+            .await;
+        let events = ua.server.locator_events.as_ref().unwrap();
+        events
+            .send(LocatorEvent::Registered(Location {
+                registered_aor: Some(watcher("gate", "127.0.0.1")),
+                ..Default::default()
+            }))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), barrier.entered.notified())
+            .await
+            .unwrap();
+        let old = webrtc_location("alice", "old-contact");
+        let offline = LocatorEvent::Offline(vec![old], reason);
+        if !remote {
+            events.send(offline.clone()).unwrap();
+        }
+        // Same critical section used by the production REGISTER writer.
+        {
+            let _guard = ua.server.locator_event_lock.lock().await;
+            ua.server
+                .locator
+                .register(
+                    "alice",
+                    Some("127.0.0.1"),
+                    Location {
+                        aor: format!("sip:alice@{}", ua.socket.local_addr().unwrap())
+                            .parse()
+                            .unwrap(),
+                        registered_aor: Some(watcher("alice", "127.0.0.1")),
+                        expires: 3600,
+                        last_modified: Some(Instant::now()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        ua.request("SUBSCRIBE", "alice", "bob", "").await;
+        ua.notify().await;
+        ua.request_event("SUBSCRIBE", "alice", "bob", "", "message-summary")
+            .await;
+        ua.notify().await;
+        let presence_id = manager.get_subscribers("bob")[0].dialog_id.clone();
+        let mwi_id = manager.get_mwi_subscribers("bob")[0].dialog_id.clone();
+        if remote {
+            ua.server
+                .cluster_event_hub
+                .as_ref()
+                .unwrap()
+                .on_remote_locator_event(
+                    offline,
+                    EventSource::Remote("127.0.0.2:5060".parse().unwrap()),
+                )
+                .await;
+        }
+        ua.server
+            .locator_events
+            .as_ref()
+            .unwrap()
+            .send(LocatorEvent::Registered(Location {
+                registered_aor: Some(watcher("sentinel", "127.0.0.1")),
+                ..Default::default()
+            }))
+            .unwrap();
+        barrier.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), barrier.drained.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_subscribers("bob").len(),
+            1,
+            "queued {reason:?} must not delete the replacement presence subscription"
+        );
+        assert_eq!(
+            manager.get_mwi_subscribers("bob").len(),
+            1,
+            "queued {reason:?} must not delete the replacement MWI subscription"
+        );
+        assert!(ua.server.dialog_layer.get_dialog(&presence_id).is_some());
+        assert!(ua.server.dialog_layer.get_dialog(&mwi_id).is_some());
+        assert_eq!(
+            manager.get_state("alice").status,
+            PresenceStatus::Away("0".into())
+        );
+        manager
+            .update_state(
+                "bob",
+                PresenceState {
+                    status: PresenceStatus::Away("0".into()),
+                    ..Default::default()
+                },
+                &EventSource::Local,
+            )
+            .await;
+        assert!(
+            ua.notify().await.contains("<note>away:0</note>"),
+            "state updates must still reach the replacement flow"
+        );
+        manager.trigger_mwi("bob", 2, 0).await;
+        assert!(ua.notify().await.contains("Voice-Message: 2/0"));
+    }
+}
+
+#[tokio::test]
+async fn offline_cleanup_rechecks_registration_after_waiting_for_writer() {
+    let mut ua = PresenceWireUa::start().await;
+    ua.request("SUBSCRIBE", "alice", "bob", "").await;
+    ua.notify().await;
+    let guard = ua.server.locator_event_lock.lock().await;
+    let manager = ua.server.presence_manager.clone();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let consumer = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        manager
+            .handle_locator_event(
+                LocatorEvent::Offline(
+                    vec![webrtc_location("alice", "old-contact")],
+                    crate::proxy::locator::LocatorOfflineReason::TransportClosed,
+                ),
+                &EventSource::Local,
+            )
+            .await
+    });
+    ready.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !consumer.is_finished(),
+        "cleanup must serialize with the REGISTER writer"
+    );
+    ua.server
+        .locator
+        .register(
+            "alice",
+            Some("127.0.0.1"),
+            Location {
+                aor: format!("sip:alice@{}", ua.socket.local_addr().unwrap())
+                    .parse()
+                    .unwrap(),
+                registered_aor: Some(watcher("alice", "127.0.0.1")),
+                expires: 3600,
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    drop(guard);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), consumer)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(ua.server.presence_manager.get_subscribers("bob").len(), 1);
+    ua.server
+        .presence_manager
+        .update_state(
+            "bob",
+            PresenceState {
+                status: PresenceStatus::Idle,
+                ..Default::default()
+            },
+            &EventSource::Local,
+        )
+        .await;
+    assert!(ua.notify().await.contains("<note>idle</note>"));
 }

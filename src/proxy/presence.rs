@@ -5,7 +5,7 @@ use crate::config::ProxyConfig;
 use crate::models::presence;
 use crate::proxy::cluster_event::{EventSource, event_etags};
 use crate::proxy::cluster_sync::ClusterSync;
-use crate::proxy::locator::{Locator, LocatorEvent};
+use crate::proxy::locator::{Locator, LocatorEvent, LocatorEventLock};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::dialog::DialogId;
@@ -318,6 +318,8 @@ fn register_recovery_status(business: Option<&PresenceState>) -> PresenceStatus 
 
 #[derive(Clone)]
 pub struct PresenceManager {
+    /// Shared with REGISTER and transport cleanup; used when consuming delayed Offline events.
+    registration_guard: Option<(Arc<Box<dyn Locator>>, LocatorEventLock)>,
     states: Arc<RwLock<HashMap<String, PresenceState>>>,
     publication_locks: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// PRESENCE (RFC 3856) subscriptions keyed by subscribed-to identity.
@@ -343,6 +345,7 @@ pub struct PresenceManager {
 impl PresenceManager {
     pub fn new(database: Option<DatabaseConnection>) -> Self {
         Self {
+            registration_guard: None,
             states: Arc::new(RwLock::new(HashMap::new())),
             publication_locks: Arc::new(RwLock::new(HashMap::new())),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
@@ -356,6 +359,16 @@ impl PresenceManager {
             business_status_provider: Arc::new(RwLock::new(None)),
             publish_hooks: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Configure the same registration authority and lock used by this SIP server.
+    pub(crate) fn with_registration_guard(
+        mut self,
+        locator: Arc<Box<dyn Locator>>,
+        event_lock: LocatorEventLock,
+    ) -> Self {
+        self.registration_guard = Some((locator, event_lock));
+        self
     }
 
     /// Register an addon hook for raw SIP PUBLISH bodies. Hooks run in
@@ -1070,6 +1083,23 @@ impl PresenceManager {
                 let reason = reason.as_str().to_string();
                 for loc in locs {
                     if let Some(user) = Self::get_user(&loc) {
+                        // The event may have waited behind another identity or a peer
+                        // update. Recheck under the REGISTER writer's lock, and keep
+                        // the decision and its effects in that same critical section.
+                        let _registration = match self.registration_guard.as_ref() {
+                            Some((_, lock)) => Some(lock.lock().await),
+                            None => None,
+                        };
+                        if let Some((locator, _)) = self.registration_guard.as_ref() {
+                            match locator.has_active_binding_for_user(&user).await {
+                                Ok(false) => {},
+                                Ok(true) => continue,
+                                Err(error) => {
+                                    warn!(extension = %user, %error, "Skipping Offline presence cleanup: registration lookup failed");
+                                    continue;
+                                }
+                            }
+                        }
                         pruned.extend(self.prune_watcher_subscriptions(&user));
                         self.update_state(
                             &user,
@@ -1809,6 +1839,9 @@ impl PresenceModule {
                 )
                 .await
                 .ok();
+            } else {
+                // Drain the accept response before the server transaction drops.
+                tx.receive().await;
             }
             // Guard only newly created dialogs; on an in-dialog refresh the
             // fresh state channel is dropped (see handle_subscribe).

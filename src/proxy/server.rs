@@ -1069,7 +1069,10 @@ impl SipServerBuilder {
         }
 
         let active_call_registry = Arc::new(ActiveProxyCallRegistry::new());
-        let presence_manager = Arc::new(PresenceManager::new(database.clone()));
+        let presence_manager = Arc::new(
+            PresenceManager::new(database.clone())
+                .with_registration_guard(locator.clone(), locator_event_lock.clone()),
+        );
         presence_manager.load_from_db().await.ok();
 
         // Create cluster event hub for local event dispatch.
