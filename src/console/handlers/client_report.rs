@@ -21,8 +21,9 @@
 //!   - context: `ts` (unix secs), optional `call_id` / `remote_uri`, plus
 //!     `in_call` / `safe_mode` (headers `X-Restsend-In-Call` / `-Safe-Mode`)
 //!     and `note` (`X-Restsend-Note`).
-//! - Response: `{"ok": true}` on success (2xx = accepted; clients retry on
-//!   failures themselves).
+//! - Response: `{"ok": true, "stored_body": true, "stored_meta": true}` only
+//!   when both writes succeed; clients retry failures. Optional `report_id`
+//!   query/header metadata is echoed for correlation, without deduplication.
 //!
 //! Storage layout (zero migrations — reuses `rustpbx_runtime_snapshots`):
 //!
@@ -44,7 +45,7 @@
 //! hourly sweep as the snapshot prune).
 //!
 //! Stats API (RBAC: `reports:read` OR `cdr:read`, same as the reports page):
-//! `GET /console/api/client-reports/{summary,trend,list,body,export}`.
+//! `GET /console/api/client-reports/{summary,trend,list,body,download,export}`.
 
 use axum::{
     Json,
@@ -115,7 +116,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 /// How much of the decoded body is kept inline in the snapshot row.
 const BODY_PREVIEW_BYTES: usize = 4 * 1024;
-/// How much of the decoded body the detail endpoint returns.
+/// Maximum decoded UTF-8 bytes per detail page (full download is separate).
 const BODY_VIEW_BYTES: usize = 256 * 1024;
 /// Per-key ingest rate limit (key = client IP when known, else "global").
 const RATE_LIMIT_PER_MIN: u32 = 240;
@@ -141,6 +142,7 @@ pub fn api_urls() -> axum::Router<Arc<ConsoleState>> {
         .route("/client-reports/trend", get(trend_handler))
         .route("/client-reports/list", get(list_handler))
         .route("/client-reports/body", get(body_handler))
+        .route("/client-reports/download", get(download_handler))
         .route("/client-reports/export", get(export_handler))
 }
 
@@ -249,13 +251,14 @@ fn client_ip(headers: &HeaderMap, addr: Option<IpAddr>) -> String {
 struct DecodedBody {
     text: String,
     truncated: bool,
+    invalid_gzip: bool,
 }
 
 /// Gunzip when the payload carries the gzip magic, else treat as plain text.
 /// Decompression is capped at [`MAX_DECOMPRESSED_BYTES`].
 fn decode_body(raw: &[u8]) -> DecodedBody {
     if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
-        let mut decoder = flate2::read::GzDecoder::new(raw);
+        let mut decoder = flate2::read::MultiGzDecoder::new(raw);
         let mut buf = Vec::with_capacity(raw.len().min(MAX_DECOMPRESSED_BYTES));
         let mut chunk = [0u8; 16 * 1024];
         loop {
@@ -269,7 +272,11 @@ fn decode_body(raw: &[u8]) -> DecodedBody {
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    let mut decoded = finish_decode(buf, false);
+                    decoded.invalid_gzip = true;
+                    return decoded;
+                }
             }
         }
         finish_decode(buf, false)
@@ -283,6 +290,7 @@ fn finish_decode(bytes: Vec<u8>, truncated: bool) -> DecodedBody {
     DecodedBody {
         text: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
+        invalid_gzip: false,
     }
 }
 
@@ -352,7 +360,11 @@ fn read_telemetry_body(state: &ConsoleState, key: &str) -> Option<String> {
         return None;
     }
     let raw = std::fs::read(&canonical).ok()?;
-    Some(decode_body(&raw).text.chars().take(BODY_VIEW_BYTES * 2).collect())
+    let decoded = decode_body(&raw);
+    if decoded.invalid_gzip || decoded.truncated {
+        return None;
+    }
+    Some(decoded.text)
 }
 
 /// Delete telemetry files older than `days` (called from the hourly sweep in
@@ -467,18 +479,26 @@ pub async fn report_handler(
     let event = sanitize_event(&raw_event);
     let version = meta(&params, &headers, "version", "x-restsend-version", 32)
         .unwrap_or_else(|| "unknown".to_string());
-    let agent_id = meta(&params, &headers, "agent_id", "x-restsend-agent-id", 64)
-        .unwrap_or_default();
+    let agent_id =
+        meta(&params, &headers, "agent_id", "x-restsend-agent-id", 64).unwrap_or_default();
 
     let is_gzip = body.len() >= 2 && body[0] == 0x1f && body[1] == 0x8b;
     let decoded = decode_body(&body);
-    let preview: String = decoded.text.chars().take(BODY_PREVIEW_BYTES).collect();
+    if decoded.invalid_gzip || decoded.truncated {
+        return (
+            if decoded.invalid_gzip { StatusCode::BAD_REQUEST } else { StatusCode::PAYLOAD_TOO_LARGE },
+            Json(json!({"ok": false, "stored_body": false, "stored_meta": false,
+                "error": if decoded.invalid_gzip { "invalid gzip body" } else { "decoded body too large" }})),
+        ).into_response();
+    }
+    let report_id = meta(&params, &headers, "report_id", "x-restsend-report-id", 128);
+    let preview = &decoded.text[..utf8_end(&decoded.text, BODY_PREVIEW_BYTES)];
     let storage_key = store_telemetry_body(&state, &kind, &event, &body, is_gzip);
     // Desktop uploaders use the HTTP status, not stored_body, as their receipt.
     if storage_key.is_none() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": "report body could not be stored"})),
+            Json(json!({"ok": false, "stored_body": false, "stored_meta": false, "report_id": report_id, "error": "report body could not be stored"})),
         )
             .into_response();
     }
@@ -487,6 +507,7 @@ pub async fn report_handler(
     let safe_mode = flag(&params, &headers, "safe_mode", "x-restsend-safe-mode");
 
     let data = json!({
+        "report_id": report_id,
         "kind": kind,
         "env": meta(&params, &headers, "env", "x-restsend-env", 16),
         "os": meta(&params, &headers, "os", "x-restsend-os", 32),
@@ -529,8 +550,8 @@ pub async fn report_handler(
     )
     .await
     {
-        // Body is already on disk; report acceptance so the client does not
-        // re-upload megabytes, but surface the metadata loss.
+        // A body without its searchable metadata is not an accepted report.
+        // Keep the client retryable even though the body write succeeded.
         crate::db_report::report_db_write_failure(
             "runtime_snapshot",
             "insert",
@@ -542,12 +563,20 @@ pub async fn report_handler(
         None
     };
 
-    Json(json!({
-        "ok": true,
-        "stored_body": storage_key.is_some(),
-        "stored_meta": db_err.is_none(),
-    }))
-    .into_response()
+    (
+        if db_err.is_none() {
+            StatusCode::OK
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        Json(json!({
+            "ok": db_err.is_none(),
+            "stored_body": storage_key.is_some(),
+            "stored_meta": db_err.is_none(),
+            "report_id": report_id,
+        })),
+    )
+        .into_response()
 }
 
 /// Record an update check (`GET {api_prefix}/release?version=…`) as a
@@ -678,10 +707,7 @@ struct TrendPoint {
     update_checks: i64,
 }
 
-async fn summary_access_denied(
-    state: &ConsoleState,
-    user: &crate::models::user::Model,
-) -> bool {
+async fn summary_access_denied(state: &ConsoleState, user: &crate::models::user::Model) -> bool {
     !super::reports::has_reports_access(state, user, false).await
 }
 
@@ -706,9 +732,18 @@ async fn summary_handler(
     let totals = SnapshotEntity::find()
         .select_only()
         .column_as(SnapCol::Id.count(), "total")
-        .column_as(count_when(SnapCol::Kind.is_in(abnormal_kinds())), "abnormal")
-        .column_as(count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)), "update_checks")
-        .column_as(sea_orm::sea_query::Expr::col(SnapCol::InstanceId).count_distinct(), "versions")
+        .column_as(
+            count_when(SnapCol::Kind.is_in(abnormal_kinds())),
+            "abnormal",
+        )
+        .column_as(
+            count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)),
+            "update_checks",
+        )
+        .column_as(
+            sea_orm::sea_query::Expr::col(SnapCol::InstanceId).count_distinct(),
+            "versions",
+        )
         .column_as(
             sea_orm::sea_query::Expr::expr(json_text_expr(backend, "data", "agent_id"))
                 .count_distinct(),
@@ -736,7 +771,10 @@ async fn summary_handler(
         .select_only()
         .column_as(SnapCol::InstanceId, "version")
         .column_as(SnapCol::Id.count(), "count")
-        .column_as(count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)), "update_checks")
+        .column_as(
+            count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)),
+            "update_checks",
+        )
         .filter(window.clone())
         .group_by(SnapCol::InstanceId)
         .order_by_desc(SnapCol::Id.count())
@@ -772,16 +810,13 @@ async fn summary_handler(
         .await
         .unwrap_or_default();
 
-    let totals = totals
-        .ok()
-        .flatten()
-        .unwrap_or(SummaryTotals {
-            total: 0,
-            abnormal: 0,
-            update_checks: 0,
-            versions: 0,
-            agents: 0,
-        });
+    let totals = totals.ok().flatten().unwrap_or(SummaryTotals {
+        total: 0,
+        abnormal: 0,
+        update_checks: 0,
+        versions: 0,
+        agents: 0,
+    });
 
     let by_event: Vec<serde_json::Value> = by_event
         .into_iter()
@@ -811,10 +846,7 @@ async fn summary_handler(
             let mut envs = std::collections::BTreeMap::new();
             for cell in &version_envs {
                 if cell.version.as_deref() == Some(version.as_str()) {
-                    let env = cell
-                        .env
-                        .clone()
-                        .unwrap_or_else(|| "unknown".into());
+                    let env = cell.env.clone().unwrap_or_else(|| "unknown".into());
                     *envs.entry(env).or_insert(0i64) += cell.count;
                 }
             }
@@ -857,8 +889,7 @@ async fn trend_handler(
     let q = params.inner.resolve();
     let db = state.db();
     let backend = db.get_database_backend();
-    let bucket_expr =
-        bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
+    let bucket_expr = bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
     let mut window = cr_window(&q).add(kind_like_cr());
     if let Some(ref env) = env {
         window = window.add(env_cond(backend, env));
@@ -868,8 +899,14 @@ async fn trend_handler(
         .select_only()
         .column_as(bucket_expr, "bucket")
         .column_as(SnapCol::Id.count(), "total")
-        .column_as(count_when(SnapCol::Kind.is_in(abnormal_kinds())), "abnormal")
-        .column_as(count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)), "update_checks")
+        .column_as(
+            count_when(SnapCol::Kind.is_in(abnormal_kinds())),
+            "abnormal",
+        )
+        .column_as(
+            count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)),
+            "update_checks",
+        )
         .filter(window)
         .group_by(sea_orm::sea_query::Expr::cust("bucket"))
         .order_by_asc(sea_orm::sea_query::Expr::cust("bucket"))
@@ -913,7 +950,7 @@ struct ListRow {
     data: Option<serde_json::Value>,
 }
 
-/// GET /console/api/client-reports/list?from=&to=&event=&version=&limit=
+/// GET /console/api/client-reports/list?from=&to=&event=&version=&agent_id=&limit=&before_id=
 async fn list_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -924,7 +961,11 @@ async fn list_handler(
     }
     let env = params.env();
     let q = params.inner.resolve();
-    let event = params.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let event = params
+        .event
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let version = params
         .version
         .as_deref()
@@ -944,13 +985,39 @@ async fn list_handler(
         cond = cond.add(env_cond(backend, &env));
     }
 
-    let rows = SnapshotEntity::find()
+    if let Some(before_id) = params.before_id {
+        cond = cond.add(SnapCol::Id.lt(before_id));
+    }
+    if let Some(agent_id) = params
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cond = cond.add(
+            json_text_expr(state.db().get_database_backend(), "data", "agent_id").eq(agent_id),
+        );
+    }
+    let mut rows = match SnapshotEntity::find()
         .filter(cond)
         .order_by_desc(SnapCol::Id)
-        .limit(limit)
+        .limit(limit + 1)
         .all(state.db())
         .await
-        .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "client report list query failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "report query failed"})),
+            )
+                .into_response();
+        }
+    };
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next_before_id = has_more.then(|| rows.last().map(|row| row.id)).flatten();
 
     let items: Vec<ListRow> = rows
         .into_iter()
@@ -974,7 +1041,7 @@ async fn list_handler(
         })
         .collect();
 
-    Json(json!({"data": items})).into_response()
+    Json(json!({"data": items, "next_before_id": next_before_id})).into_response()
 }
 
 impl ListParams {
@@ -991,10 +1058,13 @@ struct ListParams {
     version: Option<String>,
     env: Option<String>,
     limit: Option<u32>,
+    before_id: Option<i64>,
+    agent_id: Option<String>,
 }
 
-/// GET /console/api/client-reports/body?id=123 — decoded telemetry body for
-/// one report (from the local telemetry store).
+/// GET /console/api/client-reports/body?id=123&offset=0&limit=262144.
+/// Offsets count decoded UTF-8 bytes; pages end at character boundaries.
+/// The authenticated download endpoint returns the complete decoded body.
 async fn body_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -1003,7 +1073,61 @@ async fn body_handler(
     if summary_access_denied(&state, &user).await {
         return crate::console::config_helpers::permission_denied();
     }
-    let local = body_response_local(&state, params.id, false).await;
+    let response = fetch_body(&state, &params).await;
+    if !params.download || !response.status().is_success() {
+        return response;
+    }
+    let Ok(bytes) =
+        axum::body::to_bytes(response.into_body(), MAX_DECOMPRESSED_BYTES * 6 + 4096).await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let Some(text) = body.get("text").and_then(|text| text.as_str()) else {
+        return StatusCode::GONE.into_response();
+    };
+    // A legacy peer may ignore `download` and return only a preview. Require
+    // explicit complete-body metadata before presenting its text as a download.
+    if body.get("offset").and_then(|value| value.as_u64()) != Some(0)
+        || body.get("total_bytes").and_then(|value| value.as_u64()) != Some(text.len() as u64)
+        || body.get("next_offset") != Some(&serde_json::Value::Null)
+        || body.get("truncated") != Some(&serde_json::Value::Bool(false))
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "report body node did not prove a complete download"})),
+        )
+            .into_response();
+    }
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"client-report-{}.txt\"", params.id),
+            ),
+        ],
+        text.to_string(),
+    )
+        .into_response()
+}
+
+async fn download_handler(
+    state: State<Arc<ConsoleState>>,
+    auth: AuthRequired,
+    AxumQuery(mut params): AxumQuery<BodyParams>,
+) -> Response {
+    params.download = true;
+    body_handler(state, auth, AxumQuery(params)).await
+}
+
+async fn fetch_body(state: &ConsoleState, params: &BodyParams) -> Response {
+    let local = body_response_local(state, params, false).await;
     if !matches!(local.status(), StatusCode::NOT_FOUND | StatusCode::GONE) {
         return local;
     }
@@ -1021,20 +1145,33 @@ async fn body_handler(
     // forwards again, and verifies the persisted owner before opening a file.
     let responses = futures::future::join_all(cluster.peers.iter().map(|peer| {
         let url = format!(
-            "{}/cluster/client-reports/body?id={}",
+            "{}/cluster/client-reports/body?id={}&offset={}&limit={}&download={}",
             crate::proxy::cluster_forward::peer_ami_base(peer, ami_path),
             params.id,
+            params.offset,
+            params.limit.unwrap_or(BODY_VIEW_BYTES),
+            params.download,
         );
         async move {
-            crate::proxy::cluster_forward::forward_json(client, &url, reqwest::Method::GET, None)
+            // The generic forwarding helper rejects non-2xx before exposing
+            // their status. Body reads must preserve owner validation errors
+            // and distinguish absent files from unavailable peers.
+            let response = client
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
                 .await
+                .ok()?;
+            let status = response.status();
+            let body = response.json::<serde_json::Value>().await.ok()?;
+            Some((status, body))
         }
     }))
     .await;
     let mut unavailable = false;
     for response in responses {
         match response {
-            Some((status, body)) if status.is_success() => {
+            Some((status, body)) if status.is_success() || status == StatusCode::BAD_REQUEST => {
                 return (status, Json(body)).into_response();
             }
             Some((StatusCode::NOT_FOUND | StatusCode::GONE, _)) => {}
@@ -1059,10 +1196,15 @@ pub(crate) async fn cluster_body_handler(
     let Some(state) = app.console.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    body_response_local(state, params.id, true).await
+    body_response_local(state, &params, true).await
 }
 
-async fn body_response_local(state: &ConsoleState, id: i64, require_owner: bool) -> Response {
+async fn body_response_local(
+    state: &ConsoleState,
+    params: &BodyParams,
+    require_owner: bool,
+) -> Response {
+    let id = params.id;
     let Some(row) = SnapshotEntity::find()
         .filter(SnapCol::Id.eq(id))
         .one(state.db())
@@ -1083,7 +1225,9 @@ async fn body_response_local(state: &ConsoleState, id: i64, require_owner: bool)
         )
             .into_response();
     }
-    let owner = row.data.as_ref()
+    let owner = row
+        .data
+        .as_ref()
         .and_then(|data| data.get("received_by"))
         .and_then(|owner| owner.as_str());
     // Legacy keys are not globally unique. Only local console reads may
@@ -1109,10 +1253,36 @@ async fn body_response_local(state: &ConsoleState, id: i64, require_owner: bool)
     };
     match read_telemetry_body(state, &key) {
         Some(text) => {
-            let truncated = text.len() > BODY_VIEW_BYTES;
-            let text: String = text.chars().take(BODY_VIEW_BYTES).collect();
-            Json(json!({"id": row.id, "storage_key": key, "text": text, "truncated": truncated}))
-                .into_response()
+            let total_bytes = text.len();
+            if params.offset > total_bytes || !text.is_char_boundary(params.offset) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "offset must be a UTF-8 byte boundary within the body"})),
+                )
+                    .into_response();
+            }
+            let offset = if params.download { 0 } else { params.offset };
+            let end = if params.download {
+                total_bytes
+            } else {
+                // A minimum of four bytes ensures every UTF-8 character can fit.
+                utf8_end(
+                    &text,
+                    offset.saturating_add(
+                        params
+                            .limit
+                            .unwrap_or(BODY_VIEW_BYTES)
+                            .clamp(4, BODY_VIEW_BYTES),
+                    ),
+                )
+            };
+            let next_offset = (end < total_bytes).then_some(end);
+            Json(
+                json!({"id": row.id, "storage_key": key, "text": &text[offset..end],
+                "offset": offset, "total_bytes": total_bytes, "next_offset": next_offset,
+                "truncated": next_offset.is_some()}),
+            )
+            .into_response()
         }
         None => (
             StatusCode::GONE,
@@ -1122,9 +1292,22 @@ async fn body_response_local(state: &ConsoleState, id: i64, require_owner: bool)
     }
 }
 
-#[derive(Debug, Deserialize)]
+fn utf8_end(text: &str, max: usize) -> usize {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct BodyParams {
     id: i64,
+    #[serde(default)]
+    offset: usize,
+    limit: Option<usize>,
+    #[serde(default)]
+    download: bool,
 }
 
 use serde::Deserialize;
@@ -1142,8 +1325,7 @@ async fn export_handler(
     let q = params.inner.resolve();
     let db = state.db();
     let backend = db.get_database_backend();
-    let bucket_expr =
-        bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
+    let bucket_expr = bucket_index_expr(backend, "created_at", q.bucket.secs(), q.tz_offset_secs);
     let mut window = cr_window(&q).add(kind_like_cr());
     if let Some(ref env) = env {
         window = window.add(env_cond(backend, env));
@@ -1153,8 +1335,14 @@ async fn export_handler(
         .select_only()
         .column_as(bucket_expr, "bucket")
         .column_as(SnapCol::Id.count(), "total")
-        .column_as(count_when(SnapCol::Kind.is_in(abnormal_kinds())), "abnormal")
-        .column_as(count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)), "update_checks")
+        .column_as(
+            count_when(SnapCol::Kind.is_in(abnormal_kinds())),
+            "abnormal",
+        )
+        .column_as(
+            count_when(SnapCol::Kind.eq(CR_UPDATE_CHECK)),
+            "update_checks",
+        )
         .filter(window)
         .group_by(sea_orm::sea_query::Expr::cust("bucket"))
         .order_by_asc(sea_orm::sea_query::Expr::cust("bucket"))
@@ -1225,7 +1413,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/report?kind=diag&event=diag_run&version=0.1.13")
+                    .uri("/api/report?kind=diag&event=diag_run&version=0.1.13&report_id=fixture-report")
                     .header("content-type", "application/gzip")
                     .body(axum::body::Body::from(gzip_bytes(
                         b"complete diagnostic report",
@@ -1234,6 +1422,278 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    async fn console_get(state: Arc<ConsoleState>, uri: &str) -> Response {
+        use tower::ServiceExt;
+        api_urls()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .extension(crate::console::middleware::ApiTokenAuth(
+                        crate::console::handlers::test_helpers::superuser(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_corrupt_gzip_without_receipt() {
+        use tower::ServiceExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _app) = report_state(tmp.path(), None, vec![]).await;
+        let mut truncated = gzip_bytes(b"not a complete gzip");
+        truncated.truncate(truncated.len() - 5);
+        for body in [
+            truncated,
+            [gzip_bytes(b"first"), b"garbage".to_vec()].concat(),
+            [gzip_bytes(b"first"), vec![0x1f, 0x8b, 0xff, 0xff]].concat(),
+        ] {
+            let response = crate::api::router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/report?kind=diag&event=diag_run")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(
+            SnapshotEntity::find()
+                .filter(kind_like_cr())
+                .all(state.db())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_cumulative_gzip_member_limit() {
+        use tower::ServiceExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _app) = report_state(tmp.path(), None, vec![]).await;
+        let body = [
+            gzip_bytes(&vec![b'a'; MAX_DECOMPRESSED_BYTES]),
+            gzip_bytes(b"b"),
+        ]
+        .concat();
+        let response = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/report?kind=diag&event=diag_run")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            SnapshotEntity::find()
+                .filter(kind_like_cr())
+                .all(state.db())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_metadata_failure_is_retryable_and_not_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _app) = report_state(tmp.path(), None, vec![]).await;
+        use sea_orm::ConnectionTrait;
+        state
+            .db()
+            .execute_unprepared("DROP TABLE rustpbx_runtime_snapshots")
+            .await
+            .unwrap();
+        let response = upload_report(state.clone()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let receipt = response_json(response).await;
+        assert_eq!(receipt["ok"], false);
+        assert_eq!(receipt["stored_body"], true);
+        assert_eq!(receipt["stored_meta"], false);
+        let response = console_get(state, "/client-reports/list").await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn body_byte_pages_and_download_recover_entire_unicode_upload() {
+        use tower::ServiceExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _app) = report_state(tmp.path(), None, vec![]).await;
+        let text = "中".repeat(200_000);
+        let response = crate::api::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/report?kind=diag&event=diag_run")
+                    .body(axum::body::Body::from(
+                        [
+                            gzip_bytes(text[..300_000].as_bytes()),
+                            gzip_bytes(text[300_000..].as_bytes()),
+                        ]
+                        .concat(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt = response_json(response).await;
+        assert_eq!(receipt["stored_body"], true);
+        assert_eq!(receipt["stored_meta"], true);
+        let row = SnapshotEntity::find()
+            .filter(kind_like_cr())
+            .one(state.db())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.data.as_ref().unwrap()["body_preview"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= 4096
+        );
+        let mut offset = 0;
+        let mut recovered = String::new();
+        loop {
+            let page = response_json(
+                console_get(
+                    state.clone(),
+                    &format!(
+                        "/client-reports/body?id={}&offset={offset}&limit=262144",
+                        row.id
+                    ),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(page["total_bytes"], 600000);
+            let part = page["text"].as_str().unwrap();
+            assert!(part.len() <= 262144);
+            recovered.push_str(part);
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert!(next > offset);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(recovered, text);
+        for offset in [1, 600001] {
+            let invalid = console_get(
+                state.clone(),
+                &format!("/client-reports/body?id={}&offset={offset}", row.id),
+            )
+            .await;
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        }
+        let unauthenticated = api_urls()
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/client-reports/download?id={}", row.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(unauthenticated.status().is_redirection());
+        let unprivileged = api_urls()
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/client-reports/download?id={}", row.id))
+                    .extension(crate::console::middleware::ApiTokenAuth(
+                        crate::console::handlers::test_helpers::unprivileged_user(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unprivileged.status(), StatusCode::FORBIDDEN);
+
+        let response = console_get(state, &format!("/client-reports/download?id={}", row.id)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("content-disposition"));
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            text.as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_cursor_filters_agent_and_keeps_stable_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _app) = report_state(tmp.path(), None, vec![]).await;
+        for agent in ["alice", "bob", "alice", "alice"] {
+            ingest_row(
+                &state,
+                "diag_run",
+                "1",
+                1,
+                false,
+                false,
+                json!({"agent_id": agent}),
+            )
+            .await
+            .unwrap();
+        }
+        let page = response_json(
+            console_get(state.clone(), "/client-reports/list?agent_id=alice&limit=2").await,
+        )
+        .await;
+        let items = page["data"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|r| r["data"]["agent_id"] == "alice"));
+        let cursor = page["next_before_id"].as_i64().expect("next page cursor");
+        ingest_row(
+            &state,
+            "diag_run",
+            "1",
+            1,
+            false,
+            false,
+            json!({"agent_id": "alice"}),
+        )
+        .await
+        .unwrap();
+        let next = response_json(
+            console_get(
+                state,
+                &format!("/client-reports/list?agent_id=alice&limit=2&before_id={cursor}"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(next["data"].as_array().unwrap().len(), 1);
+        assert!(next["data"][0]["id"].as_i64().unwrap() < cursor);
+        assert_eq!(next["next_before_id"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -1252,7 +1712,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (owner, owner_app) = report_state(&tmp.path().join("owner"), None, vec![]).await;
         let db = owner.db().clone();
-        assert_eq!(upload_report(owner.clone()).await.status(), StatusCode::OK);
+        let receipt = upload_report(owner.clone()).await;
+        assert_eq!(receipt.status(), StatusCode::OK);
+        assert_eq!(response_json(receipt).await["report_id"], "fixture-report");
         let row = SnapshotEntity::find()
             .filter(kind_like_cr())
             .one(&db)
@@ -1280,7 +1742,10 @@ mod tests {
         let response = body_handler(
             State(reader.clone()),
             AuthRequired(crate::console::handlers::test_helpers::superuser()),
-            AxumQuery(BodyParams { id: row.id }),
+            AxumQuery(BodyParams {
+                id: row.id,
+                ..Default::default()
+            }),
         )
         .await;
         let status = response.status();
@@ -1290,11 +1755,47 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["text"], "complete diagnostic report");
+        // Query options and full downloads must reach the body-owning peer.
+        let page = response_json(
+            console_get(
+                reader.clone(),
+                &format!("/client-reports/body?id={}&offset=9&limit=4", row.id),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(page["text"], "diag");
+        assert_eq!(page["total_bytes"], 26);
+        assert_eq!(page["next_offset"], 13);
+        let invalid = console_get(
+            reader.clone(),
+            &format!("/client-reports/body?id={}&offset=27", row.id),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let download = console_get(
+            reader.clone(),
+            &format!("/client-reports/download?id={}", row.id),
+        )
+        .await;
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(download.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"complete diagnostic report"
+        );
+        assert_eq!(row.data.as_ref().unwrap()["report_id"], "fixture-report");
 
         let denied = body_handler(
             State(reader.clone()),
             AuthRequired(crate::console::handlers::test_helpers::unprivileged_user()),
-            AxumQuery(BodyParams { id: row.id }),
+            AxumQuery(BodyParams {
+                id: row.id,
+                ..Default::default()
+            }),
         )
         .await;
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
@@ -1320,7 +1821,10 @@ mod tests {
         let mut legacy = row.data.clone().unwrap();
         legacy["received_by"] = serde_json::Value::Null;
         SnapshotEntity::update_many()
-            .col_expr(SnapCol::Data, sea_orm::sea_query::Expr::value(legacy).into())
+            .col_expr(
+                SnapCol::Data,
+                sea_orm::sea_query::Expr::value(legacy).into(),
+            )
             .filter(SnapCol::Id.eq(row.id))
             .exec(&db)
             .await
@@ -1328,7 +1832,10 @@ mod tests {
         let response = body_handler(
             State(owner),
             AuthRequired(crate::console::handlers::test_helpers::superuser()),
-            AxumQuery(BodyParams { id: row.id }),
+            AxumQuery(BodyParams {
+                id: row.id,
+                ..Default::default()
+            }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1347,10 +1854,74 @@ mod tests {
         let unavailable = body_handler(
             State(reader),
             AuthRequired(crate::console::handlers::test_helpers::superuser()),
-            AxumQuery(BodyParams { id: row.id }),
+            AxumQuery(BodyParams {
+                id: row.id,
+                ..Default::default()
+            }),
         )
         .await;
         assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
+    }
+    #[tokio::test]
+    async fn download_rejects_peer_without_complete_body_proof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (owner, _owner_app) = report_state(&tmp.path().join("owner"), None, vec![]).await;
+        assert_eq!(upload_report(owner.clone()).await.status(), StatusCode::OK);
+        let row = SnapshotEntity::find()
+            .filter(kind_like_cr())
+            .one(owner.db())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut data = row.data.clone().unwrap();
+        data["received_by"] = json!("legacy-peer");
+        SnapshotEntity::update_many()
+            .col_expr(SnapCol::Data, sea_orm::sea_query::Expr::value(data).into())
+            .filter(SnapCol::Id.eq(row.id))
+            .exec(owner.db())
+            .await
+            .unwrap();
+        for payload in [
+            json!({"text": "partial", "truncated": true}),
+            json!({"text": "partial", "truncated": false}),
+            json!({"text": "partial", "offset": 0, "total_bytes": 99, "next_offset": null, "truncated": false}),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let router = axum::Router::new().route(
+                &format!(
+                    "{}/cluster/client-reports/body",
+                    crate::config::DEFAULT_AMI_PATH
+                ),
+                get(move || {
+                    let payload = payload.clone();
+                    async move { Json(payload) }
+                }),
+            );
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let peer = crate::config::ClusterPeer {
+                addr: "127.0.0.1".into(),
+                sip_port: 15060,
+                ami_port: port,
+            };
+            let (reader, _reader_app) = report_state(
+                &tmp.path().join("reader"),
+                Some(owner.db().clone()),
+                vec![peer],
+            )
+            .await;
+            let page =
+                console_get(reader.clone(), &format!("/client-reports/body?id={}", row.id)).await;
+            assert_eq!(page.status(), StatusCode::OK);
+            assert_eq!(response_json(page).await["text"], "partial");
+            let response =
+                console_get(reader, &format!("/client-reports/download?id={}", row.id)).await;
+            task.abort();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert!(!response.headers().contains_key("content-disposition"));
+        }
     }
     #[test]
     fn sanitize_event_keeps_known_shapes_and_caps_length() {
@@ -1409,9 +1980,9 @@ mod tests {
         assert_eq!(decoded.text, "plain text body");
         assert!(!decoded.truncated);
 
-        // Corrupt gzip falls back to lossy text of the raw bytes.
+        // Corrupt gzip must not be reported as a complete decoded body.
         let decoded = decode_body(&[0x1f, 0x8b, 0xff, 0xff]);
-        assert!(!decoded.text.is_empty() || decoded.truncated == false);
+        assert!(decoded.invalid_gzip);
     }
 
     #[test]

@@ -516,9 +516,14 @@
 
             <!-- recent reports -->
             <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
-                <div class="flex items-center justify-between px-4 py-3">
+                <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
                     <h2 class="text-sm font-semibold text-slate-900">{{ "client_reports.recent_title" | t }}</h2>
-                    <span class="text-xs text-slate-400">{{ "client_reports.recent_hint" | t }}</span>
+                    <div class="flex items-center gap-2 text-xs text-slate-500">
+                        <label for="telemetry-agent-filter">{{ "client_reports.col_agent" | t }}</label>
+                        <input id="telemetry-agent-filter" type="text" x-model="tlAgent" @keydown.enter="loadTelemetry()"
+                            class="w-32 rounded-lg border border-slate-200 px-2 py-1 text-sm focus:border-sky-400 focus:outline-none" />
+                        <button type="button" @click="loadTelemetry()" class="font-medium text-sky-600 hover:text-sky-500">{{ "client_reports.refresh" | t }}</button>
+                    </div>
                 </div>
                 <table class="min-w-full divide-y divide-slate-100 text-sm">
                     <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -553,7 +558,12 @@
                         </template>
                     </tbody>
                 </table>
-                <p x-show="!reports.length" class="py-10 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                <p x-show="tlListError" role="alert" class="px-4 py-3 text-sm text-rose-600" x-text="tlListError"></p>
+                <p x-show="!reports.length && !tlListLoading && !tlListError" class="py-10 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                <div x-show="tlListLoading || tlNextBeforeId != null" class="border-t border-slate-100 px-4 py-3 text-center">
+                    <button type="button" @click="loadMoreReports()" :disabled="tlListLoading"
+                        class="rounded-md px-3 py-1.5 text-sm font-medium text-sky-600 hover:bg-sky-50 disabled:opacity-50">{{ "client_reports.view" | t }} ↓</button>
+                </div>
             </section>
         </div><!-- /telemetry tab -->
     </div>
@@ -574,11 +584,16 @@
                 <span x-text="tlBody?.row ? (eventLabels[tlBody.row.event] || tlBody.row.event) : ''"></span>
                 <span x-text="tlBody?.row ? tlBody.row.version : ''" class="font-mono"></span>
                 <span x-text="tlBody?.row ? fmtTime(tlBody.row.created_at) : ''"></span>
-                <button type="button" x-show="tlBody && !tlBody.full" @click="loadFullBody()"
-                    class="ml-auto rounded-md bg-sky-50 px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-100">
-                    {{ "client_reports.load_full" | t }}
+                <button type="button" x-show="tlBody && !tlBody.full && tlBody.nextOffset != null" @click="loadFullBody()" :disabled="tlBody?.loading"
+                    class="ml-auto rounded-md bg-sky-50 px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-100 disabled:opacity-50">
+                    {{ "client_reports.view" | t }} ↓
                 </button>
+                <button type="button" @click="downloadBody()" :disabled="tlBody?.downloading"
+                    class="rounded-md px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-50 disabled:opacity-50">{{ "releases_page.action_download" | t }}</button>
             </div>
+            <p x-show="tlBody && !tlBody.full" class="mb-2 text-xs text-amber-700">… {{ "client_reports.load_full" | t }} ↓</p>
+            <p x-show="tlBody?.totalBytes != null" class="mb-2 font-mono text-xs text-slate-500" x-text="(tlBody?.loadedBytes ?? 0) + ' / ' + tlBody?.totalBytes + ' B'"></p>
+            <p x-show="tlBody?.error" role="alert" class="mb-2 text-xs text-rose-600" x-text="tlBody?.error"></p>
             <pre class="flex-1 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 font-mono text-xs leading-relaxed text-slate-700 ring-1 ring-slate-100" x-text="tlBody?.text || '{{ "client_reports.body_empty" | t }}'"></pre>
         </div>
     </div>
@@ -681,6 +696,12 @@
             tlEvent: '',
             tlVersion: '',
             tlEnv: '',
+            tlAgent: '',
+            tlNextBeforeId: null,
+            tlListQuery: '',
+            tlListRequest: 0,
+            tlListLoading: false,
+            tlListError: '',
             summary: {},
             trend: [],
             reports: [],
@@ -840,24 +861,46 @@
                 await this.loadTelemetry();
             },
             async loadTelemetry() {
+                const request = ++this.tlListRequest;
                 const qs = this.tlQuery();
-                try {
-                    const [summary, trend] = await Promise.all([
+                const extra = new URLSearchParams(qs);
+                if (this.tlEvent) extra.set('event', this.tlEvent);
+                if (this.tlVersion) extra.set('version', this.tlVersion);
+                if (this.tlAgent.trim()) extra.set('agent_id', this.tlAgent.trim());
+                extra.set('limit', '50');
+                this.tlListQuery = extra.toString();
+                this.reports = [];
+                this.tlNextBeforeId = null;
+                this.tlListLoading = false;
+                this.tlListError = '';
+                await Promise.all([
+                    Promise.all([
                         apiGet('/client-reports/summary?' + qs),
                         apiGet('/client-reports/trend?' + qs),
-                    ]);
-                    this.summary = summary.data || {};
-                    this.trend = trend.data || [];
-                } catch (e) { /* surfaced by api.js */ }
+                    ]).then(([summary, trend]) => {
+                        if (request !== this.tlListRequest) return;
+                        this.summary = summary.data || {};
+                        this.trend = trend.data || [];
+                    }).catch(() => { /* surfaced by api.js */ }),
+                    this.loadMoreReports(true),
+                ]);
+            },
+            async loadMoreReports(reset = false) {
+                if (this.tlListLoading || (!reset && this.tlNextBeforeId == null)) return;
+                const request = this.tlListRequest;
+                const query = new URLSearchParams(this.tlListQuery);
+                if (!reset) query.set('before_id', this.tlNextBeforeId);
+                this.tlListLoading = true;
+                this.tlListError = '';
                 try {
-                    const extra = new URLSearchParams(qs);
-                    if (this.tlEvent) extra.set('event', this.tlEvent);
-                    if (this.tlVersion) extra.set('version', this.tlVersion);
-                    extra.set('limit', '50');
-                    const list = await apiGet('/client-reports/list?' + extra.toString());
-                    this.reports = list.data || [];
+                    const list = await apiGet('/client-reports/list?' + query);
+                    if (request !== this.tlListRequest) return;
+                    this.reports = reset ? (list.data || []) : [...this.reports, ...(list.data || [])];
+                    this.tlNextBeforeId = list.next_before_id ?? null;
                 } catch (e) {
-                    this.reports = [];
+                    if (request === this.tlListRequest) this.tlListError = e.message;
+                } finally {
+                    if (request === this.tlListRequest) this.tlListLoading = false;
                 }
             },
             exportUrl() {
@@ -885,23 +928,65 @@
                 return isNaN(d) ? ts : d.toLocaleString();
             },
             async openBody(row) {
-                // Inline preview first (stored in the row's data JSON), full
-                // body fetchable via the button.
                 this.tlBody = {
                     id: row.id,
                     row,
                     text: row.data?.body_preview || '',
                     full: false,
+                    nextOffset: 0,
+                    loadedBytes: 0,
+                    totalBytes: null,
+                    loading: false,
+                    downloading: false,
+                    error: '',
                 };
                 this.tlOpen = true;
             },
             async loadFullBody() {
-                if (!this.tlBody) return;
+                const body = this.tlBody;
+                if (!body || body.loading || body.full) return;
+                const offset = body.nextOffset;
+                body.loading = true;
+                body.error = '';
                 try {
-                    const b = await apiGet('/client-reports/body?id=' + this.tlBody.id);
-                    this.tlBody.text = b.text || this.tlBody.text;
-                    this.tlBody.full = true;
-                } catch (e) { /* surfaced by api.js */ }
+                    const page = await apiGet('/client-reports/body?id=' + body.id + '&offset=' + offset);
+                    if (this.tlBody !== body) return;
+                    if (typeof page.text !== 'string') throw new Error(page.reason || '{{ "client_reports.body_empty" | t }}');
+                    body.text = offset === 0 ? page.text : body.text + page.text;
+                    body.nextOffset = page.next_offset ?? null;
+                    body.totalBytes = page.total_bytes ?? null;
+                    body.loadedBytes = body.nextOffset ?? body.totalBytes;
+                    // Older servers can signal truncation without a cursor.
+                    // Keep that visibly incomplete; full download remains available.
+                    body.full = !page.truncated && body.nextOffset == null;
+                } catch (e) {
+                    if (this.tlBody === body) body.error = e.message;
+                } finally {
+                    body.loading = false;
+                }
+            },
+            async downloadBody() {
+                const body = this.tlBody;
+                if (!body || body.downloading) return;
+                body.downloading = true;
+                body.error = '';
+                try {
+                    // apiGet retains the console's authentication/error handling
+                    // and returns the raw Response for this text attachment.
+                    const response = await apiGet('/client-reports/download?id=' + body.id);
+                    const url = URL.createObjectURL(await response.blob());
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = 'client-report-' + body.id + '.txt';
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                } catch (e) {
+                    if (this.tlBody === body) body.error = e.message;
+                } finally {
+                    body.downloading = false;
+                }
             },
             async saveEdit() {
                 const d = this.editDraft;
