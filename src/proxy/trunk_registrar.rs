@@ -291,7 +291,14 @@ async fn registration_loop(
     };
 
     let mut registration = Registration::new(endpoint, credential);
-
+    let mut extra_headers: Vec<_> = config.register_extra_headers.iter().flatten()
+        .filter(|(name, _)| !name.trim().is_empty())
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .collect();
+    extra_headers.sort();
+    registration.extra_headers = extra_headers.into_iter()
+        .map(|(name, value)| rsipstack::sip::headers::make_header(name, value.to_string()))
+        .collect();
 
     let remote_str = server_uri.to_string();
 
@@ -466,12 +473,21 @@ mod tests {
             username: Some("alice".into()),
             register_enabled: Some(true),
             register_expires: Some(300),
+            register_extra_headers: Some(HashMap::from([
+                (" X-Tenant-Id ".into(), " tenant-42 ".into()),
+                ("User-Agent".into(), "Carrier UA".into()),
+                (" ".into(), "ignored".into()),
+            ])),
             ..Default::default()
         })]);
         registrar.reconcile(&trunks).await;
         let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
         assert_eq!(server, 0);
         assert!(request.starts_with(&format!("REGISTER sip:{} ", addresses[0])));
+        assert!(request.contains("X-Tenant-Id: tenant-42\r\n"));
+        assert!(request.contains("User-Agent: Carrier UA\r\n"));
+        assert_eq!(request.matches("User-Agent:").count(), 1);
+        assert!(!request.contains("ignored"));
         // Unrelated call-routing changes must not churn registrations.
         trunks.get_mut("trunk").unwrap().max_calls = Some(10);
         registrar.reconcile(&trunks).await;
@@ -482,6 +498,7 @@ mod tests {
         let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
         assert_eq!(server, 0);
         assert!(request.contains("Expires: 0\r\n"));
+        assert!(request.contains("X-Tenant-Id: tenant-42\r\n"));
         let (server, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
         assert_eq!(server, 1);
         assert!(request.starts_with(&format!("REGISTER sip:{} ", addresses[1])));
@@ -500,6 +517,18 @@ mod tests {
         assert!(request.contains("Expires: 0\r\n"));
         let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
         assert!(request.contains("sip:bob@"));
+
+        // Reloading only the custom headers must replace the registration too.
+        trunks.get_mut("trunk").unwrap().register_extra_headers = Some(HashMap::from([
+            ("X-Tenant-Id".into(), "tenant-43".into()),
+        ]));
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        assert!(request.contains("X-Tenant-Id: tenant-42\r\n"));
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("X-Tenant-Id: tenant-43\r\n"));
+        assert!(!request.contains("User-Agent: Carrier UA\r\n"));
 
         trunks.get_mut("trunk").unwrap().disabled = Some(true);
         registrar.reconcile(&trunks).await;
