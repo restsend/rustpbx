@@ -973,7 +973,7 @@
                 try {
                     // apiGet retains the console's authentication/error handling
                     // and returns the raw Response for this text attachment.
-                    const response = await apiGet('/client-reports/download?id=' + body.id);
+                    const response = await apiGet('/client-reports/body?id=' + body.id + '&download=true');
                     const url = URL.createObjectURL(await response.blob());
                     const link = document.createElement('a');
                     link.href = url;

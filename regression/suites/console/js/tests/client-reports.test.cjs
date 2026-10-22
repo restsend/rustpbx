@@ -102,7 +102,7 @@ test('full download uses authenticated API client and downloads the response blo
   });
   await page.openBody(row(7));
   await page.downloadBody();
-  assert.equal(calls[0], '/client-reports/download?id=7');
+  assert.equal(calls[0], '/client-reports/body?id=7&download=true');
   assert.equal(clicked, 'client-report-7.txt');
   assert.equal(revoked, 'blob:report');
 });
@@ -110,6 +110,9 @@ test('full download uses authenticated API client and downloads the response blo
 
 test('legacy partial preview remains visible when complete download is unavailable', async () => {
   const page = component(async url => {
+    if (new URLSearchParams(url.split('?')[1]).get('download') === 'true') {
+      throw new Error('complete body is unavailable from this peer');
+    }
     if (url.startsWith('/client-reports/body?')) {
       return { text: 'available legacy log fragment', truncated: true };
     }

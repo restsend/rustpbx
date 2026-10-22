@@ -45,7 +45,7 @@
 //! hourly sweep as the snapshot prune).
 //!
 //! Stats API (RBAC: `reports:read` OR `cdr:read`, same as the reports page):
-//! `GET /console/api/client-reports/{summary,trend,list,body,download,export}`.
+//! `GET /console/api/client-reports/{summary,trend,list,body,export}`.
 
 use axum::{
     Json,
@@ -142,7 +142,6 @@ pub fn api_urls() -> axum::Router<Arc<ConsoleState>> {
         .route("/client-reports/trend", get(trend_handler))
         .route("/client-reports/list", get(list_handler))
         .route("/client-reports/body", get(body_handler))
-        .route("/client-reports/download", get(download_handler))
         .route("/client-reports/export", get(export_handler))
 }
 
@@ -1064,7 +1063,7 @@ struct ListParams {
 
 /// GET /console/api/client-reports/body?id=123&offset=0&limit=262144.
 /// Offsets count decoded UTF-8 bytes; pages end at character boundaries.
-/// The authenticated download endpoint returns the complete decoded body.
+/// `download=true` returns the complete decoded body as an authenticated attachment.
 async fn body_handler(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -1115,15 +1114,6 @@ async fn body_handler(
         text.to_string(),
     )
         .into_response()
-}
-
-async fn download_handler(
-    state: State<Arc<ConsoleState>>,
-    auth: AuthRequired,
-    AxumQuery(mut params): AxumQuery<BodyParams>,
-) -> Response {
-    params.download = true;
-    body_handler(state, auth, AxumQuery(params)).await
 }
 
 async fn fetch_body(state: &ConsoleState, params: &BodyParams) -> Response {
@@ -1609,11 +1599,18 @@ mod tests {
             .await;
             assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         }
+        let removed = console_get(
+            state.clone(),
+            &format!("/client-reports/download?id={}", row.id),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NOT_FOUND);
+
         let unauthenticated = api_urls()
             .with_state(state.clone())
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/client-reports/download?id={}", row.id))
+                    .uri(format!("/client-reports/body?id={}&download=true", row.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -1624,7 +1621,7 @@ mod tests {
             .with_state(state.clone())
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/client-reports/download?id={}", row.id))
+                    .uri(format!("/client-reports/body?id={}&download=true", row.id))
                     .extension(crate::console::middleware::ApiTokenAuth(
                         crate::console::handlers::test_helpers::unprivileged_user(),
                     ))
@@ -1635,7 +1632,11 @@ mod tests {
             .unwrap();
         assert_eq!(unprivileged.status(), StatusCode::FORBIDDEN);
 
-        let response = console_get(state, &format!("/client-reports/download?id={}", row.id)).await;
+        let response = console_get(
+            state,
+            &format!("/client-reports/body?id={}&download=true", row.id),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key("content-disposition"));
         assert_eq!(
@@ -1649,32 +1650,63 @@ mod tests {
 
     #[tokio::test]
     async fn list_cursor_filters_agent_and_keeps_stable_pages() {
+        use tower::ServiceExt;
         let tmp = tempfile::tempdir().unwrap();
         let (state, _app) = report_state(tmp.path(), None, vec![]).await;
-        for agent in ["alice", "bob", "alice", "alice"] {
-            ingest_row(
-                &state,
-                "diag_run",
-                "1",
-                1,
-                false,
-                false,
-                json!({"agent_id": agent}),
-            )
-            .await
-            .unwrap();
+        let mut expected = Vec::new();
+        // Repeated report IDs must not collapse distinct uploads from one agent.
+        for (index, agent) in ["alice", "bob", "alice", "alice", "alice"]
+            .iter()
+            .enumerate()
+        {
+            let text = format!("报告{index}\n").repeat(40_000);
+            let response = crate::api::router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/report?kind=task&event=call_abnormal&agent_id={agent}&report_id=repeated"
+                        ))
+                        .body(axum::body::Body::from(gzip_bytes(text.as_bytes())))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let row = SnapshotEntity::find()
+                .filter(kind_like_cr())
+                .order_by_desc(SnapCol::Id)
+                .one(state.db())
+                .await
+                .unwrap()
+                .unwrap();
+            if index == 4 {
+                // The same agent also has an upload outside the requested dates.
+                use sea_orm::ActiveModelTrait;
+                let mut old: crate::models::runtime_snapshot::ActiveModel = row.into();
+                old.created_at = sea_orm::Set(
+                    chrono::DateTime::parse_from_rfc3339("1999-12-31T12:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                );
+                old.update(state.db()).await.unwrap();
+            } else if *agent == "alice" {
+                expected.push((row.id, text));
+            }
         }
-        let page = response_json(
-            console_get(state.clone(), "/client-reports/list?agent_id=alice&limit=2").await,
-        )
-        .await;
+        let query = "/client-reports/list?agent_id=alice&from=2000-01-01&to=2100-01-01&limit=2";
+        let page = response_json(console_get(state.clone(), query).await).await;
         let items = page["data"].as_array().unwrap();
         assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|r| r["data"]["agent_id"] == "alice"));
+        assert!(
+            items
+                .iter()
+                .all(|r| r["data"]["agent_id"] == "alice" && r["event"] == "call_abnormal")
+        );
         let cursor = page["next_before_id"].as_i64().expect("next page cursor");
         ingest_row(
             &state,
-            "diag_run",
+            "call_abnormal",
             "1",
             1,
             false,
@@ -1683,17 +1715,43 @@ mod tests {
         )
         .await
         .unwrap();
-        let next = response_json(
-            console_get(
-                state,
-                &format!("/client-reports/list?agent_id=alice&limit=2&before_id={cursor}"),
-            )
-            .await,
-        )
-        .await;
+        let next =
+            response_json(console_get(state.clone(), &format!("{query}&before_id={cursor}")).await)
+                .await;
         assert_eq!(next["data"].as_array().unwrap().len(), 1);
         assert!(next["data"][0]["id"].as_i64().unwrap() < cursor);
         assert_eq!(next["next_before_id"], serde_json::Value::Null);
+        let ids: Vec<i64> = items
+            .iter()
+            .chain(next["data"].as_array().unwrap())
+            .map(|item| item["id"].as_i64().unwrap())
+            .collect();
+        expected.reverse();
+        assert_eq!(ids, expected.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        for (id, text) in expected {
+            let mut offset = 0;
+            let mut recovered = String::new();
+            loop {
+                let page = response_json(
+                    console_get(
+                        state.clone(),
+                        &format!("/client-reports/body?id={id}&offset={offset}"),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(page["total_bytes"], text.len());
+                recovered.push_str(page["text"].as_str().unwrap());
+                match page["next_offset"].as_u64() {
+                    Some(next) => {
+                        assert!(next > offset);
+                        offset = next;
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(recovered, text);
+        }
     }
 
     #[tokio::test]
@@ -1776,7 +1834,7 @@ mod tests {
 
         let download = console_get(
             reader.clone(),
-            &format!("/client-reports/download?id={}", row.id),
+            &format!("/client-reports/body?id={}&download=true", row.id),
         )
         .await;
         assert_eq!(download.status(), StatusCode::OK);
@@ -1916,8 +1974,11 @@ mod tests {
                 console_get(reader.clone(), &format!("/client-reports/body?id={}", row.id)).await;
             assert_eq!(page.status(), StatusCode::OK);
             assert_eq!(response_json(page).await["text"], "partial");
-            let response =
-                console_get(reader, &format!("/client-reports/download?id={}", row.id)).await;
+            let response = console_get(
+                reader,
+                &format!("/client-reports/body?id={}&download=true", row.id),
+            )
+            .await;
             task.abort();
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert!(!response.headers().contains_key("content-disposition"));
