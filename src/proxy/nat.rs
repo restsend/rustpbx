@@ -38,7 +38,7 @@ impl NatInspector {
     }
 }
 
-/// Core rewrite logic operating on an inbound INVITE/REGISTER request.
+/// Core rewrite logic operating on an inbound INVITE request.
 ///
 /// `source_port` is the actual transport source port, used as a fallback when
 /// the Via has no `rport`.
@@ -46,10 +46,9 @@ fn fix_nated_contact_in_request(
     req: &mut rsipstack::sip::Request,
     source_port: Option<u16>,
 ) -> bool {
-    if !matches!(
-        req.method,
-        rsipstack::sip::Method::Invite | rsipstack::sip::Method::Register
-    ) {
+    // REGISTER Contact identifies the binding across reconnects; the registrar
+    // stores the reachable transport flow separately as its destination.
+    if req.method != rsipstack::sip::Method::Invite {
         return false;
     }
 
@@ -215,7 +214,7 @@ impl MessageInspector for NatInspector {
         let mut msg = msg;
         let Some(from) = from else { return msg };
 
-        // ── Request side: fix Caller Contact for INVITE/REGISTER ────────
+        // ── Request side: fix Caller Contact for INVITE ────────────────
         if let SipMessage::Request(ref mut req) = msg {
             let source_port = from.addr.port.map(|p| p.0);
             fix_nated_contact_in_request(req, source_port);
@@ -344,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fix_nated_contact_register_rewrites_private_contact() {
+    fn test_fix_nated_contact_register_preserves_binding_identity() {
         let raw = concat!(
             "REGISTER sip:rustpbx.com SIP/2.0\r\n",
             "Via: SIP/2.0/UDP 192.168.1.50:5060;rport=60780;received=203.0.113.9;branch=z9hG4bKreg1\r\n",
@@ -361,10 +360,10 @@ mod tests {
         else {
             panic!("expected request")
         };
-        assert!(super::fix_nated_contact_in_request(&mut req, None));
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
         assert_eq!(
             contact_line(&req),
-            "Contact: <sip:1001@203.0.113.9:60780;transport=udp>;expires=3600"
+            "Contact: <sip:1001@192.168.1.50:5060;transport=udp>;expires=3600"
         );
     }
 

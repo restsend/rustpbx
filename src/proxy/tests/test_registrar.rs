@@ -305,6 +305,151 @@ async fn test_registrar_unregister() {
 }
 
 #[tokio::test]
+async fn nat_reconnect_unregister_preserves_contact_identity() {
+    use crate::proxy::locator::DialogTargetLocator;
+    use crate::proxy::locator_db::DbLocator;
+    use crate::proxy::nat::NatInspector;
+    use rsipstack::transaction::endpoint::MessageInspector;
+    use rsipstack::transport::{SipConnection, channel::ChannelConnection};
+
+    for database in [true, false] {
+        let locator: Arc<Box<dyn Locator>> = if database {
+            Arc::new(Box::new(
+                DbLocator::new("sqlite::memory:".into()).await.unwrap(),
+            ))
+        } else {
+            Arc::new(Box::new(MemoryLocator::new()))
+        };
+        let (server, config) = create_test_server_with_config_and_locator(
+            ProxyConfig {
+                realms: Some(vec!["example.com".into()]),
+                ..Default::default()
+            },
+            locator.clone(),
+        )
+        .await;
+        let registrar = RegistrarModule::new(server, config);
+        let identity = "sip:alice@example.com".try_into().unwrap();
+        let contact = "sip:alice@192.168.1.50:60558;transport=ws"
+            .try_into()
+            .unwrap();
+        let other_contact = "sip:alice@192.168.1.50:60559;transport=ws"
+            .try_into()
+            .unwrap();
+        let old_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:43494".try_into().unwrap(),
+        };
+        let new_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:60850".try_into().unwrap(),
+        };
+        let other_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:45000".try_into().unwrap(),
+        };
+        let mut reconnected_target = None;
+
+        for (local_port, flow, expires) in [
+            (60559, &other_flow, 50),
+            (60558, &old_flow, 50),
+            (60558, &new_flow, 50),
+            (60558, &new_flow, 0),
+            (60559, &other_flow, 0),
+        ] {
+            let mut request = create_register_request("alice", "example.com", Some(expires));
+            request.headers.retain(|header| {
+                !matches!(
+                    header,
+                    Header::Via(_) | Header::Contact(_) | Header::From(_) | Header::To(_)
+                )
+            });
+            request
+                .headers
+                .push(Header::From("<sip:alice@example.com>;tag=reconnect".into()));
+            request
+                .headers
+                .push(Header::To("<sip:alice@example.com>".into()));
+            request.headers.push(Header::Via(format!(
+                "SIP/2.0/WSS 192.168.1.50:{local_port};received=198.51.100.10;rport={};branch=z9hG4bK{local_port}{expires}",
+                flow.addr.port.unwrap().0,
+            ).into()));
+            request.headers.push(Header::Contact(
+                format!("<sip:alice@192.168.1.50:{local_port};transport=ws>").into(),
+            ));
+            let rsipstack::sip::SipMessage::Request(request) =
+                NatInspector::new().after_received(request.into(), Some(flow))
+            else {
+                panic!("expected request")
+            };
+            let (mut tx, _endpoint) = create_transaction(request).await;
+            let (outgoing, _outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.connection = Some(SipConnection::Channel(
+                ChannelConnection::create_connection(
+                    incoming_rx,
+                    outgoing,
+                    flow.clone(),
+                    Some(CancellationToken::new()),
+                )
+                .await
+                .unwrap(),
+            ));
+            registrar
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut tx,
+                    TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+
+            if local_port == 60558 && expires != 0 {
+                // The real close falls inside the existing freshness guard.
+                // Reconnecting must replace this Contact, not add a flow-shaped identity.
+                assert!(
+                    locator
+                        .unregister_with_address(&old_flow)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                if flow == &new_flow {
+                    reconnected_target = Some(
+                        DialogTargetLocator::new(locator.clone(), vec![], false)
+                            .locate(&contact)
+                            .await
+                            .unwrap(),
+                    );
+                }
+            }
+            if expires == 0 {
+                let remaining = locator.lookup(&identity).await.unwrap();
+                if local_port == 60558 {
+                    assert_eq!(
+                        remaining.len(),
+                        1,
+                        "quitting reconnected client must leave only the other terminal"
+                    );
+                    assert_eq!(remaining[0].aor, other_contact);
+                    assert_eq!(remaining[0].destination.as_ref(), Some(&other_flow));
+                    assert_eq!(
+                        reconnected_target.as_ref(),
+                        Some(&new_flow),
+                        "Contact must route over the new flow"
+                    );
+                } else {
+                    assert!(
+                        remaining.is_empty(),
+                        "both clients quit: no active bindings may remain"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_registrar_unregister_keeps_user_online_with_another_binding() {
     let mut stale_event_scenarios = Vec::new();
     for wildcard in [false, true] {
