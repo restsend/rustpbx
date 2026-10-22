@@ -175,11 +175,25 @@ def _b64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("utf-8")
 
 
+def _webrtc_known_accounts(cfg: dict = None) -> set:
+    """WebRTC JWT 可用的全部合法账号：各 webrtc 位点（rule.caller_group 组内
+    主叫）并集，兜底 WEBRTC_ACCOUNT。方案 A 下账号不再硬编码单个，而是随
+    webrtc 段 rule_list 引用的 caller_group 聚合。"""
+    cfg = CONFIG if cfg is None else cfg
+    known = set()
+    for entry in webrtc_entries(cfg):
+        known.update(webrtc_entry_callers(cfg, entry))
+    if WEBRTC_ACCOUNT:
+        known.add(str(WEBRTC_ACCOUNT))
+    return known
+
+
 def decode_jwt(token: str):
     """解析并校验 HS256 JWT，返回 (claims_dict | None)。
 
     校验内容：三段结构、HS256 签名（共享 JWT_SECRET）、exp/tiat/nbf、
-    iss/aud 白名单、WebRTC 账号号绑定。任何一步失败返回 None。"""
+    iss/aud 白名单、WebRTC 账号绑定（userId 必须属于配置中各 webrtc 位点的
+    合法账号集合，见 _webrtc_known_accounts）。任何一步失败返回 None。"""
     if not token or not isinstance(token, str):
         return None
     try:
@@ -215,7 +229,7 @@ def decode_jwt(token: str):
         return None
     if JWT_AUDIENCE and claims.get("aud") != JWT_AUDIENCE:
         return None
-    if str(claims.get("userId") or "") != str(WEBRTC_ACCOUNT):
+    if str(claims.get("userId") or "") not in _webrtc_known_accounts():
         return None
     return claims
 
@@ -1359,6 +1373,58 @@ def default_webrtc_account(cfg: dict = None) -> str:
     return WEBRTC_ACCOUNT
 
 
+def webrtc_account_prefixes(cfg: dict, acc) -> list:
+    """WebRTC 账号可外呼的被叫前缀：该账号归属位点 rule_list 的 prefix 列表
+    （空串表示放行任意/通配）。找不到归属位点返回空列表。"""
+    entry = find_webrtc_entry(cfg, str(acc))
+    if not entry:
+        return []
+    pre, seen = [], set()
+    for r in entry.get("rule_list") or []:
+        p = str(r.get("prefix") or "")
+        if p not in seen:
+            seen.add(p)
+            pre.append(p)
+    return pre
+
+
+def webrtc_account_rules(cfg: dict, acc) -> list:
+    """WebRTC 账号聚合的完整入口规则：归属位点 rule_list 每条 rule 的
+    prefix / strip / pri_prefix / caller_group（去重保留）。用于前端聚合展示，
+    避免给账号挂多个 rule 时只显示第一个。"""
+    entry = find_webrtc_entry(cfg, str(acc))
+    if not entry:
+        return []
+    out, seen = [], set()
+    for r in entry.get("rule_list") or []:
+        prefix = str(r.get("prefix") or "")
+        key = (prefix, int(r.get("strip") or 0),
+               str(r.get("pri_prefix") or ""), str(r.get("caller_group") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "prefix": prefix,
+            "strip": int(r.get("strip") or 0),
+            "pri_prefix": str(r.get("pri_prefix") or ""),
+            "caller_group": str(r.get("caller_group") or ""),
+        })
+    return out
+
+
+def webrtc_entry_meta(cfg: dict, acc):
+    """WebRTC 账号归属信息：point_id/group_type + 出口网关 gw_list。
+    供前端聚合展示（一个账号挂多个 rule 时，位点与出口一致）。"""
+    entry = find_webrtc_entry(cfg, str(acc))
+    if not entry:
+        return None
+    return {
+        "point_id": str(entry.get("point_id") or entry.get("group_type") or ""),
+        "group_type": str(entry.get("group_type") or ""),
+        "gw_list": [str(g) for g in (entry.get("gw_list") or [])],
+    }
+
+
 def webrtc_entry_allows_source(entry: dict, ip: str) -> bool:
     """准入策略：allowed_ips 为空 = 不限制来源；否则来源 IP 必须命中其一网段。"""
     aips = entry.get("allowed_ips") or []
@@ -1782,14 +1848,27 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
         if path == "/webrtc/accounts":
             # WebRTC 可用账号列表（供前端下拉选择）。默认=第一可用账号，
             # 顺序=配置 items 展开；配置外账号由前端自行追加测试项。
+            # 附带 prefixes：每个账号支持的被叫前缀（归属位点 rule_list）。
             accounts, dflt = [], default_webrtc_account(cfg)
+            prefixes = {}
+            rules = {}
+            metas = {}
             for entry in webrtc_entries(cfg):
                 for acc in webrtc_entry_callers(cfg, entry):
                     if acc not in accounts:
                         accounts.append(acc)
+                        prefixes[acc] = webrtc_account_prefixes(cfg, acc)
+                        rules[acc] = webrtc_account_rules(cfg, acc)
+                        metas[acc] = webrtc_entry_meta(cfg, acc)
             if accounts and dflt not in accounts:
                 accounts.insert(0, dflt)
-            return self._json(200, {"accounts": accounts, "default": dflt})
+            if dflt not in prefixes:
+                prefixes[dflt] = webrtc_account_prefixes(cfg, dflt)
+                rules[dflt] = webrtc_account_rules(cfg, dflt)
+                metas[dflt] = webrtc_entry_meta(cfg, dflt)
+            return self._json(200, {"accounts": accounts, "default": dflt,
+                                    "prefixes": prefixes, "rules": rules,
+                                    "meta": metas})
         if path in ("/static/jssip.min.js", "/jssip.min.js"):
             # WebRTC 呼叫前端同源 JsSIP：本地加载，不依赖外部 CDN
             try:

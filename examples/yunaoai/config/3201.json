@@ -20,25 +20,25 @@
                "password": "995018",
                "register_expires": 60,
                "display_name": "YA PBX (register 8195)"},
-    "8798fs": {"dest": "sip:0.0.0.0", "transport": "udp",
+    "reg879830001": {"dest": "sip:0.0.0.0", "transport": "udp",
                "type": "external", "max_load": -1,
                "direction": "bidirectional",
                "register_enabled": true,
-               "username": "8798fs",
+               "username": "879830001",
                "password": "reg-demo-8798",
                "register_expires": 60,
-               "display_name": "Demo FS (被动注册进 8798fs)"}
+               "display_name": "Demo FS (被动注册进 reg879830001)"}
   },
   "caller_groups":
     {
       "cg-8120": ["8120"],
       "cg-8196": ["8196"],
       "cg-webrtc-a": ["8899"],
-      "cg-webrtc-b": ["8810", "8811"]
+      "cg-webrtc-b": ["8810", "8811", "8812"]
     },
   "route_points": [
     {"point_id": "internal-8120", "group_type": "internal",
-     "gw_list": ["lvcx"], "rule_list": [{"prefix": "", "strip": 0, "caller_group": "cg-8120"}]},
+     "gw_list": ["reg879830001"], "rule_list": [{"prefix": "", "strip": 0, "caller_group": "cg-8120"}]},
     {"point_id": "internal-8196-5000", "group_type": "internal",
      "gw_list": ["lvcx"], "rule_list": [{"prefix": "5000", "strip": 0, "caller_group": "cg-8196"}]},
     {"point_id": "internal-6000", "group_type": "internal",
@@ -46,7 +46,7 @@
     {"point_id": "internal-default", "group_type": "internal", "default_for": "external",
      "gw_list": ["lvcx"], "rule_list": [{"prefix": "", "strip": 0}]},
     {"point_id": "external-default", "group_type": "external", "default_for": "internal",
-     "gw_list": ["8798fs"], "rule_list": [{"prefix": "", "strip": 0}]}
+     "gw_list": ["reg879830001"], "rule_list": [{"prefix": "", "strip": 0}]}
   ],
   "webrtc": [
     {"point_id": "webrtc-8899",
