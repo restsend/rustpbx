@@ -1478,6 +1478,54 @@ impl QueueApp {
     async fn resolve_agents(&mut self) {
         if let Some(ref registry) = self.agent_registry {
             let queue_id = self.config.name.as_str();
+
+            // Skill-group queues MUST re-resolve through the CC adapter's
+            // dispatch route, never via `find_available_agents`: that helper
+            // is a skill-filtered listing with NO strict-FIFO gate, NO ACD
+            // policy and NO `skill_group_*` announcements. Production
+            // evidence (call cdb5ab9c…, 2026-10-21 03:21): the adapter
+            // resolve had just answered `acd_blocked`, yet this path dialled
+            // the agent anyway — `queue_agent_offered` with NO
+            // `skill_group_agent_assigned`, breaking the offered ≤ assigned
+            // parity that dequeue analytics (and `assert_skill_group_parity`)
+            // depend on. The adapter route emits the same event family as
+            // the pre-resolve: an assignment when it dispatches, a
+            // queued/no-agent announcement otherwise (the call then stays in
+            // wait retention and polls like any deferred caller).
+            // Plain backends (memory / test registries) declare no skill-group
+            // dispatch support and keep the legacy listing below.
+            if registry.supports_skill_group_dispatch()
+                && let Some(skill_group) = self
+                    .current_group
+                    .clone()
+                    .or_else(|| self.config.skill_group.clone())
+            {
+                let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
+                let target = format!("skill-group:{}", skill_group);
+                let uris = registry
+                    .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                    .await;
+                if !uris.is_empty() {
+                    let locations: Vec<Location> = uris
+                        .into_iter()
+                        .map(|uri| Location {
+                            aor: uri.parse().unwrap_or_default(),
+                            contact_raw: Some(uri),
+                            ..Default::default()
+                        })
+                        .collect();
+                    let locations = self.enrich_locations(locations).await;
+                    info!(
+                        "Queue: resolved {} dynamic agents for queue '{}' (skill group {})",
+                        locations.len(),
+                        queue_id,
+                        skill_group
+                    );
+                    self.dynamic_agents = Some(locations);
+                }
+                return;
+            }
+
             let skills = &self.config.required_skills;
 
             let agents = registry.find_available_agents(skills).await;

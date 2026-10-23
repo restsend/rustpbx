@@ -423,6 +423,17 @@ pub trait AgentRegistry: Send + Sync {
     /// Returns empty Vec if the URI is not recognized or cannot be resolved.
     async fn resolve_target(&self, target_uri: &str) -> Vec<String>;
 
+    /// Whether this backend implements full skill-group dispatch semantics
+    /// for `skill-group:{id}` targets: the cross-node strict-FIFO gate, ACD
+    /// policy evaluation AND the `skill_group_*` scheduling announcements
+    /// (candidates / assigned / queued). The CC adapter overrides this to
+    /// `true`; plain registries (memory / test doubles) keep `false`, so the
+    /// queue app falls back to the legacy `find_available_agents` listing —
+    /// which understands no skill-group URIs and emits nothing.
+    fn supports_skill_group_dispatch(&self) -> bool {
+        false
+    }
+
     /// Resolve target URI with an optional ACD policy hint.
     ///
     /// `call_id` identifies the call being routed; addon implementations use it

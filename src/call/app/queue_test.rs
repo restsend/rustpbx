@@ -2072,6 +2072,11 @@ mod tests {
         rejects: std::sync::Mutex<Vec<(String, String, bool)>>,
         /// Alerts seen by `emit_assign_failed_alert`.
         assign_alerts: std::sync::Mutex<Vec<crate::call::app::agent_registry::AssignFailedAlert>>,
+        /// Whether the mock declares full skill-group dispatch support
+        /// (`supports_skill_group_dispatch`). Mirrors the CC adapter — the
+        /// queue app's `resolve_agents` re-resolve takes the adapter route
+        /// only when this is set.
+        skill_group_dispatch: bool,
     }
 
     impl HookRecordingRegistry {
@@ -2095,7 +2100,13 @@ mod tests {
                 fifo_releases: std::sync::Mutex::new(Vec::new()),
                 rejects: std::sync::Mutex::new(Vec::new()),
                 assign_alerts: std::sync::Mutex::new(Vec::new()),
+                skill_group_dispatch: false,
             }
+        }
+
+        fn with_skill_group_dispatch(mut self, supported: bool) -> Self {
+            self.skill_group_dispatch = supported;
+            self
         }
 
         fn with_escalation_uris(mut self, uris: Vec<Vec<String>>) -> Self {
@@ -2199,6 +2210,10 @@ mod tests {
             self.inner
                 .resolve_target_with_policy(target_uri, _policy, _call_id)
                 .await
+        }
+
+        fn supports_skill_group_dispatch(&self) -> bool {
+            self.skill_group_dispatch
         }
 
         async fn resolve_escalation_targets(
@@ -5457,11 +5472,95 @@ mod tests {
         let _ = stack.join().await;
     }
 
-    /// Regression (session kick × queue without an agent registry): a
-    /// skill-group queue with NO registry attached cannot retain wait
-    /// (`allows_wait_retention` false), so `on_enter` answers and starts the
-    /// busy prompt + fallback. The late session kick must not replay the busy
-    /// prompt nor drive the fallback a second time.
+    /// REGRESSION (production call cdb5ab9c…, 2026-10-21): a CC-adapter-backed
+    /// skill-group queue whose resolve REFUSES (acd_blocked / strict-FIFO
+    /// deferral → empty URI list) must NOT dial from the legacy
+    /// `find_available_agents` listing at `on_enter`. The old code dialled the
+    /// agent anyway — `queue_agent_offered` with NO
+    /// `skill_group_agent_assigned`, breaking the offered ≤ assigned parity
+    /// that dequeue analytics depend on. With the adapter route wired, the
+    /// refused resolve leaves the call in wait retention: the late
+    /// `dial_next_agent` kick must produce NO dial, and the next REAL poll
+    /// (which consults the adapter again) is the only dial source.
+    #[tokio::test]
+    async fn test_resolve_agents_refused_skill_group_does_not_bypass_dial() {
+        use crate::call::app::agent_registry::PresenceState;
+        use std::sync::Arc;
+
+        // Adapter route refuses (no resolve URIs queued), while the legacy
+        // listing WOULD find an Idle agent — exactly the production shape
+        // that produced the stealth dial.
+        let registry = Arc::new(HookRecordingRegistry::new().with_skill_group_dispatch(true));
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence("agent-001", PresenceState::Idle)
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-refused-1".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Wait-retention hold music proves the refused resolve entered
+        // retention instead of the dial path.
+        stack
+            .next_cmd(2000)
+            .await
+            .expect("hold music while waiting after a refused resolve");
+
+        // The adapter route WAS consulted for the skill group (not the
+        // legacy listing).
+        let targets = registry.resolve_targets.lock().unwrap().clone();
+        assert!(
+            targets.iter().any(|t| t == "skill-group:support"),
+            "on_enter re-resolve must consult the adapter skill-group route, saw: {targets:?}"
+        );
+
+        // The late session kick must NOT originate a dial: the adapter
+        // refused this round, and `find_available_agents` is no longer a
+        // dial source for skill-group backends.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::LegAdd { .. }),
+                "a refused skill-group resolve must not bypass-dial on the late kick, got {cmd:?}"
+            );
+        }
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
     #[tokio::test]
     async fn test_dial_kick_after_busy_prompt_is_noop() {
         let mut config = build_simple_queue_config();
