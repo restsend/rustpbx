@@ -623,6 +623,8 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 #                                       # Console: Media Options → ICE-Lite). For strict full-ICE
 #                                       # peers (Teams Direct Routing) that never fall back to
 #                                       # plain RTP. false = explicitly off; unset = inherit global.
+# nat_fix = false                       # per-trunk override of [proxy] nat_fix for SIP messages
+#                                       # from this trunk's IPs (inbound_hosts/dest/backup_dest).
 # # Custom headers (X-* / P-* that are not standard SIP headers) copied between
 # # the call legs when calls go to this trunk, in both directions: the caller's
 # # INVITE headers onto this trunk's INVITE, and this trunk's 18x/200 headers

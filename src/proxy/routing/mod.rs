@@ -184,6 +184,13 @@ pub struct TrunkConfig {
     /// global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ice_lite: Option<bool>,
+    /// Per-trunk override of the global `proxy.nat_fix`. When set, SIP
+    /// messages received from this trunk's addresses (`inbound_hosts`, `dest`,
+    /// `backup_dest`; IP literals only) use this value instead of the global
+    /// switch to decide whether a private-IP Contact is rewritten to the
+    /// observed source address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nat_fix: Option<bool>,
     /// Network profile id from `[[network_profile]]` in the main config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -547,6 +554,7 @@ impl Default for TrunkConfig {
             external_ip: None,
             bind_ip: None,
             ice_lite: None,
+            nat_fix: None,
             profile: None,
             did_numbers: Vec::new(),
             ringback: None,

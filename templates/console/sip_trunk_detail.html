@@ -230,6 +230,16 @@ default('RustPBX') }}{% endblock %}
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                             <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_retry_codes_hint" | t }}</p>
                         </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_nat_fix" | t }}
+                            <select x-model="form.nat_fix"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">Default</option>
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                            <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_nat_fix_hint" | t }}</p>
+                        </label>
                         <div class="flex flex-col gap-2">
                             <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t
                                 }}</span>
@@ -688,6 +698,7 @@ default('RustPBX') }}{% endblock %}
                 register_extra_headers: '',
                 recording_enabled: '',
                 ice_lite: '',
+                nat_fix: '',
                 retry_status_codes: '',
                 max_ring_time: '',
                 network_profile: '',
@@ -777,6 +788,7 @@ default('RustPBX') }}{% endblock %}
                     const sbc = meta.sbc || {};
                     this.form.recording_enabled = typeof sbc.recording_enabled === 'boolean' ? String(sbc.recording_enabled) : '';
                     this.form.ice_lite = typeof sbc.ice_lite === 'boolean' ? String(sbc.ice_lite) : '';
+                    this.form.nat_fix = typeof sbc.nat_fix === 'boolean' ? String(sbc.nat_fix) : '';
                     const retry = sbc.retry_policy || {};
                     this.form.retry_status_codes = Array.isArray(retry.status_codes) ? retry.status_codes.join(', ') : '';
                     this.form.max_ring_time = Number.isInteger(sbc.max_ring_time) && sbc.max_ring_time > 0 ? String(sbc.max_ring_time) : '';
@@ -1054,6 +1066,13 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.ice_lite = false;
                     } else {
                         delete meta.sbc.ice_lite;
+                    }
+                    if (this.form.nat_fix === 'true') {
+                        meta.sbc.nat_fix = true;
+                    } else if (this.form.nat_fix === 'false') {
+                        meta.sbc.nat_fix = false;
+                    } else {
+                        delete meta.sbc.nat_fix;
                     }
                     if (this.form.media_mode) {
                         meta.sbc.media_mode = this.form.media_mode;

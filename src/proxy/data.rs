@@ -24,6 +24,7 @@ use crate::{
     config::{ProxyConfig, RecordingPolicy},
     config_store::GeneratedConfigStore,
     models::{routing, sip_trunk},
+    proxy::nat::NatInspector,
     proxy::queue_files::{self as queue_files},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
@@ -37,6 +38,9 @@ pub struct ProxyDataContext {
     config: RwLock<Arc<ProxyConfig>>,
     pub trunks: DashMap<String, TrunkConfig>,
     pub acl_inbound_trunks: ArcSwap<JointPrefixMap<IpNet, Vec<String>>>,
+    /// SIP NAT inspector whose trunk exception list is rebuilt on every
+    /// trunk reload.
+    nat_inspector: NatInspector,
     pub queues: DashMap<String, RouteQueueConfig>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
@@ -78,6 +82,7 @@ impl ProxyDataContext {
             config: RwLock::new(config.clone()),
             trunks: DashMap::new(),
             acl_inbound_trunks: ArcSwap::from_pointee(JointPrefixMap::new()),
+            nat_inspector: NatInspector::new(config.nat_fix),
             queues: DashMap::new(),
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
@@ -161,6 +166,10 @@ impl ProxyDataContext {
             }
         }
         matched
+    }
+
+    pub fn nat_inspector(&self) -> &NatInspector {
+        &self.nat_inspector
     }
 
     pub fn routes_snapshot(&self) -> Vec<RouteRule> {
@@ -301,7 +310,7 @@ impl ProxyDataContext {
     /// Try to parse a trunk `dest` field into an `IpNet` for ACL inbound matching.
     /// Handles bare IP, IP:port, CIDR, and `sip:`/`sips:` prefixed variants.
     /// Returns `None` for hostnames (no DNS resolution during config reload).
-    fn dest_to_ipnet(dest: &str) -> Option<IpNet> {
+    pub(crate) fn dest_to_ipnet(dest: &str) -> Option<IpNet> {
         let dest = dest.trim().trim_matches(|c| c == '<' || c == '>');
         let dest = dest
             .strip_prefix("sip:")
@@ -511,6 +520,7 @@ impl ProxyDataContext {
             self.trunks.insert(k.clone(), v.clone());
         }
         self.acl_inbound_trunks.store(Arc::new(acl_inbound_trunks));
+        self.nat_inspector.update_trunks(&trunks);
 
         let acl_enabled = config
             .modules
@@ -1299,6 +1309,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         external_ip: from_str(sbc.and_then(|s| s.get("external_ip"))),
         bind_ip: from_str(sbc.and_then(|s| s.get("bind_ip"))),
         ice_lite: from_bool(sbc.and_then(|s| s.get("ice_lite"))),
+        nat_fix: from_bool(sbc.and_then(|s| s.get("nat_fix"))),
         retry_policy: sbc
             .and_then(|s| s.get("retry_policy"))
             .and_then(|v| serde_json::from_value::<super::routing::RetryPolicy>(v.clone()).ok())
@@ -1431,6 +1442,9 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
             }
             if sbc.ice_lite.is_some() {
                 trunk.ice_lite = sbc.ice_lite;
+            }
+            if sbc.nat_fix.is_some() {
+                trunk.nat_fix = sbc.nat_fix;
             }
             if sbc.retry_policy.is_some() {
                 trunk.retry_policy = sbc.retry_policy;
@@ -2577,6 +2591,20 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert!(trunk.ringback.is_none(), "no metadata → no ringback");
+    }
+
+    /// `metadata.sbc.nat_fix` (no dedicated column) must reach the trunk.
+    #[test]
+    fn convert_trunk_merges_sbc_nat_fix() {
+        let model = sip_trunk::Model {
+            id: 1,
+            name: "nat-trunk".to_string(),
+            sip_server: Some("sip:203.0.113.52:5060".to_string()),
+            metadata: Some(serde_json::json!({"sbc": {"nat_fix": false}})),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).unwrap();
+        assert_eq!(trunk.nat_fix, Some(false));
     }
 
     #[test]

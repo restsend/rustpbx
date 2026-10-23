@@ -939,11 +939,25 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
+        let database = self.database.clone();
+
+        let data_context = if let Some(ref context) = self.data_context {
+            context.clone()
+        } else {
+            let dc = Arc::new(
+                ProxyDataContext::new(self.config.clone(), database.clone())
+                    .await
+                    .map_err(|err| anyhow!("failed to initialize proxy data context: {err}"))?,
+            );
+            self.data_context = Some(dc.clone());
+            dc
+        };
+
         let advertised_methods = Arc::new(OnceLock::new());
         let mut inspectors: Vec<Box<dyn MessageInspector>> = self.message_inspectors;
-        if self.config.nat_fix {
-            inspectors.insert(0, Box::new(super::nat::NatInspector::new()));
-        }
+        // Always installed: trunks may enable `nat_fix` even when the global
+        // switch is off. The data context keeps its trunk list current.
+        inspectors.insert(0, Box::new(data_context.nat_inspector().clone()));
         inspectors.push(Box::new(
             super::capability_headers::CapabilityHeadersInspector::new(advertised_methods.clone()),
         ));
@@ -1051,19 +1065,6 @@ impl SipServerBuilder {
         }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
-        let database = self.database.clone();
-
-        let data_context = if let Some(ref context) = self.data_context {
-            context.clone()
-        } else {
-            let dc = Arc::new(
-                ProxyDataContext::new(self.config.clone(), database.clone())
-                    .await
-                    .map_err(|err| anyhow!("failed to initialize proxy data context: {err}"))?,
-            );
-            self.data_context = Some(dc.clone());
-            dc
-        };
         // Wire up the SIP endpoint for trunk registration BEFORE reconciling,
         // so trunks with register_enabled=true are registered on startup.
         data_context

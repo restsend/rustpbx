@@ -969,6 +969,8 @@ error_retry_codes = "重试状态码必须为 300–699 范围内的 SIP 失败�
 error_max_ring_time = "最长振铃时间必须为正整数秒，或留空。"
 field_ice_lite = "ICE-Lite"
 field_ice_lite_hint = "以 a=ice-lite 应答/提供 SDP，适用于强制 ICE 的对端（如 Teams Direct Routing）。不影响 WebRTC 腿。"
+field_nat_fix = "SIP NAT 修正"
+field_nat_fix_hint = "将来自该中继的私网 IP Contact 改写为实际来源地址。默认跟随全局 proxy nat_fix。"
 field_audio_codecs = "音频编解码器（每行一个）"
 field_video_codecs = "视频编解码器（每行一个）"
 field_codecs_hint = "常用: PCMU, PCMA, G722, G729, OPUS, H264, VP8"

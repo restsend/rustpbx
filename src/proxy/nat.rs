@@ -1,21 +1,78 @@
+use arc_swap::ArcSwap;
+use ipnet::IpNet;
+use prefix_trie::joint::JointPrefixSet;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::{HostWithPort, SipMessage, ToTypedHeader};
 use rsipstack::transaction::endpoint::MessageInspector;
 use rsipstack::transport::SipAddr;
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use tracing::debug;
 
-pub struct NatInspector;
+use super::data::ProxyDataContext;
+use super::routing::TrunkConfig;
+
+/// Rewrites private-IP Contacts on received messages to the observed source
+/// address.
+///
+/// The global `proxy.nat_fix` is the default; trunks whose own `nat_fix`
+/// differs from it form an exception list keyed by source network. With the
+/// global switch on the list is a blacklist (messages from those trunks are
+/// left alone), with it off a whitelist (only those trunks are fixed). The
+/// list is replaced on every trunk reload via [`NatInspector::update_trunks`].
+#[derive(Clone)]
+pub struct NatInspector {
+    enabled: bool,
+    exceptions: Arc<ArcSwap<JointPrefixSet<IpNet>>>,
+}
 
 impl Default for NatInspector {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 
 impl NatInspector {
-    pub fn new() -> Self {
-        Self
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            exceptions: Arc::new(ArcSwap::from_pointee(JointPrefixSet::new())),
+        }
+    }
+
+    /// Rebuild the exception list from the current trunks: every enabled
+    /// trunk whose `nat_fix` is set and differs from the global default
+    /// contributes its `inbound_hosts`, `dest` and `backup_dest` (IP/CIDR
+    /// entries only; hostnames are not resolved).
+    pub fn update_trunks(&self, trunks: &HashMap<String, TrunkConfig>) {
+        let mut exceptions = JointPrefixSet::new();
+        for trunk in trunks.values() {
+            if trunk.nat_fix.is_none_or(|enabled| enabled == self.enabled)
+                || trunk.disabled == Some(true)
+            {
+                continue;
+            }
+            let networks = trunk
+                .inbound_hosts
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(trunk.dest.as_str()))
+                .chain(trunk.backup_dest.as_deref())
+                .filter_map(ProxyDataContext::dest_to_ipnet);
+            for network in networks {
+                exceptions.insert(network);
+            }
+        }
+        self.exceptions.store(Arc::new(exceptions));
+    }
+
+    fn enabled_for(&self, from: &SipAddr) -> bool {
+        let rsipstack::sip::Host::IpAddr(ip) = &from.addr.host else {
+            return self.enabled;
+        };
+        let listed = self.exceptions.load().get_lpm(&IpNet::from(*ip)).is_some();
+        self.enabled != listed
     }
 
     fn is_private_ip(ip: &IpAddr) -> bool {
@@ -215,6 +272,9 @@ impl MessageInspector for NatInspector {
     fn after_received(&self, msg: SipMessage, from: Option<&SipAddr>) -> SipMessage {
         let mut msg = msg;
         let Some(from) = from else { return msg };
+        if !self.enabled_for(from) {
+            return msg;
+        }
 
         // ── Request side: fix Caller Contact for INVITE/REGISTER ────────
         if let SipMessage::Request(ref mut req) = msg {
@@ -261,6 +321,9 @@ impl MessageInspector for NatInspector {
 #[cfg(test)]
 mod tests {
     use super::NatInspector;
+    use crate::proxy::routing::TrunkConfig;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use rsipstack::sip::SipMessage;
     use rsipstack::sip::{HeadersExt, ToTypedHeader};
     use rsipstack::transaction::endpoint::MessageInspector;
@@ -302,7 +365,7 @@ mod tests {
             .unwrap()
             .into();
 
-        let rewritten = NatInspector::new().after_received(msg, Some(&from));
+        let rewritten = NatInspector::default().after_received(msg, Some(&from));
         let text = rewritten.to_string();
         let contact_line = text
             .lines()
@@ -335,10 +398,135 @@ mod tests {
             .unwrap()
             .into();
 
-        let text = NatInspector::new().after_received(msg, Some(&from)).to_string();
+        let text = NatInspector::default()
+            .after_received(msg, Some(&from))
+            .to_string();
         assert!(
             text.contains("Contact: <sip:trunkuser@10.0.0.5:15060>;expires=600"),
             "{text}"
+        );
+    }
+
+    fn carrier_trunks(nat_fix: Option<bool>) -> HashMap<String, TrunkConfig> {
+        HashMap::from([(
+            "carrier".to_string(),
+            TrunkConfig {
+                dest: "sip:203.0.113.52:5060".to_string(),
+                inbound_hosts: vec!["198.51.100.0/24".to_string()],
+                nat_fix,
+                ..Default::default()
+            },
+        )])
+    }
+
+    fn inspector_with_trunk(global: bool, trunk_nat_fix: Option<bool>) -> NatInspector {
+        let inspector = NatInspector::new(global);
+        inspector.update_trunks(&carrier_trunks(trunk_nat_fix));
+        inspector
+    }
+
+    fn fixed_invite_contact(inspector: &NatInspector, source: &str) -> String {
+        let msg = SipMessage::Request(nated_invite());
+        let from: SipAddr = rsipstack::sip::HostWithPort::try_from(source)
+            .unwrap()
+            .into();
+        let SipMessage::Request(req) = inspector.after_received(msg, Some(&from)) else {
+            panic!("expected request")
+        };
+        contact_line(&req)
+    }
+
+    #[test]
+    fn test_trunk_nat_fix_overrides_disabled_global() {
+        let inspector = inspector_with_trunk(false, Some(true));
+        // From the trunk's inbound_hosts: the trunk enables the fix.
+        assert_eq!(
+            fixed_invite_contact(&inspector, "198.51.100.24:15060"),
+            "Contact: <sip:41111112222@198.51.100.24:15060>"
+        );
+        // Any other source keeps the global (disabled) behaviour.
+        assert_eq!(
+            fixed_invite_contact(&inspector, "192.0.2.7:15060"),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+    }
+
+    #[test]
+    fn test_trunk_nat_fix_overrides_enabled_global() {
+        let inspector = inspector_with_trunk(true, Some(false));
+        assert_eq!(
+            fixed_invite_contact(&inspector, "198.51.100.24:15060"),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+        assert_eq!(
+            fixed_invite_contact(&inspector, "192.0.2.7:15060"),
+            "Contact: <sip:41111112222@198.51.100.24:15060>"
+        );
+    }
+
+    #[test]
+    fn test_trunk_nat_fix_override_matches_trunk_dest_responses() {
+        // A 200 OK from the trunk's dest (an outbound call) follows the trunk.
+        let inspector = inspector_with_trunk(true, Some(false));
+        let raw = concat!(
+            "SIP/2.0 200 OK\r\n",
+            "Via: SIP/2.0/UDP 198.51.100.24:15060;branch=z9hG4bK-out\r\n",
+            "Call-ID: out@test\r\n",
+            "From: <sip:alice@198.51.100.24>;tag=a\r\n",
+            "To: <sip:bob@203.0.113.52>;tag=b\r\n",
+            "CSeq: 1 INVITE\r\n",
+            "Contact: <sip:bob@10.20.30.40:5060>\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let from: SipAddr = rsipstack::sip::HostWithPort::try_from("203.0.113.52:5060")
+            .unwrap()
+            .into();
+        let msg = SipMessage::try_from(raw).unwrap();
+        let text = inspector.after_received(msg, Some(&from)).to_string();
+        assert!(
+            text.contains("Contact: <sip:bob@10.20.30.40:5060>"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_trunk_without_nat_fix_follows_global() {
+        let inspector = inspector_with_trunk(false, None);
+        assert_eq!(
+            fixed_invite_contact(&inspector, "198.51.100.24:15060"),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trunk_reload_updates_nat_exceptions() {
+        use crate::config::ProxyConfig;
+        use crate::proxy::data::ProxyDataContext;
+
+        let generated_dir = tempfile::tempdir().unwrap();
+        let mut config = ProxyConfig::default();
+        config.nat_fix = false;
+        config.acl_rules = None;
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
+        config.trunks = carrier_trunks(Some(true));
+        let dc = ProxyDataContext::new(Arc::new(config.clone()), None)
+            .await
+            .unwrap();
+
+        let inspector = dc.nat_inspector().clone();
+        assert_eq!(
+            fixed_invite_contact(&inspector, "198.51.100.24:15060"),
+            "Contact: <sip:41111112222@198.51.100.24:15060>"
+        );
+
+        config.trunks = carrier_trunks(None);
+        dc.reload_trunks(false, Some(Arc::new(config)))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixed_invite_contact(&inspector, "198.51.100.24:15060"),
+            "Contact: <sip:41111112222@10.10.10.10:15060>"
         );
     }
 

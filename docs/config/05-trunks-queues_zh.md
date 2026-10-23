@@ -50,6 +50,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `max_ring_time` | int | 无 | 中继级最大振铃/建立时长（秒）；超时未接听以 408 拒绝。`0` 禁用此中继的振铃超时。对通过该中继路由的呼叫覆盖全局 `[proxy] max_ring_time` |
 | `external_ip` | string | 无 | 覆盖此中继通话腿在 SDP `c=`/`o=` 行和 ICE 候选中公布的 IP，替代配置档/全局 RTP 外部 IP。当中继在 Tailscale/WireGuard 等覆盖网络终结，需要与公网 NAT 不同的公布地址时尤其重要 |
 | `bind_ip` | string | 无 | 覆盖此中继通话腿 RTP socket 绑定的本地 IP，替代配置档/全局 RTP 绑定 IP |
+| `nat_fix` | bool | 无 | 覆盖全局 `[proxy] nat_fix`，作用于来自此中继的 SIP 消息（来源 IP 按 `inbound_hosts`、`dest`、`backup_dest` 匹配；仅支持 IP/CIDR，不解析域名）。`true` 将私网 IP 的 Contact 改写为实际来源地址，`false` 保持原样。不设置 = 跟随全局（Console：**常规 → SIP NAT 修正**，存储为 `metadata.sbc.nat_fix`） |
 | `profile` | string | 无 | 主配置 `[[network_profile]]` 的配置档 ID（Console：中继 **Media Option → Network profile**）。成组应用 RTP/SDP 和 SIP Contact 设置；设置了中继级 `external_ip` / `bind_ip` 时仍由其覆盖 |
 | `header_passthrough` | table | 无 | 控制原 INVITE 的哪些自定义头转发到该中继的出站 INVITE。`mode` 为 `"all"`（默认）、`"whitelist"`、`"blacklist"` 或 `"x_only"`；`whitelist`/`blacklist` 为头名称列表（不区分大小写）。标准 SIP 头（`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/…）始终不转发。未设置（默认）时不向外部中继转发任何自定义头；内部目标（同 Realm/已注册/home-proxy）始终全部转发，除非路由的 `with_original_headers` 覆盖 |
 
