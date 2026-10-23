@@ -3234,6 +3234,24 @@ impl SipSession {
         extensions.set_agent_attribution(agent_id);
     }
 
+    /// Resolve the first REGISTERED agent among URI candidates (wire-form
+    /// `registered_aor`, dial `aor`, …). Single decision point for the
+    /// transfer paths' wire marker: a target that is a registered agent
+    /// declares `leg=agent` on the INVITE (its home node then runs the child
+    /// dialog with the agent attribution); anything else keeps the path's
+    /// specific intent (`transfer`/`consult`).
+    pub(crate) async fn resolve_registered_agent_user(&self, candidates: &[&str]) -> Option<String> {
+        let registry = self.server.agent_registry.as_ref()?;
+        for candidate in candidates {
+            if let Some(user) = Self::uri_user_part(candidate)
+                && registry.get_agent(&user).await.is_some()
+            {
+                return Some(user);
+            }
+        }
+        None
+    }
+
     /// Child-leg session: resolve and pin the DIALED agent before the first
     /// leg-scoped ringing is emitted.
     ///
@@ -3268,6 +3286,14 @@ impl SipSession {
         };
         if registry.get_agent(&user).await.is_some() {
             Self::set_pinned_agent_id(&self.extensions, &user);
+            // Normalize the declared role: a consult/REFER transfer landing
+            // on a REGISTERED agent makes this dialog an AGENT dialog — the
+            // dial-time intent ("transfer"/"consult") must not survive into
+            // the events. The registration machine is the single source of
+            // the agent attribution (prd: 转接之后 leg_role=agent 没有了).
+            if self.meta.child_leg_role.as_deref() != Some("agent") {
+                self.meta.child_leg_role = Some("agent".to_string());
+            }
             debug!(session_id = %self.id, agent = %user,
                 "child-leg session pinned the dialed agent before ringing");
         }
@@ -3365,7 +3391,7 @@ impl SipSession {
     /// that stops resolving an agent keeps its earlier attribution). If the
     /// meta entry was already removed (transfer released the gateway state
     /// before the final `call_hangup`), it is REBUILT from live context.
-    fn sync_agent_context_to_rwi_meta(&self) {
+    pub(super) fn sync_agent_context_to_rwi_meta(&self) {
         let Some(ref gw) = self.server.rwi_gateway else {
             return;
         };
@@ -3630,11 +3656,14 @@ impl SipSession {
     /// Extract the user-part of a SIP URI string (`sip:bob@host` → `bob`).
     /// Returns `None` when the URI has no usable user part.
     pub(super) fn uri_user_part(uri: &str) -> Option<String> {
-        uri.strip_prefix("sip:")
+        // A BARE name (`carol` — the CC API transfer target form) is the
+        // user itself; strip the optional scheme before splitting on '@'.
+        let stripped = uri
+            .strip_prefix("sip:")
             .or_else(|| uri.strip_prefix("sips:"))
-            .and_then(|s| s.split('@').next())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+            .unwrap_or(uri);
+        let user = stripped.split('@').next().unwrap_or_default();
+        (!user.is_empty()).then(|| user.to_string())
     }
 
     /// Scenario ③ (agent-initiated calls): resolve and stamp the caller leg's
@@ -4181,7 +4210,10 @@ impl SipSession {
     /// an external INVITE carrying a planted header must keep the regular
     /// lifecycle. Mirrors the `X-CC-Recording-Delivery` trust model
     /// (`screen_pop_context`).
-    fn from_cluster_peer(server: &SipServerRef, cookie: &crate::call::TransactionCookie) -> bool {
+    pub(crate) fn from_cluster_peer(
+        server: &SipServerRef,
+        cookie: &crate::call::TransactionCookie,
+    ) -> bool {
         cookie
             .get_extension::<crate::call::CallerPeerContext>()
             .and_then(|peer| peer.0.parse::<std::net::SocketAddr>().ok())
@@ -15895,7 +15927,7 @@ impl SipSession {
     /// the primary session id for the FIRST agent-facing leg of the session
     /// (`seq == 0`), `{base}-r{n}` for every subsequent one — re-dials never
     /// reuse a Call-ID a phone may have declined.
-    fn agent_leg_call_id(base: &str, seq: u32) -> String {
+    pub(crate) fn agent_leg_call_id(base: &str, seq: u32) -> String {
         if seq == 0 {
             base.to_string()
         } else {

@@ -556,16 +556,23 @@ impl SipSession {
         }
         // Carry the root session id to the transfer target via UUI so an
         // external network leg can re-attach on the way back in, and declare
-        // the leg intent (`leg=transfer`): a cluster peer that terminates the
-        // INVITE as its own session then knows this is a child leg of the
-        // logical call, not a new call (no duplicate call_created /
-        // call_answered lifecycle there).
+        // the leg intent: a cluster peer that terminates the INVITE as its
+        // own session then knows this is a child leg of the logical call,
+        // not a new call (no duplicate call_created / call_answered
+        // lifecycle there). A REGISTERED agent target declares `leg=agent`
+        // — its home node runs the child dialog with the agent attribution
+        // (the dial-time "transfer" intent must not survive into events);
+        // anything else keeps `leg=transfer`.
+        let refer_role = match Self::uri_user_part(target_uri) {
+            Some(user) if Self::refer_target_cc_agent(server, &user).await.is_some() => "agent",
+            _ => "transfer",
+        };
         headers.push(crate::call::uui::build_uui_header(
             &root_session_id,
             None,
             None,
             None,
-            Some("transfer"),
+            Some(refer_role),
         ));
         let media = server.default_media_config();
         let external_ip = media

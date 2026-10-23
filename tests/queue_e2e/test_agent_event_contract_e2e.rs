@@ -199,9 +199,20 @@ async fn start_harness(capture: &WebhookCapture) -> Result<Harness> {
         .update_status(AGENT, rustpbx::addons::cc::agent::AgentStatus::Idle)
         .await
         .unwrap();
+    // Transfer-target agent: DIFFERENT skill so queue routing (support) is
+    // unaffected — only the transfer flow dials her.
+    cc_registry
+        .register("carol".to_string(), vec!["sales".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("carol", rustpbx::addons::cc::agent::AgentStatus::Idle)
+        .await
+        .unwrap();
     // Production wiring simulation: the registrar bridge captured the agent's
     // registration socket, so the gateway stamps `client_ip` on its events.
     cc_registry.set_client_ip(AGENT, Some(AGENT_CLIENT_IP.to_string()));
+    cc_registry.set_client_ip("carol", Some(AGENT_CLIENT_IP.to_string()));
 
     let (sg_tx, sg_rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
     let adapter = Arc::new(
@@ -263,6 +274,14 @@ async fn start_harness(capture: &WebhookCapture) -> Result<Harness> {
         SipUser {
             id: 2,
             username: "caller".to_string(),
+            password: Some("password".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        },
+        SipUser {
+            id: 3,
+            username: "carol".to_string(),
             password: Some("password".to_string()),
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
@@ -502,16 +521,18 @@ async fn test_agent_full_stream_role_and_client_ip() -> Result<()> {
     // Final contract: `leg_role`/`client_ip` belong exclusively to the
     // registration-home node's call_* events; queue families identify the
     // agent by `agent_id`.
-    for etype in [
-        "queue_agent_offered",
-        "queue_agent_connected",
-        "skill_group_agent_assigned",
-        "skill_group_agent_connected",
+    for (etype, expected) in [
+        ("queue_agent_offered", 1usize),
+        ("queue_agent_connected", 1),
+        ("skill_group_agent_assigned", 1),
+        ("skill_group_agent_connected", 1),
     ] {
         let evs = events_of_type(&events, etype);
-        assert!(
-            !evs.is_empty(),
-            "{etype} must appear in the answered flow stream"
+        assert_eq!(
+            evs.len(),
+            expected,
+            "{etype}: exactly {expected} emission expected for a single-agent \
+             answered flow — a duplicate means double-emission, absent means lost: {evs:?}"
         );
         for ev in evs {
             assert_eq!(
@@ -544,6 +565,208 @@ async fn test_agent_full_stream_role_and_client_ip() -> Result<()> {
     }
 
     agent_pump.abort();
+    harness.server.stop();
+    Ok(())
+}
+
+/// Queue → agent answers → CC blind transfer to ANOTHER registered agent
+/// (carol) → carol answers → caller hangs up. The transferred-to agent's
+/// `call_*` events must carry `leg_role=agent + client_ip` from the very
+/// first ringing (prd: 转接之后 leg_role=agent 没有了) — exactly once per
+/// lifecycle kind, attributed to carol (not the departing bob).
+#[tokio::test]
+async fn test_agent_transfer_stream_role_and_client_ip() -> Result<()> {
+    use rustpbx::call::domain::CallCommand;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let capture = WebhookCapture::start().await;
+    let harness = start_harness(&capture).await?;
+    let proxy_addr = harness.server.proxy_addr;
+
+    // ── bob answers the queue round; carol answers the transfer ──────────
+    let mut bob = make_ua(proxy_addr, AGENT);
+    bob.start().await?;
+    bob.register().await?;
+    let bob_pump = {
+        let ua = bob.clone();
+        tokio::spawn(async move {
+            loop {
+                match ua.process_dialog_events().await {
+                    Ok(events) => {
+                        for ev in events {
+                            if let TestUaEvent::IncomingCall(dialog_id, offer) = ev {
+                                let _ = ua.ring_call(&dialog_id).await;
+                                sleep(Duration::from_millis(300)).await;
+                                let sdp = offer
+                                    .as_deref()
+                                    .map(|o| create_test_sdp_answer(o, "127.0.0.1", 0))
+                                    .unwrap_or_else(|| create_test_sdp("127.0.0.1", 0, false));
+                                let _ = ua.answer_call(&dialog_id, Some(sdp)).await;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+                sleep(Duration::from_millis(30)).await;
+            }
+        })
+    };
+    let mut carol = make_ua(proxy_addr, "carol");
+    carol.start().await?;
+    carol.register().await?;
+    let carol_pump = {
+        let ua = carol.clone();
+        tokio::spawn(async move {
+            loop {
+                match ua.process_dialog_events().await {
+                    Ok(events) => {
+                        for ev in events {
+                            if let TestUaEvent::IncomingCall(dialog_id, offer) = ev {
+                                let _ = ua.ring_call(&dialog_id).await;
+                                sleep(Duration::from_millis(300)).await;
+                                let sdp = offer
+                                    .as_deref()
+                                    .map(|o| create_test_sdp_answer(o, "127.0.0.1", 0))
+                                    .unwrap_or_else(|| create_test_sdp("127.0.0.1", 0, false));
+                                let _ = ua.answer_call(&dialog_id, Some(sdp)).await;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+                sleep(Duration::from_millis(30)).await;
+            }
+        })
+    };
+    sleep(Duration::from_millis(300)).await;
+
+    // ── Caller → queue → bob ─────────────────────────────────────────────
+    let mut caller = make_ua(proxy_addr, "caller");
+    caller.start().await?;
+    let offer = create_test_sdp(
+        "127.0.0.1",
+        portpicker::pick_unused_port().unwrap_or(32500),
+        false,
+    );
+    let caller_dialog = caller.make_call(QUEUE_NUMBER, Some(offer)).await?;
+    wait_for_event(&capture, "queue_agent_connected", Duration::from_secs(20))
+        .await
+        .expect("bob connects");
+    // Agent attribution pins at answer; give the hooks a beat.
+    sleep(Duration::from_millis(700)).await;
+    let handle = harness
+        .server
+        .registry
+        .get_handle_by_call_id(&caller_dialog.call_id)
+        .ok_or_else(|| anyhow!("customer call-id must resolve to its owner session"))?;
+
+    // ── CC blind transfer → carol (registered agent) ──────────────────────
+    handle
+        .send_command(CallCommand::BlindTransferCustomer {
+            target: "carol".to_string(),
+            headers: Default::default(),
+            application_only: false,
+            completion: None,
+        })
+        .map_err(|e| anyhow!("command dispatch: {e}"))?;
+
+    // Carol rings + answers on her independent leg.
+    sleep(Duration::from_millis(2500)).await;
+    caller.hangup(&caller_dialog).await.ok();
+    sleep(Duration::from_millis(800)).await;
+
+    let events: Vec<serde_json::Value> = {
+        let received = capture.received.lock().unwrap();
+        let call_id = received
+            .iter()
+            .find(|v| v["event_type"].as_str() == Some("queue_joined"))
+            .and_then(|v| v["call_id"].as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("queue_joined never captured"))?;
+        received
+            .iter()
+            .filter(|v| v["call_id"].as_str() == Some(call_id.as_str()))
+            .cloned()
+            .collect()
+    };
+    dump_stream(&events.first().and_then(|v| v["call_id"].as_str()).unwrap_or("?"), &events);
+
+    // ── Carol's dialog: role=agent + client_ip on every lifecycle kind ───
+    for (etype, require_client_ip) in [
+        ("call_ringing", true),
+        ("call_answered", true),
+        ("call_hangup", false), // teardown may race the capture window
+    ] {
+        let carol_events: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|v| {
+                v["event_type"].as_str() == Some(etype)
+                    && payload(v)["agent_id"].as_str() == Some("carol")
+                    && payload(v)["leg_role"].as_str() == Some("agent")
+            })
+            .collect();
+        assert_eq!(
+            carol_events.len(),
+            1,
+            "{etype}: exactly ONE role=agent emission attributed to carol, got {carol_events:?}"
+        );
+        if require_client_ip {
+            assert_eq!(
+                payload(carol_events[0])["client_ip"].as_str(),
+                Some(AGENT_CLIENT_IP),
+                "{etype} (carol) must carry the registration client_ip: {}",
+                carol_events[0]
+            );
+        }
+        assert!(
+            payload(carol_events[0])["leg_id"].as_str().is_some(),
+            "{etype} (carol) agent lifecycle event must be leg-scoped: {}",
+            carol_events[0]
+        );
+    }
+
+    // ── Attribution never crosses agents ─────────────────────────────────
+    for ev in &events {
+        let p = payload(ev);
+        if p["leg_role"].as_str() == Some("agent") {
+            let agent = p["agent_id"].as_str().unwrap_or_default();
+            assert!(
+                agent == "carol" || agent == AGENT,
+                "role=agent names an unknown agent {agent:?}: {ev}"
+            );
+            // Per-leg uniqueness: each agent's own dialog reports its own
+            // lifecycle — no event kind carries the role twice for one leg.
+        }
+    }
+    let carol_ringing_legs: std::collections::HashSet<&str> = events
+        .iter()
+        .filter(|v| {
+            v["event_type"].as_str() == Some("call_ringing")
+                && payload(v)["agent_id"].as_str() == Some("carol")
+                && payload(v)["leg_id"].as_str().is_some()
+        })
+        .map(|v| payload(v)["leg_id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        carol_ringing_legs.len(),
+        1,
+        "carol rings on exactly one leg: {carol_ringing_legs:?}"
+    );
+
+    // queue families stay attribution-free (agent_id only).
+    for etype in ["queue_agent_offered", "queue_agent_connected"] {
+        for ev in events.iter().filter(|v| v["event_type"].as_str() == Some(etype)) {
+            assert_ne!(
+                payload(ev)["leg_role"].as_str(),
+                Some("agent"),
+                "{etype} must not claim the agent role: {ev}"
+            );
+        }
+    }
+
+    bob_pump.abort();
+    carol_pump.abort();
     harness.server.stop();
     Ok(())
 }

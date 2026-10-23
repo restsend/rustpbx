@@ -13147,8 +13147,7 @@ async fn child_leg_session_hangup_claims_role_without_leg_agent_id() {
 /// `call_hangup` must still claim the declared role. This is the CANCEL the
 /// queue sends at ring timeout (prd: it produced a hangup without leg_role).
 #[tokio::test]
-async fn child_leg_miss_hangup_claims_role_on_ring_timeout() {
-    let child_id = "33333333333343338333333333333333";
+async fn child_leg_miss_hangup_claims_role_on_ring_timeout() {    let child_id = "33333333333343338333333333333333";
     let mut hop = crate::call::domain::Leg::new(LegId::new("caller"));
     hop.state = LegState::Connected;
     let mut phone = crate::call::domain::Leg::new(LegId::new("callee"));
@@ -13889,3 +13888,118 @@ async fn caller_termination_preserves_application_exit_cause() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+// ── Transfer → agent: the registration machine normalizes the role ────────
+
+/// REPRO (prd: 转接之后 leg_role=agent 没有了). A REFER/consult transfer
+/// landing on a REGISTERED agent declares `leg=transfer` / `leg=consult` on
+/// the wire, so the agent machine's child-leg session stamps that dial-time
+/// INTENT on every call_* event of what is now the AGENT dialog — the
+/// contract says the registration machine stamps `leg_role=agent`.
+///
+/// The child session resolves the dialed target against the registry before
+/// ringing (`ensure_child_agent_pinned`); a REGISTERED agent must normalize
+/// the declared role to "agent". A non-agent target keeps its declared role.
+#[tokio::test]
+async fn child_leg_role_normalizes_to_agent_for_registered_target() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    async fn child_session_with_role(
+        declared: &'static str,
+        registry: Option<Arc<MemoryRegistry>>,
+    ) -> (
+        SipSession,
+        tokio::sync::broadcast::Receiver<crate::rwi::EventCacheEntry>,
+    ) {
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let events = gateway.subscribe_events();
+        let (server, _) = create_test_server_with_rwi_gateway(
+            Default::default(),
+            Arc::new(parking_lot::RwLock::new(gateway)),
+        )
+        .await;
+        let mut server = server;
+        if let Some(registry) = registry {
+            Arc::get_mut(&mut server)
+                .expect("test server uniquely held")
+                .agent_registry = Some(registry);
+        }
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "caller",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let context = CallContext {
+            session_id: format!("child-role-{declared}"),
+            dialplan: Arc::new(Dialplan::new(
+                format!("child-role-{declared}"),
+                request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:caller@rustpbx.com".into(),
+            original_callee: "sip:2002@rustpbx.com".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, _commands) =
+            SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+        session.meta.child_leg_role = Some(declared.to_string());
+        let mut callee = crate::call::domain::Leg::new(LegId::from("callee"));
+        callee.endpoint = Some("sip:2002@rustpbx.com".to_string());
+        session.legs.insert(LegId::from("callee"), callee);
+        (session, events)
+    }
+
+    let registry = Arc::new(MemoryRegistry::new());
+    registry
+        .register(
+            "2002".to_string(),
+            "Bob".to_string(),
+            "sip:2002@rustpbx.com".to_string(),
+            vec!["support".to_string()],
+            1,
+        )
+        .await
+        .unwrap();
+    registry
+        .update_presence("2002", PresenceState::Idle)
+        .await
+        .unwrap();
+
+    for declared in ["transfer", "consult"] {
+        let (mut session, mut events) =
+            child_session_with_role(declared, Some(registry.clone())).await;
+        session.ensure_child_agent_pinned().await;
+        session.emit_call_ringing(Some("callee".into()), false, None);
+        let ringing = events.try_recv().expect("child leg ringing").event.payload;
+        assert_eq!(
+            ringing["leg_role"], "agent",
+            "REPRO {declared}: a transfer/consult landing on a REGISTERED agent \
+             must normalize to leg_role=agent on the registration machine: {ringing:?}"
+        );
+        assert_eq!(
+            ringing["agent_id"], "2002",
+            "REPRO {declared}: the resolved agent is attributed: {ringing:?}"
+        );
+    }
+
+    // Non-agent target: the declared role stays (no normalization).
+    let (mut session, mut events) =
+        child_session_with_role("consult", Some(registry.clone())).await;
+    if let Some(leg) = session.legs.get_mut(&LegId::from("callee")) {
+        leg.endpoint = Some("sip:13800001380@rustpbx.com".to_string());
+    }
+    session.ensure_child_agent_pinned().await;
+    session.emit_call_ringing(Some("callee".into()), false, None);
+    let ringing = events.try_recv().expect("child leg ringing").event.payload;
+    assert_eq!(
+        ringing["leg_role"], "consult",
+        "non-agent target keeps its declared role: {ringing:?}"
+    );
+}

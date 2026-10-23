@@ -1628,15 +1628,17 @@ impl SipSession {
         // `leg_role: "agent"` + `client_ip` on its events instead of starting
         // a fresh root call. Non-agent targets (IVR / extension / trunk) keep
         // the parked (empty) identity.
-        let target_agent = match (
-            Self::uri_user_part(&location.aor.to_string()),
-            self.server.agent_registry.as_ref(),
-        ) {
-            (Some(user), Some(registry)) => {
-                registry.get_agent(&user).await.is_some().then(|| user)
-            }
-            _ => None,
-        };
+        let target_agent = self
+            .resolve_registered_agent_user(&[
+                location
+                    .registered_aor
+                    .as_ref()
+                    .map(|uri| uri.to_string())
+                    .as_deref()
+                    .unwrap_or(""),
+                &location.aor.to_string(),
+            ])
+            .await;
         if let Some(user) = target_agent
             && let Some(leg) = self.legs.get_mut(&LegId::from("callee"))
         {
@@ -1867,11 +1869,27 @@ impl SipSession {
         )
         .await?;
         self.release_api_transfer_agent_leg(agent_leg).await;
-        self.setup_bridge(customer_leg.clone(), target_leg).await;
+        self.setup_bridge(customer_leg.clone(), target_leg.clone()).await;
         // The transfer target (independent leg anchored on the customer) owns
         // the call's next stage — the departing agent's attribution stops
-        // here; its identity lives on in the stashed `transfer_source`.
+        // here; its identity lives on in the stashed `transfer_source`. A
+        // REGISTERED-AGENT target keeps its OWN attribution live instead: the
+        // new leg's resolved identity becomes the pinned agent, so every
+        // later call_* event of the transferred dialog carries its agent_id
+        // (→ client_ip) — the blanket clear used to strip the new agent too.
+        let target_agent = self
+            .legs
+            .get(&target_leg)
+            .and_then(|leg| leg.agent_id.clone());
         self.clear_agent_attribution();
+        if let Some(agent) = target_agent {
+            // Publish on BOTH attribution surfaces (pin + the ext keys the
+            // meta sync reads — the CC hook's contract), so the transferred
+            // dialog's later call_* events carry agent_id (→ client_ip).
+            Self::set_pinned_agent_id(&self.extensions, &agent);
+            self.session_ext_set("agent_id", agent);
+            self.sync_agent_context_to_rwi_meta();
+        }
         // Canonical event form: a bare extension target ("1003") is reported
         // as `sip:1003` — URI-shaped like the B2BUA dial path.
         let target_event = {
