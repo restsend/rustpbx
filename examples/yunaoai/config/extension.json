@@ -1,0 +1,22 @@
+{
+  "extensions": {
+    "879831001": "123456",
+    "879831002": "123456"
+  },
+  "trunks": {
+    "yacc55-fs": {
+      "display_name": "FS Trunk (yacc55)",
+      "direction": "bidirectional",
+      "dest": "sip:100.88.0.42:5090",
+      "transport": "udp",
+      "allow_ips": "100.88.0.42/32",
+      "profile": "tailscale",
+      "audio_codecs": ["PCMA", "PCMU"],
+      "ringback": {
+        "notfound": "sounds/failure-notfound-zh.wav",
+        "offline": "sounds/failure-offline-zh.wav"
+      }
+    }
+  },
+  "outbound_trunk": "yacc55-fs"
+}

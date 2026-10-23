@@ -1,0 +1,258 @@
+{
+    "sitecode": "3201",
+    "gateways": {
+        "yacc55-fs": {
+            "dest": "sip:100.88.0.42:5090",
+            "transport": "udp",
+            "type": "external",
+            "max_load": -1,
+            "direction": "bidirectional",
+            "display_name": "FS Trunk (yacc55)",
+            "allow_ips": "100.88.0.42/32",
+            "profile": "tailscale",
+            "audio_codecs": [
+                "PCMA",
+                "PCMU"
+            ],
+            "ringback": {
+                "offline": "sounds/failure-offline-zh.wav",
+                "notfound": "sounds/failure-notfound-zh.wav"
+            }
+        },
+        "lvcx": {
+            "dest": "sip:100.88.0.35:5080",
+            "transport": "udp",
+            "type": "internal",
+            "max_load": -1
+        },
+        "liusy": {
+            "dest": "sip:100.88.0.204:38890",
+            "transport": "udp",
+            "type": "external",
+            "max_load": -1,
+            "profile": "tailscale"
+        },
+        "ya-pbx": {
+            "dest": "sip:ya-pbx.meshcc.cn:38896",
+            "transport": "udp",
+            "type": "external",
+            "max_load": -1,
+            "direction": "bidirectional",
+            "register_enabled": true,
+            "username": "8195",
+            "password": "995018",
+            "register_expires": 60,
+            "display_name": "YA PBX (register 8195)"
+        },
+        "reg879830001": {
+            "dest": "sip:0.0.0.0",
+            "transport": "udp",
+            "type": "external",
+            "max_load": -1,
+            "direction": "bidirectional",
+            "register_enabled": true,
+            "username": "879830001",
+            "password": "reg-demo-8798",
+            "register_expires": 60,
+            "profile": "tailscale",
+            "external_ip": "100.88.0.1",
+            "display_name": "Demo FS (被动注册进 reg879830001)"
+        }
+    },
+    "caller_groups": {
+        "cg-8120": [
+            "8120"
+        ],
+        "cg-8196": [
+            "8196"
+        ],
+        "cg-webrtc-a": [
+            "8899"
+        ],
+        "cg-webrtc-b": [
+            "8810",
+            "8811",
+            "8812"
+        ]
+    },
+    "route_points": [
+        {
+            "point_id": "internal-8120",
+            "group_type": "internal",
+            "gw_list": [
+                "lvcx"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "",
+                    "strip": 0,
+                    "caller_group": "cg-8120"
+                }
+            ]
+        },
+        {
+            "point_id": "internal-8196-5000",
+            "group_type": "internal",
+            "gw_list": [
+                "lvcx"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "5000",
+                    "strip": 0,
+                    "caller_group": "cg-8196"
+                }
+            ]
+        },
+        {
+            "point_id": "internal-6000",
+            "group_type": "internal",
+            "gw_list": [
+                "lvcx"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "6000",
+                    "strip": 0
+                }
+            ]
+        },
+        {
+            "point_id": "internal-default",
+            "group_type": "internal",
+            "default_for": "external",
+            "gw_list": [
+                "lvcx"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "",
+                    "strip": 0
+                }
+            ]
+        },
+        {
+            "point_id": "external-default",
+            "group_type": "external",
+            "default_for": "internal",
+            "gw_list": [
+                "ya-pbx"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "",
+                    "strip": 0
+                }
+            ]
+        }
+    ],
+    "webrtc": [
+        {
+            "point_id": "webrtc-reg",
+            "group_type": "external",
+            "gw_list": [
+                "reg879830001"
+            ],
+            "allowed_ips": [
+                "100.88.0.0/24",
+                "127.0.0.1/32"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "8798",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-a"
+                }
+            ]
+        },
+        {
+            "point_id": "webrtc-ya",
+            "group_type": "external",
+            "gw_list": [
+                "ya-pbx",
+                "yacc55-fs"
+            ],
+            "allowed_ips": [
+                "100.88.0.0/24",
+                "127.0.0.1/32"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "13",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-a"
+                },
+                {
+                    "prefix": "98088",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-a"
+                }
+            ]
+        },
+        {
+            "point_id": "webrtc-lvcx",
+            "group_type": "external",
+            "gw_list": [
+                "lvcx"
+            ],
+            "allowed_ips": [
+                "100.88.0.0/24",
+                "127.0.0.1/32"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "13",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-b"
+                },
+                {
+                    "prefix": "15",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-b"
+                },
+                {
+                    "prefix": "18",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-b"
+                },
+                {
+                    "prefix": "178",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-b"
+                }
+            ]
+        },
+        {
+            "point_id": "webrtc-liusy",
+            "group_type": "external",
+            "gw_list": [
+                "liusy"
+            ],
+            "allowed_ips": [
+                "100.88.0.0/24",
+                "127.0.0.1/32"
+            ],
+            "rule_list": [
+                {
+                    "prefix": "155",
+                    "strip": 0,
+                    "caller_group": "cg-webrtc-b"
+                }
+            ]
+        }
+    ],
+    "internal_services": [
+        {
+            "user_agent": "CCM",
+            "source_cidrs": [
+                "100.88.0.0/24"
+            ]
+        },
+        {
+            "user_agent": "kubePhone",
+            "source_cidrs": [
+                "100.88.0.0/24"
+            ]
+        }
+    ]
+}

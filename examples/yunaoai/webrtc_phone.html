@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC 呼叫（JWT 匿名）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f5f6fa; color: #1a1a2e; font-size: 14px;
+         display: flex; justify-content: center; padding: 24px 12px; }
+  .card { width: 100%; max-width: 960px; background: #fff; border: 1px solid #e1e4ea;
+          border-radius: 14px; padding: 26px; box-shadow: 0 6px 24px rgba(0,0,0,.06); align-self: flex-start; }
+  h1 { font-size: 18px; margin-bottom: 2px; }
+  h1 .sub { font-size: 11px; color: #6b7280; font-weight: 400; display: block; margin-top: 2px; }
+  .status { margin: 10px 0 14px; padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+            background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; display: inline-block; }
+  .status.ok { background: #dcfce7; color: #15803d; border-color: #86efac; }
+  .status.err { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+  .status.warn { background: #fef3c7; color: #a16207; border-color: #fcd34d; }
+  .status.busy { background: #ede9fe; color: #6d28d9; border-color: #c4b5fd; }
+  .field { margin-bottom: 10px; }
+  label { font-size: 12px; color: #6b7280; display: block; margin-bottom: 3px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid #d0d4dc; border-radius: 8px;
+          background: #fff; color: #1a1a2e; font-size: 13px; outline: none; }
+  input:focus { border-color: #2a5298; }
+  .row { display: flex; gap: 8px; }
+  .row .field { flex: 1; }
+  select { width: 100%; padding: 8px 10px; border: 1px solid #d0d4dc; border-radius: 8px;
+           background: #fff; color: #1a1a2e; font-size: 13px; outline: none; }
+  select:focus { border-color: #2a5298; }
+  .btn-row { display: flex; gap: 8px; margin: 14px 0; }
+  .btn { flex: 1; padding: 11px; border: 1px solid #d0d4dc; border-radius: 10px; background: #fff;
+         color: #1a1a2e; cursor: pointer; font-size: 14px; font-weight: 600; transition: background .15s; }
+  .btn:hover:not(:disabled) { background: #f0f3fa; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.call { background: #16a34a; border-color: #16a34a; color: #fff; }
+  .btn.call:hover:not(:disabled) { background: #15803d; }
+  .btn.hang { background: #dc2626; border-color: #dc2626; color: #fff; }
+  .btn.hang:hover:not(:disabled) { background: #b91c1c; }
+  .btn.gray { background: #f5f6fa; }
+  .prefix-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .prefix-chip { flex: 0 0 auto !important; padding: 6px 10px; font-size: 12px;
+    border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff; color: #4338ca; cursor: pointer; }
+  .prefix-chip:hover { background: #e0e7ff; }
+  .prefix-chip:disabled { opacity: .5; cursor: not-allowed; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-width: 220px; }
+  .dpad .dkey { padding: 12px 0; border: 1px solid #d0d4dc; border-radius: 10px;
+    background: #fff; font-size: 16px; cursor: pointer; }
+  .dpad .dkey:active { background: #e8ecf3; }
+  .meta { font-size: 11px; color: #6b7280; margin: 2px 0 8px; font-family: "SF Mono", Menlo, monospace; }
+  .meta b { color: #0891b2; }
+  .logs { background: #f8fafc; border: 1px solid #e1e4ea; border-radius: 8px; padding: 8px;
+          font-family: "SF Mono", Menlo, monospace; font-size: 12px; height: 320px; overflow-y: auto;
+          word-break: break-all; line-height: 1.5; }
+  .logs-title { display: flex; align-items: center; justify-content: space-between; margin: 6px 0 8px; }
+  .logs-title .lt { font-size: 12px; color: #6b7280; font-weight: 600; }
+  .logs-title .clear { font-size: 12px; color: #dc2626; cursor: pointer; background: none; border: 1px solid #f3b4b4; border-radius: 6px; padding: 3px 10px; }
+  .logs-title .clear:hover { background: #fdeaea; }
+  .log-time { color: #9ca3af; }
+  .log-ok { color: #15803d; }
+  .log-err { color: #b91c1c; }
+  .log-info { color: #0891b2; }
+  .log-warn { color: #a16207; }
+  audio { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>WebRTC 呼叫<span class="sub">JWT 匿名验证</span></h1>
+  <div id="status" class="status">未连接</div>
+
+  <div class="field">
+    <label>RustPBX WebSocket 服务</label>
+    <input id="wsServer" type="text" placeholder="ws://HOST:8080/ws">
+  </div>
+  <div class="field">
+    <label>Token 服务地址（留空=同源）</label>
+    <input id="tokenUrl" type="text" placeholder="http://HOST:9612">
+  </div>
+
+  <div class="field">
+    <label>WebRTC 账号（第一项为默认，其余可选；末项为配置外测试账号）</label>
+    <select id="accountSel"><option value="">加载中...</option></select>
+  </div>
+
+  <div class="meta">账号: <b id="mAccount">--</b> | JWT jti: <b id="mJti">--</b> | 剩余 <span id="jwtCountdown">--</span>s</div>
+
+  <div class="field">
+    <label>被叫号码（当前账号可拨前缀见下拉提示）</label>
+    <input id="callee" type="tel" list="calleePrefix" placeholder="选下拉前缀或手输完整号码">
+    <datalist id="calleePrefix"></datalist>
+    <div id="calleePrefixBtns" class="prefix-btns" style="margin-top:6px"></div>
+  </div>
+
+  <div class="btn-row">
+    <button id="callBtn" class="btn call">发起呼叫</button>
+    <button id="hangBtn" class="btn hang" disabled>挂断</button>
+  </div>
+
+  <div class="field">
+    <label>拨号盘（通话中按键发送 DTMF·RFC2833；空闲时按键输入被叫号码）</label>
+    <div class="dpad" id="dpad"></div>
+  </div>
+
+  <div class="logs-title">
+    <span class="lt">运行日志</span>
+    <button class="clear" id="clearLogsBtn">清除日志</button>
+  </div>
+  <div class="logs" id="logs"></div>
+</div>
+
+<audio id="remoteAudio" autoplay></audio>
+
+<script src="/static/jssip.min.js"></script>
+<script>window.onerror = function (msg, src, line) { document.getElementById('status').textContent = 'JS 错误: ' + msg; }; </script>
+<script>
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var statusEl = $('status'), logsEl = $('logs');
+var callBtn = $('callBtn'), hangBtn = $('hangBtn');
+var remoteAudio = $('remoteAudio');
+
+var ua = null;
+var currentSession = null;
+var isRegistered = false;
+var pageInstanceId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+    ? window.crypto.randomUUID()
+    : (function () {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+      })();
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = 'status' + (cls ? ' ' + cls : '');
+  log(text, cls === 'err' ? 'log-err' : cls === 'ok' ? 'log-ok' : cls === 'warn' ? '' : 'log-info');
+}
+function log(msg, cls) {
+  var t = new Date().toLocaleTimeString();
+  var div = document.createElement('div');
+  div.innerHTML = '<span class="log-time">[' + t + ']</span> <span class="' + (cls || '') + '">' + escapeHtml(msg) + '</span>';
+  logsEl.appendChild(div);
+  logsEl.scrollTop = logsEl.scrollHeight;
+  if (window.console && console.log) { console.log((cls || ''), msg); }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function domainFromWs(ws) {
+  return ws.replace('wss://', '').replace('ws://', '').split('/')[0].split(':')[0];
+}
+function defaultWsUrl() {
+  var port = window.location.port ? (parseInt(window.location.port, 10) === 9612 ? 8080 : window.location.port) : 8080;
+  var host = window.location.hostname || 'localhost';
+  return (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + host + ':' + port + '/ws';
+}
+function tokenBase() {
+  var v = $('tokenUrl').value.trim();
+  if (v) return v.replace(/\/+$/, '');
+  return window.location.origin;
+}
+// 页面加载时拉取可用账号列表填充下拉：第一项为默认（自动选中），其后为
+// 可选账号；末尾追加一个配置外测试账号（用于验证服务端 account 校验）。
+async function loadAccounts() {
+  var sel = $('accountSel');
+  try {
+    var resp = await fetch(tokenBase() + '/webrtc/accounts', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    var accs = Array.isArray(data.accounts) ? data.accounts : [];
+    var prefixes = (data && data.prefixes) || {};
+    var rules = (data && data.rules) || {};
+    var metas = (data && data.meta) || {};
+    sel.innerHTML = '';
+    if (!accs.length) {
+      sel.options.add(new Option('(无可用账号)', ''));
+      return;
+    }
+    // 第一行：独立"默认"（value 为空 → 不指定账号，服务端回退默认账号）。
+    sel.options.add(new Option('默认', '', true, true));
+    // 其后为各可选账号（含默认账号本身，例如 8899 单独成行）。
+    // label 聚合展示该账号的全部 rule：可拨前缀[gw1/gw2]，直接关联前缀→出口。
+    accs.forEach(function (acc) {
+      var label = String(acc);
+      var rlist = Array.isArray(rules[String(acc)]) ? rules[String(acc)] : [];
+      var items = [];
+      rlist.forEach(function (r) {
+        var seg = '可拨' + (r['prefix'] || '任意');
+        if (r['strip']) seg += ':去' + r['strip'] + '位';
+        if (r['pri_prefix']) seg += ':加' + r['pri_prefix'];
+        var gw = Array.isArray(r['gw_list']) && r['gw_list'].length ? r['gw_list'].join(' / ') : '';
+        if (gw) seg += '[' + gw + ']';
+        items.push(seg);
+      });
+      if (items.length) {
+        label += '（' + items.join(', ') + '）';
+      } else if (Array.isArray(prefixes[String(acc)]) && prefixes[String(acc)].indexOf('') >= 0) {
+        label += '（可拨: 任意）';
+      }
+      sel.options.add(new Option(label, String(acc)));
+    });
+    // 追加配置外测试账号（配置文件里不存在 → 服务端应返回 403）
+    sel.options.add(new Option('(测试)配置外账号 9999', '9999'));
+    log('账号下拉已加载: 默认 + ' + accs.join(' / ') + ' + 测试账号', 'log-info');
+    // 保存账号→前缀/规则映射，供被叫号码下拉提示使用；并即时刷新。
+    window.__accPrefix = prefixes;
+    window.__accRules = rules;
+    refreshCalleePrefixes();
+  } catch (e) {
+    sel.innerHTML = '';
+    sel.options.add(new Option('(加载失败, 使用默认)', ''));
+    log('加载账号列表失败: ' + e.message, 'log-err');
+  }
+}
+// 根据当前选中账号，把可拨前缀刷入被叫号码 datalist 下拉 + 一键拨打按钮。
+function refreshCalleePrefixes() {
+  var dl = $('calleePrefix');
+  var btns = $('calleePrefixBtns');
+  var acc = $('accountSel') ? $('accountSel').value : '';
+  var prefixes = window.__accPrefix || {};
+  var rules = window.__accRules || {};
+  var pre = Array.isArray(prefixes[String(acc)]) ? prefixes[String(acc)] : [];
+  var rlist = Array.isArray(rules[String(acc)]) ? rules[String(acc)] : [];
+  // 比 prefix 数组更全：每条 rule 的 prefix + strip/pri_prefix 说明。
+  var opts = [];
+  rlist.forEach(function (r) {
+    var seg = r['prefix'] || '任意';
+    if (r['strip']) seg += ' (去' + r['strip'] + '位)';
+    if (r['pri_prefix']) seg += ' (加' + r['pri_prefix'] + ')';
+    if (opts.indexOf(seg) < 0) opts.push(seg);
+  });
+  if (!opts.length) { pre.forEach(function (p) { if (opts.indexOf(p) < 0) opts.push(p); }); }
+  // datalist（下拉提示，自由输入下仍可选）
+  if (dl) {
+    dl.innerHTML = '';
+    opts.forEach(function (p) {
+      var o = document.createElement('option');
+      o.value = p;
+      dl.appendChild(o);
+    });
+  }
+  // 一键拨打按钮（点击直接发出该前缀）
+  if (btns) {
+    btns.innerHTML = '';
+    rlist.forEach(function (r) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn prefix-chip';
+      var prefix = r['prefix'] || '任意';
+      b.textContent = '拨打' + prefix +
+        (r['strip'] ? '(去' + r['strip'] + ')' : '') +
+        (r['pri_prefix'] ? '(加' + r['pri_prefix'] + ')' : '');
+      b.title = '点击直接拨打该前缀';
+      b.addEventListener('click', function () {
+        if (currentSession && callBtn.disabled) { setStatus('通话中，请先挂断', 'warn'); return; }
+        $('callee').value = prefix;
+        connectAndCall();
+      });
+      btns.appendChild(b);
+    });
+  }
+}
+async function fetchJwt() {
+  // cache: 'no-store' + 随机查询串，强制浏览器不使用缓存的旧响应，
+  // 确保每次外呼都拿到服务端现签的新 JWT（否则部分浏览器会复用同一响应）。
+  var sel = $('accountSel') ? $('accountSel').value : '';
+  var body = sel ? JSON.stringify({ account: sel }) : JSON.stringify({});
+  var resp = await fetch(tokenBase() + '/token/webrtc?cb=' + Date.now() + '_' + Math.floor(Math.random() * 1e6), {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: body
+  });
+  if (!resp.ok) {
+    var reason = '';
+    try { var errData = await resp.json(); if (errData && errData.reason) reason = '：' + errData.reason; } catch (e) {}
+    var head = sel ? ' (account=' + sel + ')' : '';
+    throw new Error('签发 JWT 失败 HTTP ' + resp.status + head + reason);
+  }
+  var data = await resp.json();
+  if (!data.token || !data.account) throw new Error('JWT 响应缺少 token/account');
+  return data; // { token, account, expires_in }
+}
+// 从 JWT payload(base64url) 中提取 jti（一次性随机 nonce）。这是唯一每次必变的字段，
+// 用作页面上判断"是否换了新 token"的指纹。payload 是纯 ASCII JSON，atob 直接给出文本。
+function jtiOf(token) {
+  var br = function () { return (token.split('.')[1] || '').slice(0, 10); };
+  try {
+    var seg = (token.split('.')[1] || '').replace(/-/g, '+').replace(/_/g, '/');
+    var pad = seg + '===='.slice(0, (4 - (seg.length % 4)) % 4);
+    var obj = JSON.parse(atob(pad));
+    if (obj && obj.jti) return String(obj.jti).slice(0, 8);
+    return br();
+  } catch (e) { return br() + '?'; }
+}
+function startJwtCountdown(seconds) {
+  if (window.__jwtTimer) { clearInterval(window.__jwtTimer); }
+  var el = document.getElementById('jwtCountdown');
+  var end = Date.now() + (seconds * 1000);
+  var tick = function () {
+    var left = Math.max(0, Math.round((end - Date.now()) / 1000));
+    if (el) el.textContent = left;
+    if (left <= 0 && window.__jwtTimer) { clearInterval(window.__jwtTimer); window.__jwtTimer = null; }
+  };
+  tick();
+  window.__jwtTimer = setInterval(tick, 1000);
+}
+function attachRemote(session) {
+  var set = function (s) { if (s && remoteAudio.srcObject !== s) remoteAudio.srcObject = s; };
+  var bind = function (pc) {
+    if (!pc) return;
+    pc.onaddstream = function (e) { set(e.stream); };
+    pc.ontrack = function (e) { if (e.streams.length) set(e.streams[0]); };
+    try { var rs = pc.getRemoteStreams ? pc.getRemoteStreams() : []; if (rs.length) set(rs[0]); } catch (e) {}
+  };
+  bind(session.connection);
+  session.on('peerconnection', bind);
+  session.on('confirmed', function () { bind(session.connection); });
+}
+async function connectAndCall() {
+  var ws = $('wsServer').value.trim() || defaultWsUrl();
+  var callee = $('callee').value.trim();
+  if (!callee) { setStatus('请先输入被叫号码', 'warn'); return; }
+  if (ua) { log('已有 UA，先停止旧连接'); try { ua.stop(); } catch (e) {} ua = null; }
+
+  callBtn.disabled = true;
+  setStatus('正在申请 JWT...', 'busy');
+  var jwt, domain;
+  try {
+    jwt = await fetchJwt();
+    // 只更新对应子元素，绝不以 innerHTML 重写 .meta —— 否则会产生重复的
+    // id="jwtCountdown" 导致倒计时错乱。jti 每次必变，是最可信的"换新 token"指纹。
+    $('mAccount').textContent = jwt.account;
+    $('mJti').textContent = jtiOf(jwt.token);
+    startJwtCountdown(jwt.expires_in || 0);
+    // 每次签发都完整打印，便于确认是否拿到新 token（jti/签名不同则 token 不同）
+    log('JWT 已签发 account=' + jwt.account + ' expires_in=' + jwt.expires_in + 's token=' + jwt.token, 'log-info');
+    log('JWT header.payload 校验点: jti=' + jtiOf(jwt.token) + '（每次变化则 token 已更新）', 'log-info');
+    domain = domainFromWs(ws);
+    if (!domain) throw new Error('WebSocket 地址无效: ' + ws);
+  } catch (e) {
+    setStatus('签发 JWT 失败', 'err'); log(e.message, 'log-err');
+    releaseControl();
+    return;
+  }
+
+  setStatus('连接并注册...', 'busy');
+  if (typeof JsSIP === 'undefined') {
+    setStatus('JsSIP 加载失败（CDN 不可达）', 'err');
+    log('JsSIP undefined - script not loaded', 'log-err');
+    releaseControl();
+    return;
+  }
+  try { if (JsSIP && JsSIP.debug && JsSIP.debug.enable) { JsSIP.debug.enable('JsSIP:*'); log('SIP 报文跟踪已开启（见控制台）', 'log-info'); } } catch (e) {}
+  log('WS: ' + ws, 'log-info');
+  var socket = new JsSIP.WebSocketInterface(ws);
+  var configuration = {
+    sockets: [socket],
+    uri: 'sip:' + jwt.account + '@' + domain,
+    display_name: jwt.account,
+    register: true,
+    instance_id: pageInstanceId,
+    extra_headers: ['X-Auth-Token: ' + jwt.token],
+    mediaConstraints: { audio: true, video: false },
+    rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+  };
+  var ua2;
+  try {
+    ua2 = new JsSIP.UA(configuration);
+  } catch (e) {
+    setStatus('创建 UA 失败: ' + e.message, 'err');
+    log('UA error: ' + (e.stack || e.message), 'log-err');
+    releaseControl();
+    return;
+  }
+  ua = ua2;
+
+  log('UA: sip:' + jwt.account + '@' + domain + ' (register=true)', 'log-info');
+  ua.on('connected', function () { setStatus('WebSocket 已连接', 'ok'); log('WebSocket 已连接: ' + ws, 'log-ok'); });
+  ua.on('disconnected', function (d) { setStatus('连接断开', 'err'); log('连接断开 cause=' + (d && d.cause || 'unknown'), 'log-err'); reset(); });
+  ua.on('registrationFailed', function (data) {
+    setStatus('注册失败: ' + data.cause, 'err'); log(JSON.stringify(data), 'log-err');
+    // JWT 是单次 token，JsSIP 自动重发 REGISTER 时不再带 X-Auth-Token，
+    // 服务端会回 401。但此时若已有通话建立，绝不能再 stop() UA —— 否则会
+    // 把正在进行的通话一并杀掉（之前 30s/39s 挂断的真凶）。仅提示并保留连接。
+    var inCall = currentSession && typeof currentSession.isEstablished === 'function'
+                 && currentSession.isEstablished();
+    if (inCall) {
+      setStatus('注册令牌已过期（当前通话不受影响）', 'warn');
+      log('重注册失败(401)但通话已建立，保留 UA 不解散，避免误挂', 'log-warn');
+      return;
+    }
+    if (ua) { try { ua.stop(); } catch (e) {} }
+    reset();
+  });
+  ua.on('newRTCSession', function (data) {
+    var session = data.session;
+    if (data.originator !== 'remote') {
+      currentSession = session;
+      attachRemote(session);
+      bindSession(session);
+      return;
+    }
+    log('收到来电，自动拒绝(Busy)', 'log-info');
+    session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+  });
+  ua.on('registered', function () {
+    isRegistered = true;
+    setStatus('注册成功', 'ok');
+    log('注册成功 -> 开始拨打 ' + callee, 'log-ok');
+    // 呼叫进行中：发起按钮保持禁用，只有挂断/失败/结束后才重新启用
+    callBtn.disabled = true; hangBtn.disabled = false;
+    placeCall(callee);
+  });
+  ua.start();
+}
+// 确保本地 offer/answer SDP 声明 RFC4733 telephone-event（DTMF 走 RFC2833 的前提）。
+// 浏览器默认生成的音频 offer 常不含该负载，需在此显式补上，否则对端按键无法被识别。
+function ensureTelephoneEventInSdp(sdp) {
+  if (!sdp || typeof sdp !== 'string') return sdp;
+  var nl = sdp.indexOf('\r\n') >= 0 ? '\r\n' : '\n';
+  var lines = sdp.split(nl);
+  var telPt = null;
+  var telRe = /^a=rtpmap:(\d+)\s+telephone-event\/\d+/i;
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(telRe);
+    if (m) { telPt = m[1]; break; }
+  }
+  var audioIdx = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf('m=audio') === 0) { audioIdx = i; break; }
+  }
+  if (audioIdx < 0) return sdp;
+  var media = lines[audioIdx].split(' ');
+  if (media.length < 4) return sdp;
+  if (!telPt) {
+    var used = {};
+    for (var j = audioIdx; j < lines.length; j++) {
+      if (j > audioIdx && lines[j].indexOf('m=') === 0) break;
+      var mm = lines[j].match(/^a=rtpmap:(\d+)/);
+      if (mm) used[mm[1]] = true;
+    }
+    for (var j = 3; j < media.length; j++) used[media[j]] = true;
+    telPt = '101';
+    for (var p = 96; p <= 127; p++) {
+      if (!used[String(p)]) { telPt = String(p); break; }
+    }
+    lines.splice(audioIdx + 1, 0,
+      'a=rtpmap:' + telPt + ' telephone-event/8000',
+      'a=fmtp:' + telPt + ' 0-16');
+    media.push(telPt);
+    lines[audioIdx] = media.join(' ');
+  } else if (media.indexOf(telPt) < 0) {
+    media.push(telPt);
+    lines[audioIdx] = media.join(' ');
+  }
+  return lines.join(nl);
+}
+
+function bindSession(session) {
+  // 终止态事件可能异步晚到（例如第一次呼叫的 ended 在第二次呼叫进行中才触发）。
+  // 必须校验触发事件的 session 是否仍是当前会话，否则会误清第二次呼叫的状态。
+  function isCurrent() { return session === currentSession; }
+  // 本地 offer/answer 生成后，强制声明 telephone-event，否则无法接收/发送 RFC2833 DTMF。
+  session.on('sdp', function (data) {
+    if (!isCurrent()) return;
+    if (data && data.originator === 'local' && data.sdp) {
+      var before = data.sdp;
+      data.sdp = ensureTelephoneEventInSdp(data.sdp);
+      if (data.sdp !== before) {
+        log('本地SDP已补充 telephone-event payload，可走 RFC2833 DTMF', 'log-ok');
+      }
+    }
+  });
+  // ---- 诊断：记录会话生命周期，判断是否 session-timer 自动挂断 ----
+  var __callStartMs = Date.now();
+  var __updates = 0;          // session-timer refresher(UPDATE/re-INVITE) 次数
+  session.on('update', function (e) { if (!isCurrent()) return; __updates++; var st = Date.now() - __callStartMs; log('session-timer refresh UPDATE #' + __updates + ' after=' + Math.round(st / 1000) + 's', 'log-info'); });
+  session.on('reinvite', function (e) { if (!isCurrent()) return; __updates++; var st = Date.now() - __callStartMs; log('re-INVITE refresh #' + __updates + ' after=' + Math.round(st / 1000) + 's', 'log-info'); });
+  session.on('bye', function (e) { if (!isCurrent()) return; log('收到/发送 BYE (与此次挂断相关)', 'log-warn'); });
+  session.on('progress', function (e) { if (!isCurrent()) return; setStatus('呼叫中(100/180/183)...', 'busy'); callBtn.disabled = true; hangBtn.disabled = false; log('响应: ' + (e.response && e.response.status_code) + ' ' + (e.response && e.response.reason_phrase), 'log-info'); });
+  session.on('accepted', function (e) { if (!isCurrent()) return; setStatus('通话中', 'ok'); callBtn.disabled = true; hangBtn.disabled = false; log('已应答: ' + (e.response && e.response.status_code), 'log-ok'); });
+  session.on('confirmed', function () { if (!isCurrent()) return; setStatus('通话中', 'ok'); callBtn.disabled = true; hangBtn.disabled = false; log('通话建立(confirmed)', 'log-ok'); });
+  // 收到远端按键 DTMF（RFC2833/telephone-event 落 RTCPeerConnection，JsSIP
+  // 以 newDTMF 事件抛出）。JsSIP 该事件的 e.dtmf 是对象 {tone, duration}，
+  // tone 为本次按键字符('0'-'9'/'#'/'*')，duration 为时长(ms)；兼容 e.dtmf.value。
+  session.on('newDTMF', function (e) {
+    if (!isCurrent()) { return; }
+    var t = e && e.dtmf;
+    var k = (t && t.tone) || (t && t.value) || '';
+    var dur = t && t.duration;
+    log('收到 DTMF: ' + (k ? k : '(解析失败)') +
+        ' duration=' + (typeof dur === 'number' ? dur + 'ms' : 'n/a'),
+        'log-ok');
+  });
+  session.on('failed', function (e) { if (!isCurrent()) { log('忽略旧会话失败事件 cause=' + (e.cause || ''), 'log-info'); return; } setStatus('呼叫失败: ' + (e.cause || ''), 'err'); currentSession = null; hangBtn.disabled = true; var st = Math.round((Date.now() - __callStartMs) / 1000); log('呼叫失败 cause=' + e.cause + ' code=' + (e.status_code !== undefined ? e.status_code : (e.response && e.response.status_code)) + ' 距离发起=' + st + 's updates=' + __updates, 'log-err'); disconnectUA(); });
+  session.on('ended', function (e) { if (!isCurrent()) { log('忽略旧会话结束事件 cause=' + (e.cause || ''), 'log-info'); return; } setStatus('呼叫已结束', 'warn'); currentSession = null; hangBtn.disabled = true; var st = Math.round((Date.now() - __callStartMs) / 1000); var who = window.__manualHangup ? '手动挂断(用户点击)' : '非手动(疑似自动/session-timer)'; var detail = ''; try { if (e && e.message && typeof e.message.toString === 'function') detail = ' msg=' + e.message.toString(); } catch (x) {} log('呼叫结束 cause=' + (e.cause || '') + ' ' + who + ' 距离发起=' + st + 's 期间UPDATE/refresh=' + __updates + detail, __manualHangup ? '' : 'log-warn'); window.__manualHangup = false; disconnectUA(); });
+}
+function placeCall(callee) {
+  var domain = domainFromWs($('wsServer').value.trim() || defaultWsUrl());
+  var destination = callee.indexOf('sip:') === 0 ? callee : 'sip:' + callee + '@' + domain;
+  // 网页侧为本次呼叫生成唯一关联标识（X-CID 自定义 SIP 头），随 INVITE 透传。
+  // 决策服务 resolve_webrtc_xtag 优先沿用该值（而非本地 KRTC_<session_id>），
+  // 使决策 corr_id、RWI 事件 xcid、追踪全链路以网页 xcid 为同一关联键。
+  var xcid = 'WRTC_' + (window.crypto && crypto.randomUUID
+    ? crypto.randomUUID().replace(/-/g, '')
+    : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
+  log('拨打 ' + destination + '  X-CID=' + xcid);
+  try {
+    currentSession = ua.call(destination, {
+      extraHeaders: xcid ? ['X-CID: ' + xcid] : [],
+      mediaConstraints: { audio: true, video: false },
+      rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+    });
+    attachRemote(currentSession);
+    bindSession(currentSession);
+    setStatus('呼叫中...', 'busy');
+    hangBtn.disabled = false;
+    log('INVITE 已发送，等待应答...', 'log-info');
+    pollRouteTrace(xcid);
+  } catch (e) {
+    setStatus('发起呼叫出错', 'err'); log(e.message, 'log-err');
+    hangBtn.disabled = true;
+    disconnectUA();
+  }
+}
+
+async function pollRouteTrace(xcid) {
+  var seen = {};
+  var tries = 0;
+  var maxTries = 12;
+  var interval = 300;
+  await new Promise(function (r) { setTimeout(r, 200); });
+  while (tries < maxTries) {
+    tries++;
+    try {
+      var resp = await fetch(tokenBase() + '/trace?corr_id=' + encodeURIComponent(xcid), { cache: 'no-store' });
+      if (resp.ok) {
+        var data = await resp.json();
+        var recs = data.records || [];
+        var newCount = 0;
+        recs.forEach(function (r) {
+          var key = r.ts + '_' + r.layer + '_' + (r.action || '');
+          if (seen[key]) return;
+          seen[key] = true;
+          newCount++;
+          renderTraceRecord(r);
+        });
+        if (recs.length > 0 && recs.every(function (r) { return r.action === 'forward' || r.action === 'reject'; })) {
+          break;
+        }
+      }
+    } catch (e) {}
+    await new Promise(function (r) { setTimeout(r, interval); });
+  }
+}
+
+function renderTraceRecord(r) {
+  var layer = r.layer || '';
+  var entry = r.entry || '';
+  var caller = r.caller || '';
+  var callee = r.callee || '';
+  var action = r.action || '';
+  var matched = r.matched_prefix || '';
+  var targets = r.targets || [];
+  var steps = r.steps || [];
+  var cls = action === 'reject' ? 'log-err' : (action === 'forward' ? 'log-ok' : 'log-info');
+  var lines = [];
+  lines.push('── 路由决策 [' + layer + '] entry=' + entry + (caller ? ' caller=' + caller : '') + (callee ? ' callee=' + callee : ''));
+  if (matched) lines.push('   匹配前缀: ' + matched);
+  if (steps.length) {
+    steps.forEach(function (s) { lines.push('   ' + s.trim()); });
+  }
+  if (action === 'forward') {
+    lines.push('   → FORWARD 出口: ' + targets.map(function (t) {
+      if (typeof t === 'string') return t;
+      return (t.trunk ? 'trunk=' + t.trunk + ' ' : '') + 'callee=' + (t.callee || '');
+    }).join(', '));
+  } else if (action === 'reject') {
+    lines.push('   → REJECT status=' + (r.status || '') + ' reason=' + (r.reason || ''));
+  } else if (targets.length) {
+    lines.push('   targets: ' + targets.map(function (t) { return typeof t === 'string' ? t : (t.trunk || t.callee || ''); }).join(', '));
+  }
+  lines.forEach(function (l) { log(l, cls); });
+}
+function releaseControl() {
+  callBtn.disabled = false;
+  hangBtn.disabled = true;
+}
+// 主动断开 UA/连接（注销 + 关闭 WebSocket）。返回 true 表示有 UA 待断开，
+// 断开完成后会触发 'disconnected' 事件，届时再由 reset() 恢复发起按钮。
+function disconnectUA() {
+  if (!ua) return false;
+  if (isRegistered) { try { ua.unregister(); } catch (e) {} }
+  isRegistered = false;
+  try { ua.stop(); } catch (e) {}
+  return true;
+}
+function hangup() {
+  window.__manualHangup = true;   // 标记：手动挂断（用于 ended 时区分是否为自动/session-timer 自挂）
+  if (currentSession) { try { currentSession.terminate(); } catch (e) {} currentSession = null; }
+  setStatus('已挂断', 'warn');
+  hangBtn.disabled = true;
+  // 有 UA 则等其断开（disconnected）后再恢复按钮；无 UA 立即恢复
+  if (!disconnectUA()) { releaseControl(); }
+}
+function reset() {
+  isRegistered = false;
+  currentSession = null;
+  if (ua) { try { ua.stop(); } catch (e) {} ua = null; }
+  releaseControl();
+}
+
+$('callBtn').addEventListener('click', function () {
+  connectAndCall();
+});
+$('hangBtn').addEventListener('click', hangup);
+$('clearLogsBtn').addEventListener('click', function () {
+  while (logsEl.firstChild) { logsEl.removeChild(logsEl.firstChild); }
+});
+
+/* ---------- DTMF：拨号盘 + 键盘 ---------- */
+var DTMF_KEYS = '0123456789#*';
+function inCall() {
+  return !!(currentSession && typeof currentSession.isEstablished === 'function' && currentSession.isEstablished());
+}
+// 通话中 → 经 JsSIP 发 DTMF（协商到 RFC 2833 则由浏览器走 telephone-event RTP）；
+// 空闲 → 点击的键填入被叫号码框。
+function dtmfKey(d) {
+  if (d === '' || DTMF_KEYS.indexOf(d) < 0) { return; }
+  if (inCall()) {
+    try {
+      currentSession.sendDTMF(d);
+      log('发送 DTMF: ' + d + ' （通话中，RFC2833/telephone-event）', 'log-ok');
+    } catch (e) {
+      log('DTMF 发送失败: ' + e, 'log-err');
+    }
+  } else {
+    $('callee').value += d;
+    $('callee').focus();
+  }
+}
+(function buildDpad() {
+  var layout = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+  var box = $('dpad');
+  layout.forEach(function (k) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dkey';
+    b.textContent = k;
+    b.addEventListener('click', function () { dtmfKey(k); });
+    box.appendChild(b);
+  });
+})();
+document.addEventListener('keydown', function (ev) {
+  var key = ev.key;
+  if (key === 'Enter') { return; }   // 回车交给按钮/表单
+  var isEditable = ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA');
+  // 光标在被叫号码框时：不拦截原生输入（含 datalist 下拉），完全放行。
+  if (isEditable && ev.target && ev.target.id === 'callee') { return; }
+  if (!DTMF_KEYS.includes(key)) { return; }   // 只拦数字/#/*
+  ev.preventDefault();
+  // 光标在其它可编辑框（如 WS/Token 地址）时，通话中仍发 DTMF；空闲则交还原生输入
+  if (isEditable) {
+    if (!inCall()) { return; }   // 空闲时不让键盘打断；用拨号盘点
+  }
+  dtmfKey(key);
+});
+/* ---------- DTMF end ---------- */
+
+window.addEventListener('beforeunload', function () { try { if (ua) { ua.stop(); } } catch (e) {} });
+
+$('wsServer').placeholder = defaultWsUrl();
+$('wsServer').value = localStorage.getItem('webrtc_ws') || defaultWsUrl();
+$('wsServer').addEventListener('change', function () { localStorage.setItem('webrtc_ws', $('wsServer').value); });
+$('tokenUrl').value = localStorage.getItem('webrtc_token_url') || '';
+$('tokenUrl').addEventListener('change', function () { localStorage.setItem('webrtc_token_url', $('tokenUrl').value); });
+// 切换账号 → 刷新被叫号码白名单前缀下拉
+$('accountSel').addEventListener('change', function () {
+  refreshCalleePrefixes();
+  log('已切换账号: ' + ($('accountSel').value || '默认'), 'log-info');
+});
+loadAccounts();
+log('页面就绪。输入被叫号码后点击“发起呼叫”，自动申请 JWT 并注册。', 'log-info');
+</script>
+</body>
+</html>

@@ -1453,7 +1453,7 @@ fn select_trunk_weighted(
     Ok(trunks[trunks.len() - 1].clone())
 }
 
-fn attach_outbound_trunk_metadata(
+pub fn attach_outbound_trunk_metadata(
     hints: &mut Option<DialplanHints>,
     trunk_name: &str,
     trunk: &TrunkConfig,
