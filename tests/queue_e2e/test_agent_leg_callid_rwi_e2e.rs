@@ -271,6 +271,40 @@ fn spawn_answer_pump(ua: TestUa, seen: SeenCallIds) -> tokio::task::JoinHandle<(
     })
 }
 
+/// Like [`spawn_answer_pump`], but models the ACD miss flow: the FIRST
+/// agent-leg INVITE (Call-ID = the bare root session id) rings unanswered —
+/// the queue's ring timeout fires — while a RE-DIAL INVITE (Call-ID with the
+/// `-r{n}` retry suffix) is answered. This keeps the scenario deterministic
+/// regardless of which agent the dispatcher offers first.
+fn spawn_miss_then_answer_pump(ua: TestUa, seen: SeenCallIds) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match ua.process_dialog_events().await {
+                Ok(events) => {
+                    for ev in events {
+                        if let TestUaEvent::IncomingCall(dialog_id, offer) = ev {
+                            let call_id = dialog_id.call_id.clone();
+                            seen.lock().unwrap().push(call_id.clone());
+                            let _ = ua.ring_call(&dialog_id).await;
+                            if call_id.contains("-r") {
+                                sleep(Duration::from_millis(200)).await;
+                                let sdp = offer
+                                    .as_deref()
+                                    .map(|o| create_test_sdp_answer(o, "127.0.0.1", 0))
+                                    .unwrap_or_else(|| create_test_sdp("127.0.0.1", 0, false));
+                                let _ = ua.answer_call(&dialog_id, Some(sdp)).await;
+                            }
+                            // First dial: keep ringing — never answer.
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+            sleep(Duration::from_millis(30)).await;
+        }
+    })
+}
+
 async fn wait_webhook_event(
     capture: &WebhookCapture,
     event_type: &str,
@@ -961,6 +995,177 @@ async fn test_non_agent_extension_calling_agent_has_no_agent_leg_role() -> Resul
     bob_pump.abort();
     let _ = bob.stop();
     let _ = alice.stop();
+    harness.server.stop();
+    Ok(())
+}
+
+/// ── Scenario ⑤: first offered agent misses → the re-dial keeps the contract
+///
+/// Sequential dispatch offers an agent; it rings but never answers (ring
+/// timeout), and the queue re-dials the NEXT agent. The identity contract
+/// must survive the retry:
+///
+/// 1. the FIRST agent INVITE carries the root session id as its SIP Call-ID;
+/// 2. the RE-DIAL INVITE carries `{root}-r2` — a phone may refuse a Call-ID
+///    it already declined (Linphone), so retries must not reuse it;
+/// 3. the whole webhook timeline keeps ONE `call_id` (the root session id)
+///    across the missed leg AND the answered leg, and the answered leg keeps
+///    `leg_role: "agent"`.
+#[tokio::test]
+async fn test_queue_miss_then_redial_keeps_callid_contract() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+
+    let capture = WebhookCapture::start().await;
+    let harness = start_harness(&capture).await?;
+    let proxy_addr = harness.server.proxy_addr;
+
+    // charlie joins the skill group as a second agent: whoever is offered
+    // first misses, the queue re-dials the other one.
+    harness
+        .cc_registry
+        .register("charlie".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    harness
+        .cc_registry
+        .update_status("charlie", rustpbx::addons::cc::agent::AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let mut bob = make_ua(proxy_addr, "bob");
+    bob.start().await?;
+    bob.register().await?;
+    let mut charlie = make_ua(proxy_addr, "charlie");
+    charlie.start().await?;
+    charlie.register().await?;
+    sleep(Duration::from_millis(300)).await;
+
+    let bob_call_ids: SeenCallIds = Arc::new(Mutex::new(Vec::new()));
+    let charlie_call_ids: SeenCallIds = Arc::new(Mutex::new(Vec::new()));
+    let bob_pump = spawn_miss_then_answer_pump(bob.clone(), bob_call_ids.clone());
+    let charlie_pump = spawn_miss_then_answer_pump(charlie.clone(), charlie_call_ids.clone());
+
+    let mut caller = make_ua(proxy_addr, "alice");
+    caller.start().await?;
+    let offer = create_test_sdp(
+        "127.0.0.1",
+        portpicker::pick_unused_port().unwrap_or(30220),
+        false,
+    );
+    let call = {
+        let ua = caller.clone();
+        tokio::spawn(async move { ua.make_call(QUEUE_NUMBER, Some(offer)).await })
+    };
+    let dialog = tokio::time::timeout(Duration::from_secs(15), call)
+        .await
+        .map_err(|_| anyhow!("caller did not settle within 15s"))?
+        .map_err(|e| anyhow!("caller task failed: {e}"))?
+        .expect("caller should reach the queue");
+
+    let session_id = harness
+        .server
+        .wait_for_active_call(Duration::from_secs(5))
+        .await
+        .expect("queue call must be active");
+
+    fn seen_invite_calls(seen: &[SeenCallIds]) -> Vec<String> {
+        seen.iter()
+            .flat_map(|s| s.lock().unwrap().clone())
+            .collect()
+    }
+    let pumps = [bob_call_ids.clone(), charlie_call_ids.clone()];
+
+    // ── 1. the FIRST INVITE carries the bare root id ─────────────────────
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let first_call_id = loop {
+        let seen = seen_invite_calls(&pumps);
+        if let Some(id) = seen.first() {
+            break id.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no agent INVITE arrived; bob={:?} charlie={:?}",
+            bob_call_ids.lock().unwrap(),
+            charlie_call_ids.lock().unwrap()
+        );
+        sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        first_call_id, session_id,
+        "the first agent-leg INVITE must carry the root session id as its SIP Call-ID"
+    );
+
+    // ── 2. the RE-DIAL INVITE carries `{root}-r2` ────────────────────────
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let redial_call_id = loop {
+        let seen = seen_invite_calls(&pumps);
+        if let Some(id) = seen.iter().find(|id| id.contains("-r")) {
+            break id.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queue never re-dialed after the miss; seen={seen:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        redial_call_id,
+        format!("{session_id}-r2"),
+        "the re-dial INVITE must carry the -r2 Call-ID variant of the root session id"
+    );
+
+    // ── 3. the re-dialed agent answers and the queue bridges ─────────────
+    wait_webhook_event(&capture, "queue_agent_connected", Duration::from_secs(30))
+        .await
+        .expect("the re-dialed agent answers → queue_agent_connected");
+    let answered = wait_webhook_matching(
+        &capture,
+        "call_answered",
+        |v| v["event"]["leg_role"].as_str() == Some("agent"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the answered leg's call_answered");
+    assert_eq!(
+        answered["call_id"].as_str(),
+        Some(session_id.as_str()),
+        "the answered (re-dialed) leg must report the root call_id: {answered}"
+    );
+
+    // ── 4. ONE call_id across the whole timeline (missed leg included) ───
+    sleep(Duration::from_millis(800)).await;
+    let drift: Vec<(String, String)> = {
+        let events = capture.received.lock().unwrap();
+        events
+            .iter()
+            .filter_map(|v| {
+                let id = v["call_id"].as_str()?;
+                (id != session_id).then(|| {
+                    (
+                        v["event_type"].as_str().unwrap_or("").to_string(),
+                        id.to_string(),
+                    )
+                })
+            })
+            .collect()
+    };
+    assert!(
+        drift.is_empty(),
+        "every webhook must carry the root call_id, drifted={drift:?}:\n{}",
+        render_timeline(&capture, &session_id)
+    );
+
+    eprintln!(
+        "RWI webhook timeline for session {session_id} (miss → re-dial):\n{}",
+        render_timeline(&capture, &session_id)
+    );
+
+    let _ = caller.hangup(&dialog).await;
+    bob_pump.abort();
+    charlie_pump.abort();
+    let _ = bob.stop();
+    let _ = charlie.stop();
+    let _ = caller.stop();
     harness.server.stop();
     Ok(())
 }

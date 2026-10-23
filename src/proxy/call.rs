@@ -548,6 +548,85 @@ impl CallModule {
         Self { inner }
     }
 
+    /// Session id for an inbound INVITE — the single seam `default_resolve`
+    /// resolves every inbound call through.
+    ///
+    /// Cluster child legs of an existing logical call (queue dispatch,
+    /// consult, transfer — including RE-DIAL rounds whose wire Call-ID carries
+    /// the `-r{n}` suffix) adopt the root session id their peer declares on
+    /// the wire, so the agent-answered session keeps the caller's `call_id`
+    /// and every event / CDR of the logical call stays on one id. Everything
+    /// else keeps the legacy derivation: reuse the Call-ID when it is
+    /// id-shaped (unless `session_id_inherit_callid` is disabled), else a
+    /// fresh id; plain P2P internal calls keep the raw Call-ID verbatim.
+    pub(crate) fn resolve_inbound_session_id(
+        server: &SipServerRef,
+        cookie: &TransactionCookie,
+        original: &rsipstack::sip::Request,
+        dialog_id: &str,
+        session_id_enabled: bool,
+    ) -> String {
+        if let Some(root) = Self::inherited_child_session_id(server, cookie, original) {
+            return root;
+        }
+        if session_id_enabled {
+            crate::call::session_id::derive_from_call_id(dialog_id)
+        } else {
+            dialog_id.to_string()
+        }
+    }
+
+    /// Root id a CLUSTER PEER declares for a child leg of an existing logical
+    /// call: a CC UUI `leg=` intent (`agent` / `consult` / `transfer`) plus
+    /// the root id on the `Session-ID` header (UUI data fallback).
+    ///
+    /// Why: the FIRST agent-facing leg dials with the root id as its wire
+    /// Call-ID, so Call-ID derivation lands on it. Every later leg of the
+    /// same logical call must NOT reuse a Call-ID the phone may have already
+    /// declined — it dials `{root}-r{n}`, which `derive_from_call_id` cannot
+    /// normalize, and the child session used to fall back to a fresh id (the
+    /// "sessionid changed when the agent picked up" divergence). The
+    /// Session-ID header / UUI are explicit correlation channels that survive
+    /// the re-dial, so adoption restores one id across the whole logical
+    /// call.
+    ///
+    /// `None` → legacy derivation: non-peer sources (an external PBX planting
+    /// the headers must not merge calls), INVITEs without a CC leg intent,
+    /// and the parallel-leg case where a live local session already holds the
+    /// root id (parallel agent legs on one node must not collapse into one
+    /// id; they still correlate through the enriched `session_id`).
+    fn inherited_child_session_id(
+        server: &SipServerRef,
+        cookie: &TransactionCookie,
+        original: &rsipstack::sip::Request,
+    ) -> Option<String> {
+        if !crate::proxy::proxy_call::sip_session::SipSession::from_cluster_peer(server, cookie) {
+            return None;
+        }
+        let cc_uui = crate::call::uui::extract_cc_uui(&original.headers)?;
+        // A declared dial intent marks this INVITE as a child leg of an
+        // existing logical call — the same trust seam `SipSession::new_inner`
+        // uses for `child_leg_role`.
+        cc_uui
+            .leg
+            .as_deref()
+            .filter(|leg| crate::call::uui::is_known_leg_role(leg))?;
+        let root = crate::call::session_id::extract_inherited(original)
+            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))?;
+        if server.active_call_registry.get(&root).is_some() {
+            debug!(
+                root = %root,
+                "child-leg root id already live on this node; keeping a unique session id"
+            );
+            return None;
+        }
+        info!(
+            root = %root,
+            "inbound cluster child leg adopts the root session id"
+        );
+        Some(root)
+    }
+
     async fn default_resolve(
         &self,
         original: &rsipstack::sip::Request,
@@ -567,7 +646,6 @@ impl CallModule {
                     .with_code(&crate::proxy::error_catalog::MISSING_CALL_ID)
             })?
             .value();
-        let session_id = dialog_id.to_string();
 
         let media_config = {
             let rtp = self.inner.server.rtp_config.load();
@@ -1089,11 +1167,13 @@ impl CallModule {
             && pending_app.is_none()
             && pending_queue.is_none()
             && routed_forward.is_none());
-        let session_id = if session_id_enabled {
-            crate::call::session_id::derive_from_call_id(&dialog_id)
-        } else {
-            session_id
-        };
+        let session_id = Self::resolve_inbound_session_id(
+            &self.inner.server,
+            cookie,
+            original,
+            &dialog_id,
+            session_id_enabled,
+        );
         let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
             .with_session_id_enabled(session_id_enabled)
             .with_caller(
@@ -2732,6 +2812,7 @@ mod tests {
     use crate::call::{DialDirection, RouteInvite, SipUser, TransactionCookie};
     use crate::config::RouteResult;
     use crate::proxy::tests::common::{create_test_server, create_test_server_with_config};
+    use crate::proxy::proxy_call::sip_session::SipSession;
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
 
@@ -4852,6 +4933,184 @@ mod tests {
         assert!(
             targets[1].destination.is_none(),
             "external-realm target should NOT have destination resolved"
+        );
+    }
+
+    // ── cluster child-leg session id contract ───────────────────────────────
+
+    /// A child-leg INVITE exactly as the DISPATCHING node's production builders
+    /// serialize it (`initiate_sip_leg_with_deadline`): the agent-leg Call-ID
+    /// from `agent_leg_call_id`, the root id stamped on the `Session-ID`
+    /// header (`build_wire_header`) and the CC UUI `leg=agent` dial intent
+    /// (`build_uui_header`). No hand-written correlation formats here — the
+    /// parsing side must accept what the sending side actually emits.
+    fn child_leg_invite(call_id: &str, root: &str) -> rsipstack::sip::Request {
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(rsipstack::sip::Header::CallId(
+            rsipstack::sip::headers::CallId::new(call_id.to_string()),
+        ));
+        // The dispatching node stamps the root id on the `Session-ID` header —
+        // a 32-hex root rides `InviteOption.session_id`, which rsipstack
+        // serializes on the wire through `SessionId::from_local`.
+        headers.push(
+            rsipstack::sip::headers::SessionId::from_local(root)
+                .expect("32-hex root passes rsipstack validation")
+                .into(),
+        );
+        headers.push(crate::call::uui::build_uui_header(
+            root,
+            None,
+            None,
+            None,
+            Some("agent"),
+        ));
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:1001@rustpbx.com".parse().unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    async fn peer_server_and_cookie() -> (SipServerRef, TransactionCookie) {
+        let (mut server, _config) = create_test_server().await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips =
+            vec!["192.0.2.44".parse().unwrap()];
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
+        (server, cookie)
+    }
+
+    /// REPRO (queue re-dial loses the call id): when the first offered agent
+    /// misses, the re-dial INVITE cannot reuse the Call-ID the phone already
+    /// declined — it dials `{root}-r2`. The agent-home node terminates that
+    /// INVITE as its own session and, per the CTI contract, the agent's
+    /// answered session must keep the ROOT id: every event / CDR of the
+    /// logical call shares one `call_id`. A fresh per-leg id here is exactly
+    /// the "sessionid changed when the agent picked up" divergence.
+    #[tokio::test]
+    async fn redial_child_leg_session_id_adopts_root() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        // Second agent-facing dial of the session → wire Call-ID `{root}-r2`.
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        assert_eq!(call_id, format!("{root}-r2"));
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_eq!(
+            resolved, root,
+            "a cluster child leg must adopt the root session id, not a fresh per-leg id"
+        );
+    }
+
+    /// The session-id layer can be disabled for the child INVITE (plain
+    /// internal dialplan, no app/queue): the legacy fallback is the RAW
+    /// Call-ID — `{root}-r2` verbatim. Adoption must work there too, since
+    /// that is the branch queue dispatch actually takes on the agent node.
+    #[tokio::test]
+    async fn redial_child_leg_adopts_root_even_without_session_id_layer() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, false,
+        );
+        assert_eq!(
+            resolved, root,
+            "raw-Call-ID fallback must not leak the -r2 suffix into the session id"
+        );
+    }
+
+    /// First dial (seq == 0): the wire Call-ID IS the root id, so the legacy
+    /// Call-ID derivation already lands on it. Pins the case that was never
+    /// broken — the closed loop from `agent_leg_call_id` to the inbound
+    /// derivation.
+    #[tokio::test]
+    async fn first_dial_child_leg_keeps_root_via_call_id() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        let call_id = SipSession::agent_leg_call_id(root, 0);
+        assert_eq!(call_id, root);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_eq!(resolved, root);
+    }
+
+    /// A non-peer source (external PBX planting the same headers) must NOT
+    /// get its id adopted — the legacy derivation keeps a unique id.
+    #[tokio::test]
+    async fn non_peer_redial_keeps_unique_id() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (mut server, _config) = create_test_server().await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips =
+            vec!["192.0.2.44".parse().unwrap()];
+        // No CallerPeerContext: the INVITE did not arrive from a peer.
+        let cookie = TransactionCookie::default();
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_ne!(resolved, root);
+        assert_eq!(
+            resolved.len(),
+            32,
+            "legacy derivation must still yield an id-shaped session id"
+        );
+    }
+
+    /// Parallel agent legs on ONE node: a live local session already holds
+    /// the root id, so adoption must back off — parallel legs must not
+    /// collapse into one session id. (They still correlate through the
+    /// enriched `session_id` field; uniqueness wins here.)
+    #[tokio::test]
+    async fn live_local_root_id_blocks_adoption() {
+        use crate::proxy::active_call_registry::ActiveProxyCallEntry;
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        // A live local session occupying the root id (parallel leg already
+        // serving on this node).
+        let dialplan = Dialplan::new(
+            "parallel-leg-probe".to_string(),
+            crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            DialDirection::Inbound,
+        );
+        let (_session, handle, _rx) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        server.active_call_registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: root.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: chrono::Utc::now(),
+                answered_at: None,
+                status: ActiveProxyCallStatus::Ringing,
+            },
+            handle,
+        );
+
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_ne!(
+            resolved, root,
+            "a live local session with the root id must block adoption"
         );
     }
 }
