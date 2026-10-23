@@ -9,7 +9,7 @@
   body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
          background: #f5f6fa; color: #1a1a2e; font-size: 14px;
          display: flex; justify-content: center; padding: 24px 12px; }
-  .card { width: 100%; max-width: 700px; background: #fff; border: 1px solid #e1e4ea;
+  .card { width: 100%; max-width: 960px; background: #fff; border: 1px solid #e1e4ea;
           border-radius: 14px; padding: 26px; box-shadow: 0 6px 24px rgba(0,0,0,.06); align-self: flex-start; }
   h1 { font-size: 18px; margin-bottom: 2px; }
   h1 .sub { font-size: 11px; color: #6b7280; font-weight: 400; display: block; margin-top: 2px; }
@@ -184,27 +184,23 @@ async function loadAccounts() {
     // 第一行：独立"默认"（value 为空 → 不指定账号，服务端回退默认账号）。
     sel.options.add(new Option('默认', '', true, true));
     // 其后为各可选账号（含默认账号本身，例如 8899 单独成行）。
-    // label 聚合展示该账号的全部 rule：prefix [strip 剥离 N] [呼叫前缀 +P]。
+    // label 聚合展示该账号的全部 rule：可拨前缀[gw1/gw2]，直接关联前缀→出口。
     accs.forEach(function (acc) {
       var label = String(acc);
       var rlist = Array.isArray(rules[String(acc)]) ? rules[String(acc)] : [];
-      var m = metas[String(acc)] || {};
       var items = [];
       rlist.forEach(function (r) {
         var seg = '可拨' + (r['prefix'] || '任意');
         if (r['strip']) seg += ':去' + r['strip'] + '位';
         if (r['pri_prefix']) seg += ':加' + r['pri_prefix'];
+        var gw = Array.isArray(r['gw_list']) && r['gw_list'].length ? r['gw_list'].join(' / ') : '';
+        if (gw) seg += '[' + gw + ']';
         items.push(seg);
       });
       if (items.length) {
         label += '（' + items.join(', ') + '）';
       } else if (Array.isArray(prefixes[String(acc)]) && prefixes[String(acc)].indexOf('') >= 0) {
         label += '（可拨: 任意）';
-      }
-      // 追加归属位点 + 出口网关
-      if (m['point_id']) {
-        var gw = Array.isArray(m['gw_list']) ? m['gw_list'].join(' / ') : '';
-        label += ' [点:' + m['point_id'] + (gw ? ' 出口:' + gw : '') + ']';
       }
       sel.options.add(new Option(label, String(acc)));
     });
@@ -526,11 +522,71 @@ function placeCall(callee) {
     setStatus('呼叫中...', 'busy');
     hangBtn.disabled = false;
     log('INVITE 已发送，等待应答...', 'log-info');
+    pollRouteTrace(xcid);
   } catch (e) {
     setStatus('发起呼叫出错', 'err'); log(e.message, 'log-err');
     hangBtn.disabled = true;
     disconnectUA();
   }
+}
+
+async function pollRouteTrace(xcid) {
+  var seen = {};
+  var tries = 0;
+  var maxTries = 12;
+  var interval = 300;
+  await new Promise(function (r) { setTimeout(r, 200); });
+  while (tries < maxTries) {
+    tries++;
+    try {
+      var resp = await fetch(tokenBase() + '/trace?corr_id=' + encodeURIComponent(xcid), { cache: 'no-store' });
+      if (resp.ok) {
+        var data = await resp.json();
+        var recs = data.records || [];
+        var newCount = 0;
+        recs.forEach(function (r) {
+          var key = r.ts + '_' + r.layer + '_' + (r.action || '');
+          if (seen[key]) return;
+          seen[key] = true;
+          newCount++;
+          renderTraceRecord(r);
+        });
+        if (recs.length > 0 && recs.every(function (r) { return r.action === 'forward' || r.action === 'reject'; })) {
+          break;
+        }
+      }
+    } catch (e) {}
+    await new Promise(function (r) { setTimeout(r, interval); });
+  }
+}
+
+function renderTraceRecord(r) {
+  var layer = r.layer || '';
+  var entry = r.entry || '';
+  var caller = r.caller || '';
+  var callee = r.callee || '';
+  var action = r.action || '';
+  var matched = r.matched_prefix || '';
+  var targets = r.targets || [];
+  var steps = r.steps || [];
+  var cls = action === 'reject' ? 'log-err' : (action === 'forward' ? 'log-ok' : 'log-info');
+  var lines = [];
+  lines.push('── 路由决策 [' + layer + '] entry=' + entry + (caller ? ' caller=' + caller : '') + (callee ? ' callee=' + callee : ''));
+  if (matched) lines.push('   匹配前缀: ' + matched);
+  if (steps.length) {
+    steps.forEach(function (s) { lines.push('   ' + s.trim()); });
+  }
+  if (action === 'forward') {
+    lines.push('   → FORWARD 出口: ' + targets.map(function (t) {
+      if (typeof t === 'string') return t;
+      return (t.trunk ? 'trunk=' + t.trunk + ' ' : '') + 'callee=' + (t.callee || '');
+    }).join(', '));
+  } else if (action === 'reject') {
+    lines.push('   → REJECT status=' + (r.status || '') + ' reason=' + (r.reason || ''));
+  } else if (targets.length) {
+    lines.push('   targets: ' + targets.map(function (t) { return typeof t === 'string' ? t : (t.trunk || t.callee || ''); }).join(', '));
+  }
+  lines.forEach(function (l) { log(l, cls); });
 }
 function releaseControl() {
   callBtn.disabled = false;

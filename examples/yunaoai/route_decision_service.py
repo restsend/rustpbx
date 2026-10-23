@@ -297,13 +297,15 @@ def _apply_extensions(cfg: dict) -> None:
     """把 gateways 表中"被动注册型"网关解析成本地分机账本 USERS。
 
     不再使用独立的 `extensions` 字段：被动注册型网关（dest=sip:0.0.0.0）
-    即代表一台对方注册进来的分机，网关名=分机号，网关 password=入呼注册密码。
-    /auth（分机鉴权）与路由裁决共用同一份配置单例，/config/reload 热加载后
-    账本一并更新。"""
+    即代表一台对方注册进来的分机。分机号优先取网关内的 `username` 字段
+    （对方实际注册时用的用户名）；缺失则 fallback 到网关名。网关 password
+    = 入呼注册密码。/auth（分机鉴权）与路由裁决共用同一份配置单例，
+    /config/reload 热加载后账本一并更新。"""
     USERS.clear()
     for name, gw in (cfg.get("gateways") or {}).items():
         if is_passive_gateway(gw):
-            USERS[str(name).strip()] = str(gw.get("password") or "")
+            ext = str(gw.get("username") or name).strip()
+            USERS[ext] = str(gw.get("password") or "")
     if USERS:
         log("auth", f"被动注册分机账本已同步: {len(USERS)} 个 {sorted(USERS)}")
 
@@ -665,8 +667,9 @@ def load_config(path: str = None) -> dict:
                   f"route_points={len(cfg.get('route_points') or [])} "
                   f"gateways={len(cfg.get('gateways') or {})} "
                   f"extensions={sum(1 for g in (cfg.get('gateways') or {}).values() if is_passive_gateway(g))}")
-    # 同步分机账本（/auth 鉴权用），与路由裁决共用同一份配置单例
     _apply_extensions(cfg)
+    cfg["_webrtc_table"] = build_webrtc_table(cfg)
+    cfg["_route_table"] = build_route_points_table(cfg)
     return cfg
 
 
@@ -806,6 +809,27 @@ def _dest_host_port(dest: str) -> str:
     elif s.lower().startswith("sip:"):
         s = s[4:]
     return s.split("@")[-1]
+
+
+def _lookup_contact_hostport(ext: str) -> str:
+    """查 RustPBX locator API，拿分机 ext 当前注册的 host:port。
+
+    GET /api/diagnostics/locator/lookup → records[0].destination
+    destination 形如 "UDP 100.88.0.204:38890"，抽出末尾 host:port。
+    查不到（离线 / 未注册）返回 "" —— 调用方应降级为不带 trunk 的
+    {"callee": ext}，让 RustPBX extension_locator 自己处理。"""
+    try:
+        data = _console_request(
+            "POST", "/api/diagnostics/locator/lookup", {"user": ext}, timeout=3,
+        )
+    except Exception as exc:
+        log("locator", f"lookup '{ext}' failed: {exc}")
+        return ""
+    records = (data or {}).get("records") or []
+    if not records:
+        return ""
+    dest = (records[0].get("destination") or "").strip()
+    return dest.split()[-1] if dest else ""
 
 
 def _existing_trunks() -> dict:
@@ -1236,7 +1260,18 @@ def strip_caller_sitecode(caller: str, cfg: dict) -> str:
 
 
 def gateway_targets(callee: str, gwlist, cfg: dict):
-    """出口 gw_list → 结构化 targets 列表（{"callee", "trunk"}）。
+    """出口 gw_list → (targets 列表, rtp_config 字典, network_profile_id str|None)。
+
+    返回 tuple：
+      - targets：结构化或纯 URI targets 列表，供 RustPBX http_router 转发。
+      - rtp_config：收集到的媒体覆盖配置（external_ip/bind_ip），如果
+        gw_list 中网关配置了 external_ip/profile 则有值，否则 {}。
+        调用方应将其合并进 HTTP 响应顶层 rtp_config 字段，让 RustPBX
+        应用对应的媒体宣告地址（如 tailscale overlay 上对端可达的 IP）。
+      - network_profile_id：gw_list 里第一个带 profile 的网关的 profile 名
+        （如 "tailscale"），让 RustPBX 把对应的 network_profile 应用到本
+        次呼叫的 media（包括 sip_contact、bind_ip、rtp 端口等）。被动注册型
+        网关（纯 URI target 不带 trunk）也能拿到正确的 SIP Contact 地址。
 
     RustPBX http_router 已支持 {callee, trunk} 结构化 targets：网关名即
     RustPBX trunk 注册表条目（本服务启动时把 gateways 表同步写入，见
@@ -1246,22 +1281,43 @@ def gateway_targets(callee: str, gwlist, cfg: dict):
     多网关按序展开 + strategy="sequential" = 等价 use_next_gw 失败换下一
     网关；停用网关跳过（等价探测摘除）。
     同步失败降级（SYNC_STATE.ok=False）：生成 `sip:<callee>@<dest-host:port>`
-    纯 URI targets —— 呼叫仍按 host:port 可达，trunk 盖章不生效。"""
+    纯 URI targets —— 呼叫仍按 host:port 可达，trunk 盖章不生效。
+
+    被动注册型网关（对方 FS 注册进来当分机）：cfg.gateways 中 dest=0.0.0.0，
+    其 username 字段 = 对方实际注册的分机号（同步进 USERS 账本）。
+    对这类网关，先实时调 RustPBX locator API 查该分机的动态 Contact
+    host:port → 拼 `sip:<原始callee>@<host:port>` 纯 URI target。
+    这样 Request-URI 里的 user 就是用户真正拨的号（FS 能知道是 8798001
+    还是 8798555），host 直接路由到 FS 注册地址。
+    locator 查不到（对方离线）则降级为 {"callee": ext} —— RustPBX
+    extension_locator 自己处理（也会因为离线而失败，但保持优雅降级）。"""
     targets = []
+    rtp_config = {}
+    network_profile_id = None
     for name in gwlist or []:
-        # 分机型出口：gw_list 名字命中分机账本 USERS（被动注册型网关，
-        # 即对方注册进来当分机）时，把呼叫转发给该注册分机 —— 生成结构化
-        # target 但【不带 trunk】：RustPBX 会以原请求 realm 解析 callee
-        # （core.extension_locator），拨到该分机注册的 contact（例如 demo
-        # 服务器注册进来的分机）。这区别于 gateways/trunk：trunk 走对端
-        # 网关盖章，分机走注册表定位本机端点。
+        gw = (cfg.get("gateways") or {}).get(name)
+        if gw and gw.get("external_ip"):
+            rtp_config.setdefault("external_ip", gw["external_ip"])
+        if gw and gw.get("bind_ip"):
+            rtp_config.setdefault("bind_ip", gw["bind_ip"])
+        if gw and gw.get("profile") and network_profile_id is None:
+            network_profile_id = gw["profile"]
+        if gw and is_passive_gateway(gw):
+            ext = str(gw.get("username") or name).strip()
+            hp = _lookup_contact_hostport(ext)
+            if hp:
+                targets.append(f"sip:{callee}@{hp}")
+            else:
+                log("targets", f"passive gw '{name}' ext={ext} not registered, "
+                               f"fallback to {{callee: {ext}}}")
+                targets.append({"callee": ext})
+            continue
         if name in USERS:
             if SYNC_STATE.get("ok"):
                 targets.append({"callee": name})
             else:
                 targets.append(f"sip:{name}@{LOCAL_REALM or 'localhost'}")
             continue
-        gw = (cfg.get("gateways") or {}).get(name)
         if not gw:
             log("targets", f"gateway '{name}' missing, skip")
             continue
@@ -1274,7 +1330,7 @@ def gateway_targets(callee: str, gwlist, cfg: dict):
             dest = gw["dest"]
             host_port = dest.split(":", 1)[-1] if ":" in dest else dest
             targets.append(f"sip:{callee}@{host_port}")
-    return targets
+    return targets, rtp_config, network_profile_id
 
 
 def resolve_xcid(payload: dict) -> str:
@@ -1318,6 +1374,89 @@ def webrtc_entries(cfg: dict) -> list:
     return list(webrtc or [])
 
 
+def _expand_entries(src_list: list, kind: str) -> list:
+    """把条目数组展平成三元组表（caller_group, prefix → gw_list）。"""
+    table = []
+    for src in src_list:
+        if src.get("enabled") is False:
+            continue
+        for ri, rule in enumerate(src.get("rule_list") or []):
+            table.append({
+                "kind": kind,
+                "source": src.get("point_id") or src.get("group_type") or kind,
+                "rule_index": ri,
+                "caller_group": (rule.get("caller_group") or "").strip() or None,
+                "caller": (rule.get("caller") or "").strip() or None,
+                "prefix": (rule.get("prefix") or "").strip(),
+                "gw_list": list(src.get("gw_list") or []),
+                "strip": rule.get("strip"),
+                "pri_prefix": rule.get("pri_prefix"),
+                "priority": int(rule.get("priority") or 0),
+                "default_for": src.get("default_for"),
+                "allowed_ips": src.get("allowed_ips"),
+                "enabled": True,
+            })
+    return table
+
+
+def build_webrtc_table(cfg: dict) -> list:
+    """webrtc 路由表：独立于 route_points，只服务 webrtc 分机。"""
+    table = _expand_entries(webrtc_entries(cfg), "webrtc")
+    log("route-table", f"webrtc_table built {len(table)} entries")
+    return table
+
+
+def build_route_points_table(cfg: dict) -> list:
+    """route_points 路由表：独立于 webrtc，服务普通分机。"""
+    table = _expand_entries(cfg.get("route_points") or [], "route")
+    log("route-table", f"route_table built {len(table)} entries")
+    return table
+
+
+def _find_in_table(table: list, caller: str, callee: str,
+                   group_hits: dict, trail=None):
+    """从指定路由表中找最优三元组（caller 命中 + callee 前缀）。
+
+    只有 callee 前缀匹配的条目才能参与竞争，rank 按 (前缀长度, priority,
+    caller 强度) 排序，最长前缀优先。"""
+    candidates = [t for t in table if t["enabled"] and not t.get("default_for")]
+    best = None
+
+    for t in candidates:
+        caller_len = 0
+        if t["caller_group"]:
+            caller_len = group_hits.get(t["caller_group"], 0)
+        elif t["caller"]:
+            caller_len = len(t["caller"]) if caller.startswith(t["caller"]) else 0
+        else:
+            caller_len = None
+
+        callee_hit = bool(t["prefix"]) and callee.startswith(t["prefix"])
+        if not callee_hit:
+            continue
+
+        if caller_len:
+            layer = "L1"
+        elif caller_len is None:
+            layer = "L2"
+        else:
+            continue
+
+        rank = (len(t["prefix"]), t["priority"], caller_len or 0)
+        if best is None or rank > best[0]:
+            best = (rank, t, layer)
+
+        if trail is not None:
+            trail.append(f"  [{t['source']}#{t['rule_index']}] "
+                         f"cg={t['caller_group']!r} callee_prefix={t['prefix']!r} "
+                         f"caller_hit={'Y' if caller_len else 'N'} "
+                         f"callee_hit=Y -> {layer}")
+
+    if best:
+        return best[1], best[2]
+    return None, None
+
+
 def webrtc_entry_tag(entry: dict) -> str:
     """webrtc 位点标识：与 route_points 同构用 point_id；无则退回 group_type。"""
     return str(entry.get("point_id") or entry.get("group_type") or "webrtc")
@@ -1350,17 +1489,47 @@ def webrtc_entry_callers(cfg: dict, entry: dict) -> list:
     return out
 
 
-def find_webrtc_entry(cfg: dict, caller: str):
-    """按主叫归属定位 webrtc 位点（方案 A）：主叫命中该位点任一 rule 的
-    caller_group → 归属此 WebRTC 位点；否则 None（走普通 L1~L4 路由裁决）。"""
+def is_webrtc_caller(cfg: dict, caller: str) -> bool:
+    """caller 是否归属任何 webrtc 条目（仅按 caller_group 判定，不管 callee）。"""
     hits = resolve_caller_groups(caller, cfg)
     for entry in webrtc_entries(cfg):
         if entry.get("enabled") is False:
             continue
-        for g in webrtc_entry_groups(entry):
-            if hits.get(g, 0):
+        if any(hits.get(g, 0) for g in webrtc_entry_groups(entry)):
+            return True
+    return False
+
+
+def find_webrtc_entry(cfg: dict, caller: str, callee: str = ""):
+    """遍历 webrtc 条目（独立竞争，按配置顺序）。
+
+    传 callee 时：caller_group 命中 AND callee 前缀命中 → 第一个命中的返回。
+    全条目遍历完未命中 → None。
+    不传 callee：仅按 caller_group → 第一个命中的返回。"""
+    hits = resolve_caller_groups(caller, cfg)
+    for entry in webrtc_entries(cfg):
+        if entry.get("enabled") is False:
+            continue
+        if not any(hits.get(g, 0) for g in webrtc_entry_groups(entry)):
+            continue
+        if callee:
+            if webrtc_match_rule(entry, callee) is not None:
                 return entry
+        else:
+            return entry
     return None
+
+
+def find_all_webrtc_entries(cfg: dict, caller: str) -> list:
+    """返回所有 caller 归属的 webrtc 条目列表（同 caller_group 可能挂多个条目）。"""
+    hits = resolve_caller_groups(caller, cfg)
+    result = []
+    for entry in webrtc_entries(cfg):
+        if entry.get("enabled") is False:
+            continue
+        if any(hits.get(g, 0) for g in webrtc_entry_groups(entry)):
+            result.append(entry)
+    return result
 
 
 def default_webrtc_account(cfg: dict = None) -> str:
@@ -1374,55 +1543,54 @@ def default_webrtc_account(cfg: dict = None) -> str:
 
 
 def webrtc_account_prefixes(cfg: dict, acc) -> list:
-    """WebRTC 账号可外呼的被叫前缀：该账号归属位点 rule_list 的 prefix 列表
-    （空串表示放行任意/通配）。找不到归属位点返回空列表。"""
-    entry = find_webrtc_entry(cfg, str(acc))
-    if not entry:
-        return []
+    """WebRTC 账号可外呼的被叫前缀：所有归属位点 rule_list 的 prefix 列表聚合去重。"""
+    entries = find_all_webrtc_entries(cfg, str(acc))
     pre, seen = [], set()
-    for r in entry.get("rule_list") or []:
-        p = str(r.get("prefix") or "")
-        if p not in seen:
-            seen.add(p)
-            pre.append(p)
+    for entry in entries:
+        for r in entry.get("rule_list") or []:
+            p = str(r.get("prefix") or "")
+            if p not in seen:
+                seen.add(p)
+                pre.append(p)
     return pre
 
 
 def webrtc_account_rules(cfg: dict, acc) -> list:
-    """WebRTC 账号聚合的完整入口规则：归属位点 rule_list 每条 rule 的
-    prefix / strip / pri_prefix / caller_group（去重保留）。用于前端聚合展示，
-    避免给账号挂多个 rule 时只显示第一个。"""
-    entry = find_webrtc_entry(cfg, str(acc))
-    if not entry:
-        return []
+    """WebRTC 账号聚合的完整入口规则：所有归属位点 rule_list 的 prefix / strip /
+    pri_prefix / caller_group / gw_list 聚合去重。每条 rule 带上所属条目 gw_list，
+    供前端展示"前缀→出口"关联（不再需要单独的 meta 点信息）。"""
+    entries = find_all_webrtc_entries(cfg, str(acc))
     out, seen = [], set()
-    for r in entry.get("rule_list") or []:
-        prefix = str(r.get("prefix") or "")
-        key = (prefix, int(r.get("strip") or 0),
-               str(r.get("pri_prefix") or ""), str(r.get("caller_group") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({
-            "prefix": prefix,
-            "strip": int(r.get("strip") or 0),
-            "pri_prefix": str(r.get("pri_prefix") or ""),
-            "caller_group": str(r.get("caller_group") or ""),
-        })
+    for entry in entries:
+        gw_list = [str(g) for g in (entry.get("gw_list") or [])]
+        for r in entry.get("rule_list") or []:
+            prefix = str(r.get("prefix") or "")
+            key = (prefix, int(r.get("strip") or 0),
+                   str(r.get("pri_prefix") or ""), str(r.get("caller_group") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "prefix": prefix,
+                "strip": int(r.get("strip") or 0),
+                "pri_prefix": str(r.get("pri_prefix") or ""),
+                "caller_group": str(r.get("caller_group") or ""),
+                "gw_list": gw_list,
+            })
     return out
 
 
 def webrtc_entry_meta(cfg: dict, acc):
-    """WebRTC 账号归属信息：point_id/group_type + 出口网关 gw_list。
-    供前端聚合展示（一个账号挂多个 rule 时，位点与出口一致）。"""
-    entry = find_webrtc_entry(cfg, str(acc))
-    if not entry:
+    """WebRTC 账号归属信息：所有归属条目列表，每条带 point_id + group_type + gw_list。
+    同 caller_group 可能挂多个条目（合并配置后不同前缀走不同网关）。"""
+    entries = find_all_webrtc_entries(cfg, str(acc))
+    if not entries:
         return None
-    return {
-        "point_id": str(entry.get("point_id") or entry.get("group_type") or ""),
-        "group_type": str(entry.get("group_type") or ""),
-        "gw_list": [str(g) for g in (entry.get("gw_list") or [])],
-    }
+    return [{
+        "point_id": str(e.get("point_id") or e.get("group_type") or ""),
+        "group_type": str(e.get("group_type") or ""),
+        "gw_list": [str(g) for g in (e.get("gw_list") or [])],
+    } for e in entries]
 
 
 def webrtc_entry_allows_source(entry: dict, ip: str) -> bool:
@@ -1433,22 +1601,28 @@ def webrtc_entry_allows_source(entry: dict, ip: str) -> bool:
     return any(ip_in_cidr(ip, c) for c in aips if str(c).strip())
 
 
-def webrtc_match_rule(entry: dict, callee: str):
+def webrtc_match_rule(entry: dict, callee: str, caller: str = "", cfg: dict = None):
     """webrtc 条目内 rule_list 白名单匹配（对齐 route_points：rule_list=入口过滤，
-    gw_list=出口）。逐条按前缀匹配，取最长前缀（相同长度按配置顺序）；
+    gw_list=出口）。逐条按前缀匹配，取最长前缀（相同长度时：若传 caller+cfg，
+    优先选 caller_group 命中主叫的那条；否则保留配置顺序先命中的）。
     命中返回该 rule（其 strip/pri_prefix 用于号码变换），未命中 None。"""
     best = None
     best_len = -1
+    best_cg_match = False
+    caller_hits = resolve_caller_groups(caller, cfg) if caller and cfg else {}
     for i, rule in enumerate(entry.get("rule_list") or []):
         prefix = (rule.get("prefix") or "").strip()
         if not prefix or not callee.startswith(prefix):
             continue
+        cg = (rule.get("caller_group") or "").strip()
+        cg_hits = caller_hits.get(cg, 0) if cg else True
         if len(prefix) > best_len:
-            best, best_len = rule, len(prefix)
-        elif len(prefix) == best_len and best is None:
-            best = rule
-        elif len(prefix) == best_len and best is not None:
-            pass  # 等长保留先命中（配置顺序）
+            best, best_len, best_cg_match = rule, len(prefix), bool(cg_hits)
+        elif len(prefix) == best_len:
+            if cg_hits and not best_cg_match:
+                best, best_cg_match = rule, True
+            elif best is None:
+                best = rule
     return best
 
 
@@ -1474,7 +1648,7 @@ def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
     过滤），gw_list=出口（多网关），外加 allowed_ips=来源准入。命中 rule 后
     用该 rule 的 strip/pri_prefix 变换被叫，再经条目 gw_list 出口。"""
     entry_tag = webrtc_entry_tag(entry)
-    matched_rule = webrtc_match_rule(entry, callee)
+    matched_rule = webrtc_match_rule(entry, callee, caller, cfg)
     matched = (matched_rule.get("prefix") or "").strip() if matched_rule else None
 
     # 来源信息诊断：raw_addr = RustPBX 捕获的 WS 对端原始地址（可能含端口），
@@ -1520,7 +1694,7 @@ def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
         if not _hits.get(_cg, 0):
             log("decision", f"webrtc caller={caller} callee={callee} "
                             f"entry={entry_tag} caller_group={_cg} → 主叫组未命中")
-            trace_record(payload.get("call_id") or "", "decision",
+            trace_record(payload.get("call_id") or "", "decluision",
                          session_id=payload.get("session_id"),
                          layer="webrtc", callee=callee, caller=caller,
                          entry=entry_tag, matched_prefix=matched,
@@ -1534,7 +1708,7 @@ def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
     # 号码变换：取该命中 rule 的 strip/pri_prefix（对齐 route_points），
     # 然后经该条目 gw_list 出口（多网关按序展开）。
     callee2 = apply_rule_transforms(matched_rule, callee)
-    targets = gateway_targets(callee2, entry.get("gw_list"), cfg)
+    targets, rtp_config, network_profile_id = gateway_targets(callee2, entry.get("gw_list"), cfg)
     if not targets:
         trace_record(payload.get("call_id") or "", "decision",
                      session_id=payload.get("session_id"),
@@ -1552,6 +1726,10 @@ def webrtc_route_decision(payload: dict, cfg: dict, caller: str, callee: str,
         "headers": {"X-cid": resolve_webrtc_xtag(payload),
                     "User-to-User": uui_business_value()},
     }
+    if rtp_config:
+        resp["rtp_config"] = rtp_config
+    if network_profile_id:
+        resp["network_profile_id"] = network_profile_id
     _corr = resolve_webrtc_xtag(payload)
     trace_record(payload.get("call_id") or "", "decision",
                  session_id=payload.get("session_id"),
@@ -1588,48 +1766,98 @@ def route_decision(payload: dict) -> dict:
                      layer="reject", status=484, callee=callee, caller=caller)
         return {"action": "reject", "status": 484, "reason": "address incomplete"}
 
-    # WebRTC 呼叫（方案 A）：主叫命中 webrtc 位点（规则 rule_list 的
-    # caller_group 归属，webrtc 段与 route_points 完全同构）→ 走独立白名单
-    # + 准入策略，跳过 L1~L4 路由裁决（仅允许指定前缀，其余拒绝）。
-    webrtc_entry = find_webrtc_entry(cfg, caller)
-    if webrtc_entry is not None:
-        trace_record(payload.get("call_id") or "", "decision",
-                     session_id=payload.get("session_id"), layer="webrtc-branch")
-        return webrtc_route_decision(payload, cfg, caller, callee, webrtc_entry)
-
-    # 第 1~3 层：主被叫都符合 → 被叫符合 → 主叫符合
+    webrtc_table = cfg.get("_webrtc_table") or []
+    route_table = cfg.get("_route_table") or []
     group_hits = resolve_caller_groups(caller, cfg)
-    # 计算过程轨迹（决策记录 steps 字段）：主叫组解析结果 + 逐条规则
-    # 评估顺序（跳过/命中/落选原因）+ 最优选择，界面可完整查看计算过程
+
+    # WebRTC 呼叫：caller 归属 webrtc caller_group → 只查 webrtc_table。
+    # 命中 → 构造 fake entry 走 webrtc_route_decision；
+    # 不命中 → 直接 403 reject，绝不掉 route_points 兜底。
+    if webrtc_table:
+        webrtc_groups = set()
+        for t in webrtc_table:
+            if t["caller_group"]:
+                webrtc_groups.add(t["caller_group"])
+        if any(group_hits.get(g, 0) for g in webrtc_groups):
+            trail = []
+            t3, _layer = _find_in_table(
+                webrtc_table, caller, callee, group_hits, trail=trail)
+            if t3 is not None:
+                fake_entry = {
+                    "point_id": t3["source"],
+                    "gw_list": t3["gw_list"],
+                    "allowed_ips": None,
+                    "rule_list": [{
+                        "prefix": t3["prefix"],
+                        "strip": t3["strip"],
+                        "pri_prefix": t3["pri_prefix"],
+                        "caller_group": t3["caller_group"],
+                    }],
+                }
+                fake_entry.update({
+                    k: None for k in ("caller",)
+                })
+                for src in webrtc_entries(cfg):
+                    if src.get("point_id") == t3["source"]:
+                        fake_entry["allowed_ips"] = src.get("allowed_ips")
+                        break
+                trace_record(payload.get("call_id") or "", "decision",
+                             session_id=payload.get("session_id"),
+                             layer="webrtc-branch", entry=t3["source"],
+                             steps=trail)
+                return webrtc_route_decision(
+                    payload, cfg, caller, callee, fake_entry)
+            trace_record(payload.get("call_id") or "", "decision",
+                         session_id=payload.get("session_id"),
+                         layer="webrtc-reject", callee=callee, caller=caller,
+                         reason="caller is webrtc but no callee prefix match",
+                         steps=trail)
+            return {"action": "reject", "status": 403,
+                    "reason": "prefix not allowed for webrtc calls"}
+
+    # 普通路由：从聚合表筛 kind="route" 条目。不命中 → 兜底组。
     steps = ["主叫组解析: " + (", ".join(f"{g}(长度{v})" for g, v in group_hits.items())
                               or "无")]
-    route_group, rule, layer = match_rule(caller, callee, group_hits, cfg, trail=steps)
-    # 判定细节（随决策记录写入，界面可查看判断过程）：主叫分组命中、
-    # 命中规则过滤条件、L4 方向判定依据、号码变换前后值、计算过程轨迹
+    t3, layer = _find_in_table(
+        route_table, caller, callee, group_hits, trail=steps)
     details = {"group_hits": group_hits, "steps": steps}
 
-    # 第 4 层：主被叫均未命中 → User-Agent 判内部/外部 → 兜底组
-    if rule is None:
+    if t3 is None:
         internal, why_internal = identify_internal(payload, cfg)
         details["internal_check"] = why_internal
-        steps.append("第 4 层方向判定: " + why_internal)
+        steps.append("兜底方向判定: " + why_internal)
         side = "internal" if internal else "external"
         layer = f"L4-{side}"
-        route_group = find_default_route_group(side, cfg)
-        rule = match_default_rule(route_group, callee) if route_group else None
-        if route_group:
-            if rule:
-                steps.append(f"兜底组: {route_group.get('point_id')}，"
-                             f"兜底规则 prefix='{(rule.get('prefix') or '').strip()}'")
+        default_group = None
+        for src in cfg.get("route_points") or []:
+            if src.get("enabled") is not False and src.get("default_for") == side:
+                default_group = src
+                break
+        default_rule = None
+        if default_group:
+            best_k = None
+            for r in default_group.get("rule_list") or []:
+                pre = (r.get("prefix") or "").strip()
+                if callee.startswith(pre):
+                    k = (len(pre), int(r.get("priority") or 0))
+                    if best_k is None or k > best_k:
+                        best_k, default_rule = k, r
+            if default_rule:
+                steps.append(f"兜底组: {default_group.get('point_id')}，"
+                             f"prefix='{(default_rule.get('prefix') or '').strip()}'")
             else:
-                steps.append(f"兜底组: {route_group.get('point_id')}，无匹配规则")
-        else:
-            steps.append(f"兜底组: 无（{side} 方向未配置默认组）")
-        if not internal:
-            # UA 未识别/未配置：运营可见（UA 串随版本升级变化会落到这里）
-            log("decision", f"fallback UA not recognized → {side} default "
-                            f"(callee={callee} caller={caller})")
-        if rule is None:
+                steps.append(f"兜底组: {default_group.get('point_id')}，"
+                             f"无匹配规则")
+            t3 = {
+                "source": default_group.get("point_id"),
+                "gw_list": list(default_group.get("gw_list") or []),
+                "prefix": (default_rule.get("prefix") or "").strip() if default_rule else "",
+                "strip": default_rule.get("strip") if default_rule else None,
+                "pri_prefix": default_rule.get("pri_prefix") if default_rule else None,
+                "caller_group": None,
+                "kind": "route",
+            }
+        if t3 is None:
             log("decision", f"no default route_group/rule for {side} — reject 500")
             trace_record(payload.get("call_id") or "", "decision",
                          session_id=payload.get("session_id"),
@@ -1638,25 +1866,17 @@ def route_decision(payload: dict) -> dict:
             return {"action": "reject", "status": 500,
                     "reason": "No GW Route found"}
     else:
-        log("decision", f"hit layer={layer} route_group={route_group.get('point_id')} "
-                        f"groups={sorted(group_hits)}")
+        log("decision", f"hit table route t3={t3['source']} layer={layer} "
+                        f"prefix='{t3['prefix']}' gw={t3['gw_list']}")
 
-    # 号码变换
-    details["rule"] = rule_detail(rule)
-    details["callee_raw"] = callee
-    details["caller_raw"] = caller
-    callee2 = apply_rule_transforms(rule, callee)
-    first_gw = (cfg.get("gateways") or {}).get((route_group.get("gw_list") or [""])[0]) or {}
-    callee2 = apply_area_prefix0(callee2, first_gw, cfg)
-    caller2 = strip_caller_sitecode(caller, cfg)
-
-    # targets（出口 gw_list，多网关 sequential = use_next_gw 等价）
-    targets = gateway_targets(callee2, route_group.get("gw_list"), cfg)
+    callee2 = apply_rule_transforms(
+        {"strip": t3["strip"], "pri_prefix": t3["pri_prefix"]}, callee)
+    targets, rtp_config, network_profile_id = gateway_targets(callee2, t3["gw_list"], cfg)
     if not targets:
         trace_record(payload.get("call_id") or "", "decision",
                      session_id=payload.get("session_id"),
-                     layer=layer, status=500, route_group=route_group.get("point_id"),
-                     callee=callee2, caller=caller, reason="no usable gateway",
+                     layer=layer, status=500, callee=callee2, caller=caller,
+                     reason="no usable gateway", source=t3["source"],
                      **details)
         return {"action": "reject", "status": 500, "reason": "No GW Route found"}
 
@@ -1664,27 +1884,21 @@ def route_decision(payload: dict) -> dict:
         "action": "forward",
         "targets": targets,
         "strategy": "sequential",
-        # UUI（User-to-User）标准头随出口 trunk INVITE 下发，被叫侧能凭同一
-        # KTM_<session_id> 关联回主叫侧 /trace；X-cid 为自定义关联头。
         "headers": {"X-cid": resolve_xcid(payload),
                     "User-to-User": uui_business_value()},
     }
-    if caller2 and caller2 != caller:
-        resp["caller"] = caller2
-    # 网关编解码策略 → allow_codecs（等价 trunk codec 下发）
-    codecs = first_gw.get("audio_codecs")
-    if codecs:
-        resp["allow_codecs"] = codecs
+    if rtp_config:
+        resp["rtp_config"] = rtp_config
+    if network_profile_id:
+        resp["network_profile_id"] = network_profile_id
 
-    log("decision", f"forward layer={layer} route_group={route_group.get('point_id')} "
-                    f"callee={callee2} targets={targets} caller={resp.get('caller')}")
-    _corr = resolve_xcid(payload)
+    log("decision", f"forward callee2={callee2} targets={targets} rtp={rtp_config}")
     trace_record(payload.get("call_id") or "", "decision",
                  session_id=payload.get("session_id"),
-                 layer=layer, action="forward",
-                 route_group=route_group.get("point_id"),
-                 callee=callee2, caller=resp.get("caller") or caller,
-                 targets=targets, corr_id=_corr, **details)
+                 layer=layer, callee=callee2, caller=caller,
+                 source=t3["source"], targets=targets, rtp_config=rtp_config,
+                 matched_prefix=t3["prefix"], strip=t3["strip"],
+                 pri_prefix=t3["pri_prefix"], **details)
     return resp
 
 

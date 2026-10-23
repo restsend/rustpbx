@@ -390,6 +390,10 @@ struct HttpResponsePayload {
     /// authenticated caller is kept. An unparseable value fails the call
     /// immediately with 500 Server Internal Error.
     pub caller: Option<String>,
+    /// Network profile id to apply for this call. Overrides trunk.profile
+    /// when the route has no resolved trunk (e.g. passive gateways returning
+    /// pure-URI targets).
+    pub network_profile_id: Option<String>,
 }
 
 #[async_trait]
@@ -598,6 +602,19 @@ impl CallRouter for HttpCallRouter {
                         if let Some(attempt) = attempt {
                             attempts.push(attempt);
                         }
+                    }
+                }
+
+                if let Some(profile_id) = result.network_profile_id.as_deref().filter(|s| !s.is_empty()) {
+                    for attempt in &mut attempts {
+                        let mut hints: DialplanHints = match attempt.hints.take() {
+                            Some(h) => Arc::try_unwrap(h).unwrap_or_else(|_| DialplanHints::default()),
+                            None => DialplanHints::default(),
+                        };
+                        if hints.network_profile_id.is_none() {
+                            hints.network_profile_id = Some(profile_id.to_string());
+                        }
+                        attempt.hints = Some(Arc::new(hints));
                     }
                 }
 
