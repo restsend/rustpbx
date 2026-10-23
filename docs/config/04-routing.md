@@ -174,7 +174,7 @@ headers = { "X-Api-Key" = "secret" }
 | `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |
 | `headers` | object | Custom SIP headers to add to the outgoing INVITE (key-value) |
 | `caller` | string | Caller override for the callee leg (From header). Accepts a full SIP URI (`sip:88888888@pbx.example.com`), a `user@host` shorthand, or a bare user qualified with the caller's realm. Omit to keep the authenticated caller. An unparseable value fails the call with `500 Server Internal Error` |
-| `with_original_headers` | bool | Per-route override of original-header passthrough: `true` forwards the original INVITE's custom headers to the callee leg (equivalent to `header_passthrough.mode = "all"`); `false` forwards none. When omitted, the internal-vs-trunk resolution applies — internal destinations forward all custom headers, external trunks forward per their `header_passthrough` config (default: none). Core SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. |
+| `with_original_headers` | bool | Per-route override of the header passthrough, in both directions (original INVITE → callee INVITE, callee 18x/200 → caller): `true` copies all custom headers (unparsed `X-`/`P-` headers such as `X-Smart2Agent` or `P-Early-Media`) (equivalent to `header_passthrough.mode = "all"`); `false` copies none. When omitted, the internal-vs-trunk resolution applies — internal destinations copy all custom headers, external trunks per their `header_passthrough` config (default: none). Standard SIP headers are never copied. |
 | `extensions` | object | Custom key-value pairs stored in the dialplan (useful for CDRs) |
 
 ### Python Example (Flask)

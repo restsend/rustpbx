@@ -255,6 +255,31 @@ default('RustPBX') }}{% endblock %}
                             placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
                 </section>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_header_passthrough" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_header_passthrough_desc" | t }}</p>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_header_passthrough_mode" | t }}
+                            <select x-model="form.header_passthrough_mode"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">{{ "sip_trunk_detail.header_passthrough_mode_off" | t }}</option>
+                                <option value="whitelist">{{ "sip_trunk_detail.header_passthrough_mode_whitelist" | t }}</option>
+                                <option value="blacklist">{{ "sip_trunk_detail.header_passthrough_mode_blacklist" | t }}</option>
+                                <option value="x_only">{{ "sip_trunk_detail.header_passthrough_mode_x_only" | t }}</option>
+                                <option value="all">{{ "sip_trunk_detail.header_passthrough_mode_all" | t }}</option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700"
+                            x-show="form.header_passthrough_mode === 'whitelist' || form.header_passthrough_mode === 'blacklist'">
+                            {{ "sip_trunk_detail.field_header_passthrough_headers" | t }}
+                            <textarea rows="3" x-model="form.header_passthrough_headers"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="P-Early-Media&#10;X-*"></textarea>
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_header_passthrough_headers_hint" | t }}</span>
+                        </label>
+                    </div>
+                </section>
             </div>
 
             <div class="space-y-6" x-show="activeTab === 'access'" x-transition.opacity x-cloak
@@ -672,6 +697,8 @@ default('RustPBX') }}{% endblock %}
                 video_policy: '',
                 audio_codecs: '',
                 video_codecs: '',
+                header_passthrough_mode: '',
+                header_passthrough_headers: '',
                 ringback_ring: '',
                 ringback_busy: '',
                 ringback_reject: '',
@@ -760,6 +787,21 @@ default('RustPBX') }}{% endblock %}
                     this.form.video_policy = sbc.video_policy || '';
                     this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
                     this.form.video_codecs = Array.isArray(sbc.video_codecs) ? sbc.video_codecs.join('\n') : '';
+                    const hp = sbc.header_passthrough;
+                    if (hp && typeof hp === 'object') {
+                        const whitelist = Array.isArray(hp.whitelist) ? hp.whitelist : [];
+                        const blacklist = Array.isArray(hp.blacklist) ? hp.blacklist : [];
+                        let hpMode = hp.mode || 'all';
+                        // mode=all with a list behaves like that list.
+                        if (hpMode === 'all' && whitelist.length) hpMode = 'whitelist';
+                        else if (hpMode === 'all' && blacklist.length) hpMode = 'blacklist';
+                        this.form.header_passthrough_mode = hpMode;
+                        const hpList = hpMode === 'whitelist' ? whitelist : hpMode === 'blacklist' ? blacklist : [];
+                        this.form.header_passthrough_headers = hpList.join('\n');
+                    } else {
+                        this.form.header_passthrough_mode = '';
+                        this.form.header_passthrough_headers = '';
+                    }
                     const rb = sbc.ringback || {};
                     this.form.ringback_ring = rb.ring || '';
                     this.form.ringback_busy = rb.busy || '';
@@ -1049,6 +1091,16 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.video_codecs = videoCodecs;
                     } else {
                         delete meta.sbc.video_codecs;
+                    }
+                    const hpMode = this.form.header_passthrough_mode;
+                    if (hpMode) {
+                        const hpHeaders = this.form.header_passthrough_headers.split('\n').map(s => s.trim()).filter(s => s);
+                        const hp = { mode: hpMode };
+                        if (hpMode === 'whitelist') hp.whitelist = hpHeaders;
+                        if (hpMode === 'blacklist') hp.blacklist = hpHeaders;
+                        meta.sbc.header_passthrough = hp;
+                    } else {
+                        delete meta.sbc.header_passthrough;
                     }
                     const ringback = {};
                     if (this.form.ringback_ring.trim()) ringback.ring = this.form.ringback_ring.trim();

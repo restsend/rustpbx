@@ -1122,25 +1122,28 @@ impl CallModule {
         // `build_target_invite_option`.
         let header_passthrough = {
             let locs = targets.locations();
-            let internal = callee_is_same_realm
-                || locs
-                    .iter()
-                    .any(|t| t.registered_aor.is_some() || t.home_proxy.is_some());
+            let routed_trunk = dialplan_hints.as_ref().and_then(|h| {
+                h.extensions
+                    .get::<crate::call::OutboundTrunkContext>()
+                    .map(|ctx| ctx.name.clone())
+            });
+            // A call routed to a trunk is external even when the dialed
+            // number is in our own realm: the trunk's rule applies.
+            let internal = routed_trunk.is_none()
+                && (callee_is_same_realm
+                    || locs
+                        .iter()
+                        .any(|t| t.registered_aor.is_some() || t.home_proxy.is_some()));
             if internal {
                 Some(crate::proxy::routing::HeaderPassthrough::all())
             } else if let Some(target) = locs.first() {
-                let trunk_dest = dialplan_hints.as_ref().and_then(|h| {
-                    h.extensions
-                        .get::<crate::call::OutboundTrunkContext>()
-                        .and_then(|ctx| ctx.dest.clone())
-                });
                 self.inner
                     .server
                     .header_passthrough_for(
                         target,
                         false,
                         &original.uri,
-                        trunk_dest.as_deref(),
+                        routed_trunk.as_deref(),
                     )
                     .await
             } else {

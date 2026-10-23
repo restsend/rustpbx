@@ -973,6 +973,18 @@ field_audio_codecs = "Audio codecs (one per line)"
 field_video_codecs = "Video codecs (one per line)"
 field_codecs_hint = "Common: PCMU, PCMA, G722, G729, OPUS, H264, VP8"
 
+# Header passthrough section
+section_header_passthrough = "Header Passthrough"
+section_header_passthrough_desc = "Custom SIP headers (X-* / P-*) copied between call legs when calls go to this trunk: from the caller's INVITE to this trunk, and from this trunk's 18x/200 responses back to the caller. Standard SIP headers are never copied."
+field_header_passthrough_mode = "Passthrough mode"
+header_passthrough_mode_off = "Off (copy none)"
+header_passthrough_mode_whitelist = "Only listed headers"
+header_passthrough_mode_blacklist = "All except listed headers"
+header_passthrough_mode_x_only = "X- headers only"
+header_passthrough_mode_all = "All custom headers"
+field_header_passthrough_headers = "Headers (one per line)"
+field_header_passthrough_headers_hint = "Exact names, or a prefix ending in * (e.g. X-*). Use P-Early-Media for carriers that gate early media."
+
 # Ringback / Early Media section
 section_ringback = "Ringback / Early Media"
 section_ringback_desc = "Configure custom ringback tones and early media audio for each SIP status."

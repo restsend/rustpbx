@@ -1172,9 +1172,13 @@ mod tests {
             .await
             .unwrap();
 
+        let rule = dialplan
+            .header_passthrough
+            .as_ref()
+            .expect("with_original_headers=false must be an explicit rule");
         assert!(
-            dialplan.header_passthrough.is_none(),
-            "with_original_headers=false must map to no passthrough"
+            !rule.allows("X-Smart2Agent"),
+            "with_original_headers=false must forward no custom headers"
         );
     }
 

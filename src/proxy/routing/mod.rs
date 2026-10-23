@@ -146,16 +146,17 @@ pub struct TrunkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_rules: Option<Vec<HeaderRule>>,
 
-    /// Per-trunk control of whether custom headers from the original INVITE are
-    /// forwarded to this trunk's outbound INVITE.
+    /// Per-trunk control of which custom headers are copied between the call
+    /// legs when this trunk is the destination: the caller's INVITE headers
+    /// onto this trunk's INVITE, and this trunk's 18x/2xx headers back onto
+    /// the caller's responses.
     ///
-    /// - `Some(HeaderPassthrough)` — apply the rule to the original request's
-    ///   custom (non-standard) headers.
-    /// - `None` (default) — strict: no original custom headers are forwarded.
+    /// - `Some(HeaderPassthrough)` — apply the rule in both directions.
+    /// - `None` (default) — strict: no custom headers are copied.
     ///
     /// Destinations resolved as internal (same realm / registered AOR /
-    /// home-proxy) always passthrough all custom headers regardless of this
-    /// setting.
+    /// home-proxy) always passthrough all custom headers, in both directions,
+    /// regardless of this setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_passthrough: Option<HeaderPassthrough>,
 
@@ -206,9 +207,12 @@ pub struct TrunkConfig {
     pub retry_policy: Option<RetryPolicy>,
 }
 
-/// Controls which original-request custom headers are forwarded to the
-/// destination leg's INVITE. Standard SIP headers (Via/From/To/Call-ID/CSeq/
-/// Contact/... ) are always excluded regardless of this rule.
+/// Controls which custom headers are copied between call legs: original
+/// INVITE headers onto the destination leg's INVITE, and the destination's
+/// 18x/2xx headers onto the caller's responses. Only custom headers are ever
+/// copied: unparsed `X-`/`P-` headers (see `Dialplan::is_custom_header`).
+/// Standard SIP headers (Via, Require, Identity, P-Asserted-Identity, ...) never
+/// are, regardless of this rule.
 ///
 /// Rule precedence:
 /// - `Whitelist` — forward only the listed headers.
@@ -220,7 +224,8 @@ pub struct TrunkConfig {
 /// - `All` (default) — forward all custom headers; if `whitelist` is non-empty
 ///   it behaves like a whitelist, otherwise a non-empty `blacklist` is honored.
 ///
-/// Header names are matched case-insensitively.
+/// Header names are matched case-insensitively. A list entry ending in `*`
+/// matches by prefix (`X-*`, `P-*`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HeaderPassthrough {
     #[serde(default)]
@@ -247,6 +252,16 @@ impl HeaderPassthrough {
         Self::default()
     }
 
+    /// Forward no custom headers — an explicit "none" that, unlike an absent
+    /// rule, is not replaced by the per-target default.
+    pub fn none() -> Self {
+        Self {
+            mode: HeaderPassthroughMode::Whitelist,
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
+    }
+
     /// Forward only `X-`-prefixed custom headers — opt-in per trunk for
     /// dial-out-metadata destinations (e.g. the CCF-facing trunk).
     pub fn x_custom() -> Self {
@@ -260,26 +275,31 @@ impl HeaderPassthrough {
     /// Returns `true` if a header with the given (case-insensitive) name should
     /// be forwarded under this rule.
     pub fn allows(&self, name: &str) -> bool {
+        let listed = |list: &[String]| list.iter().any(|p| header_name_matches(p, name));
         match self.mode {
-            HeaderPassthroughMode::Whitelist => {
-                self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
-            }
-            HeaderPassthroughMode::Blacklist => {
-                !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(name))
-            }
-            HeaderPassthroughMode::XOnly => {
-                name.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("x-"))
-            }
+            HeaderPassthroughMode::Whitelist => listed(&self.whitelist),
+            HeaderPassthroughMode::Blacklist => !listed(&self.blacklist),
+            HeaderPassthroughMode::XOnly => header_name_matches("X-*", name),
             HeaderPassthroughMode::All => {
                 if !self.whitelist.is_empty() {
-                    self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
+                    listed(&self.whitelist)
                 } else if !self.blacklist.is_empty() {
-                    !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(name))
+                    !listed(&self.blacklist)
                 } else {
                     true
                 }
             }
         }
+    }
+}
+
+/// Case-insensitive header name match; a trailing `*` matches by prefix.
+fn header_name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
+        None => pattern.eq_ignore_ascii_case(name),
     }
 }
 

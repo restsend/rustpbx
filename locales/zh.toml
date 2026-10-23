@@ -973,6 +973,18 @@ field_audio_codecs = "音频编解码器（每行一个）"
 field_video_codecs = "视频编解码器（每行一个）"
 field_codecs_hint = "常用: PCMU, PCMA, G722, G729, OPUS, H264, VP8"
 
+# Header passthrough section
+section_header_passthrough = "SIP 头透传"
+section_header_passthrough_desc = "呼叫经此线路外呼时在两条腿之间复制的自定义 SIP 头（X-* / P-*）：主叫 INVITE 中的头带给此线路，此线路 18x/200 响应中的头带回主叫。标准 SIP 头不会被复制。"
+field_header_passthrough_mode = "透传模式"
+header_passthrough_mode_off = "关闭（不复制）"
+header_passthrough_mode_whitelist = "仅列出的头"
+header_passthrough_mode_blacklist = "除列出外的所有头"
+header_passthrough_mode_x_only = "仅 X- 头"
+header_passthrough_mode_all = "所有自定义头"
+field_header_passthrough_headers = "头名称（每行一个）"
+field_header_passthrough_headers_hint = "填写完整名称，或以 * 结尾的前缀（如 X-*）。对需要早媒体授权的运营商，可填写 P-Early-Media。"
+
 # Ringback / Early Media section
 section_ringback = "回铃音 / 早媒体"
 section_ringback_desc = "为每个 SIP 状态配置自定义回铃音和早媒体音频。"

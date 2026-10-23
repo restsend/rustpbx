@@ -16,6 +16,12 @@ mod test_media_e2e;
 #[path = "proxy_e2e/test_early_media_sdp_change_regression.rs"]
 mod test_early_media_sdp_change_regression;
 
+#[path = "proxy_e2e/test_p_early_media_e2e.rs"]
+mod test_p_early_media_e2e;
+
+#[path = "proxy_e2e/test_header_passthrough_e2e.rs"]
+mod test_header_passthrough_e2e;
+
 #[path = "proxy_e2e/test_inbound_refer.rs"]
 mod test_inbound_refer;
 

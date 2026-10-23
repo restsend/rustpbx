@@ -48,7 +48,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the profile/global RTP external IP. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
 | `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the profile/global RTP bind IP |
 | `profile` | string | none | Network profile id from `[[network_profile]]` in the main config (Console: trunk **Media Option → Network profile**). Applies grouped RTP/SDP and SIP Contact settings; per-trunk `external_ip` / `bind_ip` override the profile when set |
-| `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, `"blacklist"`, or `"x_only"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
+| `header_passthrough` | table | none | Control which custom headers (unparsed `X-`/`P-` headers such as `X-Smart2Agent` or `P-Early-Media`) are copied between the call legs when calls go to this trunk, in both directions: the original INVITE's onto this trunk's INVITE, and this trunk's 18x/200 back onto the caller's responses. `mode` is `"all"` (default), `"whitelist"`, `"blacklist"`, or `"x_only"`; `whitelist`/`blacklist` are header-name lists (case-insensitive, a trailing `*` matches by prefix). Standard SIP headers are never copied. Unset (default) = copy nothing for external trunks; internal destinations (same realm / registered / home-proxy) always copy all custom headers unless overridden by the route's `with_original_headers` |
 
 ### Custom Header Passthrough
 
@@ -77,7 +77,7 @@ header_passthrough = { mode = "all" }                # forward all custom header
 > custom headers, the dropped header names are logged (warn) so field loss
 > is never silent.
 
-Standard SIP headers are never forwarded; only custom (non-standard) headers are subject to this rule.
+Standard SIP headers (`Require`, `Identity`, `P-Asserted-Identity`, …) are never copied; only custom headers (unparsed `X-`/`P-` headers such as `X-Smart2Agent` or `P-Early-Media`) are subject to this rule, in both directions.
 
 ### Trunk Registration
 

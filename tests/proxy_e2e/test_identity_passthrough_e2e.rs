@@ -4,8 +4,11 @@ use std::time::Duration;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 
+/// Header passthrough copies only custom (`X-`/`P-`) headers: the standard
+/// STIR/SHAKEN `Identity` header stays on the caller leg (rustpbx neither signs
+/// nor verifies it), while the custom header still reaches the callee.
 #[tokio::test]
-async fn identity_header_reaches_the_callee_untouched() {
+async fn identity_header_is_not_passed_through_but_custom_headers_are() {
     let server = E2eTestServer::start().await.unwrap();
 
     let identity = "info=<eyJhbGciOiJFUzI1NiJ9.eyJhdHQiOiJBIiwicHB0Ijoic2hha2VuIn0.c2ln>;alg=ES256;ppt=shaken";
@@ -64,11 +67,11 @@ async fn identity_header_reaches_the_callee_untouched() {
     }
     let bob_dialog = bob_dialog.expect("bob must receive the INVITE");
 
-    let received_identity = bob
-        .incoming_invite_header(&bob_dialog, "Identity")
-        .await
-        .expect("Identity header must survive the proxy");
-    assert_eq!(received_identity, identity);
+    assert_eq!(
+        bob.incoming_invite_header(&bob_dialog, "Identity").await,
+        None,
+        "standard Identity header must not be copied to the callee"
+    );
     assert_eq!(
         bob.incoming_invite_header(&bob_dialog, "X-Test-Control")
             .await

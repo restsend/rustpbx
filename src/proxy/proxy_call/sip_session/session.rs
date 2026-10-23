@@ -132,6 +132,9 @@ pub struct SipSession {
     pub(super) conference: Option<ConferenceAttachment>,
     pub meta: crate::proxy::proxy_call::call_meta::CallMeta,
     pub media: crate::proxy::proxy_call::media_state::MediaState,
+    /// The dialed target's passthrough rule, reused for the custom headers
+    /// copied from its 18x/2xx back to the caller.
+    response_header_passthrough: Option<crate::proxy::routing::HeaderPassthrough>,
 
     timers: HashMap<DialogId, SessionTimerState>,
     update_refresh_disabled: HashSet<DialogId>,
@@ -1360,6 +1363,7 @@ impl SipSession {
             cancel_token,
             meta,
             media: crate::proxy::proxy_call::media_state::MediaState::new(caller_offer),
+            response_header_passthrough: None,
             timers: HashMap::new(),
             update_refresh_disabled: HashSet::new(),
             timer_queue: DelayQueue::new(),
@@ -3304,6 +3308,23 @@ impl SipSession {
         )]
     }
 
+    /// Custom headers of a callee 18x/2xx that the call's passthrough rule
+    /// lets onto the matching caller response.
+    fn relayed_response_headers(
+        &self,
+        response: &rsipstack::sip::Response,
+        existing: &[rsipstack::sip::Header],
+    ) -> Vec<rsipstack::sip::Header> {
+        match &self.response_header_passthrough {
+            Some(rule) => crate::call::Dialplan::select_passthrough_headers(
+                &response.headers.0,
+                existing,
+                rule,
+            ),
+            None => Vec::new(),
+        }
+    }
+
     async fn send_mid_dialog_request_to_side(
         &mut self,
         side: DialogSide,
@@ -3813,7 +3834,7 @@ impl SipSession {
                 .headers
                 .0
                 .iter()
-                .filter(|h| crate::call::Dialplan::should_forward_header(h))
+                .filter(|h| crate::call::Dialplan::is_custom_header(h))
                 .map(|h| h.name().to_string())
                 .collect();
             if !dropped.is_empty() {
@@ -3834,6 +3855,9 @@ impl SipSession {
             );
             headers.extend(selected);
         }
+        // The same rule governs the callee's 18x/2xx headers relayed back to
+        // the caller.
+        self.response_header_passthrough = passthrough_rule.clone();
         if !validated_transfer_headers.is_empty() {
             info!(
                 session_id = %self.context.session_id,
@@ -6401,7 +6425,7 @@ impl SipSession {
         // destination that was present during the initial routing preview.
         if let Some(trunk) = hints.extensions.get::<crate::call::OutboundTrunkContext>() {
             plan.header_passthrough = self.server
-                .header_passthrough_for(&attempt.location, false, &plan.original.uri, trunk.dest.as_deref())
+                .header_passthrough_for(&attempt.location, false, &plan.original.uri, Some(&trunk.name))
                 .await;
         }
         plan.extensions.extend(hints.extensions.clone());
@@ -7813,6 +7837,13 @@ impl SipSession {
                                 self.fire_on_call_ringing_hooks(true).await;
                                 self.emit_call_ringing(None, true, None);
 
+                                // Copy the callee's custom headers the passthrough
+                                // rule allows (e.g. P-Early-Media) onto the 183.
+                                let mut early_headers = Self::sdp_headers();
+                                let relayed =
+                                    self.relayed_response_headers(response, &early_headers);
+                                early_headers.extend(relayed);
+
                                 if self.media_profile.path == MediaPathMode::Anchored {
                                     let caller_sdp = match self
                                         .prepare_caller_answer_from_callee_sdp(
@@ -7835,7 +7866,7 @@ impl SipSession {
 
                                     if let Some(dialog) = self.caller_dialog.as_ref() {
                                     if let Err(e) = dialog.ringing(
-                                        Some(Self::sdp_headers()),
+                                        Some(early_headers),
                                         caller_sdp.map(|sdp| sdp.into_bytes()),
                                     ) {
                                         warn!(session_id = %self.id,
@@ -7848,7 +7879,7 @@ impl SipSession {
                                 } else {
                                     if let Some(dialog) = self.caller_dialog.as_ref() {
                                         if let Err(e) = dialog.ringing(
-                                            Some(Self::sdp_headers()),
+                                            Some(early_headers),
                                             Some(callee_sdp.into_bytes()),
                                         ) {
                                             warn!(session_id = %self.id,
@@ -7864,8 +7895,9 @@ impl SipSession {
                             if !self.media.early_media_sent {
                                 self.update_leg_state(&LegId::from("callee"), LegState::Ringing);
                             }
+                            let relayed = self.relayed_response_headers(response, &[]);
                             if let Some(dialog) = self.caller_dialog.as_ref() {
-                            if let Err(e) = dialog.ringing(None, None) {
+                            if let Err(e) = dialog.ringing((!relayed.is_empty()).then_some(relayed), None) {
                                 warn!(session_id = %self.id,
                                     session_id = %self.context.session_id,
                                     error = %e,
@@ -8013,7 +8045,11 @@ impl SipSession {
         }
         self.callee_guards.push(callee_guard);
 
-        self.accept_call(Some(callee_uri.to_string()), caller_answer)
+        let relayed_headers = response
+            .as_ref()
+            .map(|response| self.relayed_response_headers(response, &[]))
+            .unwrap_or_default();
+        self.accept_call_with_headers(Some(callee_uri.to_string()), caller_answer, relayed_headers)
             .await
             .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
 
@@ -8559,6 +8595,17 @@ impl SipSession {
     }
 
     pub async fn accept_call(&mut self, callee: Option<String>, sdp: Option<String>) -> Result<()> {
+        self.accept_call_with_headers(callee, sdp, Vec::new()).await
+    }
+
+    /// [`Self::accept_call`] whose 200 OK also carries `relayed_headers`
+    /// (custom headers copied from the callee's 200 OK).
+    async fn accept_call_with_headers(
+        &mut self,
+        callee: Option<String>,
+        sdp: Option<String>,
+        relayed_headers: Vec<rsipstack::sip::Header>,
+    ) -> Result<()> {
         self.meta.connected_callee = callee.clone();
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
@@ -8619,6 +8666,7 @@ impl SipSession {
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
+            headers.extend(relayed_headers);
             if let Some(focus) = self
                 .context
                 .dialplan

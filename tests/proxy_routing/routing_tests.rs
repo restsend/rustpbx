@@ -3432,6 +3432,36 @@ fn header_passthrough_all_mode_honors_whitelist_then_blacklist() {
 }
 
 #[test]
+fn header_passthrough_lists_accept_prefix_patterns() {
+    use rustpbx::proxy::routing::{HeaderPassthrough, HeaderPassthroughMode};
+    let wl = HeaderPassthrough {
+        mode: HeaderPassthroughMode::Whitelist,
+        whitelist: vec!["x-*".into(), "P-Early-Media".into()],
+        blacklist: vec![],
+    };
+    assert!(wl.allows("X-Smart2Agent"));
+    assert!(wl.allows("p-early-media"));
+    assert!(!wl.allows("P-Charging-Vector"));
+    assert!(!wl.allows("X"));
+
+    let bl = HeaderPassthrough {
+        mode: HeaderPassthroughMode::Blacklist,
+        whitelist: vec![],
+        blacklist: vec!["P-*".into()],
+    };
+    assert!(bl.allows("X-Smart2Agent"));
+    assert!(!bl.allows("P-Charging-Vector"));
+}
+
+#[test]
+fn header_passthrough_none_forwards_nothing() {
+    use rustpbx::proxy::routing::HeaderPassthrough;
+    let none = HeaderPassthrough::none();
+    assert!(!none.allows("X-Smart2Agent"));
+    assert!(!none.allows("P-Early-Media"));
+}
+
+#[test]
 fn trunk_dest_host_port_parses_uris_and_bare_addresses() {
     use rustpbx::proxy::routing::trunk_dest_host_port;
     assert_eq!(

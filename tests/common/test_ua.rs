@@ -60,6 +60,10 @@ pub struct TestUa {
     /// All headers of each incoming initial INVITE — screen-pop `Call-Info` /
     /// `User-to-User` assertions on queue-dispatched legs.
     incoming_invite_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
+    /// Headers of every 1xx response seen on this UA's dialogs.
+    provisional_headers: Arc<Mutex<Vec<(String, String)>>>,
+    /// Headers of the 200 OK answering each outgoing INVITE.
+    answer_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real rustrtc PeerConnection used when the UA runs with live media
@@ -249,6 +253,8 @@ impl TestUa {
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             incoming_from_users: Arc::new(Mutex::new(HashMap::new())),
             incoming_invite_headers: Arc::new(Mutex::new(HashMap::new())),
+            provisional_headers: Arc::new(Mutex::new(Vec::new())),
+            answer_headers: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
             media_mode,
@@ -580,10 +586,31 @@ impl TestUa {
                 let mut sdps = self.negotiated_answer_sdps.lock().await;
                 sdps.insert(dialog.id(), answer_sdp);
             }
+            self.answer_headers.lock().await.insert(
+                dialog.id(),
+                resp.headers
+                    .iter()
+                    .map(|h| (h.name().to_string(), h.value().to_string()))
+                    .collect(),
+            );
             Ok(dialog.id())
         } else {
             Err(anyhow!("Call failed: {}", resp.status_code))
         }
+    }
+
+    /// Values of header `name` (case-insensitive) on the 200 OK that answered
+    /// the outgoing INVITE of `dialog_id`.
+    pub async fn answer_header_values(&self, dialog_id: &DialogId, name: &str) -> Vec<String> {
+        self.answer_headers
+            .lock()
+            .await
+            .get(dialog_id)
+            .into_iter()
+            .flatten()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+            .collect()
     }
 
     /// Get negotiated answer SDP for a successfully established outgoing INVITE.
@@ -759,6 +786,17 @@ impl TestUa {
         dialog_id: &DialogId,
         sdp_answer: Option<String>,
     ) -> Result<()> {
+        self.answer_call_with_headers(dialog_id, sdp_answer, Vec::new())
+            .await
+    }
+
+    /// Answer with a 200 OK carrying extra headers (e.g. `X-` metadata).
+    pub async fn answer_call_with_headers(
+        &self,
+        dialog_id: &DialogId,
+        sdp_answer: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -812,13 +850,18 @@ impl TestUa {
                     }
 
                     let body = sdp_answer.map(|sdp| sdp.into_bytes());
-                    let headers = if body.is_some() {
+                    let mut headers = if body.is_some() {
                         vec![rsipstack::sip::Header::ContentType(
                             "application/sdp".into(),
                         )]
                     } else {
                         vec![]
                     };
+                    headers.extend(
+                        extra_headers
+                            .into_iter()
+                            .map(|(name, value)| rsipstack::sip::Header::Other(name, value)),
+                    );
 
                     d.accept(Some(headers), body).map_err(|e| e.into_anyhow())?;
                     Ok(())
@@ -867,6 +910,17 @@ impl TestUa {
         dialog_id: &DialogId,
         early_media_sdp: Option<String>,
     ) -> Result<()> {
+        self.send_ringing_with_headers(dialog_id, early_media_sdp, Vec::new())
+            .await
+    }
+
+    /// Send a ringing response carrying extra headers (e.g. `P-Early-Media`).
+    pub async fn send_ringing_with_headers(
+        &self,
+        dialog_id: &DialogId,
+        early_media_sdp: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -882,6 +936,11 @@ impl TestUa {
                     };
 
                     let mut headers = vec![contact.into()];
+                    headers.extend(
+                        extra_headers
+                            .into_iter()
+                            .map(|(name, value)| rsipstack::sip::Header::Other(name, value)),
+                    );
                     let body = if let Some(sdp) = early_media_sdp {
                         headers.push(rsipstack::sip::Header::ContentType(
                             "application/sdp".into(),
@@ -1107,6 +1166,19 @@ impl TestUa {
             .map(|(_, v)| v.clone())
     }
 
+    /// Values of header `name` (case-insensitive) across every 1xx response
+    /// seen on this UA's dialogs, in arrival order. Query it on the caller UA
+    /// to inspect what the proxy relayed.
+    pub async fn provisional_header_values(&self, name: &str) -> Vec<String> {
+        self.provisional_headers
+            .lock()
+            .await
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     /// Map one dialog state to test events, performing the in-band replies
     /// the harness owes the peer (200 for re-INVITE / NOTIFY / INFO, 202 for
     /// REFER, ...). Runs on the background pump task.
@@ -1134,6 +1206,11 @@ impl TestUa {
                         debug!(
                             "TestUa: Received Early state ({}) for {}",
                             resp.status_code, id
+                        );
+                        self.provisional_headers.lock().await.extend(
+                            resp.headers
+                                .iter()
+                                .map(|h| (h.name().to_string(), h.value().to_string())),
                         );
                         // Mirror JsSIP/browser behaviour: apply a 1xx body as a
                         // PRANSWER on the WebRTC PeerConnection so ICE/DTLS (and

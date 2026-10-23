@@ -1316,60 +1316,23 @@ impl Dialplan {
         self.flow = DialplanFlow::replace_terminal(current, new_terminal);
     }
 
-    pub fn should_forward_header(header: &rsipstack::sip::Header) -> bool {
-        use rsipstack::sip::Header;
-
+    /// A custom header is one SIP itself does not define: rsipstack leaves it
+    /// unparsed and its name carries the `X-` or `P-` prefix (`X-Smart2Agent`,
+    /// `P-Early-Media`). Only custom headers are ever copied between legs, so
+    /// standard ones (`Require`, `Identity`, the parsed `P-Asserted-Identity`)
+    /// never are.
+    pub fn is_custom_header(header: &rsipstack::sip::Header) -> bool {
         match header {
-            Header::Via(_)
-            | Header::Contact(_)
-            | Header::From(_)
-            | Header::To(_)
-            | Header::CallId(_)
-            | Header::CSeq(_)
-            | Header::MaxForwards(_)
-            | Header::ContentLength(_)
-            | Header::ContentType(_)
-            | Header::Authorization(_)
-            | Header::ProxyAuthorization(_)
-            | Header::ProxyAuthenticate(_)
-            | Header::WwwAuthenticate(_)
-            | Header::Route(_)
-            | Header::UserAgent(_)
-            | Header::Allow(_)
-            | Header::Supported(_)
-            | Header::RecordRoute(_) => false,
-            Header::Other(name, _) => {
-                // Avoid the lowercase allocation on every header of every leg:
-                // compare case-insensitively against the constant list.
-                const BLOCKED: &[&str] = &[
-                    "via",
-                    "from",
-                    "to",
-                    "contact",
-                    "call-id",
-                    "cseq",
-                    "max-forwards",
-                    "content-length",
-                    "content-type",
-                    "route",
-                    "record-route",
-                    "authorization",
-                    "proxy-authorization",
-                    "proxy-authenticate",
-                    "www-authenticate",
-                    "user-agent",
-                    "allow",
-                    "supported",
-                ];
-                !BLOCKED.iter().any(|b| name.eq_ignore_ascii_case(b))
-            }
-            _ => true,
+            rsipstack::sip::Header::Other(name, _) => name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-") || prefix.eq_ignore_ascii_case("p-")),
+            _ => false,
         }
     }
 
-    /// Select which headers from the original request should be forwarded to a
-    /// callee leg, applying a passthrough rule on top of the always-on
-    /// `should_forward_header` safety filter.
+    /// Select which custom headers (see [`Self::is_custom_header`]) of one leg's
+    /// message are copied onto the other leg's: the original INVITE onto a
+    /// callee INVITE, or a callee 18x/2xx onto the caller's response.
     ///
     /// Headers already present in `existing` (by case-insensitive name) are not
     /// duplicated.
@@ -1380,7 +1343,7 @@ impl Dialplan {
     ) -> Vec<rsipstack::sip::Header> {
         let mut selected = Vec::new();
         for header in original_headers {
-            if !Self::should_forward_header(header) {
+            if !Self::is_custom_header(header) {
                 continue;
             }
             let name = header.name();
@@ -1894,30 +1857,19 @@ mod tests {
     }
 
     #[test]
-    fn should_forward_header_allows_custom_and_excludes_standard() {
+    fn is_custom_header_means_unparsed_x_or_p_header() {
         use rsipstack::sip::Header;
-        assert!(Dialplan::should_forward_header(&custom_header(
-            "X-Smart2Agent",
-            "v"
-        )));
-        assert!(Dialplan::should_forward_header(&custom_header(
-            "x-referred-id",
-            "v"
-        )));
-        assert!(!Dialplan::should_forward_header(&Header::Via(
-            "SIP/2.0/UDP h:5060".into()
-        )));
-        assert!(!Dialplan::should_forward_header(&Header::From(
-            "sip:a@b".into()
-        )));
-        assert!(!Dialplan::should_forward_header(&Header::CallId(
-            "cid".into()
-        )));
-        assert!(!Dialplan::should_forward_header(&custom_header(
-            "Call-ID", "v"
-        )));
-        assert!(!Dialplan::should_forward_header(&custom_header(
-            "From", "v"
+        assert!(Dialplan::is_custom_header(&custom_header("X-Smart2Agent", "v")));
+        assert!(Dialplan::is_custom_header(&custom_header("x-referred-id", "v")));
+        assert!(Dialplan::is_custom_header(&custom_header("P-Early-Media", "sendrecv")));
+        // Unprefixed or standard headers are never custom.
+        assert!(!Dialplan::is_custom_header(&custom_header("Allow-Events", "talk")));
+        assert!(!Dialplan::is_custom_header(&custom_header("Diversion", "<sip:a@b>")));
+        assert!(!Dialplan::is_custom_header(&custom_header("Call-ID", "v")));
+        assert!(!Dialplan::is_custom_header(&Header::Via("SIP/2.0/UDP h:5060".into())));
+        assert!(!Dialplan::is_custom_header(&Header::Require("100rel".into())));
+        assert!(!Dialplan::is_custom_header(&Header::PAssertedIdentity(
+            "<sip:1001@pbx>".into()
         )));
     }
 
@@ -1973,6 +1925,25 @@ mod tests {
         let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
         assert!(names.contains(&"X-Smart2Agent".to_string()));
         assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("x-token")));
+    }
+
+    #[test]
+    fn select_passthrough_headers_copies_only_custom_headers() {
+        use crate::proxy::routing::HeaderPassthrough;
+        let headers = vec![
+            custom_header("P-Early-Media", "sendrecv"),
+            custom_header("X-Carrier-Ref", "r-1"),
+            custom_header("Allow-Events", "talk"),
+            custom_header("Diversion", "<sip:a@b>"),
+            rsipstack::sip::Header::Require("100rel".into()),
+            rsipstack::sip::Header::RSeq("1".into()),
+            rsipstack::sip::Header::UserToUser("abc;encoding=hex".into()),
+        ];
+
+        let sel = Dialplan::select_passthrough_headers(&headers, &[], &HeaderPassthrough::all());
+
+        let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
+        assert_eq!(names, vec!["P-Early-Media", "X-Carrier-Ref"]);
     }
 
     /// The per-trunk `x_only` mode (CCF-facing dial-out metadata trunks):

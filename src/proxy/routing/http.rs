@@ -133,11 +133,12 @@ struct HttpResponsePayload {
     pub rtp_timeout: Option<u32>,
     pub media_proxy: Option<MediaProxyMode>,
     pub headers: Option<HashMap<String, String>>,
-    /// When set, overrides the original-header passthrough for this route.
-    /// `true` forwards the original INVITE's custom headers to the callee leg
-    /// (equivalent to `header_passthrough.mode = "all"`); `false` forwards none.
+    /// When set, overrides the custom-header passthrough for this route, in
+    /// both directions (caller INVITE -> callee INVITE, callee 18x/200 ->
+    /// caller). `true` copies all custom headers (equivalent to
+    /// `header_passthrough.mode = "all"`); `false` copies none.
     /// When omitted, the internal-vs-trunk resolution applies (internal
-    /// destinations forward everything, external trunks forward per their
+    /// destinations copy everything, external trunks per their
     /// `header_passthrough` config, default none).
     pub with_original_headers: Option<bool>,
     pub extensions: Option<HashMap<String, String>>,
@@ -434,11 +435,11 @@ impl CallRouter for HttpCallRouter {
                 // the original-header passthrough rule. When omitted, the
                 // internal-vs-trunk resolution applies at INVITE build time.
                 if let Some(with_orig) = result.with_original_headers {
-                    dialplan.header_passthrough = if with_orig {
-                        Some(crate::proxy::routing::HeaderPassthrough::all())
+                    dialplan.header_passthrough = Some(if with_orig {
+                        crate::proxy::routing::HeaderPassthrough::all()
                     } else {
-                        None
-                    };
+                        crate::proxy::routing::HeaderPassthrough::none()
+                    });
                 }
 
                 if let Some(exts) = result.extensions {
