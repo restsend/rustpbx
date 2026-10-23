@@ -91,6 +91,14 @@ pub struct SipServerInner {
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
+    /// Startup-only snapshot of this node's listener addresses (host
+    /// pre-formatted, port as `u16`), captured after every transport is bound
+    /// but before any remote connection can exist. `Endpoint::get_addrs()`
+    /// also mixes in every tracked remote connection — including the
+    /// ever-growing WS/UDP peer cache — so hot-path checks such as
+    /// `is_same_realm` must compare against this snapshot instead; otherwise
+    /// each call clones and stringifies thousands of remote addresses.
+    pub local_listen_addrs: Vec<(String, Option<u16>)>,
     pub dialog_layer: Arc<DialogLayer>,
     pub create_route_invites: Vec<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_request: bool,
@@ -981,7 +989,7 @@ impl SipServerBuilder {
         locator.set_event_sender(Some(locator_events.clone()));
         locator.set_event_lock(Some(locator_event_lock.clone()));
 
-        let locator_local_addrs = endpoint_local_addrs;
+        let locator_local_addrs = endpoint_local_addrs.clone();
         let cluster_enabled = !self.cluster_peers.is_empty();
 
         endpoint_builder = endpoint_builder
@@ -1242,6 +1250,10 @@ impl SipServerBuilder {
             locator: locator.clone(),
             callrecord_sender: self.callrecord_sender,
             endpoint,
+            local_listen_addrs: endpoint_local_addrs
+                .iter()
+                .map(|a| (a.addr.host.to_string(), a.addr.port.map(|p| p.value())))
+                .collect(),
             dialog_layer,
             dialplan_inspectors: Arc::new(parking_lot::RwLock::new(self.dialplan_inspectors)),
             create_route_invites: self.create_route_invites,
@@ -2277,23 +2289,41 @@ impl SipServerInner {
                     }
                 }
                 let realms_empty = proxy_config.realms.as_ref().map_or(true, |v| v.is_empty());
-                if self.endpoint.get_addrs().iter().any(|addr| {
-                    let addr_host = addr.addr.host.to_string();
-                    if addr_host == host {
-                        port.map(|p| addr.addr.port == Some(p.into()))
-                            .unwrap_or(true)
-                    } else if realms_empty && (addr_host == "0.0.0.0" || addr_host == "::") {
-                        port.map(|p| addr.addr.port == Some(p.into()))
-                            .unwrap_or(true)
-                    } else {
-                        false
-                    }
-                }) {
+                if Self::realm_matches_listen_addrs(
+                    host,
+                    port,
+                    &self.local_listen_addrs,
+                    realms_empty,
+                ) {
                     return true;
                 }
                 self.user_backend.is_same_realm(callee_realm).await
             }
         }
+    }
+
+    /// Compare a callee `host:port` realm against the startup listener
+    /// snapshot (`local_listen_addrs`). Pure function of its inputs so the
+    /// matching rules stay unit-testable; mirrors the previous
+    /// `Endpoint::get_addrs()` comparison exactly, minus the remote
+    /// connection addresses that must never be consulted: remote peers
+    /// (trunk gateways, NAT'd UAs) leaking into this check used to make
+    /// external realms look "same realm" and blackhole their calls.
+    fn realm_matches_listen_addrs(
+        host: &str,
+        port: Option<u16>,
+        listen_addrs: &[(String, Option<u16>)],
+        realms_empty: bool,
+    ) -> bool {
+        listen_addrs.iter().any(|(addr_host, addr_port)| {
+            if addr_host == host {
+                port.map(|p| *addr_port == Some(p)).unwrap_or(true)
+            } else if realms_empty && (addr_host == "0.0.0.0" || addr_host == "::") {
+                port.map(|p| *addr_port == Some(p)).unwrap_or(true)
+            } else {
+                false
+            }
+        })
     }
 
     /// Resolve the original-header passthrough rule for a callee destination.
@@ -2616,6 +2646,136 @@ mod contact_uri_tests {
         let uri = build_contact_uri("rustpbx", &addr, None);
 
         assert_eq!(uri.to_string(), "sip:rustpbx@192.0.2.20:5060");
+    }
+
+    #[test]
+    fn realm_listen_matches_exact_listener_host_and_port() {
+        let listens = vec![
+            ("192.168.1.10".to_string(), Some(15060u16)),
+            ("pbx.example.com".to_string(), Some(5060u16)),
+        ];
+        assert!(SipServerInner::realm_matches_listen_addrs(
+            "pbx.example.com",
+            Some(5060),
+            &listens,
+            false
+        ));
+        assert!(SipServerInner::realm_matches_listen_addrs(
+            "192.168.1.10",
+            Some(15060),
+            &listens,
+            false
+        ));
+    }
+
+    #[test]
+    fn realm_listen_matches_listener_host_without_port_in_realm() {
+        let listens = vec![("192.168.1.10".to_string(), Some(15060u16))];
+        // Callee realm with no ":port" → port None → any bound port matches.
+        assert!(SipServerInner::realm_matches_listen_addrs(
+            "192.168.1.10",
+            None,
+            &listens,
+            false
+        ));
+    }
+
+    #[test]
+    fn realm_listen_rejects_wrong_port_on_matching_host() {
+        let listens = vec![("192.168.1.10".to_string(), Some(15060u16))];
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "192.168.1.10",
+            Some(9999),
+            &listens,
+            false
+        ));
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "192.168.1.10",
+            Some(5060),
+            &listens,
+            false
+        ));
+    }
+
+    #[test]
+    fn realm_listen_wildcard_bind_matches_only_when_realms_empty() {
+        let listens = vec![("0.0.0.0".to_string(), Some(15060u16))];
+        // realms empty → wildcard bind answers any host on its bound port.
+        assert!(SipServerInner::realm_matches_listen_addrs(
+            "any.provider.net",
+            Some(15060),
+            &listens,
+            true
+        ));
+        // realms configured → wildcard bind must NOT claim foreign hosts.
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "any.provider.net",
+            Some(15060),
+            &listens,
+            false
+        ));
+        // Still port-sensitive on the wildcard bind.
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "8.8.8.8",
+            Some(5060),
+            &listens,
+            true
+        ));
+    }
+
+    #[test]
+    fn realm_listen_wildcard_ipv6_bind_matches_when_realms_empty() {
+        let listens = vec![("::".to_string(), Some(5060u16))];
+        assert!(SipServerInner::realm_matches_listen_addrs(
+            "203.0.113.9",
+            Some(5060),
+            &listens,
+            true
+        ));
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "203.0.113.9",
+            Some(5060),
+            &listens,
+            false
+        ));
+    }
+
+    /// Regression anchor for the transport-connection leak fix: remote peer
+    /// addresses (trunk gateways / NAT'd UAs / disconnected WS clients
+    /// accumulated in the transport connection cache) must never satisfy a
+    /// same-realm check. The old `endpoint.get_addrs()` path consulted them,
+    /// so a callee realm that happened to equal a cached remote `ip:port`
+    /// was routed internally and blackholed.
+    #[test]
+    fn realm_listen_ignores_remote_connection_addresses() {
+        let listens = vec![("10.0.0.5".to_string(), Some(5060u16))];
+        // A remote trunk peer cached in the connection table.
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "1.2.3.4",
+            Some(5080),
+            &listens,
+            false
+        ));
+        // Remote host that even shares our listen port.
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "1.2.3.4",
+            Some(5060),
+            &listens,
+            false
+        ));
+    }
+
+    #[test]
+    fn realm_listen_empty_snapshot_never_matches() {
+        // Defensive: a server with no captured listeners must not claim
+        // same-realm via this path (call falls through to user_backend).
+        let listens: Vec<(String, Option<u16>)> = vec![];
+        assert!(!SipServerInner::realm_matches_listen_addrs(
+            "192.168.1.10",
+            Some(5060),
+            &listens,
+            true
+        ));
     }
 
     #[test]

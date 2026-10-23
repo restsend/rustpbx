@@ -152,6 +152,10 @@ async fn create_test_server_with_dependencies(
         locator,
         callrecord_sender: None,
         endpoint,
+        // Test harness builds the server directly (no builder snapshot):
+        // empty listen list keeps `is_same_realm` on its user_backend
+        // fallback, which is what the proxy tests exercise.
+        local_listen_addrs: Vec::new(),
         dialog_layer,
         dialplan_inspectors: Arc::new(parking_lot::RwLock::new(Vec::new())),
         create_route_invites: Vec::new(),

@@ -513,6 +513,9 @@ async fn test_guest_call_allowed_extension() {
         locator,
         callrecord_sender: None,
         endpoint,
+        // Direct construction (no builder snapshot): empty listen list keeps
+        // `is_same_realm` on its user_backend fallback.
+        local_listen_addrs: Vec::new(),
         dialog_layer,
         dialplan_inspectors: Arc::new(parking_lot::RwLock::new(Vec::new())),
         create_route_invites: Vec::new(),

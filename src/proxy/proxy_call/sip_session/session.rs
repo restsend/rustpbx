@@ -6624,7 +6624,6 @@ impl SipSession {
             ));
         }
 
-        let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
 
         let default_expires = self
@@ -7584,7 +7583,6 @@ impl SipSession {
             ));
         }
 
-        let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
         let default_expires = self
             .server

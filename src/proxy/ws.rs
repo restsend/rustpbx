@@ -210,10 +210,135 @@ pub async fn sip_ws_handler(
     }
     ws_token.cancel();
     // Identity-based removal: only THIS connection is taken out of the
-    // transport cache. `del_connection(&addr)` would tear down every
-    // connection sharing the peer ip:port — several agents behind one office
-    // NAT legitimately do (see rsipstack 0.7.5 connection-conflict handling).
+    // transport cache. Requires the local rsipstack fork (patched via
+    // [patch.crates-io]), whose `retire_connection` includes Channel
+    // bridges in identity-based removal — upstream 0.7.7 silently skips
+    // non-stream connections here, which made the connection table grow
+    // with every WS session ever served. Sibling connections sharing the
+    // peer ip:port (several agents behind one office NAT legitimately do)
+    // are preserved, unlike an address-scoped `del_connection`.
     endpoint_ref
         .transport_layer
         .remove_connection(&sip_connection);
+}
+
+#[cfg(test)]
+mod channel_cleanup_tests {
+    use super::*;
+    use rsipstack::transport::TransportLayer;
+
+    /// Regression test for the transport-connection table leak: every axum-WS
+    /// session is bridged as a `SipConnection::Channel` and registered in the
+    /// transport layer's connection table keyed by the peer address. When the
+    /// socket ends, identity-based `remove_connection` MUST remove the entry.
+    /// Upstream rsipstack 0.7.7 silently skips Channel connections in
+    /// `retire_connection` (non-stream early return), which made
+    /// `connections_count` grow with every WS session ever served; the local
+    /// fork ([patch.crates-io]) includes Channel in identity-based removal.
+    /// This test replays the exact add/cleanup sequence from
+    /// `sip_ws_handler`.
+    #[tokio::test]
+    async fn channel_connection_removed_from_transport_table_on_cleanup() {
+        let tl = TransportLayer::new(CancellationToken::new());
+
+        // Same construction as sip_ws_handler: the peer addr (browser
+        // ip:ephemeral-port) is what `add_connection` will use as the map key.
+        let peer_addr = SipAddr {
+            r#type: Some(transport_type_for_test()),
+            addr: "203.0.113.7:54321"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        };
+        let (_from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
+        let (to_ws_tx, _to_ws_rx) = mpsc::unbounded_channel();
+        let connection = ChannelConnection::create_connection(
+            from_ws_rx,
+            to_ws_tx,
+            peer_addr.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Register — exactly what ws.rs does on every accepted WS session.
+        tl.add_connection(SipConnection::Channel(connection.clone()));
+        assert_eq!(tl.connections_count(), 1, "channel entry not tracked");
+
+        // Cleanup — the fixed identity-based path (fork): only this
+        // connection's entry is removed.
+        tl.remove_connection(&SipConnection::Channel(connection));
+        assert_eq!(
+            tl.connections_count(),
+            0,
+            "channel entry leaked after remove_connection — transport table would grow unbounded"
+        );
+    }
+
+    /// The reason identity-based removal is used instead of the deprecated
+    /// address-scoped `del_connection`: when a new session reuses one remote
+    /// ip:port (NAT port reuse), `add_connection` OVERWRITES the cached entry
+    /// (connectionless slot, single handle per peer). The OLD connection's
+    /// cleanup must then NOT evict the NEW one that replaced it — identity
+    /// matching fails silently and the replacement survives. An
+    /// address-scoped delete would tear the live replacement down.
+    #[tokio::test]
+    async fn channel_replacement_survives_stale_connection_cleanup() {
+        let tl = TransportLayer::new(CancellationToken::new());
+        let shared_addr = SipAddr {
+            r#type: Some(transport_type_for_test()),
+            addr: "198.51.100.9:5060"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        };
+
+        // Old session registers first.
+        let (_from_tx_a, from_rx_a) = mpsc::unbounded_channel();
+        let (to_tx_a, _to_rx_a) = mpsc::unbounded_channel();
+        let old_conn = ChannelConnection::create_connection(
+            from_rx_a,
+            to_tx_a,
+            shared_addr.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        tl.add_connection(SipConnection::Channel(old_conn.clone()));
+        assert_eq!(tl.connections_count(), 1);
+
+        // NAT port reuse: a new session takes over the same remote ip:port.
+        let (_from_tx_b, from_rx_b) = mpsc::unbounded_channel();
+        let (to_tx_b, _to_rx_b) = mpsc::unbounded_channel();
+        let new_conn = ChannelConnection::create_connection(
+            from_rx_b,
+            to_tx_b,
+            shared_addr.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        tl.add_connection(SipConnection::Channel(new_conn.clone()));
+        // Connectionless slot: single handle per peer — the newcomer replaced
+        // the old entry (still exactly one slot).
+        assert_eq!(tl.connections_count(), 1);
+
+        // The OLD session now ends and cleans up. Identity-based removal
+        // must leave the replacement alone (an address-scoped delete would
+        // evict it and blackhole the live session).
+        tl.remove_connection(&SipConnection::Channel(old_conn));
+        assert_eq!(
+            tl.connections_count(),
+            1,
+            "stale connection cleanup must not evict its live replacement"
+        );
+
+        // The new session ends later: the slot is finally reclaimed.
+        tl.remove_connection(&SipConnection::Channel(new_conn));
+        assert_eq!(tl.connections_count(), 0);
+    }
+
+    fn transport_type_for_test() -> rsipstack::sip::transport::Transport {
+        rsipstack::sip::transport::Transport::Ws
+    }
 }
