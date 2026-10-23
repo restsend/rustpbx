@@ -11,6 +11,38 @@ use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
+/// A bridged WS session with no inbound frames for this long is torn down:
+/// clients auto-pong our 25s pings, so silence means the connection is
+/// half-open (client vanished without FIN — network drop, NAT rebinding,
+/// nginx killing the client leg without closing upstream cleanly). Without
+/// this bound, half-open sockets pin the handler task and the transport
+/// table entry for as long as the kernel tolerates the dead TCP peer.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// RAII cleanup for a bridged WebSocket session: drops of the handler future
+/// (axum/hyper tearing the connection task down mid-flight — client races,
+/// `nginx -s reload` killing worker connections in bulk) and panics inside
+/// the loops would otherwise skip the cleanup after the `select!`, leaving
+/// the transport-table entry behind. Every exit path — normal completion,
+/// future drop, unwind — runs this `Drop`.
+struct WsChannelCleanupGuard {
+    transport_layer: rsipstack::transport::TransportLayer,
+    sip_connection: SipConnection,
+    ws_token: CancellationToken,
+    addr: SipAddr,
+}
+
+impl Drop for WsChannelCleanupGuard {
+    fn drop(&mut self) {
+        // Idempotent by construction: token cancellation is idempotent and
+        // `remove_connection` is a no-op once the entry is gone.
+        self.ws_token.cancel();
+        self.transport_layer
+            .remove_connection(&self.sip_connection);
+        debug!(addr = %self.addr, "ws channel cleanup: transport entry removed");
+    }
+}
+
 pub async fn sip_ws_handler(
     token: CancellationToken,
     client_addr: ClientAddr,
@@ -56,21 +88,48 @@ pub async fn sip_ws_handler(
         .transport_layer
         .add_connection(sip_connection.clone());
 
+    // From here on, every exit path (client Close/EOF, ping failure, idle
+    // timeout, token cancellation, handler future being dropped mid-flight,
+    // panic unwind) runs the cleanup — the transport-table entry cannot
+    // outlive this future by more than a deliberate leak. The guard is
+    // intentionally unused: it exists so its Drop runs when this future
+    // ends.
+    let _cleanup_guard = WsChannelCleanupGuard {
+        transport_layer: endpoint_ref.transport_layer.clone(),
+        sip_connection: sip_connection.clone(),
+        ws_token: ws_token.clone(),
+        addr: local_addr.clone(),
+    };
+
     const WS_PING_INTERVAL: Duration = Duration::from_secs(25);
     let local_addr_clone = local_addr.clone();
     let sip_connection_clone = sip_connection.clone();
     let read_from_websocket_loop = async move {
         loop {
-            match ws_read.next().await {
-                None => {
+            // Bound the wait for the next inbound frame: a healthy client
+            // answers our 25s pings with auto-pongs, so 90s of silence means
+            // the connection is half-open — tear it down instead of pinning
+            // the handler task (and the transport entry) for hours.
+            let next_frame =
+                tokio::time::timeout(WS_IDLE_TIMEOUT, ws_read.next()).await;
+            match next_frame {
+                Err(_elapsed) => {
+                    debug!(
+                        addr = %local_addr_clone,
+                        idle_secs = WS_IDLE_TIMEOUT.as_secs(),
+                        "WebSocket idle timeout, closing connection"
+                    );
+                    break;
+                }
+                Ok(None) => {
                     debug!(addr = %local_addr_clone, "WebSocket stream ended");
                     break;
                 }
-                Some(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     debug!(addr = %local_addr_clone, "WebSocket read error: {}", e);
                     break;
                 }
-                Some(Ok(message)) => {
+                Ok(Some(Ok(message))) => {
                     match message {
                         Message::Text(text) => {
                             let text = text.to_string();
@@ -208,18 +267,10 @@ pub async fn sip_ws_handler(
             info!(addr = %local_addr, "WebSocket write loop exited");
         }
     }
-    ws_token.cancel();
-    // Identity-based removal: only THIS connection is taken out of the
-    // transport cache. Requires the local rsipstack fork (patched via
-    // [patch.crates-io]), whose `retire_connection` includes Channel
-    // bridges in identity-based removal — upstream 0.7.7 silently skips
-    // non-stream connections here, which made the connection table grow
-    // with every WS session ever served. Sibling connections sharing the
-    // peer ip:port (several agents behind one office NAT legitimately do)
-    // are preserved, unlike an address-scoped `del_connection`.
-    endpoint_ref
-        .transport_layer
-        .remove_connection(&sip_connection);
+    // Cleanup is owned by `cleanup_guard` (Drop): it runs here on normal
+    // completion as well as when the handler future is dropped mid-flight or
+    // unwinds through a panic — the paths that used to skip this block and
+    // leak the transport-table entry.
 }
 
 #[cfg(test)]
@@ -340,5 +391,56 @@ mod channel_cleanup_tests {
 
     fn transport_type_for_test() -> rsipstack::sip::transport::Transport {
         rsipstack::sip::transport::Transport::Ws
+    }
+
+    /// The handler future can be dropped mid-flight (hyper tears the
+    /// connection task down on a client race, `nginx -s reload` kills worker
+    /// connections in bulk): the `select!` at the tail of `sip_ws_handler`
+    /// never completes and the pre-guard code skipped cleanup entirely. The
+    /// guard's `Drop` must reclaim the transport-table entry on that path.
+    #[tokio::test]
+    async fn cleanup_guard_reclaims_entry_when_handler_future_is_dropped() {
+        let tl = TransportLayer::new(CancellationToken::new());
+        let peer_addr = SipAddr {
+            r#type: Some(transport_type_for_test()),
+            addr: "203.0.113.7:54322"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        };
+        let (_from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
+        let (to_ws_tx, _to_ws_rx) = mpsc::unbounded_channel();
+        let connection = ChannelConnection::create_connection(
+            from_ws_rx,
+            to_ws_tx,
+            peer_addr.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let sip_connection = SipConnection::Channel(connection);
+        tl.add_connection(sip_connection.clone());
+        assert_eq!(tl.connections_count(), 1);
+
+        let token = CancellationToken::new();
+        let ws_token = token.child_token();
+        // Simulate the aborted handler: only the guard survives the drop.
+        let guard = WsChannelCleanupGuard {
+            transport_layer: tl.clone(),
+            sip_connection: sip_connection.clone(),
+            ws_token: ws_token.clone(),
+            addr: peer_addr,
+        };
+        drop(guard);
+
+        assert_eq!(
+            tl.connections_count(),
+            0,
+            "guard must reclaim the entry when the handler future is dropped"
+        );
+        assert!(
+            ws_token.is_cancelled(),
+            "guard must cancel the session token so flow affinity stops routing to it"
+        );
     }
 }
