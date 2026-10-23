@@ -13,6 +13,7 @@
 
 use crate::common::test_helpers;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use crate::common::wait::wait_for_value;
 use anyhow::{Result, anyhow};
 use rustpbx::config::MediaProxyMode;
 use rustpbx::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig};
@@ -122,7 +123,6 @@ impl Harness {
                 _ = server.serve() => {}
             }
         });
-        sleep(Duration::from_millis(200)).await;
 
         Ok(Self {
             proxy_addr: format!("127.0.0.1:{port}").parse()?,
@@ -260,7 +260,6 @@ fn response(
 async fn trunk_calls_bob(global_nat_fix: bool, trunk_nat_fix: Option<bool>) -> Result<Landed> {
     let h = Harness::start(global_nat_fix, trunk_nat_fix).await?;
     let bob = h.ua("bob", "password456").await?;
-    sleep(Duration::from_millis(100)).await;
 
     let claimed = h.claimed_port();
     let call_id = format!("nat-in-{claimed}@test");
@@ -285,17 +284,21 @@ async fn trunk_calls_bob(global_nat_fix: bool, trunk_nat_fix: Option<bool>) -> R
     let bob_answer = {
         let bob = bob.clone();
         tokio::spawn(async move {
-            for _ in 0..100 {
-                for event in bob.process_dialog_events().await? {
-                    if let TestUaEvent::IncomingCall(id, _) = event {
-                        let answer = test_helpers::pcmu_sdp("127.0.0.1", 40010);
-                        bob.answer_call(&id, Some(answer)).await?;
-                        return Ok(id);
-                    }
-                }
-                sleep(Duration::from_millis(50)).await;
-            }
-            Err(anyhow!("bob never received the INVITE"))
+            let id = wait_for_value(Duration::from_secs(5), || async {
+                bob.process_dialog_events()
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .find_map(|event| match event {
+                        TestUaEvent::IncomingCall(id, _) => Some(id),
+                        _ => None,
+                    })
+            })
+            .await
+            .map_err(|_| anyhow!("bob never received the INVITE"))?;
+            let answer = test_helpers::pcmu_sdp("127.0.0.1", 40010);
+            bob.answer_call(&id, Some(answer)).await?;
+            Ok::<_, anyhow::Error>(id)
         })
     };
 
@@ -317,8 +320,9 @@ async fn trunk_calls_bob(global_nat_fix: bool, trunk_nat_fix: Option<bool>) -> R
         to = header(&ok, "To"),
     );
     h.trunk.send_to(ack.as_bytes(), h.proxy_addr).await?;
-    sleep(Duration::from_millis(300)).await;
 
+    // BYE goes to the Contact taken from the INVITE whether or not the proxy
+    // has processed the ACK yet, so no wait is needed here.
     bob.hangup(&bob_dialog).await?;
     h.landed("BYE", &call_id).await
 }
@@ -329,7 +333,6 @@ async fn trunk_calls_bob(global_nat_fix: bool, trunk_nat_fix: Option<bool>) -> R
 async fn alice_calls_trunk(global_nat_fix: bool, trunk_nat_fix: Option<bool>) -> Result<Landed> {
     let h = Harness::start(global_nat_fix, trunk_nat_fix).await?;
     let alice = h.ua("alice", "password123").await?;
-    sleep(Duration::from_millis(100)).await;
 
     let call = {
         let alice = alice.clone();

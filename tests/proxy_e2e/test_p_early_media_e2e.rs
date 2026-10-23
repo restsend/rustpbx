@@ -8,11 +8,11 @@
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_helpers::pcmu_sdp;
 use crate::common::test_ua::TestUaEvent;
+use crate::common::wait::{wait_for_value, wait_until};
 use anyhow::Result;
 use rustpbx::config::MediaProxyMode;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 
 /// Places alice -> bob, has bob answer the INVITE with a 183 + SDP carrying
 /// `callee_headers`, then returns the `P-Early-Media` values alice saw on 1xx.
@@ -24,7 +24,6 @@ async fn p_early_media_seen_by_caller(
     let server = Arc::new(E2eTestServer::start_with_mode(mode).await?);
     let caller_ua = Arc::new(server.create_ua("alice").await?);
     let callee_ua = server.create_ua("bob").await?;
-    sleep(Duration::from_millis(100)).await;
 
     let to_owned = |headers: Vec<(&str, &str)>| -> Vec<(String, String)> {
         headers
@@ -43,29 +42,33 @@ async fn p_early_media_seen_by_caller(
             .await
     });
 
-    let mut callee_dialog_id = None;
-    for _ in 0..50 {
-        for event in callee_ua.process_dialog_events().await? {
-            if let TestUaEvent::IncomingCall(id, _) = event {
-                callee_ua
-                    .send_ringing_with_headers(
-                        &id,
-                        Some(pcmu_sdp("127.0.0.1", 40010)),
-                        callee_headers.clone(),
-                    )
-                    .await?;
-                callee_dialog_id = Some(id);
-                break;
-            }
-        }
-        if callee_dialog_id.is_some() {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    let callee_id = callee_dialog_id.ok_or_else(|| anyhow::anyhow!("bob never got the INVITE"))?;
+    let callee_id = wait_for_value(Duration::from_secs(5), || async {
+        callee_ua
+            .process_dialog_events()
+            .await
+            .ok()?
+            .into_iter()
+            .find_map(|event| match event {
+                TestUaEvent::IncomingCall(id, _) => Some(id),
+                _ => None,
+            })
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("bob never got the INVITE"))?;
+    callee_ua
+        .send_ringing_with_headers(
+            &callee_id,
+            Some(pcmu_sdp("127.0.0.1", 40010)),
+            callee_headers,
+        )
+        .await?;
 
-    sleep(Duration::from_millis(400)).await;
+    // Answer only once alice has the 183, so its headers are what she saw.
+    wait_until(Duration::from_secs(5), || async {
+        !caller_ua.provisional_header_values("CSeq").await.is_empty()
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("alice never got the 183"))?;
     callee_ua
         .answer_call(&callee_id, Some(pcmu_sdp("127.0.0.1", 40010)))
         .await?;
@@ -75,7 +78,6 @@ async fn p_early_media_seen_by_caller(
         .map_err(|_| anyhow::anyhow!("alice's INVITE timed out"))?
         .map_err(|e| anyhow::anyhow!("join: {}", e))?
         .map_err(|e| anyhow::anyhow!("call: {}", e))?;
-    sleep(Duration::from_millis(100)).await;
 
     let seen = caller_ua.provisional_header_values("P-Early-Media").await;
 

@@ -7,6 +7,7 @@
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_helpers::pcmu_sdp;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use crate::common::wait::{wait_for_value, wait_until};
 use anyhow::Result;
 use rustpbx::config::{MediaProxyMode, ProxyConfig};
 use rustpbx::proxy::routing::{
@@ -15,7 +16,6 @@ use rustpbx::proxy::routing::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 
 struct Observed {
     /// Headers of the INVITE the carrier received.
@@ -140,7 +140,6 @@ async fn call_through_carrier_with_twins(
     });
     carrier.start().await?;
     let alice = Arc::new(server.create_ua("alice").await?);
-    sleep(Duration::from_millis(100)).await;
 
     let alice_clone = alice.clone();
     let invite_headers = owned(invite_headers);
@@ -154,30 +153,33 @@ async fn call_through_carrier_with_twins(
             .await
     });
 
-    let mut carrier_dialog = None;
-    for _ in 0..50 {
-        for event in carrier.process_dialog_events().await? {
-            if let TestUaEvent::IncomingCall(id, _) = event {
-                carrier
-                    .send_ringing_with_headers(
-                        &id,
-                        Some(pcmu_sdp("127.0.0.1", 40010)),
-                        owned(ringing_headers),
-                    )
-                    .await?;
-                carrier_dialog = Some(id);
-                break;
-            }
-        }
-        if carrier_dialog.is_some() {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    let carrier_id =
-        carrier_dialog.ok_or_else(|| anyhow::anyhow!("carrier never got the INVITE"))?;
+    let carrier_id = wait_for_value(Duration::from_secs(5), || async {
+        carrier
+            .process_dialog_events()
+            .await
+            .ok()?
+            .into_iter()
+            .find_map(|event| match event {
+                TestUaEvent::IncomingCall(id, _) => Some(id),
+                _ => None,
+            })
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("carrier never got the INVITE"))?;
+    carrier
+        .send_ringing_with_headers(
+            &carrier_id,
+            Some(pcmu_sdp("127.0.0.1", 40010)),
+            owned(ringing_headers),
+        )
+        .await?;
 
-    sleep(Duration::from_millis(300)).await;
+    // Answer only once alice has the 183, so its headers are what she saw.
+    wait_until(Duration::from_secs(5), || async {
+        !alice.provisional_header_values("CSeq").await.is_empty()
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("alice never got the 183"))?;
     carrier
         .answer_call_with_headers(
             &carrier_id,
@@ -191,7 +193,6 @@ async fn call_through_carrier_with_twins(
         .map_err(|_| anyhow::anyhow!("alice's INVITE timed out"))?
         .map_err(|e| anyhow::anyhow!("join: {}", e))?
         .map_err(|e| anyhow::anyhow!("call: {}", e))?;
-    sleep(Duration::from_millis(100)).await;
 
     let mut observed = Observed {
         invite: Vec::new(),
