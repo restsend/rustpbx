@@ -10,13 +10,6 @@ members = [
     "crates/rustpbx-record-common",
 ]
 
-# Local rsipstack fork: adds Channel support to identity-based connection
-# removal (retire_connection / is_same_stream), required to fix the
-# transport-connection table leak for WebSocket-bridged sessions without
-# regressing the same-NAT-ip:port sibling protection.
-[patch.crates-io]
-rsipstack = { path = "../rsipstack" }
-
 [package]
 name = "rustpbx"
 version = "0.5.1"
