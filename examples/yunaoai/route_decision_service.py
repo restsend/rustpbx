@@ -1770,52 +1770,63 @@ def route_decision(payload: dict) -> dict:
     route_table = cfg.get("_route_table") or []
     group_hits = resolve_caller_groups(caller, cfg)
 
-    # WebRTC 呼叫：caller 归属 webrtc caller_group → 只查 webrtc_table。
-    # 命中 → 构造 fake entry 走 webrtc_route_decision；
-    # 不命中 → 直接 403 reject，绝不掉 route_points 兜底。
-    if webrtc_table:
+    xcid = header_value(payload, "X-cid") or ""
+    is_webrtc_source = xcid.lower().startswith("wrtc_")
+
+    # 入口分流：
+    #  来源 = webrtc（SIP X-cid 以 "WRTC_" 开头）：
+    #    caller 不属 any webrtc caller_group → 403 reject（绝不降级 route_points）
+    #    caller 属 webrtc cg → 查 webrtc_table 前缀匹配
+    #  来源 = 普通分机（无 wrtc X-cid）→ 直接走 route_points 路由表
+    if is_webrtc_source and webrtc_table:
         webrtc_groups = set()
         for t in webrtc_table:
             if t["caller_group"]:
                 webrtc_groups.add(t["caller_group"])
-        if any(group_hits.get(g, 0) for g in webrtc_groups):
-            trail = []
-            t3, _layer = _find_in_table(
-                webrtc_table, caller, callee, group_hits, trail=trail)
-            if t3 is not None:
-                fake_entry = {
-                    "point_id": t3["source"],
-                    "gw_list": t3["gw_list"],
-                    "allowed_ips": None,
-                    "rule_list": [{
-                        "prefix": t3["prefix"],
-                        "strip": t3["strip"],
-                        "pri_prefix": t3["pri_prefix"],
-                        "caller_group": t3["caller_group"],
-                    }],
-                }
-                fake_entry.update({
-                    k: None for k in ("caller",)
-                })
-                for src in webrtc_entries(cfg):
-                    if src.get("point_id") == t3["source"]:
-                        fake_entry["allowed_ips"] = src.get("allowed_ips")
-                        break
-                trace_record(payload.get("call_id") or "", "decision",
-                             session_id=payload.get("session_id"),
-                             layer="webrtc-branch", entry=t3["source"],
-                             steps=trail)
-                return webrtc_route_decision(
-                    payload, cfg, caller, callee, fake_entry)
+        if not any(group_hits.get(g, 0) for g in webrtc_groups):
             trace_record(payload.get("call_id") or "", "decision",
                          session_id=payload.get("session_id"),
-                         layer="webrtc-reject", callee=callee, caller=caller,
-                         reason="caller is webrtc but no callee prefix match",
-                         steps=trail)
+                         layer="webrtc-reject", caller=caller, xcid=xcid,
+                         reason="webrtc source but caller not in any webrtc caller_group")
             return {"action": "reject", "status": 403,
-                    "reason": "prefix not allowed for webrtc calls"}
+                    "reason": "caller not allowed for webrtc calls"}
+        trail = []
+        t3, _layer = _find_in_table(
+            webrtc_table, caller, callee, group_hits, trail=trail)
+        if t3 is not None:
+            fake_entry = {
+                "point_id": t3["source"],
+                "gw_list": t3["gw_list"],
+                "allowed_ips": None,
+                "rule_list": [{
+                    "prefix": t3["prefix"],
+                    "strip": t3["strip"],
+                    "pri_prefix": t3["pri_prefix"],
+                    "caller_group": t3["caller_group"],
+                }],
+            }
+            fake_entry.update({
+                k: None for k in ("caller",)
+            })
+            for src in webrtc_entries(cfg):
+                if src.get("point_id") == t3["source"]:
+                    fake_entry["allowed_ips"] = src.get("allowed_ips")
+                    break
+            trace_record(payload.get("call_id") or "", "decision",
+                         session_id=payload.get("session_id"),
+                         layer="webrtc-branch", entry=t3["source"],
+                         steps=trail)
+            return webrtc_route_decision(
+                payload, cfg, caller, callee, fake_entry)
+        trace_record(payload.get("call_id") or "", "decision",
+                     session_id=payload.get("session_id"),
+                     layer="webrtc-reject", callee=callee, caller=caller,
+                     reason="caller is webrtc but no callee prefix match",
+                     steps=trail)
+        return {"action": "reject", "status": 403,
+                "reason": "prefix not allowed for webrtc calls"}
 
-    # 普通路由：从聚合表筛 kind="route" 条目。不命中 → 兜底组。
+    # 普通路由：无 webrtc_table 配置时，从聚合表筛 kind="route" 条目。不命中 → 兜底组。
     steps = ["主叫组解析: " + (", ".join(f"{g}(长度{v})" for g, v in group_hits.items())
                               or "无")]
     t3, layer = _find_in_table(
@@ -2014,17 +2025,29 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
                 return self._json(200, {"action": "reject", "status": 500,
                                         "reason": f"decision error: {exc}"})
         if path.endswith("/config/reload"):
+            raw = self._read_body()
+            body_cfg_path = ""
+            if raw:
+                try:
+                    data = json.loads(raw.decode("utf-8")) or {}
+                    if isinstance(data, dict):
+                        body_cfg_path = (data.get("config_file") or "").strip()
+                except ValueError:
+                    pass
+            target = body_cfg_path or CONFIG_FILE or None
             try:
-                new_cfg = load_config(CONFIG_FILE or None)
+                new_cfg = load_config(target)
             except ValueError as exc:
-                # 加载/校验失败：保留旧配置（运行中不崩溃），显式 400 告警
-                log("config", f"reload REJECTED: {exc}")
+                log("config", f"reload REJECTED (target={target}): {exc}")
                 return self._json(400, {"ok": False, "reason": str(exc)})
             CONFIG = new_cfg
-            # 配置变更后重新同步网关表（upsert 幂等；新增网关自动入 ACL）
+            if body_cfg_path:
+                CONFIG_FILE = body_cfg_path
+            log("config", f"reloaded from {target}")
             sync_trunks_to_rustpbx(CONFIG)
             return self._json(200, {"ok": True, "sitecode": CONFIG.get("sitecode"),
-                                    "trunk_sync": SYNC_STATE.get("ok")})
+                                    "trunk_sync": SYNC_STATE.get("ok"),
+                                    "config_file": target})
         if path.endswith("/rwi"):
             # RWI webhook 接收端（呼叫跟踪 + 前端事件链）：RustPBX
             # [rwi_webhook] 推送呼叫生命周期事件，2xx 即视为送达。

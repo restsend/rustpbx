@@ -751,3 +751,48 @@ impl CallRouter for HttpCallRouter {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_payload_with_network_profile_id() {
+        let json = r#"{
+            "action": "forward",
+            "targets": [{"callee": "8798"}],
+            "network_profile_id": "tailscale"
+        }"#;
+        let payload: HttpResponsePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.network_profile_id.as_deref(), Some("tailscale"));
+    }
+
+    #[test]
+    fn deserialize_payload_without_network_profile_id() {
+        let json = r#"{
+            "action": "forward",
+            "targets": [{"callee": "8120"}]
+        }"#;
+        let payload: HttpResponsePayload = serde_json::from_str(json).unwrap();
+        assert!(payload.network_profile_id.is_none());
+    }
+
+    #[test]
+    fn deserialize_payload_with_null_network_profile_id() {
+        let json = r#"{
+            "action": "forward",
+            "network_profile_id": null
+        }"#;
+        let payload: HttpResponsePayload = serde_json::from_str(json).unwrap();
+        assert!(payload.network_profile_id.is_none());
+    }
+
+    #[test]
+    fn deserialize_payload_empty_network_profile_id_is_treated_as_some() {
+        let json = r#"{
+            "action": "forward",
+            "network_profile_id": ""
+        }"#;
+        let payload: HttpResponsePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.network_profile_id.as_deref(), Some(""));
+    }
+}
