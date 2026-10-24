@@ -52,14 +52,22 @@ use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::SampleStreamSource;
 use rustrtc::{PeerConnection, RtpRewriteBridgeOptions, RtpRewriteRule};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::audio_source::{AudioSource, ResamplingAudioSource};
 
 /// Default ptime (packetization interval) in milliseconds.
 const DEFAULT_PTIME_MS: u32 = 20;
+
+/// Maximum number of consecutive catch-up frames the egress emits after a
+/// pacing stall. The pacing clock is wall-clock anchored, so after a stall the
+/// following ticks fire immediately until the schedule is caught up; this caps
+/// that burst (5 frames = 100 ms at the default 20 ms ptime). Anything beyond
+/// the cap is dropped by re-anchoring the schedule, so a multi-second stall
+/// (GC pause, host suspend, debug-build CPU starvation) can never dump an
+/// unbounded burst of frames into the sender and the network.
+const MAX_CATCHUP_FRAMES: u32 = 5;
 
 /// Grace tail after a non-looping Media source reaches natural EOF. The
 /// pipeline keeps streaming silence for this long before firing
@@ -333,6 +341,34 @@ fn pcm_samples_per_frame(codec: CodecType, ptime: Duration) -> usize {
     (rate as u64 * ptime.as_millis() as u64 / 1000) as usize
 }
 
+/// Advance the wall-clock egress pacing schedule for one emitted frame.
+///
+/// The schedule is an absolute deadline (`next_deadline += ptime`), so a short
+/// stall is made up by the following ticks firing immediately. That catch-up
+/// burst is capped at [`MAX_CATCHUP_FRAMES`]; when the cap is exceeded the
+/// remaining backlog is dropped by re-anchoring the deadline to `now + ptime`,
+/// and the dropped duration is returned so the caller can log it.
+fn advance_pacing(
+    next_deadline: &mut tokio::time::Instant,
+    now: tokio::time::Instant,
+    ptime: Duration,
+    catchup_frames: &mut u32,
+) -> Option<Duration> {
+    *next_deadline += ptime;
+    if *next_deadline <= now {
+        *catchup_frames += 1;
+        if *catchup_frames > MAX_CATCHUP_FRAMES {
+            let behind = now.saturating_duration_since(*next_deadline);
+            *next_deadline = now + ptime;
+            *catchup_frames = 0;
+            return Some(behind);
+        }
+    } else {
+        *catchup_frames = 0;
+    }
+    None
+}
+
 /// Wrap a Media audio source so it yields PCM at the egress codec's sample
 /// rate. The encoder (e.g. opus/48000) must receive samples at its rate; a
 /// file decoded at a different native rate (e.g. a 24 kHz MP3) would otherwise
@@ -418,8 +454,23 @@ impl EgressTask {
         ptime: Duration,
         cancel: CancellationToken,
     ) {
-        let mut interval = tokio::time::interval(ptime);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // Wall-clock anchored pacing. Every tick emits exactly one ptime of
+        // audio and advances the RTP timeline by that ptime. A plain
+        // `tokio::time::interval` with `MissedTickBehavior::Skip` does NOT make
+        // up a late tick, so the egress clock permanently falls behind the wall
+        // clock (measured 91.7% of real time on a debug build over 20 s): the
+        // receiver's jitter buffer drains, PLC starts filling gaps and the
+        // audio turns muffled/watery. Here the schedule is an absolute
+        // deadline, so short stalls are caught up by the following ticks, and
+        // the catch-up burst is capped at [`MAX_CATCHUP_FRAMES`] to keep a long
+        // stall from flooding the sender.
+        let mut next_deadline = tokio::time::Instant::now();
+        let mut catchup_frames: u32 = 0;
+        // Tracks the relay/gated parked state so the pacing clock can be
+        // re-anchored on both edges: while parked no tick is polled, and the
+        // pending schedule would otherwise replay the whole parked span as one
+        // back-to-back burst of frames.
+        let mut was_parked = false;
         loop {
             // RewriteRelay parks the pacing loop: the rewrite bridge owns the
             // ICE send channel exclusively, so no frames must be produced.
@@ -437,13 +488,20 @@ impl EgressTask {
             // so don't arm the ptime timer at all: 1600 legs waking at 50 Hz to
             // run an empty tick branch is pure CPU. Use a pending future so the
             // select only wakes on commands/cancel.
+            let parked = is_relay || gated;
+            if parked != was_parked {
+                // Entering/leaving the parked state is a pacing discontinuity:
+                // drop whatever backlog the schedule accumulated so the unpark
+                // cannot dump the parked span into the sender at once.
+                next_deadline = tokio::time::Instant::now();
+                catchup_frames = 0;
+                was_parked = parked;
+            }
             let tick: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> =
-                if is_relay || gated {
+                if parked {
                     Box::pin(std::future::pending())
                 } else {
-                    Box::pin(async {
-                        interval.tick().await;
-                    })
+                    Box::pin(tokio::time::sleep_until(next_deadline))
                 };
             tokio::select! {
                 biased;
@@ -533,6 +591,12 @@ impl EgressTask {
                         // A pending transcode accumulator belongs to the
                         // previous peer/source — never carry it across.
                         self.transcode_pending.clear();
+                        // Re-anchor the pacing clock on a source switch. While
+                        // the loop is parked (pre-answer gate / relay) the
+                        // schedule keeps accumulating; dropping it here keeps
+                        // the unpark from dumping the parked span at once.
+                        next_deadline = tokio::time::Instant::now();
+                        catchup_frames = 0;
                         self.source = s;
                     }
                     Some(EgressCmd::UpdateCodec(new_codec)) => {
@@ -554,6 +618,20 @@ impl EgressTask {
                     None => break,
                 },
                 _ = tick => {
+                    let now = tokio::time::Instant::now();
+                    if let Some(behind) = advance_pacing(
+                        &mut next_deadline,
+                        now,
+                        ptime,
+                        &mut catchup_frames,
+                    ) && behind >= ptime
+                    {
+                        warn!(
+                            behind_ms = behind.as_millis() as u64,
+                            max_catchup_frames = MAX_CATCHUP_FRAMES,
+                            "egress pacing fell behind; dropped the remaining backlog"
+                        );
+                    }
                     if let Some(frame) = self.next_frame().await {
                         let clear_marker = self.marker_pending;
                         let stamp_ts = frame.rtp_timestamp;
@@ -1990,6 +2068,55 @@ mod tests {
             pcm_samples_per_frame(CodecType::Opus, Duration::from_millis(20)),
             960
         );
+    }
+
+    /// The catch-up after a stall is wall-clock anchored but bounded: at most
+    /// [`MAX_CATCHUP_FRAMES`] frames go out back to back, then the remaining
+    /// backlog is dropped by re-anchoring `next_deadline` to `now + ptime`.
+    #[test]
+    fn pacing_catchup_is_bounded_after_a_stall() {
+        use tokio::time::{Duration, Instant};
+
+        let ptime = Duration::from_millis(20);
+        let t0 = Instant::now();
+        let mut deadline = t0;
+        let mut catchup = 0u32;
+
+        // On-time cadence: no catch-up, no drops, deadline stays wall-anchored.
+        for i in 0..5u32 {
+            let now = t0 + ptime * i;
+            assert_eq!(
+                advance_pacing(&mut deadline, now, ptime, &mut catchup),
+                None
+            );
+            assert_eq!(catchup, 0);
+        }
+        assert_eq!(deadline, t0 + ptime * 5);
+
+        // A 300 ms stall (15 frames of backlog): only MAX_CATCHUP_FRAMES
+        // back-to-back frames plus the current one are emitted; the rest is
+        // dropped and the deadline re-anchors one ptime after `now`.
+        let now = t0 + Duration::from_millis(300);
+        let mut dropped = Duration::ZERO;
+        for _ in 0..=MAX_CATCHUP_FRAMES {
+            if let Some(d) = advance_pacing(&mut deadline, now, ptime, &mut catchup) {
+                dropped = d;
+            }
+        }
+        assert!(
+            dropped >= ptime,
+            "a 300 ms stall must drop the excess backlog, dropped {dropped:?}"
+        );
+        assert_eq!(deadline, now + ptime, "schedule re-anchors to now + ptime");
+        assert_eq!(catchup, 0, "cap resets the catch-up counter");
+
+        // The re-anchored schedule resumes the normal cadence: the next frame
+        // is on time, not an immediate catch-up tick.
+        assert_eq!(
+            advance_pacing(&mut deadline, now + ptime, ptime, &mut catchup),
+            None
+        );
+        assert_eq!(catchup, 0);
     }
 
     /// `media_source_for_codec` must wrap a 24 kHz source in a resampler that

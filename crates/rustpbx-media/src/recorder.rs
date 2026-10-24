@@ -238,18 +238,6 @@ impl Recorder {
         self.capture_clock = None;
     }
 
-    pub async fn write_sample(
-        &mut self,
-        leg: Leg,
-        sample: &MediaSample,
-        dtmf_pt: Option<u8>,
-        dtmf_clock_rate: Option<u32>,
-        codec_hint: Option<CodecType>,
-    ) -> Result<()> {
-        self.write_sample_with_profile(leg, sample, dtmf_pt, dtmf_clock_rate, codec_hint, None, 0)
-            .await
-    }
-
     pub(crate) async fn write_sample_with_profile(
         &mut self,
         leg: Leg,
@@ -593,16 +581,6 @@ impl Recorder {
                 }
             }
         }
-    }
-
-    pub async fn write_dtmf_payload(
-        &mut self,
-        leg: Leg,
-        payload: &[u8],
-        rtp_timestamp: u32,
-        clock_rate: u32,
-    ) -> Result<()> {
-        self.write_dtmf_payload_at(leg, payload, rtp_timestamp, clock_rate, None).await
     }
 
     async fn write_dtmf_payload_at(
