@@ -259,9 +259,20 @@ portpicker = { version = "0.1.1", optional = true }
 
 [[test]]
 name = "e2e_core"
+# The aggregated suites reach into `addons::cc`; they only compile with the
+# contact-center feature on (same requirement as any e2e run).
+required-features = ["contact-center"]
 
 [[test]]
 name = "e2e_addons"
+
+# CC E2E suite lives inside the addon submodule (src/addons/cc/tests/e2e) but
+# is built as a parent integration test; it reaches `addons::cc`, so it needs
+# the addon feature on.
+[[test]]
+name = "cc_e2e"
+path = "src/addons/cc/tests/e2e/cc_e2e.rs"
+required-features = ["addon-cc"]
 
 [[test]]
 name = "step_ivr_trace_e2e"
