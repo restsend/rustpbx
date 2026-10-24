@@ -1,14 +1,11 @@
 //! Aggregated addon E2E suite (feature-gated).
 //!
-//! `cargo test-dev` (commerce,wholesale,contact-center) covers both modules;
-//! with a feature off, its module compiles out entirely and the binary runs
+//! The CC suite moved into the addon itself (`src/addons/cc/tests/e2e`,
+//! parent `[[test]] name = "cc_e2e"`); this binary now covers wholesale.
+//! With a feature off, its module compiles out entirely and the binary runs
 //! zero tests for it.
 
 mod common;
-
-#[cfg(feature = "addon-cc")]
-#[path = "cc_e2e.rs"]
-mod cc_e2e;
 
 #[cfg(feature = "addon-wholesale")]
 #[path = "wholesale.rs"]
