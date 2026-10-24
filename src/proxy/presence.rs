@@ -72,10 +72,6 @@ struct RpidActivities {
     /// RFC 4480 human-readable activity note (`<rpid:note>`).
     #[serde(rename = "note", default)]
     notes: Vec<String>,
-    /// RFC 4480 application-specific activity text (`<rpid:other>`); CC uses
-    /// the exact `ring-timeout-ack <token>` grammar.
-    #[serde(rename = "other", default)]
-    other: Option<String>,
     #[serde(rename = "away", default)]
     away: Option<RpidEmpty>,
     #[serde(rename = "busy", default)]
@@ -2285,7 +2281,7 @@ mod tests {
             .await;
 
         // Lapsed PUBLISH for a vanished client → flipped offline.
-        let mut gone = PresenceState {
+        let gone = PresenceState {
             status: PresenceStatus::Idle,
             last_updated: now - 600,
             expires_at: Some(now - 60),
