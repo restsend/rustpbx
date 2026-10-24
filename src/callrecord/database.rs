@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set};
+use sea_orm::{DatabaseConnection, DbBackend, EntityTrait, Set};
 
 use crate::callrecord::CallRecord;
 

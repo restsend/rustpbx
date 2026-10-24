@@ -6813,7 +6813,7 @@ async fn stereo_external_left_resolves_swap_per_call_shape() {
 
     // Same-realm caller arriving from a trunk: the caller leg is the external
     // party even though direction says Outbound (realm lied).
-    let mut cookie = TransactionCookie::default();
+    let cookie = TransactionCookie::default();
     cookie.insert_extension(TrunkContext {
         id: Some(1),
         name: "inbound-trunk".to_string(),
@@ -6914,7 +6914,7 @@ async fn stereo_external_left_resolves_swap_per_call_shape() {
 
     // Trunk inbound caller under an Outbound realm: still external caller on
     // the right.
-    let mut cookie = TransactionCookie::default();
+    let cookie = TransactionCookie::default();
     cookie.insert_extension(TrunkContext {
         id: Some(1),
         name: "inbound-trunk".to_string(),

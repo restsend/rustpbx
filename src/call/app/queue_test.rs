@@ -4275,7 +4275,6 @@ mod tests {
     #[tokio::test]
     async fn test_queue_agent_reject_reconciles_excludes_and_alerts() {
         use crate::call::app::agent_registry::AssignFailReason;
-        use crate::rwi::auth::RwiIdentity;
         use std::sync::Arc;
 
         let registry = Arc::new(HookRecordingRegistry::new());
@@ -5581,7 +5580,7 @@ mod tests {
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
-        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
+        let _ = stack.next_cmd(2000).await.expect("busy prompt Play");
 
         // The late session kick arrives while the busy prompt is playing.
         stack.custom("dial_next_agent", serde_json::json!({}));

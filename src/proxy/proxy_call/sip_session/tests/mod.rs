@@ -3654,7 +3654,7 @@ async fn test_customer_blind_transfer_route_to_queue() {
         "rustpbx.com",
         None,
     );
-    let original_request = request.clone();
+    let _original_request = request.clone();
     let (tx, _) = create_transaction(request.clone()).await;
     let (state_tx, _state_rx) = mpsc::unbounded_channel();
     let server_dialog = server
@@ -12531,7 +12531,7 @@ async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
             .dialog_layer
             .get_or_create_server_invite(&tx, state_tx, None, None)
             .expect("server dialog");
-        let mut cookie = TransactionCookie::default();
+        let cookie = TransactionCookie::default();
         if let Some(peer) = peer {
             cookie.insert_extension(crate::call::CallerPeerContext(peer.to_string()));
         }
