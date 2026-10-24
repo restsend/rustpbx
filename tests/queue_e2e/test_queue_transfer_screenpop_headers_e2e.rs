@@ -285,10 +285,10 @@ async fn run_scenario(
     .await?;
 
     // Agent registered + Idle BEFORE the call: the queue dials immediately.
-    let mut bob = make_registered_ua(&server, "bob").await?;
+    let bob = make_registered_ua(&server, "bob").await?;
 
     // Caller → IVR.
-    let mut caller = make_registered_ua(&server, "caller").await?;
+    let caller = make_registered_ua(&server, "caller").await?;
     let offer = create_test_sdp(
         "127.0.0.1",
         portpicker::pick_unused_port().unwrap_or(30200),
@@ -432,9 +432,15 @@ async fn queue_dispatch_uui_always_and_call_info_only_when_configured() -> Resul
         uui.contains("q=") && uui.contains("sg="),
         "User-to-User is unconditional on a dispatched agent leg: {uui}"
     );
+    // The enricher must not invent a screen-pop URL — but the agent's
+    // client-owned ring policy may legitimately attach a SEPARATE
+    // `Call-Info;purpose=ring-timeout` (client ring-timeout ack contract),
+    // so the absence check is purpose-scoped, not header-scoped.
     assert!(
-        call_info.is_none(),
-        "Call-Info must be absent when no screen-pop URL is configured: {call_info:?}"
+        call_info
+            .as_deref()
+            .is_none_or(|ci| !ci.contains("purpose=render")),
+        "Call-Info;purpose=render must be absent when no screen-pop URL is configured: {call_info:?}"
     );
     Ok(())
 }
@@ -610,7 +616,7 @@ async fn queue_overflow_escalation_agent_invite_carries_screenpop_headers() -> R
     });
 
     // Phase 1: primary agent rings, deliberately unanswered.
-    let t0 = Instant::now();
+    let _t0 = Instant::now();
     let mut agent1_dialog = None;
     for _ in 0..80 {
         let events = agent1.process_dialog_events().await?;

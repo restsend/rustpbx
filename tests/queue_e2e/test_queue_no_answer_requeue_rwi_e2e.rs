@@ -297,7 +297,7 @@ fn make_ua(proxy_addr: std::net::SocketAddr, username: &str) -> TestUa {
 /// Agent UA pump: INVITE #1 rings (180) but is never answered — the queue's
 /// ring timeout must CANCEL it and re-dial. INVITE #2+ rings and answers.
 fn spawn_agent_pump(
-    mut ua: TestUa,
+    ua: TestUa,
     invites: Arc<AtomicUsize>,
     established: Arc<AtomicUsize>,
 ) -> tokio::task::JoinHandle<()> {

@@ -278,17 +278,6 @@ async fn start_harness(trunk_dest_port: u16) -> Result<Harness> {
     Ok(Harness { server, capture })
 }
 
-fn make_ua(proxy_addr: std::net::SocketAddr, username: &str) -> TestUa {
-    TestUa::new(TestUaConfig {
-        webrtc: false,
-        username: username.to_string(),
-        password: "password".to_string(),
-        realm: "127.0.0.1".to_string(),
-        local_port: portpicker::pick_unused_port().unwrap_or(29000),
-        proxy_addr,
-    })
-}
-
 /// UA loop that answers the FIRST incoming call and stays on it.
 async fn answer_first_incoming(ua: &TestUa, sdp: &str, label: &str) -> Result<DialogId> {
     let deadline = Instant::now() + Duration::from_secs(6);

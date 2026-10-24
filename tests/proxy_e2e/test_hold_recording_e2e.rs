@@ -26,7 +26,7 @@ use crate::common::audio_analysis::{dominant_frequency, rms};
 use crate::common::cdr_capture::CdrExpectation;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::{RtpPacket, extract_media_endpoint};
-use crate::common::test_ua::{TestUa, TestUaEvent, create_test_sdp};
+use crate::common::test_ua::{TestUaEvent, create_test_sdp};
 use anyhow::Result;
 use audio_codec::{CodecType, create_decoder, create_encoder};
 use rustpbx::config::{MediaProxyMode, ProxyConfig, RecordingPolicy};
@@ -148,9 +148,6 @@ struct RtpLink {
     socket: Arc<tokio::net::UdpSocket>,
     gaps: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
     received: Arc<AtomicUsize>,
-    /// Last few (seq, timestamp, ssrc, payload_type) tuples for
-    /// discontinuity diagnosis.
-    tail: Arc<std::sync::Mutex<Vec<(u16, u32, u32, u8)>>>,
 }
 
 impl RtpLink {
@@ -158,13 +155,10 @@ impl RtpLink {
         let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
         let gaps = Arc::new(std::sync::Mutex::new(Vec::new()));
         let received = Arc::new(AtomicUsize::new(0));
-        let tail: Arc<std::sync::Mutex<Vec<(u16, u32, u32, u8)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (rx_socket, rx_gaps, rx_received, rx_tail) = (
+        let (rx_socket, rx_gaps, rx_received) = (
             Arc::clone(&socket),
             Arc::clone(&gaps),
             Arc::clone(&received),
-            Arc::clone(&tail),
         );
         rustpbx::utils::spawn(async move {
             let mut buf = vec![0u8; 1500];
@@ -180,18 +174,6 @@ impl RtpLink {
                             continue;
                         };
                         rx_received.fetch_add(1, Ordering::Relaxed);
-                        {
-                            let mut tail = rx_tail.lock().unwrap();
-                            if tail.len() == 8 {
-                                tail.remove(0);
-                            }
-                            tail.push((
-                                packet.sequence_number,
-                                packet.timestamp,
-                                packet.ssrc,
-                                packet.payload_type,
-                            ));
-                        }
                         if packet.payload_type == 0 {
                             if let Some(last) = last_audio_seq {
                                 let expected = last.wrapping_add(1);
@@ -213,7 +195,6 @@ impl RtpLink {
             socket,
             gaps,
             received,
-            tail,
         })
     }
 
@@ -242,10 +223,6 @@ impl RtpLink {
 
     fn seq_gaps(&self) -> Vec<(u16, u16)> {
         self.gaps.lock().unwrap().clone()
-    }
-
-    fn recent_pairs(&self) -> Vec<(u16, u32, u32, u8)> {
-        self.tail.lock().unwrap().clone()
     }
 }
 
@@ -313,7 +290,7 @@ async fn test_hold_keeps_both_parties_in_recording_and_rtp_continuous() -> Resul
         }
         sleep(Duration::from_millis(100)).await;
     }
-    let bob_dialog = bob_dialog.expect("bob must receive the call");
+    let _bob_dialog = bob_dialog.expect("bob must receive the call");
     let pbx_callee_endpoint =
         pbx_callee_endpoint.expect("INVITE offer must carry the PBX callee media endpoint");
 

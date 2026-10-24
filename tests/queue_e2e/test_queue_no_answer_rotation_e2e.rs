@@ -308,7 +308,7 @@ fn make_ua(proxy_addr: std::net::SocketAddr, username: &str) -> TestUa {
 
 /// alice's pump: every INVITE rings (180) but is NEVER answered — the queue's
 /// ring timeout must CANCEL it and rotate to the next agent.
-fn spawn_no_answer_pump(mut ua: TestUa, invites: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
+fn spawn_no_answer_pump(ua: TestUa, invites: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match ua.process_dialog_events().await {
@@ -330,7 +330,7 @@ fn spawn_no_answer_pump(mut ua: TestUa, invites: Arc<AtomicUsize>) -> tokio::tas
 
 /// bob's pump: answers the FIRST invite (after a short ring).
 fn spawn_answer_first_pump(
-    mut ua: TestUa,
+    ua: TestUa,
     invites: Arc<AtomicUsize>,
     established: Arc<AtomicUsize>,
 ) -> tokio::task::JoinHandle<()> {

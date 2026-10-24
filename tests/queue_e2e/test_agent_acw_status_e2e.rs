@@ -310,7 +310,7 @@ async fn wait_status(
 /// caller → queue → `agent` rings (observed) → answers (released via
 /// `gate`) → Busy. Returns the caller dialog.
 async fn established_queue_call(
-    server: &E2eTestServer,
+    _server: &E2eTestServer,
     registry: &Arc<CcAgentRegistry>,
     caller: &TestUa,
     agent: &str,

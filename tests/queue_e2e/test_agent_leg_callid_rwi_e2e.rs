@@ -799,6 +799,23 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
         "consult leg events correlate by the root session id: {consult_ringing}"
     );
 
+    // The pump auto-answers → the consult leg connects. Its answer must keep
+    // the leg's OWN identity (leg_role "consult", exactly once) — a second
+    // emission or a re-claimed agent role is the cascade regression class.
+    let consult_answered = wait_webhook_matching(
+        &capture,
+        "call_answered",
+        |v| v["event"]["leg_id"].as_str() == Some("consult-1"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the consult-leg call_answered");
+    assert_eq!(
+        consult_answered["event"]["leg_role"].as_str(),
+        Some("consult"),
+        "consult-leg answer must keep leg_role=consult (never the agent role): {consult_answered}"
+    );
+
     // ── Consult #2 → dave: second agent-facing leg dials with `{S}-r2` ───
     handle
         .send_command(CallCommand::LegRemove {
@@ -850,6 +867,85 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
         Some("consult"),
         "consult-2 must also report leg_role=consult: {consult2_ringing}"
     );
+    let consult2_answered = wait_webhook_matching(
+        &capture,
+        "call_answered",
+        |v| v["event"]["leg_id"].as_str() == Some("consult-2"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the consult-2 call_answered");
+    assert_eq!(
+        consult2_answered["event"]["leg_role"].as_str(),
+        Some("consult"),
+        "consult-2 answer must keep leg_role=consult: {consult2_answered}"
+    );
+
+    // ── Whole-timeline role contract for this plain-call consult flow ────
+    // Let trailing events (leg removes, teardown sweep) land, then pin the
+    // per-leg counts over the full stream: presence checks pass on
+    // double-emission, counts do not.
+    sleep(Duration::from_millis(800)).await;
+    let timeline: Vec<serde_json::Value> = capture
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|v| v["call_id"].as_str() == Some(session_id.as_str()))
+        .cloned()
+        .collect();
+    assert!(
+        !timeline.is_empty(),
+        "no webhook events captured for the consult session {session_id}"
+    );
+    // 1. NO agent-role claim anywhere: alice stays "caller", bob's callee leg
+    //    stays "callee" (plain dial never becomes an agent leg), consult legs
+    //    stay "consult". A blanket child-role stamping regression shows up
+    //    here as a leg_role="agent" leak.
+    let agent_claimed: Vec<&serde_json::Value> = timeline
+        .iter()
+        .filter(|v| v["event"]["leg_role"].as_str() == Some("agent"))
+        .collect();
+    assert!(
+        agent_claimed.is_empty(),
+        "plain-call consult flow must not claim leg_role=agent on any event: {agent_claimed:?}"
+    );
+    // 2. Exactly ONE answered (and one ringing) per consult leg, each keeping
+    //    its own role — `find`-style presence checks would pass on doubles.
+    for leg in ["consult-1", "consult-2"] {
+        let ringing = timeline
+            .iter()
+            .filter(|v| {
+                v["event_type"].as_str() == Some("call_ringing")
+                    && v["event"]["leg_id"].as_str() == Some(leg)
+            })
+            .count();
+        assert_eq!(
+            ringing, 1,
+            "call_ringing for {leg} must be emitted exactly once, got {ringing}:\n{}",
+            render_timeline(&capture, &session_id)
+        );
+        let answered: Vec<&serde_json::Value> = timeline
+            .iter()
+            .filter(|v| {
+                v["event_type"].as_str() == Some("call_answered")
+                    && v["event"]["leg_id"].as_str() == Some(leg)
+            })
+            .collect();
+        assert_eq!(
+            answered.len(),
+            1,
+            "call_answered for {leg} must be emitted exactly once, got {}:\n{}",
+            answered.len(),
+            render_timeline(&capture, &session_id)
+        );
+        assert_eq!(
+            answered[0]["event"]["leg_role"].as_str(),
+            Some("consult"),
+            "consult leg {leg} answered must keep leg_role=consult: {:?}",
+            answered[0]
+        );
+    }
 
     bob_pump.abort();
     charlie_pump.abort();
