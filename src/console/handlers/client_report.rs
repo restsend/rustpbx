@@ -417,7 +417,7 @@ async fn ingest_row(
 
 /// Peer IP from the `ConnectInfo` extension when present (real server) —
 /// `None` in bare test routers. Same approach as `handler::middleware::clientaddr`.
-struct PeerIp(Option<IpAddr>);
+pub struct PeerIp(Option<IpAddr>);
 
 impl axum::extract::FromRequestParts<Arc<ConsoleState>> for PeerIp {
     type Rejection = std::convert::Infallible;
@@ -2041,9 +2041,16 @@ mod tests {
         assert_eq!(decoded.text, "plain text body");
         assert!(!decoded.truncated);
 
-        // Corrupt gzip must not be reported as a complete decoded body.
+        // Corrupt gzip: the decoder errors before any output, so the lossy
+        // fallback is EMPTY text (not the raw bytes), a decode error is not a
+        // truncation, and the body is rejected as invalid gzip.
         let decoded = decode_body(&[0x1f, 0x8b, 0xff, 0xff]);
         assert!(decoded.invalid_gzip);
+        assert_eq!(
+            decoded.text, "",
+            "corrupt gzip decodes to the empty lossy fallback"
+        );
+        assert!(!decoded.truncated, "a decode error is not a truncation");
     }
 
     #[test]
@@ -2072,6 +2079,20 @@ mod tests {
         assert!(rate_limit_ok(&key));
         let map = limiter().lock();
         assert_eq!(map.get(&key).map(|(_, c)| *c), Some(1));
+        drop(map);
+
+        // Exhaust the budget: calls 2..=RATE_LIMIT_PER_MIN pass, the next one
+        // must be REJECTED — the guard must actually limit, not just count.
+        for _ in 1..RATE_LIMIT_PER_MIN {
+            assert!(rate_limit_ok(&key), "calls within the budget must pass");
+        }
+        assert!(
+            !rate_limit_ok(&key),
+            "the call after RATE_LIMIT_PER_MIN must be rejected"
+        );
+        // A different key keeps an independent budget.
+        let other = format!("{key}-other");
+        assert!(rate_limit_ok(&other), "budgets must be keyed independently");
     }
     static KEY_WITNESS: u8 = 0;
 
