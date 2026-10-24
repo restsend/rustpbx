@@ -583,7 +583,7 @@ impl Recorder {
         }
     }
 
-    async fn write_dtmf_payload_at(
+    pub(crate) async fn write_dtmf_payload_at(
         &mut self,
         leg: Leg,
         payload: &[u8],
@@ -1035,8 +1035,8 @@ mod tests {
                 ..Default::default()
             };
             for leg in [Leg::A, Leg::B] {
-                recorder.write_sample(
-                    leg, &MediaSample::Audio(frame.clone()), None, None, Some(CodecType::PCMU),
+                recorder.write_sample_with_profile(
+                    leg, &MediaSample::Audio(frame.clone()), None, None, Some(CodecType::PCMU), None, 0,
                 ).await.unwrap();
             }
             // Tokio's file write may still be queued on its blocking worker;
