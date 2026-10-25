@@ -727,6 +727,13 @@ pub struct QueueJoined {
     /// `queue_joined`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// Explicit `null` on the wire: join events describe the CALL's entry,
+    /// not an agent. Without this key the gateway's context enrichment would
+    /// merge the session's current `agent_id` into RE-ENTRY joins — after a
+    /// reject / no-answer round that attributes the rejoin to the FAILED
+    /// agent (and races the failed leg's own teardown events the other way).
+    /// `null` blocks the merge and keeps every join unattributed.
+    pub agent_id: Option<String>,
 }
 rwi_event!(QueueJoined, "queue_joined");
 

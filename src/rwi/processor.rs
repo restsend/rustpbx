@@ -2625,6 +2625,7 @@ impl RwiCommandProcessor {
             priority: (req.priority.unwrap_or(0) != 0).then_some(req.priority.unwrap_or(0)),
             // API join — first entry, no re-entry counter.
             attempt: None,
+            agent_id: None,
         });
 
         info!(
@@ -2815,6 +2816,7 @@ impl RwiCommandProcessor {
             // API requeue — the ACD re-entry counter lives in the queue app;
             // this command path reports via queue_left/rejoined pairing.
             attempt: None,
+            agent_id: None,
         });
 
         info!(call_id = %call_id, new_queue = %queue_id, priority = ?priority, "Call requeued");

@@ -199,7 +199,11 @@ impl Default for QueueConfig {
             fallback: None,
             agents: Vec::new(),
             strategy: DialStrategy::Sequential(Vec::new()),
-            ring_timeout: Some(Duration::from_secs(30)),
+            // `None` = not explicitly configured: the effective timeout falls
+            // back to the CC desk policy / registry default (30 s). A `Some`
+            // value here would silently shadow the desk-behavior ring policy
+            // for every default-constructed queue.
+            ring_timeout: None,
             skill_routing_enabled: false,
             required_skills: Vec::new(),
             sla_threshold_secs: 20,
@@ -1575,16 +1579,25 @@ impl QueueApp {
     }
 
     fn effective_ring_timeout(&self) -> Duration {
+        const DEFAULT_RING_SECS: u64 = 30;
+        let desk = self
+            .agent_registry
+            .as_ref()
+            .and_then(|registry| registry.agent_ring_timeout());
+        // Timer ownership: an explicitly configured desk window (≠ the 30 s
+        // default) is the operator's deliberate choice and WINS over the
+        // queue-configured per-ring timeout. A queue-configured timeout wins
+        // only over the desk DEFAULT — otherwise the default would silently
+        // shadow every queue's `wait_timeout_secs`.
+        if let Some(configured) = self.config.ring_timeout
+            && desk.is_none_or(|t| t == Duration::from_secs(DEFAULT_RING_SECS))
+        {
+            return configured;
+        }
         if !self.pending_agents.is_empty() && let Some(policy) = &self.ring_policy {
             return policy.timeout;
         }
-        let route_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
-        // CC supplies one configured timeout in either execution mode; other backends keep the route.
-        self
-            .agent_registry
-            .as_ref()
-            .and_then(|registry| registry.agent_ring_timeout())
-            .unwrap_or(route_timeout)
+        desk.unwrap_or(Duration::from_secs(DEFAULT_RING_SECS))
     }
 
     /// Arm the per-agent ring timeout (default 30s).
@@ -1634,6 +1647,7 @@ impl QueueApp {
             },
             priority: (self.config.priority != 0).then_some(self.config.priority),
             attempt: (self.join_attempt > 1).then_some(self.join_attempt),
+            agent_id: None,
         });
     }
 
@@ -1763,11 +1777,16 @@ impl QueueApp {
                 .await;
         }
 
-        // More agents remaining — dial the next one immediately
+        // More agents remain in the SAME resolve round — dial the next one
+        // immediately (a 486 rejection continues the round: the next candidate
+        // of the SAME resolve rings without a new skill_group announcement).
+        // This is a round CONTINUATION, not a re-entry: no
+        // `queue_joined{attempt}` here (it would break the queue_joined ↔
+        // skill_group_call_joined parity — the round's join was announced
+        // once at its first result-bearing activity).
         if ringback_ended && self.ringing_agent_legs.is_empty() {
             self.start_hold_music(ctrl).await?;
         }
-        self.emit_queue_rejoined();
         self.dial_next_agent(ctrl).await
     }
 
@@ -2545,6 +2564,7 @@ impl CallApp for QueueApp {
                 // First join of this entry — re-joins after an agent miss
                 // carry attempt >= 2 (see `emit_queue_rejoined`).
                 attempt: None,
+                agent_id: None,
             });
         }
 
@@ -3380,6 +3400,14 @@ impl CallApp for QueueApp {
                         "Queue: cancelling agent legs after ring timeout"
                     );
                     ctrl.remove_legs(&timed_out_legs, "ring_timeout");
+                    // The leg-scoped `call_hangup{reason:"ring_timeout"}` is
+                    // emitted by the SESSION when it processes the LegRemove
+                    // above (a different task). Yield the dispatch loop briefly
+                    // so the miss hangup lands BEFORE this round's no-answer
+                    // fan-out — consumers read the per-leg miss teardown as
+                    // the round's opening terminal. Kept short: unit tests
+                    // advance the fallback within ~100 ms of the trigger.
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                 }
 
                 let mut timed_out_agent_ids: Vec<String> = Vec::new();
