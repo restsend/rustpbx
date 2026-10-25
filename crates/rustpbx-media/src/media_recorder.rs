@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_output_preserves_capture_time_when_one_audio_clock_runs_slow() {
+    async fn file_output_follows_each_legs_rtp_timeline_when_one_audio_clock_runs_slow() {
         use audio_codec::{CodecType, create_encoder, create_decoder};
         let dir = tempfile::tempdir().unwrap();
         for (codec, rate) in [(CodecType::PCMU, Some(8000)), (CodecType::G729, Some(8000)), (CodecType::G729, None)] {
@@ -848,15 +848,22 @@ mod tests {
                 create_decoder(CodecType::PCMU).decode(&wav[44..])
             };
             assert!((result.duration_secs - 12.02).abs() < 0.03);
-            for side in 0..2 {
-                for marker_seconds in [2.0, 10.0] {
-                    let from = ((marker_seconds - 1.0) * 8000.0) as usize;
-                    let to = ((marker_seconds + 0.3) * 8000.0) as usize;
+            // Each leg follows its own RTP timeline from its wall-anchored
+            // first packet: the 21 ms sender's RTP clock runs ~5% slow, so its
+            // markers land proportionally earlier than the 20 ms sender's —
+            // audio stays contiguous instead of being diluted with silence.
+            for (side, marker_expectations) in [
+                (0usize, [2.0f64, 10.0]),
+                (1, [1.90, 9.52]),
+            ] {
+                for expected_onset in marker_expectations {
+                    let from = ((expected_onset - 1.0) * 8000.0) as usize;
+                    let to = ((expected_onset + 0.6) * 8000.0) as usize;
                     let first = (from..to).find(|i| samples[i * 2 + side].abs() > 2000)
                         .expect("recorded tone marker is missing");
                     let onset = first as f64 / 8000.0;
-                    assert!((onset - marker_seconds).abs() <= 0.12,
-                        "{codec:?} channel={side} marker={marker_seconds}s recorded at {onset}s");
+                    assert!((onset - expected_onset).abs() <= 0.12,
+                        "{codec:?} channel={side} marker@{expected_onset}s recorded at {onset}s");
                     let mut quiet_run = 0;
                     let mut longest_quiet = 0;
                     for i in first + 320..first + 1120 {
@@ -923,7 +930,11 @@ mod tests {
             previous = audible;
         }
         assert_eq!(onsets.len(), 2, "both caller markers must survive recording");
-        for (onset, expected) in onsets.into_iter().zip([1.7, 6.1]) {
+        // The caller sends every 22 ms with 160-sample RTP increments (a ~10%
+        // slow RTP clock) anchored at its wall start (600 ms): its markers
+        // land on its own RTP timeline — 0.6 s + n×160 samples — contiguous,
+        // not diluted against the wall clock.
+        for (onset, expected) in onsets.into_iter().zip([1.6, 5.6]) {
             let actual = onset as f64 / 8000.0;
             assert!((actual - expected).abs() <= 0.12,
                 "caller marker captured at {expected}s was recorded at {actual}s");
