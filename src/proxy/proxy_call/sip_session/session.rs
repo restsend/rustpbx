@@ -6910,6 +6910,7 @@ impl SipSession {
                 // First entry into this queue app — the ACD re-entry counter
                 // lives in the queue app (attempt >= 2 on agent-miss re-joins).
                 attempt: None,
+                agent_id: None,
             });
         }
 
@@ -13470,7 +13471,14 @@ impl SipSession {
                 let mut target = target;
                 let mut prepared_route = None;
                 let route_enabled = self.route_originated_enabled();
-                if route_enabled
+                // An application-only transfer (CC API "hand the customer to
+                // an application") resolves Application routes even when
+                // `route_originated_calls` is off — that flag governs routing
+                // of originated calls and plain transfer dialing, not the
+                // explicit application handoff (e2e: http transfer to a
+                // survey IVR must match its route rule with routing off).
+                let route_lookup_enabled = route_enabled || application_only;
+                if route_lookup_enabled
                     && let transfer::TransferTarget::Sip { uri, .. } =
                         transfer::parse_transfer_target(&target)
                 {
