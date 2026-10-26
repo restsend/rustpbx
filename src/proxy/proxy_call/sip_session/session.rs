@@ -1874,7 +1874,10 @@ impl SipSession {
     /// connect (mirrors the originate path guard in `rwi/processor.rs`).
     /// Seed the caller leg from the same resolved identity as CallMeta, so
     /// authenticated callers with an overridden From keep consistent roles.
-    /// Returns `true` when the originating agent was resolved and attributed.
+    /// Returns `true` when the call was attributed (meta seeded) — the
+    /// `agent_outbound_seeded` gate for the caller-leg early stamp and the
+    /// `call_created` role: both newly role-attributed surfaces must be
+    /// guaranteed a seeded `meta.agent_id` (client_ip derives from it).
     async fn seed_originating_agent_attribution(
         server: &SipServerRef,
         session: &mut SipSession,
@@ -2054,6 +2057,18 @@ impl SipSession {
             &original_callee,
         )
         .await;
+        // Agent-initiated outbound: stamp the CALLER leg's agent identity
+        // before any RWI event fans out. A failed dial (404/486/no-answer /
+        // CANCEL teardown) never reaches `accept_call`, so without this the
+        // failure teardown carries no `leg_role: "agent"` — the prd contract
+        // requires the agent dialog's full call_* stream to be attributed.
+        // Gated on the seed: every newly role-attributed event is then
+        // guaranteed a seeded `meta.agent_id` (client_ip derives from it);
+        // app flows (queue/IVR) keep their hook-time attribution. Idempotent
+        // with the `accept_call` stamp (success-path behavior unchanged).
+        if agent_outbound_seeded {
+            session.stamp_caller_agent_identity().await;
+        }
 
         server
             .active_call_registry
