@@ -148,7 +148,7 @@ rsipstack = "=0.6.13"
 # emitted as non-standard codes, adding audible quantization noise ("hiss")
 # on recordings when decoded by standard players/peers.
 audio-codec = "=0.4.11"
-rustrtc = "0.4.10"
+rustrtc = "=0.4.4"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
