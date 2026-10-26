@@ -12421,8 +12421,141 @@ async fn teardown_plain_two_leg_call_stays_single_session_hangup() {
     assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
 }
 
-/// Cluster 子腿会话：session 事件已带 dispatcher 声明的 `leg_role`，teardown
-/// 不再补发 leg 级事件（避免同一拆除被双重上报）。
+/// REPRO（restsend-call 坐席外呼失败，报告的缺陷场景）：坐席话机直接 INVITE
+/// 外呼，被叫失败（404/486/无应答/CANCEL），通话从未建立 → `accept_call` 的
+/// stamp 永远不运行。呼叫建立时的早期打点（`serve()` 里 seed 之后，与本测试
+/// 中显式调用同一函数）给 caller 腿（= 坐席 dialog）带上 `agent_id`，teardown
+/// 级联随即补发 leg 级 `call_hangup{leg_role: "agent"}`（先于 session 级）——
+/// prd 合同：坐席 dialog 的全部 call_* 事件（含失败 teardown）必须带坐席归因。
+/// 修复前：caller 腿无 `agent_id` → 级联排除 → 只有 session 级无角色事件。
+#[tokio::test]
+async fn failed_agent_outbound_teardown_reports_agent_caller_leg() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let registry = Arc::new(MemoryRegistry::new());
+    registry
+        .register(
+            "agent-1".to_string(),
+            "Agent One".to_string(),
+            "sip:agent-1@rustpbx.com".to_string(),
+            vec!["support".to_string()],
+            1,
+        )
+        .await
+        .unwrap();
+    Arc::get_mut(&mut server)
+        .expect("test server uniquely held")
+        .agent_registry = Some(registry);
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "agent-1",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "failed-agent-outbound".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "failed-agent-outbound".into(),
+            request,
+            DialDirection::Outbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:agent-1@rustpbx.com".into(),
+        original_callee: "sip:13800000000@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+    // 失败形态：caller dialog 已终止（reject/CANCEL），腿留在 registry、
+    // 从未接通、（修复前）无 agent_id。
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Ended;
+    session.legs.insert(LegId::from("caller"), caller_leg);
+
+    // serve() 的早期打点（seed 门控内）：注册坐席的 From → caller 腿归因。
+    session.stamp_caller_agent_identity().await;
+    assert_eq!(
+        session
+            .legs
+            .get(&LegId::from("caller"))
+            .unwrap()
+            .agent_id
+            .as_deref(),
+        Some("agent-1"),
+        "the early site must attribute the caller leg to the registered agent"
+    );
+    // 失败 teardown 终态。
+    session.meta.answer_time = None;
+    session.meta.hangup_reason = Some(CallRecordHangupReason::NoAnswer);
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(
+        hangups.len(),
+        2,
+        "agent caller teardown (leg-scoped) + session event, got: {hangups:?}"
+    );
+    // Leg 级坐席拆除 FIRST — leg_role=agent 消费方的过滤面。
+    assert_eq!(hangups[0]["scope"], "leg");
+    assert_eq!(hangups[0]["leg_id"], "caller");
+    assert_eq!(hangups[0]["leg_role"], "agent");
+    assert_eq!(hangups[0]["call_id"], "failed-agent-outbound");
+    assert_eq!(
+        hangups[0]["duration_secs"], 0,
+        "a never-connected dialog carries no talk time: {hangups:?}"
+    );
+    // Session 级事件 LAST（权威），无 leg 字段。
+    assert!(hangups[1].get("leg_id").is_none() && hangups[1].get("leg_role").is_none());
+}
+
+/// 护栏：非注册用户的外呼失败保持原样 —— caller 腿不被归因，teardown 仍然
+/// 只有 session 级一条 `call_hangup`（无 leg 字段），普通外呼不误标坐席。
+#[tokio::test]
+async fn failed_non_agent_outbound_stays_single_session_hangup() {
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Ended;
+    // 复用 harness（registry 未安装 → stamp 必然 no-op，即使被调用）。
+    let (mut session, mut events) =
+        teardown_session("failed-plain-outbound", vec![caller_leg], None).await;
+
+    session.stamp_caller_agent_identity().await;
+    assert!(
+        session
+            .legs
+            .get(&LegId::from("caller"))
+            .unwrap()
+            .agent_id
+            .is_none(),
+        "an unregistered caller must not be agent-attributed"
+    );
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(
+        hangups.len(),
+        1,
+        "plain outbound failure keeps the single session hangup: {hangups:?}"
+    );
+    assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
+}
 #[tokio::test]
 async fn teardown_child_leg_session_skips_leg_scoped_hangup() {
     let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));

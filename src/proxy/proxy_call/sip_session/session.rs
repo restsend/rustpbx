@@ -1826,24 +1826,28 @@ impl SipSession {
     /// queue session). A2A dials seed `CallMeta` but skip the session
     /// attribution pin, leaving callee-side hook attribution intact at
     /// connect (mirrors the originate path guard in `rwi/processor.rs`).
+    /// Returns `true` when the call was attributed (meta seeded) — the
+    /// `agent_outbound_seeded` gate for the caller-leg early stamp and the
+    /// `call_created` role: both newly role-attributed surfaces must be
+    /// guaranteed a seeded `meta.agent_id` (client_ip derives from it).
     async fn seed_originating_agent_attribution(
         server: &SipServerRef,
         session: &SipSession,
         auth_user: &Option<String>,
         initial_request: rsipstack::sip::Request,
         original_callee: &str,
-    ) {
+    ) -> bool {
         if session.context.dialplan.direction != crate::call::DialDirection::Outbound {
-            return;
+            return false;
         }
         if matches!(
             session.context.dialplan.flow,
             crate::call::DialplanFlow::Application { .. }
         ) {
-            return;
+            return false;
         }
         let (Some(registry), Some(gw)) = (&server.agent_registry, &server.rwi_gateway) else {
-            return;
+            return false;
         };
 
         let from_user = extract_sip_username(&session.context.original_caller);
@@ -1866,7 +1870,7 @@ impl SipSession {
             }
         }
         if candidates.is_empty() {
-            return;
+            return false;
         }
         let dest_user = extract_sip_username(original_callee).unwrap_or_default();
 
@@ -1897,8 +1901,9 @@ impl SipSession {
                 agent_id = %cand,
                 "outbound INVITE attributed to originating agent"
             );
-            return;
+            return true;
         }
+        false
     }
 
     pub async fn serve(
@@ -1989,7 +1994,7 @@ impl SipSession {
         // originate path seeding `CallMeta.agent_id` in `rwi/processor.rs`
         // (the CC hook only publishes agent context at ringing, too late for
         // `call_created`).
-        Self::seed_originating_agent_attribution(
+        let agent_outbound_seeded = Self::seed_originating_agent_attribution(
             &server,
             &session,
             &auth_user,
@@ -1997,6 +2002,18 @@ impl SipSession {
             &original_callee,
         )
         .await;
+        // Agent-initiated outbound: stamp the CALLER leg's agent identity
+        // before any RWI event fans out. A failed dial (404/486/no-answer /
+        // CANCEL teardown) never reaches `accept_call`, so without this the
+        // failure teardown carries no `leg_role: "agent"` — the prd contract
+        // requires the agent dialog's full call_* stream to be attributed.
+        // Gated on the seed: every newly role-attributed event is then
+        // guaranteed a seeded `meta.agent_id` (client_ip derives from it);
+        // app flows (queue/IVR) keep their hook-time attribution. Idempotent
+        // with the `accept_call` stamp (success-path behavior unchanged).
+        if agent_outbound_seeded {
+            session.stamp_caller_agent_identity().await;
+        }
 
         server
             .active_call_registry
@@ -2035,7 +2052,19 @@ impl SipSession {
         {
             let ev = crate::rwi::CallCreated {
                 leg_id: Some("caller".to_string()),
-                leg_role: Some("caller".to_string()),
+                // Agent-initiated outbound: the caller leg IS the agent
+                // dialog — the early stamp resolved its role and
+                // `meta.agent_id` is already seeded (client_ip derives from
+                // it), so created aligns with the answered/teardown
+                // attribution on the same leg. Every other shape keeps the
+                // positional "caller".
+                leg_role: if agent_outbound_seeded {
+                    session
+                        .leg_role_of("caller")
+                        .or_else(|| Some("caller".to_string()))
+                } else {
+                    Some("caller".to_string())
+                },
                 call_id: session_id.clone(),
                 context: "default".into(),
                 caller: original_caller,
