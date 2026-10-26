@@ -507,7 +507,7 @@ async fn create_extension(
         call_forwarding_destination: Set(payload.call_forwarding_destination),
         call_forwarding_timeout: Set(payload.call_forwarding_timeout),
         login_disabled: Set(payload.login_disabled.unwrap_or(false)),
-        voicemail_disabled: Set(payload.voicemail_disabled.unwrap_or(false)),
+        voicemail_disabled: Set(payload.voicemail_disabled.unwrap_or(true)),
         allow_guest_calls: Set(payload.allow_guest_calls.unwrap_or(false)),
         notes: Set(payload.notes),
         created_at: Set(now),
@@ -972,7 +972,7 @@ pub async fn csv_import_extensions(
         };
 
         let login_disabled = validate_bool(&row.login_disabled).unwrap_or(false);
-        let voicemail_disabled = validate_bool(&row.voicemail_disabled).unwrap_or(false);
+        let voicemail_disabled = validate_bool(&row.voicemail_disabled).unwrap_or(true);
         let allow_guest_calls = validate_bool(&row.allow_guest_calls).unwrap_or(false);
 
         if let Some(ref raw) = row.login_disabled {

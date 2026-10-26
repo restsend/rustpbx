@@ -215,15 +215,15 @@ mod tests {
     // ── voicemail_disabled mapping ─────────────────────────────────────────
 
     #[tokio::test]
-    async fn voicemail_disabled_false_by_default() {
-        // An extension whose voicemail_disabled column was never set should
-        // produce a SipUser with voicemail_disabled = false (voicemail active).
+    async fn voicemail_disabled_true_by_default() {
+        // Voicemail is opt-in: an extension whose voicemail_disabled column was
+        // never set produces a SipUser with voicemail off.
         let db = setup_db().await;
 
         extension::ActiveModel {
             extension: Set("2001".to_string()),
             sip_password: Set(Some("pw".to_string())),
-            // voicemail_disabled defaults to false in the schema
+            // voicemail_disabled defaults to true in the schema
             ..Default::default()
         }
         .insert(&db)
@@ -238,8 +238,8 @@ mod tests {
             .expect("extension must exist");
 
         assert!(
-            !user.voicemail_disabled,
-            "voicemail_disabled should be false when not explicitly set"
+            user.voicemail_disabled,
+            "voicemail_disabled should be true when not explicitly set"
         );
     }
 

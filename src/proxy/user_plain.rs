@@ -73,7 +73,7 @@ impl PlainTextBackend {
                 phone: None,
                 note: None,
                 allow_guest_calls: false,
-                voicemail_disabled: false,
+                voicemail_disabled: true,
             };
             self.users.insert(username.to_string(), user);
         }

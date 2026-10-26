@@ -30,9 +30,9 @@ pub struct SipUser {
     pub note: Option<String>,
     #[serde(default)]
     pub allow_guest_calls: bool,
-    /// When `true` the extension has opted out of voicemail; unanswered calls
-    /// should **not** be forwarded to the voicemail application.
-    #[serde(default)]
+    /// When `true` unanswered calls are **not** forwarded to the voicemail
+    /// application. Voicemail is opt-in, so this defaults to `true`.
+    #[serde(default = "default_voicemail_disabled")]
     pub voicemail_disabled: bool,
     #[serde(default)]
     pub call_forwarding_mode: Option<String>,
@@ -79,6 +79,10 @@ fn default_is_support_webrtc() -> bool {
     false
 }
 
+fn default_voicemail_disabled() -> bool {
+    true
+}
+
 impl Default for SipUser {
     fn default() -> Self {
         Self {
@@ -99,7 +103,7 @@ impl Default for SipUser {
             phone: None,
             note: None,
             allow_guest_calls: false,
-            voicemail_disabled: false,
+            voicemail_disabled: true,
             call_forwarding_mode: None,
             call_forwarding_destination: None,
             call_forwarding_timeout: None,
@@ -309,7 +313,7 @@ impl TryFrom<&Transaction> for SipUser {
             phone: None,
             note: None,
             allow_guest_calls: false,
-            voicemail_disabled: false,
+            voicemail_disabled: true,
         };
         u.build_contact(tx);
         Ok(u)
@@ -401,13 +405,21 @@ mod tests {
     // ── SipUser::voicemail_disabled ────────────────────────────────────────────
 
     #[test]
-    fn voicemail_disabled_default_is_false() {
-        // Voicemail should be active for a user unless explicitly disabled.
+    fn voicemail_disabled_default_is_true() {
+        // Voicemail is opt-in: a user gets it only when explicitly enabled.
         let user = SipUser::default();
         assert!(
-            !user.voicemail_disabled,
-            "SipUser::default() must have voicemail_disabled = false"
+            user.voicemail_disabled,
+            "SipUser::default() must have voicemail_disabled = true"
         );
+    }
+
+    #[test]
+    fn voicemail_disabled_defaults_true_when_omitted_in_config() {
+        // Memory users in the config file without the field get no voicemail.
+        let user: SipUser =
+            serde_json::from_str(r#"{"username": "1001", "password": "pw"}"#).unwrap();
+        assert!(user.voicemail_disabled);
     }
 
     #[test]
@@ -450,9 +462,12 @@ mod tests {
 
     #[test]
     fn merge_with_propagates_voicemail_disabled_when_not_yet_set() {
-        // A freshly built SipUser (voicemail_disabled = false) that merges with
-        // a DB record that also has voicemail_disabled = false stays false.
-        let mut primary = SipUser::default();
+        // A user with voicemail on that merges with a DB record that also has
+        // voicemail on stays on.
+        let mut primary = SipUser {
+            voicemail_disabled: false,
+            ..Default::default()
+        };
         let secondary = SipUser {
             voicemail_disabled: false,
             ..Default::default()

@@ -133,7 +133,7 @@ impl MigrationTrait for Migration {
                     .col(string_len_null(Column::Email, 160))
                     .col(string_len_null(Column::Status, 32))
                     .col(boolean(Column::LoginDisabled).default(false))
-                    .col(boolean(Column::VoicemailDisabled).default(false))
+                    .col(boolean(Column::VoicemailDisabled).default(true))
                     .col(boolean(Column::AllowGuestCalls).default(false))
                     .col(string_len_null(Column::SipPassword, 160))
                     .col(string_len_null(Column::CallForwardingMode, 32))

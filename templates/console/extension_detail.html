@@ -657,7 +657,7 @@
                     email: options.model?.email || '',
                     sip_password: '',
                     login_allowed: !(options.model?.login_disabled ?? false),
-                    voicemail_enabled: !(options.model?.voicemail_disabled ?? false),
+                    voicemail_enabled: !(options.model?.voicemail_disabled ?? true),
                     public_call_allowed: !!(options.model?.allow_guest_calls ?? false),
                     call_forwarding_mode: options.model?.call_forwarding_mode || 'none',
                     call_forwarding_destination: options.model?.call_forwarding_destination || '',

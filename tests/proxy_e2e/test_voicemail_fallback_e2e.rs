@@ -1,7 +1,7 @@
 //! Calls the callee cannot take fall back to the callee's voicemail.
 //!
-//! These run without addons, so core's built-in voicemail app answers and
-//! every known local user without `voicemail_disabled` qualifies. Voicemail
+//! These run without addons, so core's built-in voicemail app answers for
+//! known local users that have voicemail on (it is off by default). Voicemail
 //! taking the call shows as the caller's INVITE being answered (200 OK)
 //! instead of failing.
 

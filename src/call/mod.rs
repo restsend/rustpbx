@@ -743,6 +743,29 @@ impl DialplanFlow {
         }
     }
 
+    /// The user whose phones this call rings: every dial target is a
+    /// registered contact of that one user. `None` when any target is not a
+    /// registration (trunk, external URI), targets belong to different users,
+    /// there are no targets, or the flow is a queue or an application.
+    pub(crate) fn registered_owner(&self) -> Option<(String, Option<String>)> {
+        let Self::Targets(strategy) = self else {
+            return None;
+        };
+        let mut owner: Option<(String, Option<String>)> = None;
+        for location in strategy.locations() {
+            let target_owner = (
+                location.registered_username.clone()?,
+                location.registered_realm.clone(),
+            );
+            match &owner {
+                None => owner = Some(target_owner),
+                Some(known) if *known == target_owner => {}
+                Some(_) => return None,
+            }
+        }
+        owner
+    }
+
 
 }
 /// Recording configuration for call control
@@ -1048,9 +1071,10 @@ pub struct Dialplan {
     pub enable_sipflow: bool,
 
     pub call_forwarding: Option<CallForwardingConfig>,
-    /// Whether voicemail is enabled for the callee extension.
-    /// `true` means the callee has voicemail active (i.e. `voicemail_disabled == false`).
-    /// Populated by the proxy layer after resolving the callee user; defaults to `false`.
+    /// Whether the dialed user has voicemail enabled (`voicemail_disabled ==
+    /// false`). Decides voicemail for an offline callee, which has no phones to
+    /// ring; a failed dial instead uses the owner of the targets it rang (see
+    /// [`DialplanFlow::registered_owner`]). Defaults to `false`.
     pub voicemail_enabled: bool,
 
     pub route_invite: Option<Box<dyn RouteInvite>>,
@@ -1682,6 +1706,54 @@ mod tests {
 
         assert!(dp.voicemail_enabled);
         assert!(dp.call_forwarding.is_some());
+    }
+
+    // ── DialplanFlow::registered_owner ─────────────────────────────────────
+
+    fn registration(aor: &str, user: &str) -> Location {
+        Location {
+            registered_username: Some(user.into()),
+            registered_realm: Some("pbx.local".into()),
+            ..make_location(aor, false)
+        }
+    }
+
+    #[test]
+    fn registered_owner_is_the_user_whose_phones_ring() {
+        // Two phones of one user: that user's voicemail may answer a failure.
+        let phones = DialplanFlow::Targets(DialStrategy::Parallel(vec![
+            registration("sip:1002@10.0.0.2:5060", "1002"),
+            registration("sip:1002@10.0.0.3:5060", "1002"),
+        ]));
+        assert_eq!(
+            phones.registered_owner(),
+            Some(("1002".to_string(), Some("pbx.local".to_string())))
+        );
+    }
+
+    #[test]
+    fn registered_owner_none_unless_every_target_is_that_users_phone() {
+        // A trunk target carries no registration, even when the dialed number
+        // is a local user: its failure must not reach that user's voicemail.
+        let trunk = DialplanFlow::Targets(DialStrategy::Sequential(vec![DialAttempt::from(
+            make_location("sip:1002@198.51.100.1:5060", false),
+        )]));
+        assert_eq!(trunk.registered_owner(), None);
+
+        let mixed = DialplanFlow::Targets(DialStrategy::Sequential(vec![
+            DialAttempt::from(registration("sip:1002@10.0.0.2:5060", "1002")),
+            DialAttempt::from(make_location("sip:1002@198.51.100.1:5060", false)),
+        ]));
+        assert_eq!(mixed.registered_owner(), None);
+
+        let two_users = DialplanFlow::Targets(DialStrategy::Parallel(vec![
+            registration("sip:1002@10.0.0.2:5060", "1002"),
+            registration("sip:1003@10.0.0.4:5060", "1003"),
+        ]));
+        assert_eq!(two_users.registered_owner(), None);
+
+        let nothing = DialplanFlow::Targets(DialStrategy::Sequential(vec![]));
+        assert_eq!(nothing.registered_owner(), None);
     }
 
     // ── DialplanFlow::all_webrtc_target ────────────────────────────────────────

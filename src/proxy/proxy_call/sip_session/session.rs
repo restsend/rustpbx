@@ -2480,18 +2480,19 @@ impl SipSession {
             }
         }
 
-        // If the callee extension has voicemail enabled, chain to voicemail
-        // instead of passing the dial failure (busy, decline, unreachable, ring
-        // timeout) to the caller. Offline callees are routed to voicemail
-        // directly. Dropping the dial attempts already CANCELled any target
-        // still ringing.
+        // If the dial rang a user's own phones and that user has voicemail
+        // enabled, chain to voicemail instead of passing the dial failure
+        // (busy, decline, unreachable, ring timeout) to the caller. The owner
+        // comes from the targets actually dialed, so a trunk, queue or app leg
+        // never reaches anyone's voicemail. Offline callees are routed to
+        // voicemail directly. Dropping the dial attempts already CANCELled any
+        // target still ringing.
         if let Some((status_code, _, _)) = setup_error.as_ref()
-            && self.context.dialplan.voicemail_enabled
             && !self
                 .caller_dialog
                 .as_ref()
                 .is_none_or(|d| d.state().is_terminated())
-            && let Some(ext) = extract_sip_username(&self.context.original_callee)
+            && let Some(ext) = self.voicemail_owner_of_targets().await
         {
             info!(session_id = %self.id,
                 session_id = %self.context.session_id,
@@ -7103,6 +7104,38 @@ impl SipSession {
         }
         let resolved = Self::resolve_audio_file_path(spec);
         crate::media::audio_source::estimate_audio_duration(&resolved)
+    }
+
+    /// Mailbox for a failed dial: the user whose registered phones were the
+    /// dial targets, when that user has voicemail enabled. Looked up from the
+    /// targets, not the dialed number, so a call routed to a trunk, queue or
+    /// app never reaches the dialed number's voicemail.
+    async fn voicemail_owner_of_targets(&self) -> Option<String> {
+        let session_id = &self.context.session_id;
+        let Some((username, realm)) = self.context.dialplan.flow.registered_owner() else {
+            info!(%session_id, "No voicemail: dial targets are not one user's registered phones");
+            return None;
+        };
+        match self
+            .server
+            .user_backend
+            .get_user(&username, realm.as_deref(), None)
+            .await
+        {
+            Ok(Some(user)) if !user.voicemail_disabled => Some(username),
+            Ok(Some(_)) => {
+                info!(%session_id, user = %username, "No voicemail: target user has voicemail disabled");
+                None
+            }
+            Ok(None) => {
+                info!(%session_id, user = %username, "No voicemail: target user not found");
+                None
+            }
+            Err(e) => {
+                warn!(%session_id, user = %username, error = %e, "No voicemail: target user lookup failed");
+                None
+            }
+        }
     }
 
     /// Reject the call with a specific status code, optionally playing a configured

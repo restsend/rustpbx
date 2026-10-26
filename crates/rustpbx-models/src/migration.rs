@@ -40,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::runtime_snapshot::Migration),
             Box::new(super::add_long_text_columns::Migration),
             Box::new(super::fix_timestamptz_columns::Migration),
+            Box::new(super::m20261026_000001_extension_voicemail_default_off::Migration),
             // The queue addon migration is registered in the addon's own migrator.
         ]
     }
