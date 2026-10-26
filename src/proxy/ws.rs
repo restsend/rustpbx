@@ -25,8 +25,16 @@ const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// the loops would otherwise skip the cleanup after the `select!`, leaving
 /// the transport-table entry behind. Every exit path — normal completion,
 /// future drop, unwind — runs this `Drop`.
+///
+/// WARNING: hold the `EndpointInnerRef` here — NEVER a
+/// `rsipstack::transport::TransportLayer` clone. rsipstack implements
+/// `Drop for TransportLayer` by cancelling the *shared* cancel token, and
+/// every clone shares the same `Arc<TransportLayerInner>`/token: a guard that
+/// owned a clone tore down the whole SIP stack (all listeners and serve
+/// loops) the first time any WS session ended. `EndpointInnerRef` is a plain
+/// `Arc` with no `Drop` side effects and reaches the same `TransportLayer`.
 struct WsChannelCleanupGuard {
-    transport_layer: rsipstack::transport::TransportLayer,
+    endpoint: EndpointInnerRef,
     sip_connection: SipConnection,
     ws_token: CancellationToken,
     addr: SipAddr,
@@ -37,7 +45,8 @@ impl Drop for WsChannelCleanupGuard {
         // Idempotent by construction: token cancellation is idempotent and
         // `remove_connection` is a no-op once the entry is gone.
         self.ws_token.cancel();
-        self.transport_layer
+        self.endpoint
+            .transport_layer
             .remove_connection(&self.sip_connection);
         debug!(addr = %self.addr, "ws channel cleanup: transport entry removed");
     }
@@ -91,11 +100,10 @@ pub async fn sip_ws_handler(
     // From here on, every exit path (client Close/EOF, ping failure, idle
     // timeout, token cancellation, handler future being dropped mid-flight,
     // panic unwind) runs the cleanup — the transport-table entry cannot
-    // outlive this future by more than a deliberate leak. The guard is
-    // intentionally unused: it exists so its Drop runs when this future
-    // ends.
+    // outlive this future. The guard is intentionally unused: it exists so
+    // its Drop runs when this future ends.
     let _cleanup_guard = WsChannelCleanupGuard {
-        transport_layer: endpoint_ref.transport_layer.clone(),
+        endpoint: endpoint_ref.clone(),
         sip_connection: sip_connection.clone(),
         ws_token: ws_token.clone(),
         addr: local_addr.clone(),
@@ -276,6 +284,7 @@ pub async fn sip_ws_handler(
 #[cfg(test)]
 mod channel_cleanup_tests {
     use super::*;
+    use rsipstack::transaction::endpoint::EndpointBuilder;
     use rsipstack::transport::TransportLayer;
 
     /// Regression test for the transport-connection table leak: every axum-WS
@@ -401,6 +410,9 @@ mod channel_cleanup_tests {
     #[tokio::test]
     async fn cleanup_guard_reclaims_entry_when_handler_future_is_dropped() {
         let tl = TransportLayer::new(CancellationToken::new());
+        let endpoint = EndpointBuilder::new()
+            .with_transport_layer(tl.clone())
+            .build();
         let peer_addr = SipAddr {
             r#type: Some(transport_type_for_test()),
             addr: "203.0.113.7:54322"
@@ -426,7 +438,7 @@ mod channel_cleanup_tests {
         let ws_token = token.child_token();
         // Simulate the aborted handler: only the guard survives the drop.
         let guard = WsChannelCleanupGuard {
-            transport_layer: tl.clone(),
+            endpoint: endpoint.inner.clone(),
             sip_connection: sip_connection.clone(),
             ws_token: ws_token.clone(),
             addr: peer_addr,
@@ -441,6 +453,64 @@ mod channel_cleanup_tests {
         assert!(
             ws_token.is_cancelled(),
             "guard must cancel the session token so flow affinity stops routing to it"
+        );
+    }
+
+    /// Regression test for the premature-shutdown bug: rsipstack implements
+    /// `Drop for TransportLayer` by cancelling the *shared* cancel token, and
+    /// every clone shares the same `Arc<TransportLayerInner>`/token. A cleanup
+    /// guard that owned a `TransportLayer` clone therefore tore down the whole
+    /// SIP stack (all listeners and serve loops) the first time any WS session
+    /// ended. The guard must reach the transport layer through the
+    /// `EndpointInnerRef` (a plain `Arc` with no `Drop` side effects) instead:
+    /// dropping it reclaims the table entry and cancels only the session
+    /// token, while the shared transport token stays live.
+    #[tokio::test]
+    async fn cleanup_guard_does_not_cancel_shared_transport_token() {
+        let token = CancellationToken::new();
+        let tl = TransportLayer::new(token.clone());
+        let endpoint = EndpointBuilder::new()
+            .with_transport_layer(tl.clone())
+            .build();
+
+        let peer_addr = SipAddr {
+            r#type: Some(transport_type_for_test()),
+            addr: "203.0.113.7:54323"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        };
+        let (_from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
+        let (to_ws_tx, _to_ws_rx) = mpsc::unbounded_channel();
+        let connection = ChannelConnection::create_connection(
+            from_ws_rx,
+            to_ws_tx,
+            peer_addr.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let sip_connection = SipConnection::Channel(connection);
+        tl.add_connection(sip_connection.clone());
+        assert_eq!(tl.connections_count(), 1);
+
+        let ws_token = token.child_token();
+        let guard = WsChannelCleanupGuard {
+            endpoint: endpoint.inner.clone(),
+            sip_connection,
+            ws_token: ws_token.clone(),
+            addr: peer_addr,
+        };
+        drop(guard);
+
+        assert!(
+            !token.is_cancelled(),
+            "guard drop cancelled the shared transport token — the whole SIP stack would shut down on the first WS session end"
+        );
+        assert_eq!(tl.connections_count(), 0);
+        assert!(
+            ws_token.is_cancelled(),
+            "guard must still cancel the per-session token"
         );
     }
 }
