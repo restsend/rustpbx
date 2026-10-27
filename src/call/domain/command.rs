@@ -18,6 +18,21 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
+/// Declared intent of a session-originated dial (`CallCommand::LegAdd`).
+///
+/// Set by the DIALING side (the app / API that issues the command) so the
+/// session knows how to treat the new leg without inferring from session
+/// context: queue-dispatched agent legs and consult legs get the primary
+/// session id as their SIP Call-ID and an explicit RWI `leg_role`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegPurpose {
+    /// Queue / skill-group dispatch: the dialed party is a CC agent.
+    Agent,
+    /// Consult (attended transfer) leg: agent B consulting target C.
+    Consult,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferOutcome {
@@ -77,6 +92,24 @@ pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallCommand {
+    /// Internal typed live queue query; unavailable through wire command adapters.
+    #[serde(skip)]
+    QueueDispatchDiagnostic {
+        request: crate::call::app::QueueDiagnosticRequest,
+    },
+
+    /// Recovery-only origination, revalidated by the session when actually executed.
+    #[serde(skip)]
+    QueueRecoveryDial {
+        request_id: String,
+        app_execution_id: u64,
+        deadline: tokio::time::Instant,
+        command: Box<CallCommand>,
+    },
+
+    /// Internal application source; never accepted or emitted by wire adapters.
+    #[serde(skip)]
+    FromApplication { command: Box<CallCommand> },
     // ============================================================================
     // Basic Call Control
     // ============================================================================
@@ -157,6 +190,26 @@ pub enum CallCommand {
         leg_id: LegId,
         target: String,
         headers: HashMap<String, String>,
+    },
+
+    /// Customer-anchored blind transfer (CC `POST /cc/calls/{id}/transfer`).
+    ///
+    /// The CUSTOMER — the party that keeps talking — is preserved while the
+    /// AGENT leg is released. The target is handed the call in-session
+    /// (IVR / queue / route point / conference / voicemail / …) or dialed
+    /// (SIP). The session resolves the agent leg from the CC attribution
+    /// (`resolved_agent_id` / the hook-published `agent_id`) with a
+    /// single-stamped-leg fallback, so the API shares the SIP REFER strategy
+    /// (`handle_blind_transfer`) instead of hard-coding `caller` == customer.
+    BlindTransferCustomer {
+        target: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        /// Require unresolved destinations to match a configured application or forwarding route.
+        #[serde(default)]
+        application_only: bool,
+        #[serde(skip)]
+        completion: Option<oneshot::Sender<crate::call::runtime::CommandResult>>,
     },
 
     /// Complete an attended transfer
@@ -288,6 +341,14 @@ pub enum CallCommand {
     StopRecordingSegment {
         /// The label the segment was started with (agent id).
         label: String,
+    },
+
+    /// Close an agent segment on the upstream peer without blocking the session loop.
+    /// The peer must confirm finalization of this recording identity.
+    #[serde(skip)]
+    StopPeerRecordingSegment {
+        label: String,
+        unique_id: String,
     },
 
     /// Query the session-owned media bridge for its current recorder state.
@@ -560,12 +621,25 @@ pub enum CallCommand {
         /// for cluster forwarding.
         #[serde(default)]
         headers: Vec<(String, String)>,
+        /// Declared dial intent (`Agent` / `Consult`), set by the dialing app.
+        /// `None` for unspecific dynamic legs. Drives the agent-leg Call-ID
+        /// scheme (primary session id) and the RWI `leg_role` attribution.
+        #[serde(default)]
+        purpose: Option<LegPurpose>,
     },
 
     /// Remove a leg from the session
     LegRemove {
         /// Leg ID to remove
         leg_id: LegId,
+        /// Why the leg is being removed — carried onto the per-leg
+        /// `call_hangup` emitted for a leg that never connected (e.g.
+        /// `"ring_timeout"` when the queue cancels a ringing agent leg,
+        /// `"stage_switch"` for an escalation stage switch, `"superseded"`
+        /// for a superseded parallel dial). `None` renders as
+        /// `"cancelled"`.
+        #[serde(default)]
+        reason: Option<String>,
     },
 
     /// Leg dial completed successfully (async notification)

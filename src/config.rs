@@ -116,6 +116,15 @@ fn default_callid_suffix() -> Option<String> {
     Some("miuda.ai".to_string())
 }
 
+fn default_session_id_length() -> usize {
+    // Historical default: UUID v4 simple form (32 hex chars).
+    crate::call::session_id::LENGTH_MAX
+}
+
+fn default_session_id_inherit_callid() -> bool {
+    true
+}
+
 fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
 }
@@ -276,9 +285,19 @@ pub struct RecordingPolicy {
     /// `type = "sipflow"` for SipFlow RTP capture. Kept for config compatibility.
     #[serde(default)]
     pub force_file: Option<bool>,
-    /// Swap stereo channels in recording: callee→left, caller→right.
+    /// Deprecated: use `stereo_mode` instead. Direct stereo channel swap,
+    /// honoured only when no layer configures `stereo_mode`.
     #[serde(default)]
     pub stereo_swap: Option<bool>,
+    /// Stereo channel assignment policy: `caller_left` (default),
+    /// `callee_left` (≈ legacy `stereo_swap = true`), `external_left`
+    /// (external party → left, internal → right) or `external_right`
+    /// (external party → right, internal → left).
+    /// The external policies fall back to caller-left / caller-right when the
+    /// sides cannot be distinguished. Configuring this at any layer supersedes
+    /// the legacy `stereo_swap`.
+    #[serde(default)]
+    pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
     /// Local archival layout when `type = "local"`: `daily` (default) or
     /// `hourly`. Files are moved under `{path}/YYYYMMDD[/HH]/` after the call.
     #[serde(default)]
@@ -379,6 +398,7 @@ impl RecordingPolicy {
             auto_start_at: self.auto_start_at.unwrap_or_default(),
             recording_type: self.effective_recording_type(),
             stereo_swap: self.stereo_swap.unwrap_or(false),
+            stereo_mode: self.stereo_mode,
             option: None,
         }
     }
@@ -473,6 +493,49 @@ impl RecordingPolicy {
     }
 }
 
+/// `[release]` section: where release/version-management artifacts are stored
+/// plus the lifetime of on-demand presigned download URLs. Metadata itself
+/// lives in a single `release.toml` managed through the generated-config
+/// store (file or `config_entry` table), not in a dedicated DB table.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ReleaseConfig {
+    /// Artifact storage backend. Defaults to the local `storage/releases`
+    /// directory; configure `type = "s3"` to upload packages to an
+    /// S3-compatible bucket.
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+    /// Lifetime in seconds of presigned download URLs generated on demand for
+    /// S3-uploaded artifacts. Defaults to 86400 (24h); the SigV4 signature
+    /// caps validity at 7 days, so larger values are clamped.
+    #[serde(default)]
+    pub signed_url_expiry_secs: Option<u64>,
+    /// Local directory for client telemetry bodies (`POST {api_prefix}/report`).
+    /// Defaults to `storage/telemetry`. Bodies are deliberately kept on local
+    /// disk (not the artifact storage engine): ingestion must succeed even
+    /// while S3 / other subsystems are down.
+    #[serde(default)]
+    pub telemetry_dir: Option<String>,
+}
+
+impl ReleaseConfig {
+    /// Lifetime of presigned release download URLs, clamped to the SigV4
+    /// 7-day maximum.
+    pub fn effective_signed_url_expiry_secs(&self) -> u64 {
+        const DEFAULT_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
+        self.signed_url_expiry_secs
+            .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
+            .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
+    }
+
+    /// Effective artifact storage, defaulting to the local
+    /// `storage/releases` directory.
+    pub fn effective_storage(&self) -> StorageConfig {
+        self.storage.clone().unwrap_or(StorageConfig::Local {
+            path: "storage/releases".to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -563,6 +626,10 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
+    /// Release/version management: artifact storage + presign expiry. See
+    /// [`ReleaseConfig`].
+    #[serde(default)]
+    pub release: Option<ReleaseConfig>,
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
     /// SSO login broker (commerce builds only). Handlers are mounted only
@@ -642,6 +709,29 @@ impl Default for ClusterConfig {
             session_max_age_secs: default_session_max_age(),
         }
     }
+}
+
+/// The `[cluster].peers` entry that IS this node, matched by exact
+/// `addr:sip_port` against concrete (non-wildcard) listener addresses.
+pub fn match_self_peer_by_listeners<'a>(
+    peers: &'a [ClusterPeer],
+    local_addr_strs: &[String],
+) -> Option<&'a ClusterPeer> {
+    peers.iter().find(|p| {
+        let peer_sip_addr = format!("{}:{}", p.addr, p.sip_port);
+        local_addr_strs.iter().any(|la| la == &peer_sip_addr)
+    })
+}
+
+/// The `[cluster].peers` entry whose `addr` is one of the host's network
+/// interface IPs. Used when listeners are wildcard-bound (`0.0.0.0`/`::`) and
+/// report no concrete address, and at early startup before any listener
+/// exists (node-identity resolution — see `utils::init_instance_identity`).
+pub fn match_self_peer_by_interfaces<'a>(
+    peers: &'a [ClusterPeer],
+    interface_ips: &std::collections::HashSet<String>,
+) -> Option<&'a ClusterPeer> {
+    peers.iter().find(|p| interface_ips.contains(&p.addr))
 }
 
 fn default_session_registry_backend() -> String {
@@ -1298,6 +1388,11 @@ pub struct RtpConfig {
     /// periodic snapshots (stall events are still emitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    /// Sliding media diagnostics; disabled periodic logs preserve quiet defaults.
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    #[serde(default)]
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 fn default_comfort_noise() -> bool {
@@ -1336,6 +1431,11 @@ pub struct MediaSection {
     /// periodic snapshots (stall events are still emitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    /// Sliding media diagnostics; disabled periodic logs preserve quiet defaults.
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    #[serde(default)]
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1537,6 +1637,18 @@ pub struct ProxyConfig {
     pub useragent: Option<String>,
     #[serde(default = "default_callid_suffix")]
     pub callid_suffix: Option<String>,
+    /// Length (hex chars) of freshly generated global session ids.
+    /// 8..=32; the default 32 mirrors the legacy UUID v4 simple form.
+    #[serde(default = "default_session_id_length")]
+    pub session_id_length: usize,
+    /// Wire format of the outgoing SIP `Session-ID` header: `native` stamps
+    /// the internal id verbatim; `rfc7989` zero-pads it to 32 hex chars.
+    #[serde(default)]
+    pub session_id_header_mode: crate::call::session_id::SessionIdHeaderMode,
+    /// Reuse id-shaped incoming SIP Call-IDs as the session id. When false,
+    /// only `Session-ID` headers inherit and every originate gets a fresh id.
+    #[serde(default = "default_session_id_inherit_callid")]
+    pub session_id_inherit_callid: bool,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -1568,6 +1680,23 @@ pub struct ProxyConfig {
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
+    /// Upper bound (seconds) granted on SIP event-package subscriptions
+    /// (presence / MWI SUBSCRIBE). The granted value is echoed in the 200 OK
+    /// `Expires` header and the NOTIFY `Subscription-State` so clients that
+    /// only read the 200 OK schedule refreshes correctly. Default 3600.
+    #[serde(default)]
+    pub max_subscription_expires: Option<u32>,
+    /// Presence-state TTL sweep cadence (seconds): the background task that
+    /// flips PUBLISHed states whose `Expires` lapsed back to Offline
+    /// (subject to the registration-liveness guard). Default 60s; tests
+    /// shrink it to bound waits. Clamped to 3..=600.
+    #[serde(default)]
+    pub presence_sweep_secs: Option<u32>,
+    /// Locator REGISTER-expiry sweep cadence (seconds): reclaims bindings
+    /// whose REGISTER lapsed without a goodbye and emits
+    /// `LocatorEvent::Offline(expired)`. Default 15s. Clamped to 5..=300.
+    #[serde(default)]
+    pub locator_sweep_secs: Option<u32>,
     pub ensure_user: Option<bool>,
     #[serde(default = "default_user_backends")]
     pub user_backends: Vec<UserBackendConfig>,
@@ -1755,6 +1884,21 @@ pub struct ProxyConfig {
     /// `[proxy.queues.<name>.hold].audio_file`; per-queue config wins.
     #[serde(default)]
     pub queue_hold_music: Option<String>,
+    /// Allow pre-connect queue transfer prompts, including queue and escalation overrides.
+    #[serde(default = "default_true")]
+    pub queue_transfer_prompt_enabled: bool,
+    /// Allow comfort announcements while waiting; failure prompts are unaffected.
+    #[serde(default = "default_true")]
+    pub queue_comfort_prompt_enabled: bool,
+    /// Allow busy failure announcements before executing the queue fallback.
+    #[serde(default = "default_true")]
+    pub queue_busy_prompt_enabled: bool,
+    /// Play the built-in local ringback after an agent leg returns 180 Ringing.
+    #[serde(default)]
+    pub queue_agent_ringback_enabled: bool,
+    /// Allow no-answer announcements before executing the queue fallback.
+    #[serde(default = "default_true")]
+    pub queue_no_answer_prompt_enabled: bool,
     /// PBX-wide voicemail greeting (`[proxy] voicemail_greeting`). Used when
     /// the dialplan app params carry no `greeting_path` of their own;
     /// overrides the built-in `sounds/voicemail/greeting.wav`.
@@ -2152,6 +2296,26 @@ impl AmiConfig {
 }
 
 impl ProxyConfig {
+    /// Presence TTL sweep cadence, clamped to a safe range (a too-tight
+    /// loop would spin the locator liveness queries; a too-loose one makes
+    /// stale publications linger).
+    pub fn clamped_presence_sweep_secs(&self) -> u32 {
+        self.presence_sweep_secs.unwrap_or(60).clamp(3, 600)
+    }
+
+    /// Locator expiry sweep cadence, clamped (the sweep also feeds the
+    /// offline reason pipeline — sub-second loops would flood it).
+    pub fn clamped_locator_sweep_secs(&self) -> u32 {
+        self.locator_sweep_secs.unwrap_or(15).clamp(5, 300)
+    }
+
+    /// Subscription expiry ceiling (seconds) for presence/MWI SUBSCRIBE,
+    /// floored so a typo'd near-zero value cannot thrash clients with
+    /// immediate refresh loops.
+    pub fn clamped_max_subscription_expires(&self) -> u32 {
+        self.max_subscription_expires.unwrap_or(3600).max(60)
+    }
+
     pub fn session_timer_mode(&self) -> SessionTimerMode {
         if !self.session_timer {
             SessionTimerMode::Off
@@ -2293,11 +2457,16 @@ impl ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            presence_sweep_secs: None,
+            locator_sweep_secs: None,
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
             ua_white_list: Some(vec![]),
             ua_black_list: Some(vec![]),
             ua_block_scanners: default_ua_block_scanners(),
             addr: "0.0.0.0".to_string(),
+            session_id_length: default_session_id_length(),
+            session_id_header_mode: Default::default(),
+            session_id_inherit_callid: default_session_id_inherit_callid(),
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),
@@ -2321,6 +2490,7 @@ impl Default for ProxyConfig {
             max_concurrency: None,
             registrar_expires: Some(30),
             max_registrar_expires: Some(50),
+            max_subscription_expires: Some(3600),
             ensure_user: Some(true),
             enable_latching: true,
             latching_probation_max_packets: default_latching_probation_max_packets(),
@@ -2385,6 +2555,11 @@ impl Default for ProxyConfig {
             jwt_auth: None,
             hold_music: None,
             queue_hold_music: None,
+            queue_transfer_prompt_enabled: true,
+            queue_comfort_prompt_enabled: true,
+            queue_busy_prompt_enabled: true,
+            queue_agent_ringback_enabled: false,
+            queue_no_answer_prompt_enabled: true,
             voicemail_greeting: None,
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
@@ -2459,6 +2634,7 @@ impl Default for Config {
             demo_mode: false,
             storage: None,
             sipflow: None,
+            release: None,
             licenses: None,
             #[cfg(feature = "commerce")]
             sso: None,
@@ -2551,6 +2727,8 @@ impl Config {
             relay_ready_timeout_secs: media.and_then(|m| m.relay_ready_timeout_secs),
             stall_detect_secs: media.and_then(|m| m.stall_detect_secs),
             media_trace_interval_secs: media.and_then(|m| m.media_trace_interval_secs),
+            quality_stats: media.map(|m| m.quality_stats.clone()).unwrap_or_default(),
+            volume_stats: media.map(|m| m.volume_stats.clone()).unwrap_or_default(),
         }
     }
 
@@ -3171,6 +3349,11 @@ bucket = "default-recordings"
             addr = "0.0.0.0"
             hold_music = "sounds/hold.wav"
             queue_hold_music = "sounds/moh/kzmusic.wav"
+            queue_transfer_prompt_enabled = false
+            queue_comfort_prompt_enabled = false
+            queue_busy_prompt_enabled = false
+            queue_agent_ringback_enabled = true
+            queue_no_answer_prompt_enabled = false
             voicemail_greeting = "sounds/voicemail/custom.wav"
         "#;
         let config: Config = toml::from_str(toml_str).expect("config should parse");
@@ -3183,6 +3366,11 @@ bucket = "default-recordings"
             Some("sounds/voicemail/custom.wav")
         );
         assert_eq!(config.proxy.hold_music.as_deref(), Some("sounds/hold.wav"));
+        assert!(!config.proxy.queue_transfer_prompt_enabled);
+        assert!(!config.proxy.queue_comfort_prompt_enabled);
+        assert!(!config.proxy.queue_busy_prompt_enabled);
+        assert!(config.proxy.queue_agent_ringback_enabled);
+        assert!(!config.proxy.queue_no_answer_prompt_enabled);
 
         // Unset keys stay None — old configs keep working unchanged.
         let empty: Config =
@@ -3190,6 +3378,11 @@ bucket = "default-recordings"
         assert!(empty.proxy.queue_hold_music.is_none());
         assert!(empty.proxy.voicemail_greeting.is_none());
         assert!(empty.proxy.hold_music.is_none());
+        assert!(empty.proxy.queue_transfer_prompt_enabled);
+        assert!(empty.proxy.queue_comfort_prompt_enabled);
+        assert!(empty.proxy.queue_busy_prompt_enabled);
+        assert!(!empty.proxy.queue_agent_ringback_enabled);
+        assert!(empty.proxy.queue_no_answer_prompt_enabled);
     }
 
     #[test]
@@ -3359,10 +3552,9 @@ bucket = "default-recordings"
 
     #[test]
     fn test_recording_http_upload_defaults_preserve_wire_format() {
-        let policy: RecordingPolicy = toml::from_str(
-            "enabled = true\ntype = \"http\"\nurl = \"http://host/recording\"\n",
-        )
-        .expect("recording policy should parse");
+        let policy: RecordingPolicy =
+            toml::from_str("enabled = true\ntype = \"http\"\nurl = \"http://host/recording\"\n")
+                .expect("recording policy should parse");
         let http = policy.http_upload_config().expect("http upload config");
         assert_eq!(http.file_field.as_deref(), Some("recording"));
         assert_eq!(http.content_type.as_deref(), Some("audio/wav"));
@@ -3468,16 +3660,36 @@ bucket = "default-recordings"
     fn test_media_ice_lite_flows_into_rtp_config() {
         let config: Config = toml::from_str(r#"proxy = { addr = "127.0.0.1" }"#).unwrap();
         assert!(!config.rtp_config().ice_lite, "default must stay off");
+        assert!(!config.rtp_config().quality_stats.enabled);
 
         let config: Config = toml::from_str(
             r#"
             proxy = { addr = "127.0.0.1" }
             [media]
             ice_lite = true
+            [media.volume_stats]
+            enabled = true
+            [media.quality_stats]
+            enabled = true
+            sample_interval_ms = 500
+            window_ms = 2000
+            log_interval_ms = 2000
         "#,
         )
         .unwrap();
         assert!(config.rtp_config().ice_lite);
+        assert!(config.rtp_config().quality_stats.enabled);
+        assert!(config.rtp_config().volume_stats.enabled);
+        assert_eq!(config.rtp_config().quality_stats.sample_interval_ms, 500);
+        assert!(
+            toml::from_str::<Config>(
+                r#"proxy={addr="127.0.0.1"}
+            [media.quality_stats]
+            sample_interval_ms=1
+        "#
+            )
+            .is_err()
+        );
     }
 
     /// Trunk-level override parsing: `ice_lite` is optional per trunk and
@@ -3646,6 +3858,45 @@ bucket = "default-recordings"
         assert_eq!(parsed.peers.len(), 2);
         assert_eq!(parsed.peers[0].addr, "10.0.0.2");
         assert_eq!(parsed.peers[1].addr, "10.0.0.3");
+    }
+
+    #[test]
+    fn test_match_self_peer_by_listeners() {
+        let peers = vec![
+            ClusterPeer {
+                addr: "10.0.0.2".to_string(),
+                sip_port: 5060,
+                ami_port: 8080,
+            },
+            ClusterPeer {
+                addr: "10.0.0.3".to_string(),
+                sip_port: 5061,
+                ami_port: 8081,
+            },
+        ];
+        let listeners = vec!["10.0.0.3:5061".to_string()];
+        assert_eq!(
+            match_self_peer_by_listeners(&peers, &listeners).map(|p| p.addr.as_str()),
+            Some("10.0.0.3")
+        );
+        assert!(match_self_peer_by_listeners(&peers, &[]).is_none());
+    }
+
+    #[test]
+    fn test_match_self_peer_by_interfaces() {
+        let peers = vec![ClusterPeer {
+            addr: "10.0.0.2".to_string(),
+            sip_port: 5060,
+            ami_port: 8080,
+        }];
+        let ips: std::collections::HashSet<String> =
+            ["10.0.0.2".to_string(), "127.0.0.1".to_string()].into();
+        assert_eq!(
+            match_self_peer_by_interfaces(&peers, &ips).map(|p| p.addr.as_str()),
+            Some("10.0.0.2")
+        );
+        let empty: std::collections::HashSet<String> = Default::default();
+        assert!(match_self_peer_by_interfaces(&peers, &empty).is_none());
     }
 
     #[cfg(feature = "commerce")]

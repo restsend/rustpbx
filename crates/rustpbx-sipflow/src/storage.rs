@@ -29,6 +29,34 @@ const RAW_READ_THROUGH_GAP: u64 = 64 * 1024;
 /// rotate/flush), eliminating the per-packet blocking-pool round-trip.
 const RAW_WRITE_BUF_SIZE: usize = 64 * 1024;
 
+const QUALITY_MAX_PACKETS: usize = 250_000;
+const QUALITY_MAX_BYTES: usize = 64 * 1024 * 1024;
+const QUALITY_MAX_PACKET_BYTES: usize = 65_536;
+pub const QUALITY_MAX_POINTS: usize = 6_000;
+pub const QUALITY_MAX_BUCKETS: u64 = 600;
+pub const QUALITY_MAX_WINDOW_MS: u64 = 3_600_000;
+
+pub fn validate_quality_window(
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    bucket_ms: u64,
+) -> Result<()> {
+    let window_ms = end.signed_duration_since(start).num_milliseconds();
+    anyhow::ensure!(
+        start.timestamp_micros() >= 0 && window_ms > 0,
+        "media quality requires a positive time window"
+    );
+    anyhow::ensure!(
+        bucket_ms >= 1_000 && window_ms as u64 <= QUALITY_MAX_WINDOW_MS,
+        "media quality window or bucket size exceeds limit"
+    );
+    anyhow::ensure!(
+        (window_ms as u64).div_ceil(bucket_ms) <= QUALITY_MAX_BUCKETS,
+        "media quality bucket count exceeds limit"
+    );
+    Ok(())
+}
+
 pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
@@ -234,6 +262,16 @@ async fn read_raw_payload(
     offset: u64,
     size: usize,
 ) -> std::io::Result<Vec<u8>> {
+    read_raw_payload_limited(raw_file, current_pos, offset, size, None).await
+}
+
+async fn read_raw_payload_limited(
+    raw_file: &mut File,
+    current_pos: &mut Option<u64>,
+    offset: u64,
+    size: usize,
+    limit: Option<usize>,
+) -> std::io::Result<Vec<u8>> {
     let payload_offset = offset + RAW_RECORD_HEADER_LEN;
     seek_or_read_through(raw_file, current_pos, payload_offset).await?;
 
@@ -242,15 +280,29 @@ async fn read_raw_payload(
     *current_pos = Some(payload_offset + size as u64);
 
     if buf.starts_with(&ZSTD_MAGIC) {
-        let mut decoder = ruzstd::decoding::StreamingDecoder::new(&buf[..])
+        let decoder = ruzstd::decoding::StreamingDecoder::new(&buf[..])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let mut result = Vec::new();
-        decoder.read_to_end(&mut result)?;
+        let mut bounded = decoder.take(limit.map(|size| size as u64 + 1).unwrap_or(u64::MAX));
+        bounded.read_to_end(&mut result)?;
+        if limit.is_some_and(|limit| result.len() > limit) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "media packet exceeds limit",
+            ));
+        }
         Ok(result)
     } else if buf.starts_with(&GZIP_MAGIC) {
-        let mut decoder = flate2::read::GzDecoder::new(&buf[..]);
+        let decoder = flate2::read::GzDecoder::new(&buf[..]);
         let mut result = Vec::new();
-        decoder.read_to_end(&mut result)?;
+        let mut bounded = decoder.take(limit.map(|size| size as u64 + 1).unwrap_or(u64::MAX));
+        bounded.read_to_end(&mut result)?;
+        if limit.is_some_and(|limit| result.len() > limit) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "media packet exceeds limit",
+            ));
+        }
         Ok(result)
     } else {
         Ok(buf)
@@ -691,6 +743,135 @@ impl StorageManager {
             .collect())
     }
 
+    pub async fn query_media_quality(
+        &mut self,
+        callid: &str,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+        bucket_ms: u64,
+        max_bytes: usize,
+        max_packets: usize,
+    ) -> Result<Vec<crate::SipFlowQualityPoint>> {
+        validate_quality_window(start_dt, end_dt, bucket_ms)?;
+        let mut packets = self
+            .query_media_packets_limited(
+                callid,
+                start_dt,
+                end_dt,
+                Some((
+                    max_bytes.min(QUALITY_MAX_BYTES),
+                    max_packets.min(QUALITY_MAX_PACKETS),
+                )),
+            )
+            .await?;
+        packets.sort_by_key(|packet| packet.timestamp);
+        let start_micros = start_dt.timestamp_micros() as u64;
+        let bucket_micros = bucket_ms
+            .checked_mul(1_000)
+            .ok_or_else(|| anyhow::anyhow!("media quality bucket size overflow"))?;
+        let mut streams = std::collections::HashMap::new();
+        let mut points: Vec<crate::SipFlowQualityPoint> = Vec::new();
+        for packet in packets {
+            if packet.timestamp >= end_dt.timestamp_micros() as u64 {
+                continue;
+            }
+            // Invalid/non-RTP records cannot establish packet loss or jitter.
+            let header = parse_rtp_stats_header(&packet.payload)
+                .ok_or_else(|| anyhow::anyhow!("invalid captured RTP header"))?;
+            let bucket_start =
+                start_micros + (packet.timestamp - start_micros) / bucket_micros * bucket_micros;
+            let key = (packet.leg, packet.src.clone(), header.ssrc);
+            let (accumulator, index) = streams.entry(key).or_insert_with(|| {
+                (
+                    MediaStatsAccumulator::new(packet.leg, packet.src.clone(), Some(header.ssrc)),
+                    None::<usize>,
+                )
+            });
+            // RTP sequence numbers span payload-type changes (e.g. DTMF).
+            // Keep sequence context while restarting jitter at a clock change.
+            if accumulator
+                .payload_type
+                .is_some_and(|pt| pt != header.payload_type)
+            {
+                accumulator.payload_type = None;
+                accumulator.clock_rate = None;
+                accumulator.prev_arrival_micros = None;
+                accumulator.prev_rtp_timestamp = None;
+                accumulator.jitter_rtp_units = 0.0;
+                accumulator.jitter_samples = 0;
+            }
+            accumulator.observe(packet.timestamp, Some(header));
+            let index = match *index {
+                Some(index)
+                    if points[index].bucket_start_micros == bucket_start
+                        && points[index].payload_type == header.payload_type =>
+                {
+                    index
+                }
+                _ => {
+                    anyhow::ensure!(
+                        points.len() < QUALITY_MAX_POINTS,
+                        "media quality point limit exceeded"
+                    );
+                    let peer_addr = packet
+                        .src
+                        .parse::<std::net::SocketAddr>()
+                        .ok()
+                        .map(|_| packet.src.clone());
+                    points.push(crate::SipFlowQualityPoint {
+                        timestamp_micros: packet.timestamp,
+                        bucket_start_micros: bucket_start,
+                        leg: packet.leg,
+                        src: if packet.leg == 0 {
+                            peer_addr.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        },
+                        dst: if packet.leg == 1 {
+                            peer_addr.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        },
+                        peer_addr,
+                        ssrc: header.ssrc,
+                        payload_type: header.payload_type,
+                        clock_rate: match header.payload_type {
+                            0 | 8 | 9 | 18 => Some(8000),
+                            _ => None,
+                        },
+                        rtp_timestamp: header.rtp_timestamp,
+                        packet_count: 0,
+                        packet_bytes: 0,
+                        cumulative_packets: 0,
+                        confirmed_lost_packets: 0,
+                        pending_missing: 0,
+                        jitter_ms: None,
+                    });
+                    *index = Some(points.len() - 1);
+                    points.len() - 1
+                }
+            };
+            let point = &mut points[index];
+            point.timestamp_micros = packet.timestamp;
+            point.rtp_timestamp = header.rtp_timestamp;
+            point.packet_count += 1;
+            point.packet_bytes += packet.payload.len();
+            point.cumulative_packets = accumulator.packet_count;
+            point.confirmed_lost_packets = accumulator.lost_packets;
+            point.pending_missing = accumulator.pending_missing_sequences.len();
+            // Dynamic payload types need negotiated SDP clocks; do not expose the
+            // aggregate accumulator's historical default as a measured clock.
+            point.jitter_ms = match (header.payload_type, accumulator.jitter_samples) {
+                (0 | 8 | 9 | 18, samples) if samples > 0 => {
+                    Some(accumulator.jitter_rtp_units * 1000.0 / 8000.0)
+                }
+                _ => None,
+            };
+        }
+        points.sort_by_key(|point| point.timestamp_micros);
+        Ok(points)
+    }
+
     pub(crate) async fn query_media_sources(
         &mut self,
         callid: &str,
@@ -754,9 +935,23 @@ impl StorageManager {
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
     ) -> Result<Vec<StoredMediaPacket>> {
+        self.query_media_packets_limited(callid, start_dt, end_dt, None)
+            .await
+    }
+
+    async fn query_media_packets_limited(
+        &mut self,
+        callid: &str,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+        limits: Option<(usize, usize)>,
+    ) -> Result<Vec<StoredMediaPacket>> {
+        let bounded = limits.is_some();
+        let (max_bytes, max_packets) = limits.unwrap_or((usize::MAX, QUALITY_MAX_PACKETS));
         let mut results = Vec::new();
+        let mut total_bytes = 0usize;
         let start_ts = Self::datetime_to_storage_ts(start_dt);
-        let end_ts = Self::datetime_to_storage_ts(end_dt);
+        let end_ts = Self::datetime_to_storage_ts(end_dt) - i64::from(bounded);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -787,11 +982,16 @@ impl StorageManager {
                       WHERE c.callid = ?
                       AND s.timestamp >= ?
                       AND s.timestamp <= ?
-                      ORDER BY s.offset ASC",
+                      ORDER BY s.offset ASC LIMIT ?",
                 )
                 .bind(callid)
                 .bind(start_ts)
                 .bind(end_ts)
+                .bind(if bounded {
+                    (max_packets - results.len() + 1) as i64
+                } else {
+                    -1
+                })
                 .fetch_all(&mut conn)
                 .await
                 .inspect(|rows| sqlite_metrics::record_select(rows.len(), q_start.elapsed()))
@@ -800,6 +1000,12 @@ impl StorageManager {
                     e
                 })?;
 
+                if bounded {
+                    anyhow::ensure!(
+                        results.len() + rows.len() <= max_packets,
+                        "media quality packet limit exceeded"
+                    );
+                }
                 if !rows.is_empty() {
                     tracing::info!(
                         "query_media_packets: callid={} dir={} db_path={} rows={} ts=[{},{}]",
@@ -816,6 +1022,9 @@ impl StorageManager {
                     let offset = match u64::try_from(row.offset) {
                         Ok(o) => o,
                         Err(e) => {
+                            if bounded {
+                                return Err(e.into());
+                            }
                             tracing::debug!("skip bad media packet: offset overflow: {e}");
                             current_pos = None;
                             continue;
@@ -824,6 +1033,9 @@ impl StorageManager {
                     let size = match usize::try_from(row.size) {
                         Ok(s) => s,
                         Err(e) => {
+                            if bounded {
+                                return Err(e.into());
+                            }
                             tracing::debug!(
                                 "skip bad media packet: size overflow: {e} offset={offset}"
                             );
@@ -831,8 +1043,27 @@ impl StorageManager {
                             continue;
                         }
                     };
-                    match read_raw_payload(&mut raw_file, &mut current_pos, offset, size).await {
+                    if bounded {
+                        anyhow::ensure!(
+                            size <= QUALITY_MAX_PACKET_BYTES,
+                            "media quality packet size exceeds limit"
+                        );
+                    }
+                    match read_raw_payload_limited(
+                        &mut raw_file,
+                        &mut current_pos,
+                        offset,
+                        size,
+                        bounded.then_some(QUALITY_MAX_PACKET_BYTES),
+                    )
+                    .await
+                    {
                         Ok(payload) => {
+                            total_bytes += payload.len();
+                            anyhow::ensure!(
+                                !bounded || total_bytes <= max_bytes,
+                                "media quality byte limit exceeded"
+                            );
                             results.push(StoredMediaPacket {
                                 leg: row.leg,
                                 src: row.src,
@@ -841,6 +1072,9 @@ impl StorageManager {
                             });
                         }
                         Err(e) => {
+                            if bounded {
+                                return Err(e.into());
+                            }
                             tracing::debug!(callid, offset, size, "skip bad media packet: {e}");
                             current_pos = None;
                         }
@@ -1349,6 +1583,121 @@ mod tests {
         assert_eq!(sources.len(), 1, "expected one unique media source");
         assert_eq!(sources[0].leg, 0);
         assert_eq!(sources[0].src, "127.0.0.1:4000");
+    }
+
+    #[tokio::test]
+    async fn test_query_media_quality_preserves_stream_context_across_buckets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+        let call_id = "quality-buckets";
+        let base = chrono::Utc::now().timestamp_micros() as u64;
+        for (offset, sequence, ssrc, payload_type) in [
+            (10_000, 10u16, 1u32, 0u8),
+            (1_010_000, 12, 1, 0),
+            (1_020_000, 11, 1, 0),
+            (2_010_000, 78, 1, 0),
+            (2_020_000, 1, 2, 0),
+            (2_025_000, 2, 2, 101),
+            (2_030_000, 3, 2, 0),
+            (2_040_000, 1, 3, 110),
+        ] {
+            let mut payload = vec![0x80, payload_type];
+            payload.extend_from_slice(&sequence.to_be_bytes());
+            payload.extend_from_slice(&(u32::from(sequence) * 160).to_be_bytes());
+            payload.extend_from_slice(&ssrc.to_be_bytes());
+            storage
+                .write_processed(make_rtp_processed(
+                    base + offset,
+                    call_id,
+                    0,
+                    "127.0.0.1:4000",
+                    &payload,
+                ))
+                .await
+                .expect("write RTP");
+        }
+        storage.force_flush().await.expect("flush");
+        let start = local_dt_from_micros(base as i64);
+        let end = local_dt_from_micros(base as i64 + 3_000_000);
+        let points = storage
+            .query_media_quality(
+                call_id,
+                start,
+                end,
+                1000,
+                QUALITY_MAX_BYTES,
+                QUALITY_MAX_PACKETS,
+            )
+            .await
+            .unwrap();
+        let stream: Vec<_> = points.iter().filter(|point| point.ssrc == 1).collect();
+        assert_eq!(stream.len(), 3);
+        assert_eq!(stream[0].packet_count, 1);
+        assert_eq!(stream[1].packet_count, 2);
+        assert_eq!(
+            stream[1].pending_missing, 0,
+            "late packet clears cross-bucket gap"
+        );
+        assert_eq!(stream[1].confirmed_lost_packets, 0);
+        assert!(
+            stream[1].jitter_ms.is_some(),
+            "jitter uses preceding bucket arrival"
+        );
+        assert_eq!(
+            stream[2].confirmed_lost_packets, 1,
+            "loss only after reorder window"
+        );
+        assert_eq!(stream[2].pending_missing, 64);
+        let mixed_payload: Vec<_> = points.iter().filter(|point| point.ssrc == 2).collect();
+        assert!(
+            mixed_payload.iter().all(|point| point.pending_missing == 0),
+            "captured telephone events sharing the SSRC are not missing audio packets"
+        );
+        assert!(
+            points
+                .iter()
+                .find(|p| p.ssrc == 3)
+                .unwrap()
+                .jitter_ms
+                .is_none(),
+            "dynamic payload clock cannot be inferred without SDP"
+        );
+        assert!(
+            storage
+                .query_media_quality(
+                    call_id,
+                    start,
+                    end,
+                    0,
+                    QUALITY_MAX_BYTES,
+                    QUALITY_MAX_PACKETS
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .query_media_quality(
+                    call_id,
+                    end,
+                    start,
+                    1000,
+                    QUALITY_MAX_BYTES,
+                    QUALITY_MAX_PACKETS
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .query_media_quality(call_id, start, end, 1000, 1, QUALITY_MAX_PACKETS)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            points.iter().map(|point| point.packet_bytes).sum::<usize>(),
+            96
+        );
     }
 
     #[tokio::test]

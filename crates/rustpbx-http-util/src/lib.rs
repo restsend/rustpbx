@@ -128,9 +128,40 @@ pub async fn execute_request(
         .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("HTTP returned {}", resp.status()));
+        return Err(anyhow::Error::new(HttpStatusError {
+            status: resp.status(),
+        }));
     }
     Ok(resp)
+}
+
+/// Structured non-2xx response error.
+///
+/// `Display` intentionally matches the historical plain-anyhow text
+/// (`"HTTP returned <status>"`) so existing string-based consumers keep
+/// working; the typed payload lets callers distinguish deterministic 4xx
+/// responses (never worth retrying) from transient failures.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: reqwest::StatusCode,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP returned {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+impl HttpStatusError {
+    /// Deterministic client-side rejections: retrying cannot change the
+    /// outcome and only burns the caller's time. 408 (request timeout) and
+    /// 429 (too many requests) are the conventional retryable exceptions.
+    pub fn is_client_error(&self) -> bool {
+        let code = self.status.as_u16();
+        (400..500).contains(&code) && code != 408 && code != 429
+    }
 }
 
 /// Read the response body within `timeout`. The body read (and the response
@@ -275,4 +306,75 @@ pub async fn fetch_text(
     let req = client.get(url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
     read_body_with_timeout(t, resp.text()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Display text must stay byte-identical to the historical
+    /// plain-anyhow message: production code matches on the
+    /// `"HTTP returned"` prefix (see proxy/routing/http.rs).
+    #[test]
+    fn status_error_display_matches_legacy_text() {
+        let e = HttpStatusError {
+            status: reqwest::StatusCode::CONFLICT,
+        };
+        assert_eq!(e.to_string(), "HTTP returned 409 Conflict");
+    }
+
+    #[test]
+    fn client_error_classification() {
+        let is_client = |code: u16| HttpStatusError {
+            status: reqwest::StatusCode::from_u16(code).unwrap(),
+        }
+        .is_client_error();
+        // Deterministic rejections: fail fast, never retry.
+        assert!(is_client(400));
+        assert!(is_client(409));
+        assert!(is_client(410));
+        assert!(is_client(422));
+        // Conventional retryable exceptions.
+        assert!(!is_client(408));
+        assert!(!is_client(429));
+        // Server-side / non-4xx: handled by the generic retry path.
+        assert!(!is_client(500));
+        assert!(!is_client(503));
+    }
+
+    /// `execute_request` surfaces non-2xx as the typed error, downcast-able
+    /// through anyhow without changing the Display contract.
+    #[tokio::test]
+    async fn execute_request_downcasts_status_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            // Read the request headers (body is empty for this POST).
+            let _ = socket.read(&mut buf).await;
+            let body = "{\"error\":\"conflict\"}";
+            let resp = format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(resp.as_bytes()).await.unwrap();
+            socket.flush().await.ok();
+        });
+
+        let client = build_keepalive_client(Some(Duration::from_secs(2)), None).unwrap();
+        let req = client.post(format!("http://{addr}/step"));
+        let err = execute_request(req, &HashMap::new(), Some(Duration::from_secs(2)))
+            .await
+            .unwrap_err();
+        let status_err = err
+            .downcast_ref::<HttpStatusError>()
+            .expect("error should downcast to HttpStatusError");
+        assert_eq!(status_err.status, reqwest::StatusCode::CONFLICT);
+        assert!(status_err.is_client_error());
+    }
 }

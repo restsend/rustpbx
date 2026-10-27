@@ -134,7 +134,11 @@ pub async fn csrf_guard(request: axum::extract::Request, next: axum::middleware:
         || path.ends_with("/forgot")
         || path.ends_with("/logout")
         || path.contains("/reset/")
-        || path.contains("/login/mfa");
+        || path.contains("/login/mfa")
+        // Public telemetry collector: clients never hold session cookies
+        // (unauthenticated upload, see client_report.rs), so there is no
+        // CSRF surface to protect.
+        || path.ends_with("/report");
 
     if !is_safe && !has_authorization && !is_auth {
         let cookie_token = get_cookie(&headers, CSRF_COOKIE_NAME);

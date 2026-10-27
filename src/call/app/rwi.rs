@@ -26,6 +26,8 @@ impl CallApp for RwiApp {
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let event = CallCreated {
+            leg_id: Some("caller".to_string()),
+            leg_role: Some("caller".to_string()),
             call_id: context.call_info.session_id.clone(),
             context: self.context_name.clone(),
             caller: context.call_info.caller.clone(),

@@ -242,6 +242,7 @@ impl RwiCommandProcessor {
                             Some(Err(CommandError::CallNotFound(call_id.to_string())))
                         }
                         Some(CommandFailureKind::MediaDenied)
+                        | Some(CommandFailureKind::InvalidTarget)
                         | None => Some(Err(CommandError::CommandFailed(msg))),
                     }
                 }
@@ -646,7 +647,7 @@ impl RwiCommandProcessor {
                 target,
                 leg_id,
             } => {
-                return self.leg_add(call_id, target, leg_id.as_deref()).await;
+                return self.leg_add(call_id, target, leg_id.as_deref(), None).await;
             }
             RwiCommandPayload::LegRemove { call_id, leg_id } => {
                 return self.leg_remove(call_id, leg_id).await;
@@ -731,7 +732,7 @@ impl RwiCommandProcessor {
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "timestamp": e.cached_at.to_rfc3339(),
+                    "timestamp": crate::utils::rfc3339_local(e.cached_at),
                     "call_id": e.call_id,
                     "event": e.event,
                 })
@@ -751,7 +752,7 @@ impl RwiCommandProcessor {
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "timestamp": e.cached_at.to_rfc3339(),
+                    "timestamp": crate::utils::rfc3339_local(e.cached_at),
                     "call_id": e.call_id,
                     "event": e.event,
                 })
@@ -899,11 +900,12 @@ impl RwiCommandProcessor {
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
 
-        // Global session id (RFC 7989): originates are session roots. The
-        // wire call_id stays client-addressable, but the session id carried
-        // in the Session-ID header / UUI / CallMeta is normalized to the
-        // canonical 32 hex form so downstream nodes inherit one stable id.
-        let global_session_id = crate::call::session_id::normalize_or_generate(&req.call_id);
+        // Global session id: originates are session roots. The wire call_id
+        // stays client-addressable, but the session id carried in the
+        // Session-ID header / UUI / CallMeta is normalized to the canonical
+        // hex form (length per `proxy.session_id_length`) so downstream nodes
+        // inherit one stable id.
+        let global_session_id = crate::call::session_id::derive_from_call_id(&req.call_id);
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
@@ -911,6 +913,7 @@ impl RwiCommandProcessor {
         // root; the header lets external legs re-attach on the way back in.
         headers.push(crate::call::uui::build_uui_header(
             &global_session_id,
+            None,
             None,
             None,
             None,
@@ -936,10 +939,22 @@ impl RwiCommandProcessor {
                     .filter_map(|codec| audio_codec::CodecType::try_from(codec.as_str()).ok())
                     .collect::<Vec<_>>()
             })
+            // An empty parse (trunk with no/unknown codec entries) must fall
+            // back too — an empty offer kills the originate at media prep
+            // ("No codecs configured for originate caller leg").
+            .filter(|codecs| !codecs.is_empty())
             .unwrap_or_else(|| crate::media::MediaNegotiator::default_rtp_codecs());
         let originate_codecs =
             crate::media::MediaNegotiator::build_local_rtp_codec_offer(&configured_audio_codecs);
 
+        // RFC 7989: the originate INVITE carries the normalized global
+        // session id as its local-uuid; downstream PBXs/SBCs mirror it.
+        // Short native ids ride the raw-header channel (see build_wire_header).
+        let (origin_session_id, origin_session_id_header) =
+            crate::call::session_id::build_wire_header(Some(&global_session_id));
+        if let Some(header) = origin_session_id_header {
+            headers.push(header);
+        }
         let mut invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
@@ -961,7 +976,7 @@ impl RwiCommandProcessor {
             call_id: Some(req.call_id.clone()),
             // RFC 7989: the originate INVITE carries the normalized global
             // session id as its local-uuid; downstream PBXs/SBCs mirror it.
-            session_id: Some(global_session_id.clone()),
+            session_id: origin_session_id,
             ..Default::default()
         };
 
@@ -998,6 +1013,20 @@ impl RwiCommandProcessor {
         let routing_enabled = req
             .route_originated_calls
             .unwrap_or(server.proxy_config.load().route_originated_calls);
+        // Agent-attributed originate: carry the agent identity in the routing
+        // cookie so policy-aware RouteInvite chain nodes (CcAgentPolicyRouteInvite)
+        // can resolve and enforce the agent's outbound policy on the B-leg.
+        let routing_cookie = req.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(
+            |agent| {
+                let cookie = TransactionCookie::default();
+                cookie.set_user(crate::call::SipUser {
+                    username: agent.to_string(),
+                    from: Some(caller_uri.clone()),
+                    ..Default::default()
+                });
+                cookie
+            },
+        );
         let routed_hints: Option<crate::config::DialplanHints> =
             if explicit_trunk || !routing_enabled {
                 None
@@ -1009,7 +1038,7 @@ impl RwiCommandProcessor {
                     &caller_uri,
                     &contact,
                     None,
-                    TransactionCookie::default(),
+                    routing_cookie.unwrap_or_default(),
                 )
                 .await
                 {
@@ -1120,41 +1149,134 @@ impl RwiCommandProcessor {
                         // record.start) so the CDR carries recording_url and the
                         // call-record hooks can emit recording_metadata_available /
                         // record_end.
-                        let recorder: Vec<crate::callrecord::CallRecordMedia> = recorder_file
-                            .map(|path| {
-                                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                                crate::callrecord::CallRecordMedia {
-                                    track_id: "mixed".to_string(),
-                                    path,
-                                    size,
-                                    // Originate-option recordings have no in-session
-                                    // segment bookkeeping; mint the id here so the
-                                    // CDR entry and `recording_metadata_available`
-                                    // still carry a `unique_id`.
-                                    unique_id: Some(uuid::Uuid::new_v4().to_string()),
-                                    extra: None,
-                                }
-                            })
-                            .into_iter()
-                            .collect();
-                        // Session user data (set via RWI/REST on this
-                        // originate) rides into the outbound CDR under a
-                        // namespaced `user_data` key — same as the
-                        // session-path CDR (`record_snapshot`). Safe to read:
-                        // the guard only MOVES into the record below (and on
-                        // a full channel drops after this read).
-                        let user_data_meta = {
+                        //
+                        // In-session recording SEGMENTS (e.g. the cc agent
+                        // segment armed by `[recording] record_on_agent_connect`
+                        // on agent-attributed originates) are mirrored into the
+                        // gateway user_data by the session (it has no reporter
+                        // of its own) — map them into `recorder[]` +
+                        // `recording_segments` exactly like the session-path
+                        // reporter's `collect_recording_artifacts`. Segments win
+                        // over the legacy single-file entry when both exist, so
+                        // a call never reports the same wav twice.
+                        let (segment_media, recording_segments_meta, user_data_meta) = {
                             let gw = cdr_gateway.read();
-                            let ud = gw.get_user_data(&cdr_call_id);
-                            (!ud.is_empty()).then(|| {
+                            let mut ud = gw.get_user_data(&cdr_call_id);
+                            let segments_meta = ud.remove("completed_recording_segments");
+                            let media = segments_meta
+                                .as_ref()
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|seg| {
+                                            let segment: crate::callrecord::RecordingSegment =
+                                                serde_json::from_value(seg.clone()).ok()?;
+                                            let size = if segment.size > 0 {
+                                                segment.size
+                                            } else {
+                                                std::fs::metadata(&segment.path)
+                                                    .ok()
+                                                    .filter(|m| m.is_file())
+                                                    .map(|m| m.len())
+                                                    .unwrap_or(0)
+                                            };
+                                            if size == 0 {
+                                                return None;
+                                            }
+                                            let mut extra = std::collections::HashMap::new();
+                                            extra.insert(
+                                                "session_id".to_string(),
+                                                serde_json::Value::String(cdr_call_id.clone()),
+                                            );
+                                            extra.insert(
+                                                "segment_type".to_string(),
+                                                serde_json::Value::String(
+                                                    segment.segment_type.clone(),
+                                                ),
+                                            );
+                                            extra.insert(
+                                                "segment_id".to_string(),
+                                                serde_json::Value::String(
+                                                    segment.segment_id.clone(),
+                                                ),
+                                            );
+                                            if segment.seq > 0 {
+                                                extra.insert(
+                                                    "seq".to_string(),
+                                                    serde_json::Value::from(segment.seq),
+                                                );
+                                            }
+                                            if !segment.label.is_empty() {
+                                                extra.insert(
+                                                    "label".to_string(),
+                                                    serde_json::Value::String(segment.label.clone()),
+                                                );
+                                            }
+                                            if let Some(ref started) = segment.started_at {
+                                                extra.insert(
+                                                    "started_at".to_string(),
+                                                    serde_json::Value::String(started.clone()),
+                                                );
+                                            }
+                                            if let Some(ref ended) = segment.ended_at {
+                                                extra.insert(
+                                                    "ended_at".to_string(),
+                                                    serde_json::Value::String(ended.clone()),
+                                                );
+                                            }
+                                            Some(crate::callrecord::CallRecordMedia {
+                                                track_id: format!(
+                                                    "segment:{}:{}",
+                                                    segment.segment_type, segment.segment_id
+                                                ),
+                                                path: segment.path,
+                                                size,
+                                                unique_id: segment.unique_id,
+                                                extra: Some(extra),
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            // Session user data (set via RWI/REST on this
+                            // originate) rides into the outbound CDR under a
+                            // namespaced `user_data` key — same as the
+                            // session-path CDR (`record_snapshot`). Safe to read:
+                            // the guard only MOVES into the record below (and on
+                            // a full channel drops after this read).
+                            let user_data_meta = (!ud.is_empty()).then(|| {
                                 let mut meta = std::collections::HashMap::new();
                                 meta.insert(
                                     "user_data".to_string(),
                                     serde_json::Value::Object(ud),
                                 );
                                 meta
-                            })
+                            });
+                            (media, segments_meta, user_data_meta)
                         };
+                        let recorder: Vec<crate::callrecord::CallRecordMedia> =
+                            if !segment_media.is_empty() {
+                                segment_media
+                            } else {
+                                recorder_file
+                                    .map(|path| {
+                                        let size =
+                                            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                        vec![crate::callrecord::CallRecordMedia {
+                                            track_id: "mixed".to_string(),
+                                            path,
+                                            size,
+                                            // Originate-option recordings have no in-session
+                                            // segment bookkeeping; mint the id here so the
+                                            // CDR entry and `recording_metadata_available`
+                                            // still carry a `unique_id`.
+                                            unique_id: Some(uuid::Uuid::new_v4().to_string()),
+                                            extra: None,
+                                        }]
+                                    })
+                                    .unwrap_or_default()
+                            };
+                        let recording_segments_meta = recording_segments_meta.filter(|v| !v.is_null());
                         let mut record = crate::callrecord::CallRecord {
                             call_id: cdr_call_id.clone(),
                             // Originates are root sessions: session_id == call_id.
@@ -1184,7 +1306,16 @@ impl RwiCommandProcessor {
                                 },
                                 from_number: Some(cdr_caller.clone()),
                                 to_number: Some(cdr_callee.clone()),
-                                metadata: user_data_meta,
+                                metadata: {
+                                    let mut meta = user_data_meta;
+                                    if let Some(segments) = recording_segments_meta {
+                                        meta.get_or_insert_with(Default::default).insert(
+                                            "recording_segments".to_string(),
+                                            segments,
+                                        );
+                                    }
+                                    meta
+                                },
                                 ..Default::default()
                             },
                             extensions: http::Extensions::new(),
@@ -1308,7 +1439,9 @@ impl RwiCommandProcessor {
                     {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason: Some(format!("media_setup_failed: {}", e)),
                             hangup_by: None,
@@ -1347,6 +1480,13 @@ impl RwiCommandProcessor {
             });
 
             let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
+            // Snapshot the custom SIP headers riding the outgoing INVITE
+            // (caller-supplied + trunk-injected by apply_trunk_config) BEFORE
+            // do_invite consumes the option — `call_created` carries them
+            // verbatim, same as the inbound INVITE path.
+            let originate_sip_headers = crate::call::app::sip_headers_from(
+                invite_option.headers.as_deref().unwrap_or(&[]),
+            );
             let mut invitation = dialog_layer
                 .do_invite(invite_option, caller_state_tx)
                 .boxed();
@@ -1428,6 +1568,12 @@ impl RwiCommandProcessor {
             // `call_ringing` session hooks fire once, on the FIRST provisional
             // response — whichever of 180/183 arrives first.
             let mut ringing_hooks_fired = false;
+            // Per-leg ringing state for the A dialog: `None` until the first
+            // provisional, then the last emitted `early_media` flag. The
+            // leg-level event fires on ring-state change (ringing → early
+            // media), the same cadence `update_leg_state` uses for the
+            // queue/inbound per-leg events.
+            let mut caller_leg_ring_state: Option<bool> = None;
             // Normalized hangup reason for failed setup paths — fed to the
             // `on_call_ended` session hooks after the setup block so the CC
             // addon releases the agent (Ringing → Idle).
@@ -1450,12 +1596,14 @@ impl RwiCommandProcessor {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
                                         let gw = gateway.read();
                                         gw.send_to_owner(&crate::rwi::CallCreated {
+                                            leg_id: None,
+                                            leg_role: Some("caller".to_string()),
                                             call_id: call_id.clone(),
                                             context: "default".into(),
                                             caller: caller_display.clone(),
                                             callee: callee_display.clone(),
                                             trunk: None,
-                                            sip_headers: Default::default(),
+                                            sip_headers: originate_sip_headers.clone(),
                                             caller_name: None,
                                             callee_name: None,
                                             called_phone: None,
@@ -1489,16 +1637,44 @@ impl RwiCommandProcessor {
                                                 .await;
                                         }
 
-                                        // One `call_ringing` per provisional response.
-                                        // `early_media` marks a 183/180-with-SDP
-                                        // provisional so consumers can distinguish
-                                        // ringback from early media. Emitted after
-                                        // the hooks so it is enriched with the
-                                        // agent context.
+                                        // Per-leg ringing for the A dialog (the
+                                        // dialed customer): the outgoing INVITE
+                                        // leg IS the session's "caller" leg, and
+                                        // its provisional responses are that
+                                        // leg's ringing — leg identity on the
+                                        // wire, the same contract every other
+                                        // flow follows. Fired on ring-state
+                                        // change (ringing → early media), the
+                                        // cadence `update_leg_state` uses. The
+                                        // agent attribution rides call-meta
+                                        // enrichment: the session-pinned agent
+                                        // is the ORIGINATOR here, not a
+                                        // participant of this leg, so it is
+                                        // never pinned on the leg event.
+                                        if caller_leg_ring_state != Some(early_media) {
+                                            caller_leg_ring_state = Some(early_media);
+                                            let gw = gateway.read();
+                                            gw.send_to_owner(&crate::rwi::CallRinging {
+                                                leg_id: Some("caller".to_string()),
+                                                leg_role: Some("caller".to_string()),
+                                                call_id: call_id.clone(),
+                                                early_media,
+                                                agent_id: None,
+                                                agent_name: None,
+                                            });
+                                        }
+
+                                        // One session-level `call_ringing` per
+                                        // provisional response. `early_media`
+                                        // marks a 183/180-with-SDP provisional so
+                                        // consumers can distinguish ringback from
+                                        // early media. Emitted after the hooks so
+                                        // it is enriched with the agent context.
                                         {
                                             let gw = gateway.read();
                                             gw.send_to_owner(&crate::rwi::CallRinging {
                                                 leg_id: None,
+                                                leg_role: None,
                                                 call_id: call_id.clone(),
                                                 early_media,
                                                 // Session-level event: agent
@@ -1702,7 +1878,9 @@ impl RwiCommandProcessor {
                             {
                                 let gw = gateway.read();
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    scope: crate::rwi::CallHangupScope::Call,
                                     leg_id: None,
+                                        leg_role: None,
                                     call_id: call_id.clone(),
                                     reason: Some(format!("media_setup_failed: {}", e)),
                                     hangup_by: None,
@@ -1813,6 +1991,7 @@ impl RwiCommandProcessor {
                             let gw = gateway.read();
                             gw.send_to_owner(&crate::rwi::CallAnswered {
                                 leg_id: None,
+                                leg_role: None,
                                 call_id: call_id.clone(),
                             });
                         }
@@ -1853,15 +2032,21 @@ impl RwiCommandProcessor {
                             let gw = gateway.read();
                             if sip_status == Some(486) || sip_status == Some(600) {
                                 gw.send_to_owner(&crate::rwi::CallBusy {
+                                    leg_id: None,
+                                    leg_role: Some("caller".to_string()),
                                     call_id: call_id.clone(),
                                 });
                             } else if matches!(sip_status, Some(408) | Some(480) | Some(487)) {
                                 gw.send_to_owner(&crate::rwi::CallNoAnswer {
+                                    leg_id: None,
+                                    leg_role: Some("caller".to_string()),
                                     call_id: call_id.clone(),
                                 });
                             } else {
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    scope: crate::rwi::CallHangupScope::Call,
                                     leg_id: None,
+                                        leg_role: None,
                                     call_id: call_id.clone(),
                                     reason: Some("originate_failed".to_string()),
                                     hangup_by: None,
@@ -1875,7 +2060,9 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Failed);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason: Some(e.to_string()),
                             hangup_by: None,
@@ -1889,7 +2076,9 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Canceled);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason,
                             hangup_by: Some("system".to_string()),
@@ -1902,6 +2091,8 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::NoAnswer);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallNoAnswer {
+                            leg_id: None,
+                            leg_role: Some("caller".to_string()),
                             call_id: call_id.clone(),
                         });
                     }
@@ -2111,6 +2302,7 @@ impl RwiCommandProcessor {
 
     async fn leg_add(
         &self, call_id: &str, target: &str, leg_id: Option<&str>,
+        purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         let leg_id = leg_id.map(str::to_owned)
@@ -2118,13 +2310,14 @@ impl RwiCommandProcessor {
         handle.send_command(CallCommand::LegAdd {
             source_leg: None, target: target.to_string(),
             leg_id: Some(LegId::new(&leg_id)), headers: Vec::new(),
+            purpose,
         }).map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::LegAdded { leg_id })
     }
 
     async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        handle.send_command(CallCommand::LegRemove { leg_id: LegId::new(leg_id) })
+        handle.send_command(CallCommand::LegRemove { leg_id: LegId::new(leg_id), reason: None })
             .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::Success)
     }
@@ -2242,7 +2435,11 @@ impl RwiCommandProcessor {
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::MediaPlayStarted {
             call_id: call_id.to_string(),
-            leg_id: event_leg_id,
+            leg_id: event_leg_id.clone(),
+            leg_role: event_leg_id.as_deref().and_then(|label| match label {
+                "caller" | "callee" | "consult" => Some(label.to_string()),
+                _ => None,
+            }),
             track_id: track_id.clone(),
         });
 
@@ -2347,6 +2544,11 @@ impl RwiCommandProcessor {
                                     gw.send_to_owner(&crate::rwi::DtmfCollected {
                                         call_id: call_id.clone(),
                                         leg_id: leg_id.clone(),
+                                        leg_role: if leg_id == "caller" {
+                                            Some("caller".to_string())
+                                        } else {
+                                            None
+                                        },
                                         digits: collected,
                                     });
                                 }
@@ -2362,6 +2564,11 @@ impl RwiCommandProcessor {
                             gw.send_to_owner(&crate::rwi::DtmfCollected {
                                 call_id: call_id.clone(),
                                 leg_id: leg_id.clone(),
+                                leg_role: if leg_id == "caller" {
+                                    Some("caller".to_string())
+                                } else {
+                                    None
+                                },
                                 digits: collected,
                             });
                             return;
@@ -2379,12 +2586,22 @@ impl RwiCommandProcessor {
                 gw.send_to_owner(&crate::rwi::DtmfCollected {
                     call_id: call_id.clone(),
                     leg_id: leg_id.clone(),
+                    leg_role: if leg_id == "caller" {
+                        Some("caller".to_string())
+                    } else {
+                        None
+                    },
                     digits: collected,
                 });
             } else {
                 gw.send_to_owner(&crate::rwi::DtmfCollectionTimeout {
                     call_id: call_id.clone(),
                     leg_id: leg_id.clone(),
+                    leg_role: if leg_id == "caller" {
+                        Some("caller".to_string())
+                    } else {
+                        None
+                    },
                 });
             }
         });
@@ -2406,6 +2623,12 @@ impl RwiCommandProcessor {
             call_id: req.call_id.clone(),
             queue_id: req.queue_id.clone(),
             skill_groups: req.skill_groups.clone().filter(|g| !g.is_empty()),
+            // Absent == 0 so default-priority flows keep the exact same
+            // wire payload as before the field existed.
+            priority: (req.priority.unwrap_or(0) != 0).then_some(req.priority.unwrap_or(0)),
+            // API join — first entry, no re-entry counter.
+            attempt: None,
+            agent_id: None,
         });
 
         info!(
@@ -2489,8 +2712,45 @@ impl RwiCommandProcessor {
             return Err(CommandError::CommandFailed("Call not in queue".to_string()));
         }
 
-        info!(call_id = %call_id, priority = %priority, "Queue priority updated");
-        Ok(CommandResult::Success)
+        // Runtime priority bump: update the caller's UNCLAIMED shared-queue
+        // row — the strict-FIFO gate and monitor ordering read that row, so
+        // the new priority takes effect on the next dispatch decision.
+        let shared_db = self.gateway.read().shared_queue_db();
+        match shared_db {
+            // No CC addon / shared queue → in-memory only. Preserves the
+            // legacy success semantics for existing integrations.
+            None => {
+                info!(call_id = %call_id, priority = %priority,
+                    "Queue priority updated (no shared-queue DB — in-memory only)");
+                Ok(CommandResult::Success)
+            }
+            Some(db) => {
+                #[cfg(feature = "addon-cc")]
+                {
+                    let clamped = crate::call::clamp_priority_u32_to_i32(priority);
+                    let updated = crate::addons::cc::stats_writer::shared_update_priority(
+                        &db, call_id, clamped,
+                    )
+                    .await;
+                    if updated {
+                        info!(call_id = %call_id, priority = %clamped, "Queue priority updated");
+                        Ok(CommandResult::Success)
+                    } else {
+                        Err(CommandError::CommandFailed(format!(
+                            "No unclaimed shared-queue row for call {call_id}"
+                        )))
+                    }
+                }
+                #[cfg(not(feature = "addon-cc"))]
+                {
+                    // Shared-queue table only exists with the CC addon.
+                    let _ = db;
+                    info!(call_id = %call_id, priority = %priority,
+                        "Queue priority updated (shared queue unavailable — in-memory only)");
+                    Ok(CommandResult::Success)
+                }
+            }
+        }
     }
 
     async fn queue_assign_agent(
@@ -2513,6 +2773,8 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             queue_id: queue_id.clone(),
             agent_id: agent_id.to_string(),
+            leg_id: None,
+            leg_role: Some("agent".to_string()),
         });
 
         info!(call_id = %call_id, agent_id = %agent_id, "Agent assigned to queue call");
@@ -2523,7 +2785,7 @@ impl RwiCommandProcessor {
         &self,
         call_id: &str,
         queue_id: &str,
-        _priority: Option<u32>,
+        priority: Option<u32>,
         skill_groups: Option<Vec<String>>,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
@@ -2550,9 +2812,17 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             queue_id: queue_id.to_string(),
             skill_groups: skill_groups.filter(|g| !g.is_empty()),
+            // The shared-queue tap re-registers the row from this event —
+            // carry the requested priority (or drop the field at the default
+            // tier) so a requeue never resets a caller to priority 0.
+            priority: priority.filter(|p| *p != 0),
+            // API requeue — the ACD re-entry counter lives in the queue app;
+            // this command path reports via queue_left/rejoined pairing.
+            attempt: None,
+            agent_id: None,
         });
 
-        info!(call_id = %call_id, new_queue = %queue_id, "Call requeued");
+        info!(call_id = %call_id, new_queue = %queue_id, priority = ?priority, "Call requeued");
         Ok(CommandResult::Success)
     }
 

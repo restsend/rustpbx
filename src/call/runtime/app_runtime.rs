@@ -93,6 +93,16 @@ pub trait AppRuntime: Send + Sync {
     /// * `Err(AppRuntimeError)` - Stop failed
     async fn stop_app(&self, reason: Option<String>) -> AppResult<()>;
 
+    /// Stop with a trusted exit cause from the session lifecycle.
+    /// Runtimes without application exit callbacks retain their ordinary stop behavior.
+    async fn stop_app_with_exit_reason(
+        &self,
+        reason: Option<String>,
+        _exit_reason: crate::call::app::ExitReason,
+    ) -> AppResult<()> {
+        self.stop_app(reason).await
+    }
+
     /// Inject an event into the running application
     ///
     /// # Arguments

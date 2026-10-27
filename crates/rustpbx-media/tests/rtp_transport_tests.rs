@@ -1524,7 +1524,7 @@ async fn transcode_rtp_g722_to_webrtc_opus() {
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 }
 
-// ── G729 (RTP-only; WebRTC does not support G729) ─────────────────────────
+// ── G729 (RTP and WebRTC) ─────────────────────────────────────────────────
 
 /// G729 fast-path: same codec on both RTP legs → transport-level rewrite relay.
 #[tokio::test]
@@ -1543,6 +1543,34 @@ async fn fast_path_rtp_g729_rtp_g729() {
         .await
         .expect("B must receive G729 audio");
     assert_eq!(frame.payload_type, Some(18), "G729 must keep PT 18");
+    assert!(!frame.data.is_empty());
+    h.close();
+}
+
+/// G729 across a WebRTC leg: RTP G729 caller → WebRTC G729 agent must fast-path
+/// relay with PT 18 preserved. This pins the contract that negotiation and the
+/// media plane agree a WebRTC (DTLS-SRTP) leg can carry G729 — the guarantee
+/// behind no longer stripping G729 from generated WebRTC offers.
+#[tokio::test]
+async fn fast_path_rtp_g729_to_webrtc_g729() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::G729,
+        TransportMode::WebRtc,
+        CodecType::G729,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+    let frame = h
+        .send_and_receive(CodecType::G729, 8000)
+        .await
+        .expect("WebRTC leg must receive G729 audio");
+    assert_eq!(
+        frame.payload_type,
+        Some(18),
+        "G729 must keep PT 18 over the WebRTC leg"
+    );
     assert!(!frame.data.is_empty());
     h.close();
 }

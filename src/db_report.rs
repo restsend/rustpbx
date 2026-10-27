@@ -130,8 +130,54 @@ pub fn report_db_write_failure_with_detail(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Capture one entity's write failures without installing a global subscriber.
+    #[derive(Clone)]
+    pub(crate) struct DbErrors {
+        entity: &'static str,
+        pub(crate) errors: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl DbErrors {
+        pub(crate) fn new(entity: &'static str) -> Self {
+            Self {
+                entity,
+                errors: Default::default(),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ErrorFields {
+        entity: String,
+        error: String,
+    }
+
+    impl tracing::field::Visit for ErrorFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "entity" => self.entity = format!("{value:?}"),
+                "error" => self.error = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DbErrors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = ErrorFields::default();
+            event.record(&mut fields);
+            if fields.entity == self.entity {
+                self.errors.lock().push(fields.error);
+            }
+        }
+    }
 
     #[test]
     fn noop_upsert_matches_record_not_inserted_only() {

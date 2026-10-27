@@ -1455,7 +1455,7 @@ mod tests {
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25021);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1943,7 +1943,7 @@ mod tests {
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25091);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2356,7 +2356,7 @@ mod tests {
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25151);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2470,7 +2470,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(26001);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 

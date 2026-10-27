@@ -133,6 +133,16 @@ def pbx(webhook_server: WebhookServer) -> PbxServer:
         project_root=PROJECT_ROOT,
         work_dir=WORK_DIR,
     )
+    # Fast background sweeps: the presence-TTL / locator-expiry cadences and
+    # the offline-watchdog tick dominate this suite's wall clock (publish-TTL
+    # and register-expiry regressions wait out full sweep cycles). Production
+    # defaults are untouched — this is the e2e workdir config only.
+    server.config_builder.proxy_extra.update(
+        {
+            "presence_sweep_secs": 3,
+            "locator_sweep_secs": 5,
+        }
+    )
     server.prepare(webhook_url=webhook_server.url)
     # Add base IVR configs and routes before starting
     from helpers.config_builder import ivr_greeting_dtmf_toml

@@ -137,6 +137,18 @@ impl AgentRegistry for MemoryRegistry {
         vec![]
     }
 
+    async fn release_unanswered_reservation(&self, agent_id: &str, call_id: &str) -> bool {
+        let Some(mut agent) = self.agents.get_mut(agent_id) else {
+            return false;
+        };
+        if !matches!(&agent.presence, PresenceState::Ringing { call_id: Some(id) } if id == call_id) {
+            return false;
+        }
+        agent.presence = PresenceState::Idle;
+        agent.last_state_change = Instant::now();
+        true
+    }
+
     async fn release_call(&self, agent_id: &str, call_id: &str) -> bool {
         let bound = |presence: &PresenceState| {
             matches!(

@@ -400,7 +400,8 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
                 digit: "7".to_string(),
                 leg_id: None,
                 extra: None,
-            },
+                leg_role: None,
+},
         );
     }
 
@@ -671,14 +672,16 @@ async fn test_session_resume_returns_events() {
                 early_media: false,
                 agent_id: None,
                 agent_name: None,
-            },
+                leg_role: None,
+},
             None,
         );
         let event2 = rustpbx::rwi::event::to_legacy_event(
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "test-call-1".to_string(),
-            },
+                leg_role: None,
+},
             None,
         );
         gw.cache_event(&"test-call-1".to_string(), &event1);
@@ -723,7 +726,8 @@ async fn test_call_resume_returns_call_specific_events() {
                 early_media: false,
                 agent_id: None,
                 agent_name: None,
-            },
+                leg_role: None,
+},
             None,
         );
         let event2 = rustpbx::rwi::event::to_legacy_event(
@@ -733,7 +737,8 @@ async fn test_call_resume_returns_call_specific_events() {
                 early_media: false,
                 agent_id: None,
                 agent_name: None,
-            },
+                leg_role: None,
+},
             None,
         );
         gw.cache_event(&"call-a".to_string(), &event1);

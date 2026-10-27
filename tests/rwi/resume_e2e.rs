@@ -36,6 +36,8 @@ async fn test_full_session_resume_flow() {
             gw.fan_out(
                 "resume-test",
                 &rustpbx::rwi::CallCreated {
+                    leg_id: None,
+                    leg_role: None,
                     call_id: "resume-call-1".to_string(),
                     context: "resume-test".to_string(),
                     caller: "sip:alice@test.com".to_string(),
@@ -59,14 +61,16 @@ async fn test_full_session_resume_flow() {
                     early_media: false,
                     agent_id: None,
                     agent_name: None,
-                },
+                    leg_role: None,
+},
             );
             gw.fan_out(
                 "resume-test",
                 &rustpbx::rwi::CallAnswered {
                     leg_id: None,
                     call_id: "resume-call-1".to_string(),
-                },
+                    leg_role: None,
+},
             );
         }
 
@@ -146,7 +150,8 @@ async fn test_call_resume_filters_by_call_id() {
                     early_media: false,
                     agent_id: None,
                     agent_name: None,
-                },
+                    leg_role: None,
+},
                 None,
             ),
         );
@@ -156,7 +161,8 @@ async fn test_call_resume_filters_by_call_id() {
                 &rustpbx::rwi::CallAnswered {
                     leg_id: None,
                     call_id: "call-a".to_string(),
-                },
+                    leg_role: None,
+},
                 None,
             ),
         );
@@ -171,7 +177,8 @@ async fn test_call_resume_filters_by_call_id() {
                     early_media: false,
                     agent_id: None,
                     agent_name: None,
-                },
+                    leg_role: None,
+},
                 None,
             ),
         );

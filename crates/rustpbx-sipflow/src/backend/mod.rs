@@ -42,6 +42,20 @@ pub trait SipFlowBackend: Send + Sync {
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
     ) -> Result<Vec<SipFlowMediaStats>>;
+    /// Query bounded, time-bucketed observations from captured RTP packets.
+    /// Backends without timestamped packet access must report unavailability.
+    async fn query_media_quality(
+        &self,
+        _call_id: &str,
+        _start_time: DateTime<Local>,
+        _end_time: DateTime<Local>,
+        _bucket_ms: u64,
+        _max_bytes: usize,
+        _max_packets: usize,
+    ) -> Result<Vec<crate::SipFlowQualityPoint>> {
+        anyhow::bail!("media quality series unavailable for this backend")
+    }
+
     async fn query_media(
         &self,
         call_id: &str,

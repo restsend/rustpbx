@@ -74,6 +74,9 @@ class RestsendAgent:
         self.tone_hz = tone_hz
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.events: list[dict] = []
+        # Index into `events` just past the last answer this agent sent —
+        # lets answer() (legacy contract) target the NEXT fresh incoming.
+        self._answered_mark: int = 0
         self.last_consult_uri: str = ""
         self._reader: Optional[asyncio.Task] = None
 
@@ -150,6 +153,17 @@ class RestsendAgent:
             if ev.get("evt") == etype and (predicate is None or predicate(ev)):
                 return ev
         return None
+
+    def has_event_after(self, etype: str, since: int,
+                        predicate=None) -> Optional[dict]:
+        """Latest event of `etype` among events appended AFTER index
+        `since` (no historical matches)."""
+        found = None
+        for ev in self.events[since:]:
+            if ev.get("evt") == etype and (
+                    predicate is None or predicate(ev)):
+                found = ev
+        return found
 
     async def wait_event(self, etype: str, predicate=None,
                          timeout: float = 15.0) -> Optional[dict]:
@@ -371,16 +385,33 @@ class RestsendAgent:
                     f"stderr tail: {self.stderr_text()[-400:]}")
 
     # ── high-level ops ───────────────────────────────────────────────────
-    async def register(self, expires: int = 120) -> bool:
+    async def register(self, expires: int = 120, transport: Optional[str] = None,
+                       ws_path: str = "/ws") -> bool:
+        """init → bind → REGISTER.
+
+        transport=None (default): classic UDP bind + ``host:sip_port`` registrar.
+        transport="ws": SIP over WebSocket — ``sip_bind_ws`` to
+        ``ws://host:http_port<ws_path>`` and a ``ws://`` registrar, the
+        production cc-phone / restsend-pc path. Killing the process then drops
+        the WS link, which rustpbx treats as a transport-close offline.
+        ws_path: server ``[proxy] ws_handler`` path (default ``/ws``; a
+        prefixed deployment such as the prd cluster uses ``/rustpbx/ws``).
+        """
         init_cmd: dict[str, Any] = {"cmd": "init"}
         if self.enable_video is not None:
             init_cmd["enable_video"] = self.enable_video
         await self.cmd(init_cmd)
-        await self.cmd({"cmd": "sip_bind",
-                        "local_uri": f"sip:{self.user}@127.0.0.1:{self.local_port}"})
+        if transport == "ws":
+            registrar = f"ws://{self.pbx.host}:{self.pbx.http_port}{ws_path}"
+            await self.cmd({"cmd": "sip_bind_ws", "registrar": registrar,
+                            "user": self.user})
+        else:
+            registrar = f"{self.pbx.host}:{self.pbx.sip_port}"
+            await self.cmd({"cmd": "sip_bind",
+                            "local_uri": f"sip:{self.user}@127.0.0.1:{self.local_port}"})
         await self.wait_event("sip_bound", timeout=8)
         await self.cmd({"cmd": "sip_register",
-                        "registrar": f"{self.pbx.host}:{self.pbx.sip_port}",
+                        "registrar": registrar,
                         "user": self.user, "password": self.password,
                         "expires": expires})
         ev = await self.wait_event("sip_reg_state",
@@ -388,19 +419,76 @@ class RestsendAgent:
                                    timeout=10)
         return ev is not None
 
-    async def publish_idle(self) -> None:
-        await self.cmd({"cmd": "sip_publish", "ready": True})
+    async def publish_idle(self, expires: Optional[int] = None,
+                           refresh: bool = True) -> None:
+        """PUBLISH presence ready=true (note=idle).
+
+        expires: PUBLISH TTL in seconds (rides the SIP Expires header). The
+        PBX only arms its presence-TTL sweeper for identities that actually
+        published — pass a short value in tests that verify the
+        "stopped refreshing presence" offline path.
+        refresh: the engine re-publishes at expires/2 (production shape).
+        Pass False for the single-shot publication shape (publish once,
+        let it go stale while the REGISTER stays alive) used by the
+        presence-TTL sweeper regression tests.
+        """
+        cmd: dict[str, Any] = {"cmd": "sip_publish", "ready": True}
+        if expires is not None:
+            cmd["expires"] = int(expires)
+        if not refresh:
+            cmd["refresh"] = False
+        await self.cmd(cmd)
+
+    async def unregister(self, timeout: float = 8.0) -> bool:
+        """sip_unregister (REGISTER expires=0) — the explicit goodbye.
+
+        The terminal ``sip_reg_state`` must say "unregistered" (periodic
+        REGISTER refreshes may land in the window and are skipped).
+        """
+        await self.cmd({"cmd": "sip_unregister"})
+        ev = await self.wait_event(
+            "sip_reg_state",
+            predicate=lambda e: e.get("reason") == "unregistered",
+            timeout=timeout,
+        )
+        return ev is not None
 
     async def answer(self, timeout: float = 20.0,
                      since: Optional[int] = None) -> bool:
-        """Wait for a `sip_incoming` arriving AFTER `since` (an events-list
-        index captured BEFORE triggering the dial — the INVITE can land on
-        the wire within milliseconds), answer, and wait for `connected`.
-        When `since` is omitted the mark is taken at entry."""
-        mark = len(self.events) if since is None else since
-        if not await self.wait_event_after("sip_incoming", mark, timeout=timeout):
-            return False
+        """Answer the current or next incoming call and wait for `connected`.
+
+        Contracts by caller style (do NOT merge them):
+          * ``since=None`` (legacy, 2026-09-16 contract): answer the
+            UNANSWERED incoming call — the one that already rang (the
+            ring-then-answer callers: wait for `sip_incoming`, then answer)
+            — or, if none has arrived yet, the next one that rings (the
+            dial-then-answer callers). A naive mark-at-entry gate breaks the
+            first style (waits for a second ring that never comes and never
+            sends the answer — regression 2026-09-30) and a blind immediate
+            send breaks the second (the UA sheds an answer with nothing
+            pending). Track the last-answered position so repeated
+            answer() calls on one long-lived agent each target the NEXT
+            fresh incoming.
+          * ``since=<mark>`` (explicit dial marks): wait for a
+            `sip_incoming` appended AFTER `mark`, answer it, and wait for
+            `connected` after `mark` — rejects stale events from earlier
+            calls.
+        """
+        if since is not None:
+            if not await self.wait_event_after("sip_incoming", since, timeout=timeout):
+                return False
+            await self.cmd({"cmd": "sip_answer"})
+            ev = await self.wait_event_after(
+                "state_changed", since,
+                predicate=lambda e: e.get("name") == "connected",
+                timeout=timeout)
+            return ev is not None
+        mark = getattr(self, "_answered_mark", 0)
+        if not self.has_event_after("sip_incoming", mark):
+            if not await self.wait_event_after("sip_incoming", mark, timeout=timeout):
+                return False
         await self.cmd({"cmd": "sip_answer"})
+        self._answered_mark = len(self.events)
         ev = await self.wait_event_after(
             "state_changed", mark,
             predicate=lambda e: e.get("name") == "connected",

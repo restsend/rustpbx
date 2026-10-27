@@ -1,0 +1,1017 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ "releases_page.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6" x-data="releasesPage()">
+    <div class="mx-auto max-w-5xl space-y-6">
+        <header class="space-y-1">
+            <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "nav.releases" | t }}</p>
+            <h1 class="text-2xl font-semibold text-slate-900">{{ "releases_page.title" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "releases_page.subtitle" | t }}</p>
+            <p class="text-xs text-slate-400" x-show="pageTab === 'manage'">{{ "releases_page.api_endpoint_hint" | t }}
+                <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-600">{{ api_prefix | safe }}/release</code>
+            </p>
+        </header>
+
+        <!-- Page tabs: release management / client telemetry (settings-style) -->
+        <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+            <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                role="tablist" aria-label="{{ "releases_page.title" | t }}">
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="pageTab === 'manage' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="pageTab === 'manage'" aria-controls="releases-tab-manage"
+                    @click="pageTab = 'manage'">
+                    <div class="flex flex-col">
+                        <span class="text-sm">{{ "client_reports.tab_manage" | t }}</span>
+                        <span class="text-[11px] font-normal text-slate-400">{{ "client_reports.tab_manage_desc" | t }}</span>
+                    </div>
+                </button>
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="pageTab === 'telemetry' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="pageTab === 'telemetry'" aria-controls="releases-tab-telemetry"
+                    @click="openTelemetry()">
+                    <div class="flex flex-col">
+                        <span class="text-sm">{{ "client_reports.tab_telemetry" | t }}</span>
+                        <span class="text-[11px] font-normal text-slate-400">{{ "client_reports.tab_telemetry_desc" | t }}</span>
+                    </div>
+                </button>
+            </nav>
+        </div>
+
+        <div x-show="pageTab === 'manage'" x-cloak class="space-y-6">
+        <!-- Storage settings -->
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5"
+            x-init="loadStorage()">
+            <div class="mb-4 flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "releases_page.storage_title" | t }}</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">{{ "releases_page.storage_subtitle" | t }}</p>
+                </div>
+                <span class="shrink-0 rounded-full bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500 ring-1 ring-slate-100">
+                    <span x-show="storageSource === 'stored'" x-cloak>{{ "releases_page.storage_source_stored" | t }}</span>
+                    <span x-show="storageSource === 'config'" x-cloak>{{ "releases_page.storage_source_config" | t }}</span>
+                    <span x-show="storageSource === 'default'" x-cloak>{{ "releases_page.storage_source_default" | t }}</span>
+                </span>
+            </div>
+            <div class="space-y-4">
+                <div class="flex items-center gap-4 text-sm text-slate-600">
+                    <span class="text-xs font-medium text-slate-500">{{ "releases_page.storage_type" | t }}</span>
+                    <label class="flex items-center gap-2">
+                        <input type="radio" value="local" x-model="storageDraft.type"
+                            class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.storage_local" | t }}
+                    </label>
+                    <label class="flex items-center gap-2">
+                        <input type="radio" value="s3" x-model="storageDraft.type"
+                            class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.storage_s3" | t }}
+                    </label>
+                </div>
+
+                <!-- local fields -->
+                <div x-show="storageDraft.type === 'local'" x-cloak class="max-w-md">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_path" | t }}</span>
+                        <input type="text" x-model="storageDraft.path"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                </div>
+
+                <!-- s3 fields -->
+                <div x-show="storageDraft.type === 's3'" x-cloak class="space-y-4">
+                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_vendor" | t }}</span>
+                            <select x-model="storageDraft.vendor"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                                <option value="aws">AWS S3</option>
+                                <option value="aliyun">Aliyun OSS</option>
+                                <option value="tencent">Tencent COS</option>
+                                <option value="minio">MinIO</option>
+                                <option value="gcp">Google GCS</option>
+                                <option value="azure">Azure Blob</option>
+                                <option value="digitalocean">DigitalOcean Spaces</option>
+                            </select>
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_bucket" | t }}</span>
+                            <input type="text" x-model="storageDraft.bucket" placeholder="releases"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_region" | t }}</span>
+                            <input type="text" x-model="storageDraft.region" placeholder="us-east-1"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block sm:col-span-2">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_endpoint" | t }}</span>
+                            <input type="text" x-model="storageDraft.endpoint" placeholder="https://s3.amazonaws.com"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_prefix" | t }}</span>
+                            <input type="text" x-model="storageDraft.prefix"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_access_key" | t }}</span>
+                            <input type="password" x-model="storageDraft.access_key" autocomplete="off"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.storage_secret_key" | t }}</span>
+                            <input type="password" x-model="storageDraft.secret_key" autocomplete="off"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-4 text-xs text-slate-500">
+                        <span x-show="storageDraft.has_credentials" x-cloak>{{ "releases_page.storage_has_credentials" | t }}</span>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" x-model="storageDraft.clear_credentials"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_clear_credentials" | t }}
+                        </label>
+                        <span>{{ "releases_page.storage_s3_required_hint" | t }}</span>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                    <button type="button" @click="resetStorage()"
+                        class="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-50">{{ "releases_page.storage_reset" | t }}</button>
+                    <button type="button" @click="saveStorage()" :disabled="storageSaving"
+                        class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        {{ "releases_page.storage_save" | t }}
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Upload form -->
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+            <h2 class="mb-4 text-sm font-semibold text-slate-900">{{ "releases_page.upload_title" | t }}</h2>
+            <form @submit.prevent="upload($event)" class="space-y-4">
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_version" | t }}</span>
+                        <input type="text" name="version" required placeholder="0.1.13"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_file" | t }}</span>
+                        <input type="file" name="file" required
+                            class="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-sky-50 file:px-3 file:py-1.5 file:text-sky-600 hover:file:bg-sky-100" />
+                    </label>
+                </div>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_storage" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="radio" name="storage_choice" value="local" x-model="uploadStorage"
+                                class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_local" | t }}
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="radio" name="storage_choice" value="s3" x-model="uploadStorage"
+                                class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            {{ "releases_page.storage_s3" | t }}
+                        </label>
+                    </div>
+                </div>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_notes" | t }}</span>
+                    <textarea name="release_notes" rows="3"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
+                </label>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="testing" checked
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            testing
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="stable"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            stable
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" name="environments" value="preview"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            preview
+                        </label>
+                        <span class="text-xs text-slate-400">{{ "releases_page.upload_environments_hint" | t }}</span>
+                    </div>
+                </div>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_policy_title" | t }}</span>
+                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
+                            <input type="text" name="window" placeholder="22:00-07:00"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_min_supported" | t }}</span>
+                            <input type="text" name="min_supported" placeholder="0.1.10"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_deadline" | t }}</span>
+                            <input type="text" name="deadline" placeholder="2026-11-01T00:00:00Z"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_equivalent_to" | t }}</span>
+                            <input type="text" name="equivalent_to" placeholder="0.1.13"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                        </label>
+                    </div>
+                    <label class="mt-3 flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" name="force"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_force" | t }}
+                    </label>
+                    <p class="mt-1 text-xs text-slate-400">{{ "releases_page.upload_policy_hint" | t }}</p>
+                    <p class="mt-1 text-xs text-slate-400">{{ "releases_page.upload_equivalent_to_hint" | t }}</p>
+                </div>
+                <div class="flex items-center justify-between">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" name="published" value="true" checked
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_published" | t }}
+                    </label>
+                    <button type="submit" :disabled="uploading"
+                        class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                        </svg>
+                        <span x-text="uploading ? '{{ "releases_page.uploading" | t }}' : '{{ "releases_page.upload_btn" | t }}'"></span>
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Releases list -->
+        <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+            {% if releases %}
+            <table class="min-w-full divide-y divide-slate-100 text-sm">
+                <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-3">{{ "releases_page.col_version" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_size" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_window" | t }}</th>
+                        <th class="px-4 py-3">{{ "releases_page.col_status" | t }}</th>
+                        <th class="hidden px-4 py-3 lg:table-cell">{{ "releases_page.col_created" | t }}</th>
+                        <th class="px-4 py-3 text-right">{{ "releases_page.col_actions" | t }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in releases %}
+                    <tr class="hover:bg-slate-50/60">
+                        <td class="px-4 py-3">
+                            <div class="flex flex-col gap-1">
+                                <div class="flex flex-wrap items-center gap-1">
+                                    <span class="font-semibold text-slate-900">{{ r.version }}</span>
+                                    {% if r.force %}<span class="rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">FORCE</span>{% endif %}
+                                    {% if r.equivalent_to %}<span class="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700" title="{{ 'releases_page.badge_equivalent_to_title' | t }}">≡ {{ r.equivalent_to }}</span>{% endif %}
+                                    {% if r.storage_is_s3 %}
+                                    <span class="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">S3</span>
+                                    {% else %}
+                                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.badge_local" | t }}</span>
+                                    {% endif %}
+                                    {% if r.environments %}
+                                    {% for e in r.environments %}<span class="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{{ e }}</span>{% endfor %}
+                                    {% else %}
+                                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{{ "releases_page.env_all" | t }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="max-w-56 truncate font-mono text-xs text-slate-500" title="{{ r.file_name }}">{{ r.file_name }}</div>
+                            </div>
+                        </td>
+                        <td class="whitespace-nowrap px-4 py-3 text-slate-500" x-text="formatBytes({{ r.file_size }})"></td>
+                        <td class="whitespace-nowrap px-4 py-3">
+                            {% if r.window %}
+                            <span class="rounded bg-amber-50 px-1.5 py-0.5 text-xs font-semibold text-amber-700">{{ r.window }}</span>
+                            {% else %}
+                            <span class="text-xs text-slate-300">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3">
+                            {% if r.published %}
+                            <span title="{{ 'releases_page.status_published' | t }}" class="inline-flex">
+                                <svg class="h-5 w-5 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </span>
+                            {% else %}
+                            <span title="{{ 'releases_page.status_draft' | t }}" class="inline-flex">
+                                <svg class="h-5 w-5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="hidden px-4 py-3 text-xs text-slate-400 lg:table-cell" x-text="fmtTime('{{ r.created_at | default(value='') }}')"></td>
+                        <td class="px-4 py-3">
+                            <div class="flex items-center justify-end gap-1">
+                                <button type="button" @click="openEdit({{ loop.index0 }})"
+                                    title="{{ 'releases_page.action_edit' | t }}" :aria-label="'{{ 'releases_page.action_edit' | t }}'"
+                                    class="rounded-md p-1.5 text-sky-600 transition hover:bg-sky-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+                                    </svg>
+                                </button>
+                                <a href="{{ api_prefix | safe }}/release/{{ r.version }}/download"
+                                    title="{{ 'releases_page.action_download' | t }}" :aria-label="'{{ 'releases_page.action_download' | t }}'"
+                                    class="rounded-md p-1.5 text-sky-600 transition hover:bg-sky-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                                    </svg>
+                                </a>
+                                {% if not r.published %}
+                                <button type="button" @click="togglePublish('{{ r.version }}', {{ r.published }})"
+                                    title="{{ 'releases_page.action_publish' | t }}"
+                                    :aria-label="'{{ 'releases_page.action_publish' | t }}'"
+                                    class="rounded-md p-1.5 text-amber-600 transition hover:bg-amber-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                </button>
+                                {% endif %}
+                                <button type="button" @click="remove('{{ r.version }}')"
+                                    title="{{ 'releases_page.action_delete' | t }}" :aria-label="'{{ 'releases_page.action_delete' | t }}'"
+                                    class="rounded-md p-1.5 text-rose-600 transition hover:bg-rose-50">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="flex flex-col items-center justify-center py-16 text-center">
+                <svg class="h-12 w-12 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p class="mt-3 text-sm text-slate-400">{{ "releases_page.no_releases" | t }}</p>
+            </div>
+            {% endif %}
+        </section>
+        </div><!-- /manage tab -->
+
+        <!-- ══ Client telemetry tab ══ -->
+        <div x-show="pageTab === 'telemetry'" x-cloak class="space-y-6" x-init="null">
+            <!-- controls -->
+            <section class="flex flex-wrap items-end gap-4 rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.from" | t }}</span>
+                    <input type="date" x-model="tlFrom"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.to" | t }}</span>
+                    <input type="date" x-model="tlTo"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_event" | t }}</span>
+                    <select x-model="tlEvent"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <template x-for="e in summary.by_event || []" :key="e.event">
+                            <option :value="e.event" x-text="(eventLabels[e.event] || e.event) + ' (' + e.count + ')'"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_version" | t }}</span>
+                    <select x-model="tlVersion"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <template x-for="v in summary.by_version || []" :key="v.version">
+                            <option :value="v.version" x-text="v.version + ' (' + v.count + ')'"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "client_reports.filter_env" | t }}</span>
+                    <select x-model="tlEnv"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100">
+                        <option value="">{{ "client_reports.filter_all" | t }}</option>
+                        <option value="testing">testing</option>
+                        <option value="stable">stable</option>
+                        <option value="preview">preview</option>
+                    </select>
+                </label>
+                <button type="button" @click="loadTelemetry()"
+                    class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500">
+                    {{ "client_reports.refresh" | t }}
+                </button>
+                <a :href="exportUrl()" target="_blank" rel="noopener"
+                    class="inline-flex items-center rounded-lg px-4 py-2 text-sm font-medium text-sky-600 ring-1 ring-sky-200 transition hover:bg-sky-50">
+                    {{ "client_reports.export_csv" | t }}
+                </a>
+            </section>
+
+            <!-- KPI cards -->
+            <section class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_total" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.total ?? '-'"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_abnormal" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold" :class="(summary.abnormal || 0) > 0 ? 'text-rose-600' : 'text-emerald-600'"
+                        x-text="(summary.abnormal ?? '-') + ((summary.abnormal_pct != null) ? ' (' + summary.abnormal_pct.toFixed(1) + '%)' : '')"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_update_checks" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.update_checks ?? '-'"></p>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <p class="text-xs font-medium text-slate-500">{{ "client_reports.kpi_versions" | t }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900" x-text="summary.versions ?? '-'"></p>
+                    <p class="text-[11px] text-slate-400">{{ "client_reports.kpi_agents_hint" | t }}
+                        <span x-text="summary.agents ?? '-'"></span></p>
+                </div>
+            </section>
+
+            <!-- trend bars + distributions -->
+            <section class="grid gap-4 lg:grid-cols-3">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5 lg:col-span-2">
+                    <h2 class="mb-4 text-sm font-semibold text-slate-900">{{ "client_reports.trend_title" | t }}</h2>
+                    <div class="flex h-40 items-end gap-1" x-show="trend.length">
+                        <template x-for="(p, i) in trend" :key="i">
+                            <div class="group relative flex flex-1 flex-col items-center justify-end gap-0.5"
+                                :title="bucketLabel(p) + ': ' + p.total + ' / ' + p.abnormal">
+                                <div class="w-full max-w-6 rounded-t bg-rose-400" :style="'height:' + barH(p.abnormal) + 'px'"></div>
+                                <div class="w-full max-w-6 rounded-b bg-sky-400" :style="'height:' + barH(p.total - p.abnormal) + 'px'"></div>
+                            </div>
+                        </template>
+                    </div>
+                    <p x-show="!trend.length" class="py-12 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    <div class="mt-3 flex items-center gap-4 text-xs text-slate-500">
+                        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-sky-400"></span>{{ "client_reports.legend_normal" | t }}</span>
+                        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-rose-400"></span>{{ "client_reports.legend_abnormal" | t }}</span>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_event" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <tbody>
+                                <template x-for="e in (summary.by_event || []).slice(0, 8)" :key="e.event">
+                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlEvent = e.event; loadTelemetry()">
+                                        <td class="py-1.5 pr-2">
+                                            <span x-text="eventLabels[e.event] || e.event"
+                                                :class="e.abnormal ? 'text-rose-600' : 'text-slate-600'"></span>
+                                        </td>
+                                        <td class="py-1.5 text-right font-medium" x-text="e.count"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                        <p x-show="!(summary.by_event || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    </div>
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-900">{{ "client_reports.by_version" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <tbody>
+                                <template x-for="v in (summary.by_version || []).slice(0, 6)" :key="v.version">
+                                    <tr class="cursor-pointer hover:bg-slate-50/60" @click="tlVersion = v.version; loadTelemetry()">
+                                        <td class="py-1.5 pr-2">
+                                            <span class="font-mono text-xs text-slate-600" x-text="v.version"></span>
+                                            <span class="whitespace-nowrap">
+                                                <template x-for="(cnt, envName) in (v.envs || {})" :key="envName">
+                                                    <span class="ml-1 rounded px-1 py-0.5 text-[10px] font-medium"
+                                                        :class="envBadgeClass(envName)"
+                                                        x-text="envName + ' ' + cnt"></span>
+                                                </template>
+                                            </span>
+                                        </td>
+                                        <td class="py-1.5 text-right font-medium" x-text="v.count"></td>
+                                        <td class="py-1.5 pl-2 text-right text-xs text-slate-400">
+                                            <span x-show="v.update_checks" x-text="v.update_checks + ' ✓'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                        <p x-show="!(summary.by_version || []).length" class="py-4 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- recent reports -->
+            <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "client_reports.recent_title" | t }}</h2>
+                    <div class="flex items-center gap-2 text-xs text-slate-500">
+                        <label for="telemetry-agent-filter">{{ "client_reports.col_agent" | t }}</label>
+                        <input id="telemetry-agent-filter" type="text" x-model="tlAgent" @keydown.enter="loadTelemetry()"
+                            class="w-32 rounded-lg border border-slate-200 px-2 py-1 text-sm focus:border-sky-400 focus:outline-none" />
+                        <button type="button" @click="loadTelemetry()" class="font-medium text-sky-600 hover:text-sky-500">{{ "client_reports.refresh" | t }}</button>
+                    </div>
+                </div>
+                <table class="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_time" | t }}</th>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_event" | t }}</th>
+                            <th class="px-4 py-2.5">{{ "client_reports.col_version" | t }}</th>
+                            <th class="hidden px-4 py-2.5 md:table-cell">{{ "client_reports.col_agent" | t }}</th>
+                            <th class="hidden px-4 py-2.5 lg:table-cell">{{ "client_reports.col_os" | t }}</th>
+                            <th class="hidden px-4 py-2.5 lg:table-cell">{{ "client_reports.col_call" | t }}</th>
+                            <th class="px-4 py-2.5 text-right">{{ "client_reports.col_actions" | t }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="r in reports" :key="r.id">
+                            <tr class="hover:bg-slate-50/60">
+                                <td class="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500" x-text="fmtTime(r.created_at)"></td>
+                                <td class="px-4 py-2.5">
+                                    <span class="rounded px-1.5 py-0.5 text-xs font-medium"
+                                        :class="r.abnormal ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-600'"
+                                        x-text="eventLabels[r.event] || r.event"></span>
+                                </td>
+                                <td class="px-4 py-2.5 font-mono text-xs text-slate-600" x-text="r.version"></td>
+                                <td class="hidden px-4 py-2.5 text-slate-600 md:table-cell" x-text="r.data?.agent_id || r.data?.sip_user || '-'"></td>
+                                <td class="hidden px-4 py-2.5 text-xs text-slate-500 lg:table-cell" x-text="[r.data?.os, r.data?.arch].filter(Boolean).join('/') || '-'"></td>
+                                <td class="hidden max-w-32 truncate px-4 py-2.5 font-mono text-xs text-slate-400 lg:table-cell" x-text="r.data?.call_id || '-'" :title="r.data?.call_id || ''"></td>
+                                <td class="px-4 py-2.5 text-right">
+                                    <button type="button" @click="openBody(r)"
+                                        class="rounded-md px-2 py-1 text-xs font-medium text-sky-600 hover:bg-sky-50">{{ "client_reports.view" | t }}</button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+                <p x-show="tlListError" role="alert" class="px-4 py-3 text-sm text-rose-600" x-text="tlListError"></p>
+                <p x-show="!reports.length && !tlListLoading && !tlListError" class="py-10 text-center text-sm text-slate-400">{{ "client_reports.no_data" | t }}</p>
+                <div x-show="tlListLoading || tlNextBeforeId != null" class="border-t border-slate-100 px-4 py-3 text-center">
+                    <button type="button" @click="loadMoreReports()" :disabled="tlListLoading"
+                        class="rounded-md px-3 py-1.5 text-sm font-medium text-sky-600 hover:bg-sky-50 disabled:opacity-50">{{ "client_reports.view" | t }} ↓</button>
+                </div>
+            </section>
+        </div><!-- /telemetry tab -->
+    </div>
+
+    <!-- Telemetry body modal -->
+    <div x-show="tlOpen" x-cloak class="fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-slate-900/40" @click="tlOpen = false"></div>
+        <div x-show="tlOpen" x-transition
+            class="relative mx-auto mt-12 flex w-[92%] max-w-3xl flex-col rounded-xl bg-white p-5 shadow-xl ring-1 ring-black/5" style="max-height:85vh">
+            <div class="mb-3 flex items-start justify-between gap-4">
+                <h2 class="text-sm font-semibold text-slate-900">
+                    {{ "client_reports.body_title" | t }}
+                    <span class="ml-1 font-mono text-sky-600" x-text="tlBody?.id"></span>
+                </h2>
+                <button type="button" @click="tlOpen = false" class="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <div class="mb-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                <span x-text="tlBody?.row ? (eventLabels[tlBody.row.event] || tlBody.row.event) : ''"></span>
+                <span x-text="tlBody?.row ? tlBody.row.version : ''" class="font-mono"></span>
+                <span x-text="tlBody?.row ? fmtTime(tlBody.row.created_at) : ''"></span>
+                <button type="button" x-show="tlBody && !tlBody.full && tlBody.nextOffset != null" @click="loadFullBody()" :disabled="tlBody?.loading"
+                    class="ml-auto rounded-md bg-sky-50 px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-100 disabled:opacity-50">
+                    {{ "client_reports.view" | t }} ↓
+                </button>
+                <button type="button" @click="downloadBody()" :disabled="tlBody?.downloading"
+                    class="rounded-md px-2.5 py-1 font-medium text-sky-600 hover:bg-sky-50 disabled:opacity-50">{{ "releases_page.action_download" | t }}</button>
+            </div>
+            <p x-show="tlBody && !tlBody.full" class="mb-2 text-xs text-amber-700">… {{ "client_reports.load_full" | t }} ↓</p>
+            <p x-show="tlBody?.totalBytes != null" class="mb-2 font-mono text-xs text-slate-500" x-text="(tlBody?.loadedBytes ?? 0) + ' / ' + tlBody?.totalBytes + ' B'"></p>
+            <p x-show="tlBody?.error" role="alert" class="mb-2 text-xs text-rose-600" x-text="tlBody?.error"></p>
+            <pre class="flex-1 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 font-mono text-xs leading-relaxed text-slate-700 ring-1 ring-slate-100" x-text="tlBody?.text || '{{ "client_reports.body_empty" | t }}'"></pre>
+        </div>
+    </div>
+
+    <!-- Edit release modal -->
+    <div x-show="editOpen" x-cloak class="fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-slate-900/40" @click="editOpen = false"></div>
+        <div x-show="editOpen" x-transition
+            class="relative mx-auto mt-16 max-h-[85vh] w-[92%] max-w-xl overflow-y-auto rounded-xl bg-white p-5 shadow-xl ring-1 ring-black/5">
+            <h2 class="mb-4 text-sm font-semibold text-slate-900">
+                {{ "releases_page.edit_title" | t }}
+                <span class="ml-1 font-mono text-sky-600" x-text="editVersion"></span>
+            </h2>
+            <form @submit.prevent="saveEdit()" class="space-y-4">
+                <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_notes" | t }}</span>
+                    <textarea rows="3" x-model="editDraft.release_notes"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"></textarea>
+                </label>
+                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_window" | t }}</span>
+                        <input type="text" x-model="editDraft.window" placeholder="22:00-07:00"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_min_supported" | t }}</span>
+                        <input type="text" x-model="editDraft.min_supported" placeholder="0.1.10"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_deadline" | t }}</span>
+                        <input type="text" x-model="editDraft.deadline" placeholder="2026-11-01T00:00:00Z"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                    <label class="block">
+                        <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_equivalent_to" | t }}</span>
+                        <input type="text" x-model="editDraft.equivalent_to" placeholder="0.1.13"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100" />
+                    </label>
+                </div>
+                <p class="text-xs text-slate-400">{{ "releases_page.upload_equivalent_to_hint" | t }}</p>
+                <p class="text-xs text-slate-400">{{ "releases_page.upload_window_hint" | t }}</p>
+                <div>
+                    <span class="mb-1 block text-xs font-medium text-slate-500">{{ "releases_page.upload_environments" | t }}</span>
+                    <div class="flex items-center gap-4 text-sm text-slate-600">
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="testing" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            testing
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="stable" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            stable
+                        </label>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" value="preview" x-model="editDraft.environments"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                            preview
+                        </label>
+                        <span class="text-xs text-slate-400">{{ "releases_page.upload_environments_hint" | t }}</span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-6">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" x-model="editDraft.published"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_published" | t }}
+                    </label>
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" x-model="editDraft.force"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-100" />
+                        {{ "releases_page.upload_force" | t }}
+                    </label>
+                </div>
+                <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                    <button type="button" @click="editOpen = false"
+                        class="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-50">{{ "releases_page.edit_cancel" | t }}</button>
+                    <button type="submit" :disabled="editSaving"
+                        class="inline-flex items-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60">
+                        <span x-text="editSaving ? '{{ "releases_page.edit_saving" | t }}' : '{{ "releases_page.edit_save" | t }}'"></span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+    function releasesPage() {
+        return {
+            pageTab: 'manage',
+            releases: {{ releases | json | safe }},
+            uploading: false,
+            storageSaving: false,
+            // ── client telemetry ──
+            tlFrom: '',
+            tlTo: '',
+            tlEvent: '',
+            tlVersion: '',
+            tlEnv: '',
+            tlAgent: '',
+            tlNextBeforeId: null,
+            tlListQuery: '',
+            tlListRequest: 0,
+            tlListLoading: false,
+            tlListError: '',
+            summary: {},
+            trend: [],
+            reports: [],
+            tlOpen: false,
+            tlBody: null,
+            eventLabels: {
+                login_fail: '{{ "client_reports.ev_login_fail" | t }}',
+                dial_fail: '{{ "client_reports.ev_dial_fail" | t }}',
+                answer_fail: '{{ "client_reports.ev_answer_fail" | t }}',
+                panic: '{{ "client_reports.ev_panic" | t }}',
+                crash_marker: '{{ "client_reports.ev_crash_marker" | t }}',
+                engine_exit: '{{ "client_reports.ev_engine_exit" | t }}',
+                manual_upload: '{{ "client_reports.ev_manual_upload" | t }}',
+                diag_run: '{{ "client_reports.ev_diag_run" | t }}',
+                link_lost: '{{ "client_reports.ev_link_lost" | t }}',
+                call_abnormal: '{{ "client_reports.ev_call_abnormal" | t }}',
+                update_success: '{{ "client_reports.ev_update_success" | t }}',
+                update_fail: '{{ "client_reports.ev_update_fail" | t }}',
+                update_download_fail: '{{ "client_reports.ev_update_download_fail" | t }}',
+                update_progress: '{{ "client_reports.ev_update_progress" | t }}',
+                update_manual_report: '{{ "client_reports.ev_update_manual_report" | t }}',
+                update_check: '{{ "client_reports.ev_update_check" | t }}',
+            },
+            storageSource: 'default',
+            storageDraft: {
+                type: 'local', path: 'storage/releases',
+                vendor: 'minio', bucket: '', region: '', endpoint: '', prefix: '',
+                access_key: '', secret_key: '', has_credentials: false, clear_credentials: false,
+            },
+            uploadStorage: 'local',
+            editOpen: false,
+            editSaving: false,
+            editVersion: '',
+            // Initialize every field — especially the environments ARRAY.
+            // Alpine coerces a nested-undefined model to '' on first bind,
+            // which clobbers the checkbox `value` attributes and makes the
+            // whole group toggle together.
+            editDraft: {
+                release_notes: '',
+                published: false,
+                force: false,
+                window: '',
+                min_supported: '',
+                deadline: '',
+                equivalent_to: '',
+                environments: [],
+            },
+            formatBytes(bytes) {
+                if (!bytes || bytes <= 0) return '-';
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let v = bytes, i = 0;
+                while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+                return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+            },
+            async loadStorage() {
+                try {
+                    const s = await apiGet('/release/storage');
+                    this.storageSource = s.source || 'default';
+                    this.uploadStorage = s.type === 's3' ? 's3' : 'local';
+                    this.storageDraft = {
+                        type: s.type === 's3' ? 's3' : 'local',
+                        path: s.path || 'storage/releases',
+                        vendor: s.vendor || 'minio',
+                        bucket: s.bucket || '',
+                        region: s.region || '',
+                        endpoint: s.endpoint || '',
+                        prefix: s.prefix || '',
+                        access_key: '',
+                        secret_key: '',
+                        has_credentials: !!s.has_credentials,
+                        clear_credentials: false,
+                    };
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            async saveStorage() {
+                const d = this.storageDraft;
+                const body = d.type === 'local'
+                    ? { type: 'local', path: d.path }
+                    : {
+                        type: 's3', vendor: d.vendor, bucket: d.bucket, region: d.region,
+                        endpoint: d.endpoint, prefix: d.prefix,
+                        access_key: d.access_key, secret_key: d.secret_key,
+                        clear_credentials: d.clear_credentials,
+                    };
+                this.storageSaving = true;
+                try {
+                    await apiPut('/release/storage', body);
+                    location.reload();
+                } catch (e) {
+                    this.storageSaving = false;
+                }
+            },
+            async resetStorage() {
+                if (!confirm('{{ "releases_page.storage_reset_confirm" | t }}')) return;
+                try {
+                    await apiDelete('/release/storage');
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            async upload(event) {
+                const form = event.target;
+                const fd = new FormData(form);
+                fd.set('published', form.querySelector('[name=published]').checked ? 'true' : 'false');
+                fd.set('force', form.querySelector('[name=force]').checked ? 'true' : 'false');
+                fd.set('storage', this.uploadStorage);
+                this.uploading = true;
+                try {
+                    await apiPost('/release', fd);
+                    location.reload();
+                } catch (e) {
+                    this.uploading = false;
+                }
+            },
+            async togglePublish(version, published) {
+                try {
+                    await apiPut('/release/' + encodeURIComponent(version), { published: !published });
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            async remove(version) {
+                if (!confirm('{{ "releases_page.confirm_delete" | t }}')) return;
+                try {
+                    await apiDelete('/release/' + encodeURIComponent(version));
+                    location.reload();
+                } catch (e) { /* surfaced by api.js */ }
+            },
+            openEdit(index) {
+                const r = this.releases[index];
+                if (!r) return;
+                this.editVersion = r.version;
+                this.editDraft = {
+                    release_notes: r.release_notes || '',
+                    published: !!r.published,
+                    force: !!r.force,
+                    window: r.window || '',
+                    min_supported: r.min_supported || '',
+                    deadline: r.deadline || '',
+                    equivalent_to: r.equivalent_to || '',
+                    environments: r.environments ? [...r.environments] : [],
+                };
+                this.editOpen = true;
+            },
+            // ── client telemetry ──
+            tlQuery() {
+                const p = new URLSearchParams({ from: this.tlFrom, to: this.tlTo, bucket: 'day' });
+                if (this.tlEnv) p.set('env', this.tlEnv);
+                return p.toString();
+            },
+            async openTelemetry() {
+                this.pageTab = 'telemetry';
+                if (!this.tlFrom) {
+                    const today = new Date();
+                    const weekAgo = new Date(Date.now() - 6 * 86400000);
+                    this.tlTo = today.toISOString().slice(0, 10);
+                    this.tlFrom = weekAgo.toISOString().slice(0, 10);
+                }
+                await this.loadTelemetry();
+            },
+            async loadTelemetry() {
+                const request = ++this.tlListRequest;
+                const qs = this.tlQuery();
+                const extra = new URLSearchParams(qs);
+                if (this.tlEvent) extra.set('event', this.tlEvent);
+                if (this.tlVersion) extra.set('version', this.tlVersion);
+                if (this.tlAgent.trim()) extra.set('agent_id', this.tlAgent.trim());
+                extra.set('limit', '50');
+                this.tlListQuery = extra.toString();
+                this.reports = [];
+                this.tlNextBeforeId = null;
+                this.tlListLoading = false;
+                this.tlListError = '';
+                await Promise.all([
+                    Promise.all([
+                        apiGet('/client-reports/summary?' + qs),
+                        apiGet('/client-reports/trend?' + qs),
+                    ]).then(([summary, trend]) => {
+                        if (request !== this.tlListRequest) return;
+                        this.summary = summary.data || {};
+                        this.trend = trend.data || [];
+                    }).catch(() => { /* surfaced by api.js */ }),
+                    this.loadMoreReports(true),
+                ]);
+            },
+            async loadMoreReports(reset = false) {
+                if (this.tlListLoading || (!reset && this.tlNextBeforeId == null)) return;
+                const request = this.tlListRequest;
+                const query = new URLSearchParams(this.tlListQuery);
+                if (!reset) query.set('before_id', this.tlNextBeforeId);
+                this.tlListLoading = true;
+                this.tlListError = '';
+                try {
+                    const list = await apiGet('/client-reports/list?' + query);
+                    if (request !== this.tlListRequest) return;
+                    this.reports = reset ? (list.data || []) : [...this.reports, ...(list.data || [])];
+                    this.tlNextBeforeId = list.next_before_id ?? null;
+                } catch (e) {
+                    if (request === this.tlListRequest) this.tlListError = e.message;
+                } finally {
+                    if (request === this.tlListRequest) this.tlListLoading = false;
+                }
+            },
+            exportUrl() {
+                return (window.apiPrefix || '{{ api_prefix | safe }}') + '/client-reports/export?' + this.tlQuery();
+            },
+            maxTrend() {
+                return Math.max(1, ...this.trend.map((p) => p.total || 0));
+            },
+            barH(v) {
+                return Math.max(v > 0 ? 3 : 0, Math.round((v / this.maxTrend()) * 120));
+            },
+            bucketLabel(p) {
+                return (p.bucket_start || '').slice(0, 10);
+            },
+            envBadgeClass(env) {
+                const e = (env || '').toLowerCase();
+                if (e === 'stable') return 'bg-emerald-50 text-emerald-700';
+                if (e === 'testing') return 'bg-amber-50 text-amber-700';
+                if (e === 'preview') return 'bg-violet-50 text-violet-700';
+                return 'bg-slate-100 text-slate-500';
+            },
+            fmtTime(ts) {
+                if (!ts) return '-';
+                const d = new Date(ts);
+                return isNaN(d) ? ts : d.toLocaleString();
+            },
+            async openBody(row) {
+                this.tlBody = {
+                    id: row.id,
+                    row,
+                    text: row.data?.body_preview || '',
+                    full: false,
+                    nextOffset: 0,
+                    loadedBytes: 0,
+                    totalBytes: null,
+                    loading: false,
+                    downloading: false,
+                    error: '',
+                };
+                this.tlOpen = true;
+            },
+            async loadFullBody() {
+                const body = this.tlBody;
+                if (!body || body.loading || body.full) return;
+                const offset = body.nextOffset;
+                body.loading = true;
+                body.error = '';
+                try {
+                    const page = await apiGet('/client-reports/body?id=' + body.id + '&offset=' + offset);
+                    if (this.tlBody !== body) return;
+                    if (typeof page.text !== 'string') throw new Error(page.reason || '{{ "client_reports.body_empty" | t }}');
+                    body.text = offset === 0 ? page.text : body.text + page.text;
+                    body.nextOffset = page.next_offset ?? null;
+                    body.totalBytes = page.total_bytes ?? null;
+                    body.loadedBytes = body.nextOffset ?? body.totalBytes;
+                    // Older servers can signal truncation without a cursor.
+                    // Keep that visibly incomplete; full download remains available.
+                    body.full = !page.truncated && body.nextOffset == null;
+                } catch (e) {
+                    if (this.tlBody === body) body.error = e.message;
+                } finally {
+                    body.loading = false;
+                }
+            },
+            async downloadBody() {
+                const body = this.tlBody;
+                if (!body || body.downloading) return;
+                body.downloading = true;
+                body.error = '';
+                try {
+                    // apiGet retains the console's authentication/error handling
+                    // and returns the raw Response for this text attachment.
+                    const response = await apiGet('/client-reports/body?id=' + body.id + '&download=true');
+                    const url = URL.createObjectURL(await response.blob());
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = 'client-report-' + body.id + '.txt';
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                } catch (e) {
+                    if (this.tlBody === body) body.error = e.message;
+                } finally {
+                    body.downloading = false;
+                }
+            },
+            async saveEdit() {
+                const d = this.editDraft;
+                const trim = (v) => (v || '').trim();
+                // Send fields explicitly: an empty string clears the stored
+                // value, an empty environments array means "all environments".
+                const body = {
+                    release_notes: trim(d.release_notes),
+                    published: !!d.published,
+                    force: !!d.force,
+                    window: trim(d.window),
+                    min_supported: trim(d.min_supported),
+                    deadline: trim(d.deadline),
+                    equivalent_to: trim(d.equivalent_to),
+                    environments: d.environments,
+                };
+                this.editSaving = true;
+                try {
+                    await apiPut('/release/' + encodeURIComponent(this.editVersion), body);
+                    location.reload();
+                } catch (e) {
+                    this.editSaving = false;
+                }
+            },
+        };
+    }
+</script>
+{% endblock %}

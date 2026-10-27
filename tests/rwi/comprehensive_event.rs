@@ -202,6 +202,8 @@ async fn test_comprehensive_core_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallCreated {
+                leg_id: None,
+                leg_role: None,
                 call_id: call_id.into(),
                 context: "default".into(),
                 caller: "sip:alice@test.local".into(),
@@ -225,14 +227,16 @@ async fn test_comprehensive_core_event_structs() {
                 early_media: false,
                 agent_id: None,
                 agent_name: None,
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: call_id.into(),
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
@@ -268,6 +272,9 @@ async fn test_comprehensive_core_event_structs() {
                 call_id: call_id.into(),
                 queue_id: "support".into(),
                 skill_groups: Some(vec!["support".into()]),
+                priority: None,
+                attempt: None,
+                agent_id: None,
             },
         );
         gw.fan_out(
@@ -371,6 +378,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::MediaPlayStarted {
                 call_id: call_id.into(),
                 leg_id: None,
+                leg_role: None,
                 track_id: "prompt-1".into(),
             },
         );
@@ -379,6 +387,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::MediaPlayFinished {
                 call_id: call_id.into(),
                 leg_id: None,
+                leg_role: None,
                 track_id: "prompt-1".into(),
                 interrupted: false,
             },
@@ -390,18 +399,21 @@ async fn test_comprehensive_core_event_structs() {
                 digit: "1".into(),
                 leg_id: None,
                 extra: None,
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallHangup {
                 leg_id: None,
                 call_id: call_id.into(),
+                scope: rustpbx::rwi::CallHangupScope::Call,
                 reason: Some("normal".into()),
                 hangup_by: None,
                 sip_status: Some(200),
                 duration_secs: None,
-            },
+                leg_role: None,
+},
         );
 
         gw.broadcast(&rustpbx::rwi::ConferenceCreated {
@@ -503,7 +515,8 @@ async fn test_new_api_event_structs() {
             early_media: false,
             agent_id: None,
             agent_name: None,
-        });
+            leg_role: None,
+});
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -515,11 +528,13 @@ async fn test_new_api_event_structs() {
         gw.broadcast(&rustpbx::rwi::CallHangup {
             leg_id: None,
             call_id: call_id.into(),
+            scope: rustpbx::rwi::CallHangupScope::Call,
             reason: Some("normal".into()),
             hangup_by: None,
             sip_status: Some(200),
             duration_secs: None,
-        });
+            leg_role: None,
+});
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -533,7 +548,8 @@ async fn test_new_api_event_structs() {
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: call_id.into(),
-            },
+                leg_role: None,
+},
         );
     }
 
@@ -634,6 +650,9 @@ async fn test_new_cc_event_structs() {
         call_id: "c1".into(),
         queue_id: "q1".into(),
         skill_groups: Some(vec!["q1".into()]),
+        priority: None,
+        attempt: None,
+        agent_id: None,
     });
     gw.broadcast(&rustpbx::addons::cc::cc_events::AgentRegistered {
         agent_id: "a2".into(),

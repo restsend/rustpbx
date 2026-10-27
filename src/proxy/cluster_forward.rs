@@ -426,7 +426,10 @@ mod tests {
         ) -> Result<(), crate::call::runtime::RegistryError> {
             Ok(())
         }
-        async fn unregister(&self, _call_id: &str) -> Result<(), crate::call::runtime::RegistryError> {
+        async fn unregister(
+            &self,
+            _info: &crate::call::runtime::SessionInfo,
+        ) -> Result<(), crate::call::runtime::RegistryError> {
             Ok(())
         }
         async fn heartbeat_node(
@@ -522,13 +525,16 @@ mod tests {
     }
 
     /// `routed_op_on_owner` must POST the op body to the peer owning the
-    /// session (resolved via the session registry) — this is the path the
-    /// console's user-data forwarding uses when the REST request lands on a
-    /// non-owner node.
+    /// canonical session even when a dialog alias uses the same ID. Exercise
+    /// both registration orders and ensure alias cleanup preserves the owner.
+    /// Optional database URLs must point to isolated registry-test databases.
     #[tokio::test]
     async fn routed_op_posts_to_owning_peer() {
-        use crate::call::runtime::{MemorySessionRegistry, SessionInfo};
+        use crate::call::runtime::{
+            DbSessionRegistry, MemorySessionRegistry, SessionGuard, SessionInfo, SessionRegistryRef,
+        };
         use axum::{Json, Router, extract::State, routing::post};
+        use sea_orm::ConnectionTrait;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
         async fn capture(
@@ -540,7 +546,7 @@ mod tests {
             Json(serde_json::json!({"ok": true}))
         }
         let app: Router = Router::new()
-            .route("/cluster/set_userdata", post(capture))
+            .route("/cluster/dispatch_command", post(capture))
             .with_state(tx);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -548,39 +554,116 @@ mod tests {
             axum::serve(listener, app).await.ok();
         });
 
-        let registry: crate::call::runtime::SessionRegistryRef = MemorySessionRegistry::new(
-            "127.0.0.1:5060",
-            std::time::Duration::from_secs(60),
-            std::time::Duration::from_secs(3600),
-        );
-        registry
-            .register(&SessionInfo::new("sess-1", "127.0.0.1:5060"))
-            .await
-            .unwrap();
-
         let peers = vec![peer("127.0.0.1", 5060, port)];
-        let op = UserdataOp::Set(serde_json::json!({"crm_id":"C-1"}));
-        let resp = match routed_op_on_owner(
-            &registry,
-            &peers,
-            None,
-            "",
-            &reqwest::Client::new(),
-            "sess-1",
-            &op,
-        )
-        .await
-        {
-            OwnerOpOutcome::Applied(status, body) => Some((status, body)),
-            _ => None,
-        };
-        assert_eq!(resp.as_ref().map(|(s, _)| s.as_u16()), Some(200));
-        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("dispatch must reach the owning peer")
-            .expect("body captured");
-        assert_eq!(got["session_id"], "sess-1");
-        assert_eq!(got["data"]["crm_id"], "C-1");
+        let mut failures = Vec::new();
+        let mysql_url = std::env::var("RUSTPBX_TEST_MYSQL_URL").ok();
+        let postgres_url = std::env::var("RUSTPBX_TEST_POSTGRES_URL").ok();
+        let mut backends = vec!["memory", "sqlite"];
+        for (backend, url) in [
+            ("mysql", mysql_url.as_deref()),
+            ("postgres", postgres_url.as_deref()),
+        ] {
+            if let Some(url) = url {
+                let url = url::Url::parse(url)
+                    .unwrap_or_else(|_| panic!("invalid {backend} test URL"));
+                assert!(
+                    url.path().starts_with("/rustpbx_registrytest_"),
+                    "{backend} regression requires an isolated rustpbx_registrytest_ database"
+                );
+                backends.push(backend);
+            }
+        }
+        for backend in backends {
+            for alias_first in [false, true] {
+                let registry: SessionRegistryRef = if backend != "memory" {
+                    let url = match backend {
+                        "mysql" => mysql_url.as_deref().unwrap(),
+                        "postgres" => postgres_url.as_deref().unwrap(),
+                        _ => "sqlite::memory:",
+                    };
+                    let db = sea_orm::Database::connect(url)
+                        .await
+                        .unwrap_or_else(|_| panic!("failed to connect isolated registry database"));
+                    let mut table = sea_orm::Schema::new(db.get_database_backend())
+                        .create_table_from_entity(crate::models::cluster_session::Entity);
+                    table.if_not_exists();
+                    db.execute_raw(db.get_database_backend().build(&table))
+                        .await
+                        .unwrap();
+                    DbSessionRegistry::new(
+                        db,
+                        std::time::Duration::from_secs(60),
+                        std::time::Duration::from_secs(3600),
+                    )
+                } else {
+                    MemorySessionRegistry::new(
+                        "127.0.0.1:5060",
+                        std::time::Duration::from_secs(60),
+                        std::time::Duration::from_secs(3600),
+                    )
+                };
+                let alias = SessionInfo::dialog_alias("sess-1", "forwarded-session", "other-node");
+                let mut alias_guard = if alias_first {
+                    Some(
+                        SessionGuard::register(registry.clone(), alias.clone())
+                            .await
+                            .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let owner = SessionGuard::register(
+                    registry.clone(),
+                    SessionInfo::new("sess-1", "127.0.0.1:5060"),
+                )
+                .await
+                .unwrap();
+                if !alias_first {
+                    alias_guard = Some(
+                        SessionGuard::register(registry.clone(), alias)
+                            .await
+                            .unwrap(),
+                    );
+                }
+                let op = ConsoleCommandOp {
+                    payload: serde_json::json!({"action": "hangup"}),
+                };
+                let routed = routed_op_on_owner(
+                    &registry,
+                    &peers,
+                    Some("other-node"),
+                    "",
+                    &reqwest::Client::new(),
+                    "sess-1",
+                    &op,
+                )
+                .await;
+                if !matches!(routed, OwnerOpOutcome::Applied(status, _) if status.as_u16() == 200) {
+                    failures.push(format!(
+                        "backend={backend} alias_first={alias_first}: {routed:?}"
+                    ));
+                } else {
+                    let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(got["session_id"], "sess-1");
+                    assert_eq!(got["payload"]["action"], "hangup");
+                }
+                alias_guard.unwrap().release().await.unwrap();
+                if registry.lookup_owner("sess-1").await.as_deref() != Some("127.0.0.1:5060") {
+                    failures.push(format!(
+                        "backend={backend} alias_first={alias_first}: alias removed canonical owner"
+                    ));
+                }
+                owner.release().await.unwrap();
+                assert!(registry.lookup_owner("sess-1").await.is_none());
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "canonical command routing/cleanup failed: {failures:?}"
+        );
     }
 
     fn count(hits: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> usize {

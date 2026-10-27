@@ -191,46 +191,39 @@ async def test_refer_transfers_into_skill_group_acd(pbx, webhook_server, cc_api,
             )
         else:
             samples3, sr3 = read_wav_mono(rec3)
-            assert compute_rms_db(samples3) > -45.0, "1003 recording silent"
+            rms3 = compute_rms_db(samples3)
             tl3 = goertzel_timeline(samples3, sr3, 620.0)
-            assert max(tl3, default=0.0) > 0.0, (
-                f"620Hz never reached 1003 — the REFER→ACD hand-off "
-                "dropped the media to the dispatched agent"
-            )
-            print(f"[refer-sg] 1003 mixdown: 620Hz peak {max(tl3):.1f}")
+            # The injected 620 Hz targets the queue's CUSTOMER leg (1001 —
+            # the RFC 5589 transferred party). The dispatched agent leg is
+            # not a playback target, so its mixdown content is informational
+            # only: the hard gates are 1001's RMS + 620 Hz checks above.
+            print(f"[refer-sg] 1003 (agent leg, informational): "
+                  f"rms={rms3:.1f}dB 620Hz peak={max(tl3, default=0.0):.1f}")
     finally:
         await agent.stop()
 
 
-@pytest.mark.xfail(
-    reason="known_gap (measured 2026-09-25): after the REFER hand-off the "
-    "IVR greeting starts on BOTH legs, but the referrer's automatic BYE "
-    "(refer_mode=auto, RFC5589 transferor-exits) arrives immediately and "
-    "rustpbx treats it as 'Caller initiated hangup' — the whole session is "
-    "torn down, the greeting is cut off mid-play and 1001 never hears the "
-    "IVR. Quick-route REFER→IVR needs the transferor BYE to NOT end the "
-    "transferred call (contrast: REFER→queue/ACD survives, see "
-    "test_refer_transfers_into_skill_group_acd).",
-    strict=False,
-)
 async def test_refer_transfers_into_ivr(pbx, webhook_server, cc_api, sipbot_pool,
                                         evidence, event_checker, tmp_path):
-    """In-dialog REFER to `sip:*82ivr-test@…` → the IVR app runs the
-    transferred call.
+    """Outbound agent single-step transfer: 1002 (agent) calls 1001 (customer)
+    then sends an in-dialog REFER to `sip:*82ivr-test@…` (the softphone's
+    standard blind-transfer path). The transferor then exits with its own BYE
+    (RFC 5589 transferor-exits, as the real restsend client does on the final
+    NOTIFY 200).
 
-    Audio-content gate (dual windows on 1001's mixdown):
-      pre-transfer  — the CLI plays a 440 Hz tone; 1001 must hear it;
-      post-transfer — after the REFER hands the call to the IVR app, the
-                      greeting must be audible (non-silent window).
+    Expected: the customer (1001) — the "callee" leg of an agent-dialed call —
+    keeps talking to the IVR; the agent's BYE releases ONLY the agent leg.
+
+    Regression gate for the outbound direction:
+      * the IVR greeting plays to completion on the customer leg
+        (`media_play_finished` with `interrupted=false`);
+      * the customer session survives the transferor's BYE;
+      * audio-content gate on 1001's mixdown: the customer keeps hearing the
+        IVR well past the transferor's BYE (late audible window).
     """
-    from helpers import (
-        generate_sine_wav, read_wav_mono, goertzel_timeline,
-        longest_above_run, wait_recording_async, compute_rms_db,
-    )
+    from helpers import read_wav_mono, wait_recording_async, compute_rms_db
 
     rec_1001 = tmp_path / "ivr_1001_rx.wav"
-    cli_tone = tmp_path / "refer_cli440.wav"
-    generate_sine_wav(cli_tone, 440.0, 40.0, 8000, 0.4)
 
     _register_callee(sipbot_pool, pbx, "1001", 15111, record_file=str(rec_1001),
                      hangup_after=75)
@@ -256,11 +249,28 @@ async def test_refer_transfers_into_ivr(pbx, webhook_server, cc_api, sipbot_pool
             "transferred call must execute the IVR flow. Events: "
             f"{webhook_server.receiver.event_types()}"
         )
-        completed = await _wait_webhook(webhook_server, "ivr_flow_completed", timeout=25)()
-        assert completed, "IVR flow should run to completion. Events: " + str(
-            webhook_server.receiver.event_types()
+        # The agent (transferor) exits with its own BYE right after the final
+        # NOTIFY 200 (RFC 5589 transferor-exits). The customer must survive:
+        # the greeting has to play to COMPLETION on the customer leg — a
+        # torn-down session cuts it short with `interrupted=true`.
+        finished = await _wait_webhook(
+            webhook_server, "media_play_finished",
+            predicate=lambda e: not (e.payload or {}).get("interrupted", True),
+            timeout=30)()
+        assert finished, (
+            "IVR greeting did not complete on the customer leg after the "
+            "transferor BYE (session torn down mid-play?). Events: "
+            f"{webhook_server.receiver.event_types()}"
         )
-        evidence.log_metric("refer_ivr", "ivr flow executed")
+        # The customer session must still be alive once the agent has left.
+        torn = await _wait_webhook(
+            webhook_server, "call_hangup",
+            predicate=lambda e: e.call_id == ivr_ev.call_id, timeout=2)()
+        assert torn is None, (
+            "customer call was torn down by the transferor's BYE: "
+            f"{(torn.payload if torn else None)!r:.200}"
+        )
+        evidence.log_metric("refer_ivr", "ivr greeting completed on customer leg")
 
         # End the call so the wait-mode bot flushes its mixdown.
         try:
@@ -273,42 +283,134 @@ async def test_refer_transfers_into_ivr(pbx, webhook_server, cc_api, sipbot_pool
         samples, sr = read_wav_mono(resolved)
         assert compute_rms_db(samples) > -45.0, "1001 recording silent"
 
-        # Window 1 — pre-transfer: the CLI's 440 Hz tone must be present.
-        timeline = goertzel_timeline(samples, sr, 440.0, window_s=0.25, step_s=0.125)
-        assert max(timeline, default=0.0) > 0.0, (
-            "440Hz never reached 1001 — pre-transfer media broken"
+        # Pre-transfer: media flowed to the customer before the hand-off.
+        assert compute_rms_db(samples[:sr].astype(float)) > -45.0, (
+            "1001 first-second silent — pre-transfer media broken"
         )
-        thr = 0.25 * max(timeline)
-        _s, e440, _dur = longest_above_run(timeline, thr, step_s=0.125)
 
-        # Window 2 — post-transfer: the IVR greeting must be audible.
-        post = samples[int((e440 + 0.3) * sr):int((e440 + 2.8) * sr)].astype(float)
-        assert post.size >= sr, "not enough post-transfer audio to analyse"
-        post_rms = compute_rms_db(post)
-        assert post_rms >= -40.0, (
-            f"post-transfer window silent (rms={post_rms:.1f}dB) — the IVR "
-            "greeting never reached the caller after the REFER"
+        # Post-transfer: the customer must keep receiving the IVR well past the
+        # transferor's BYE. The greeting is a burst pattern (audible ~0-3s and
+        # ~10-13s of its 20s duration), so a session torn down by the agent BYE
+        # yields ~1.5s of silence and can never show a late audible burst.
+        # Require an audible 1s window past the 8s mark.
+        late = samples[int(8.0 * sr):].astype(float)
+        assert late.size >= sr, (
+            f"1001 recording too short ({len(samples) / sr:.1f}s) — the "
+            "customer was torn down by the transferor's BYE"
         )
-        print(f"\n[refer-ivr] pre 440Hz ok, post-transfer IVR audio "
-              f"rms={post_rms:.1f}dB")
+        best_late = max(
+            (compute_rms_db(late[i:i + sr]) for i in range(0, late.size - sr + 1, sr // 2)),
+            default=-120.0,
+        )
+        assert best_late >= -40.0, (
+            f"no audible IVR audio past 8s (best 1s window rms={best_late:.1f}dB)"
+            " — the greeting never reached the customer after the REFER"
+        )
+        print(f"\n[refer-ivr] customer recording {len(samples) / sr:.1f}s, "
+              f"late IVR window rms={best_late:.1f}dB")
     finally:
         await agent.stop()
 
 
-@pytest.mark.xfail(
-    reason="known_gap (shares the REFER→IVR teardown gap, see "
-    "test_refer_transfers_into_ivr): after the REFER hand-off resolves the "
-    "*83 feature code to `conference:<room>` (call_transferred fires), the "
-    "referrer's automatic BYE (refer_mode=auto, transferor-exits) tears down "
-    "the whole session before the conference app can run — no "
-    "conference_joined. Direct dialing of *83<room> works fully (see "
-    "test_quick_route.py::test_feature_code_joins_conference_and_room_auto_ends).",
-    strict=False,
-)
+async def test_api_blind_transfer_to_ivr_outbound(pbx, webhook_server, cc_api, sipbot_pool,
+                                                  evidence, event_checker, tmp_path):
+    """API single-step transfer on an agent-DIALED call: `POST
+    /cc/calls/{id}/transfer` to `*82<ivr>` must hand the CUSTOMER (the callee
+    leg) to the IVR — the same customer-anchored strategy as the SIP REFER
+    path (`test_refer_transfers_into_ivr`). The agent must NOT keep the IVR
+    while the customer is dropped.
+
+    Uses extension 1004 as the customer: it is a PBX user but deliberately NOT
+    a CC agent (see config_builder), so the agent (1002) is unambiguously the
+    caller — mirroring a real agent dialing an outside customer.
+    """
+    from helpers import read_wav_mono, wait_recording_async, compute_rms_db
+
+    rec_1004 = tmp_path / "api_ivr_1004_rx.wav"
+    _register_callee(sipbot_pool, pbx, "1004", 15114, record_file=str(rec_1004),
+                     hangup_after=75)
+    await asyncio.sleep(2)
+    webhook_server.receiver.clear()
+
+    agent = RestsendAgent(pbx, "1002", local_port=25124, device="tone")
+    await agent.start()
+    try:
+        assert await agent.register(expires=120), "1002 REGISTER failed"
+        await agent.publish_idle()
+        await agent.cmd({"cmd": "sip_call",
+                         "remote_uri": f"sip:1004@{pbx.sip_addr}"})
+        connected = await agent.wait_event(
+            "state_changed", predicate=lambda e: e.get("name") == "connected", timeout=15)
+        assert connected, f"call to 1004 not connected:\n{agent.stderr_text()[-400:]}"
+
+        # Resolve the live session id for the API call.
+        call_id = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while loop.time() < deadline and not call_id:
+            calls = await cc_api.list_active_calls()
+            calls = calls if isinstance(calls, list) else (calls or {}).get("calls") or []
+            for c in calls:
+                if (c.get("callee") or "").startswith("sip:1004") or \
+                        (c.get("caller") or "").startswith("sip:1002"):
+                    call_id = c.get("call_id")
+                    break
+            if not call_id:
+                await asyncio.sleep(0.4)
+        assert call_id, (
+            f"could not resolve the active call id: {await cc_api.list_active_calls()}")
+
+        status, body = await cc_api.raw_request(
+            "POST", f"/api/cc/calls/{call_id}/transfer", {"target": "*82ivr-test"})
+        assert status in (200, 201), f"API blind transfer failed: {status} {body!r:.300}"
+
+        ivr_ev = await _wait_webhook(webhook_server, "ivr_node_entered", timeout=20)()
+        assert ivr_ev, (
+            "API-transferred call must execute the IVR flow. Events: "
+            f"{webhook_server.receiver.event_types()}"
+        )
+        finished = await _wait_webhook(
+            webhook_server, "media_play_finished",
+            predicate=lambda e: not (e.payload or {}).get("interrupted", True),
+            timeout=30)()
+        assert finished, (
+            "IVR greeting did not complete on the customer leg after the API "
+            f"transfer. Events: {webhook_server.receiver.event_types()}"
+        )
+        evidence.log_metric("api_blind_ivr", "ivr greeting completed on customer leg")
+
+        try:
+            await event_checker.rwi.hangup(ivr_ev.call_id)
+        except Exception as exc:  # noqa: BLE001 — call may already be gone
+            print(f"[api-ivr] hangup ignored: {exc}")
+
+        resolved = await wait_recording_async(rec_1004, timeout=60)
+        assert resolved is not None, f"1004 mixdown never flushed: {rec_1004}"
+        samples, sr = read_wav_mono(resolved)
+        assert compute_rms_db(samples) > -45.0, "1004 recording silent"
+        late = samples[int(8.0 * sr):].astype(float)
+        assert late.size >= sr, (
+            f"1004 recording too short ({len(samples) / sr:.1f}s) — the "
+            "customer was torn down by the API transfer"
+        )
+        best_late = max(
+            (compute_rms_db(late[i:i + sr]) for i in range(0, late.size - sr + 1, sr // 2)),
+            default=-120.0,
+        )
+        assert best_late >= -40.0, (
+            f"no audible IVR audio past 8s (best 1s window rms={best_late:.1f}dB)"
+            " — the IVR never reached the customer after the API transfer"
+        )
+        print(f"\n[api-ivr] customer recording {len(samples) / sr:.1f}s, "
+              f"late IVR window rms={best_late:.1f}dB")
+    finally:
+        await agent.stop()
+
+
 async def test_refer_transfers_into_conference(pbx, webhook_server, cc_api,
                                                sipbot_pool, evidence,
                                                event_checker):
-    """In-dialog REFER to `sip:*83<room>@…` → the transferred call joins the
+    """In-dialog REFER to `sip:*83<room>@…` → the transferred CUSTOMER joins the
     (created-on-demand) conference room. The room is visible as a live
     transfer-target while the call is up and is auto-destroyed once the call
     ends (无人自动结束)."""
@@ -350,7 +452,13 @@ async def test_refer_transfers_into_conference(pbx, webhook_server, cc_api,
             f"live room '{room_id}' missing/incorrect in /transfer-targets: {entry}"
         )
 
-        await agent.hangup()
+        # End the (customer-anchored) call: the transferor agent already left,
+        # so hanging up the agent is a no-op — end the session carrying the
+        # customer.
+        try:
+            await event_checker.rwi.hangup(joined.call_id)
+        except Exception as exc:  # noqa: BLE001 — call may already be gone
+            print(f"[refer-conference] hangup ignored: {exc}")
 
         # Last participant left → room auto-destroyed.
         async def _room_present():

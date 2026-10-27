@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent};
+use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent, ExitReason};
 use crate::call::domain::CallCommand;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 
@@ -20,6 +20,7 @@ use super::{AppResult, AppRuntime, AppRuntimeError};
 struct RunningApp {
     name: String,
     cancel_token: CancellationToken,
+    cancel_reason: Arc<parking_lot::Mutex<ExitReason>>,
     /// Generation claimed by the `start_app` that installed this slot.
     /// Lets the event-loop teardown clear its own registration on natural
     /// exit without ever clobbering a successor's.
@@ -161,6 +162,7 @@ impl AppRuntime for DefaultAppRuntime {
         // `set_app_event_sender(None)`, dropping the successor's channel and
         // killing the new IVR with ExitReason::Normal.
         let cancel_token = CancellationToken::new();
+        let cancel_reason = Arc::new(parking_lot::Mutex::new(ExitReason::Cancelled));
 
         // Reserve the running slot: the AlreadyRunning check and the install
         // happen under ONE write lock, so concurrent start_app calls
@@ -183,6 +185,7 @@ impl AppRuntime for DefaultAppRuntime {
             *running = Some(RunningApp {
                 name: app_name.to_string(),
                 cancel_token: cancel_token.clone(),
+                cancel_reason: cancel_reason.clone(),
                 generation,
                 invocation,
             });
@@ -202,7 +205,7 @@ impl AppRuntime for DefaultAppRuntime {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
 
         // Create controller — it owns the timer sender, we get the receiver back.
-        let (controller, timer_rx) = CallController::new(self.handle.clone(), event_rx);
+        let (controller, timer_rx) = CallController::new(self.handle.for_application(), event_rx);
 
         // Register the event sender with the session so SipSession can forward
         // DTMF / hangup / audio-complete events to the running app.
@@ -237,7 +240,7 @@ impl AppRuntime for DefaultAppRuntime {
 
         // Auto-answer if requested
         if auto_answer {
-            if let Err(e) = self.handle.send_command(CallCommand::Answer {
+            if let Err(e) = self.handle.for_application().send_command(CallCommand::Answer {
                 leg_id: crate::call::domain::LegId::from("caller"),
             }) {
                 // The event loop below would never run against a dead
@@ -262,7 +265,8 @@ impl AppRuntime for DefaultAppRuntime {
                 (*context).clone(),
                 cancel_token,
                 timer_rx,
-            );
+            )
+            .with_cancel_reason(cancel_reason);
 
             if let Err(e) = event_loop.run().await {
                 tracing::error!(
@@ -342,6 +346,15 @@ impl AppRuntime for DefaultAppRuntime {
     }
 
     async fn stop_app(&self, reason: Option<String>) -> AppResult<()> {
+        self.stop_app_with_exit_reason(reason, ExitReason::Cancelled)
+            .await
+    }
+
+    async fn stop_app_with_exit_reason(
+        &self,
+        reason: Option<String>,
+        exit_reason: ExitReason,
+    ) -> AppResult<()> {
         let running = {
             let running = self.running.read().await;
             running.clone()
@@ -349,6 +362,8 @@ impl AppRuntime for DefaultAppRuntime {
 
         match running {
             Some(running) => {
+                // Store the lifecycle cause before interrupting an in-flight callback.
+                *running.cancel_reason.lock() = exit_reason;
                 // Cancel the event loop
                 running.cancel_token.cancel();
 

@@ -13,6 +13,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
+    call_errors::{ErrSeverity, TraceEvent, TraceKind, append_trace},
     callrecord::{
         CallRecord, CallRecordHook, CallRecordMedia, UploadFailedMarker, is_direct_child_of_root,
     },
@@ -21,6 +22,78 @@ use crate::{
     rwi::{RwiGatewayRef, proto::RecordingMetadata},
     storage::{Storage, StorageConfig},
 };
+
+/// `metadata["trace"]` codes for the recording upload lifecycle. Codes that
+/// only mark neutral / successful transitions (`recording.queued`,
+/// `recording.uploaded`, `recording.retry_succeeded`) are carried on
+/// `TraceKind::Recording` entries with `severity: info`; every failure code
+/// stays on `TraceKind::Error` (severity warn/error) so degraded recordings
+/// keep the red "Error" treatment in the CDR timeline. `detail` holds the
+/// structured context (path/bucket/key/address/error/attempts).
+pub mod recording_trace_codes {
+    /// `[recording]` policy absent while media artifacts exist — explains a
+    /// CDR that keeps local file paths.
+    pub const POLICY_MISSING: &str = "recording.policy_missing";
+    /// Upload storage could not be built or no target matched (e.g. a
+    /// partial `access_key`/`secret_key` pair, missing bucket override).
+    pub const STORAGE_UNAVAILABLE: &str = "recording.storage_unavailable";
+    /// The local media file vanished before it could be uploaded.
+    pub const MEDIA_MISSING: &str = "recording.media_missing";
+    /// S3 upload queue full — local file retained, upload not retried by the
+    /// queue (still eligible for marker-based retry on failure).
+    pub const CHANNEL_FULL: &str = "recording.channel_full";
+    /// The background uploader stopped (policy reload / shutdown).
+    pub const UPLOADER_STOPPED: &str = "recording.uploader_stopped";
+    /// An upload attempt failed (initial HTTP/S3 attempt or retry).
+    pub const UPLOAD_FAILED: &str = "recording.upload_failed";
+    /// A recording artifact was successfully queued for background upload —
+    /// evidence that the pipeline accepted it even when the process later
+    /// died / restarted before the upload ran.
+    pub const QUEUED: &str = "recording.queued";
+    /// An upload attempt succeeded (initial or retry).
+    pub const UPLOADED: &str = "recording.uploaded";
+    /// A previously failed upload succeeded via the retry worker.
+    pub const RETRY_SUCCEEDED: &str = "recording.retry_succeeded";
+    /// A recorder was installed (auto full-call or app-driven segment).
+    pub const STARTED: &str = "recording.started";
+    /// A recording segment was stopped and finalized (path + duration).
+    pub const STOPPED: &str = "recording.stopped";
+    /// The auto recorder failed to install (no media profile / output path).
+    pub const START_FAILED: &str = "recording.start_failed";
+    /// Stopping the recorder failed; the segment may not be finalized.
+    pub const STOP_FAILED: &str = "recording.stop_failed";
+    /// Auto recording was skipped for this call (e.g. routed app exempted by
+    /// `[recording].auto_start_except`).
+    pub const AUTOSTART_SKIPPED: &str = "recording.autostart_skipped";
+    /// The agent-connect hook skipped its work because the global agent status
+    /// no longer looked like this call's ringing state (ring-timeout release or
+    /// a duplicate connect). Explains a CDR whose agent stage has no segment.
+    pub const AGENT_CONNECT_SKIPPED: &str = "recording.agent_connect_skipped";
+    /// The agent-connect hook recognized its own answer even though a
+    /// client-reported busy (cluster/presence sync) had overwritten the
+    /// dispatch-bound ringing state, and preserved the agent recording start.
+    pub const AGENT_CONNECT_RACE_RESCUED: &str = "recording.agent_connect_race_rescued";
+    /// The queue's dispatch claim (recording reservation) was still held at the
+    /// agent answer even though the shared status showed a foreign/stale state —
+    /// the recording start was preserved and the binding repaired BEST-EFFORT.
+    /// `detail.binding` says what happened: `rebound` (foreign binding was dead
+    /// and was stolen back to this call), `kept_live_foreign` (a LIVE foreign
+    /// binding was left untouched — never steal a live call), or
+    /// `rebound_ringing` (a non-bound state was normalized to Ringing{this}).
+    pub const AGENT_CONNECT_REBOUND: &str = "recording.agent_connect_rebound";
+    /// The on-demand agent segment start was skipped (recording disabled,
+    /// policy full-call recording active, segment owned by an upstream peer,
+    /// live session handle unavailable, ...). `detail.reason` says which.
+    pub const AGENT_SEGMENT_SKIPPED: &str = "recording.agent_segment_skipped";
+    /// A peer's `record.stop_segment` matched no active or completed agent
+    /// segment on this node — the promised recording never started here (or
+    /// the identity diverged). The 404 answer is deliberate; the trace makes
+    /// it visible in the CDR timeline.
+    pub const PEER_SEGMENT_STOP_NOT_FOUND: &str = "recording.peer_segment_stop_not_found";
+    /// Forwarding a `record.stop_segment` to the upstream peer failed after
+    /// all retries — the segment boundary (and possibly the artifact) is lost.
+    pub const PEER_SEGMENT_STOP_FAILED: &str = "recording.peer_segment_stop_failed";
+}
 
 /// Shared handle to the `[recording]` policy. The SIP server swaps the inner
 /// value on hot-reload (`reload_recording_settings` / `reload_proxy_config`),
@@ -129,6 +202,16 @@ pub(crate) fn media_source_tag(media: &CallRecordMedia) -> String {
     crate::callrecord::RecordingSource::classify(raw_tag.unwrap_or("full"))
         .as_str()
         .to_string()
+}
+
+/// Whether the record carries non-signaling media artifacts (recording WAV
+/// segments / mixed track) — upload trace events are only worth writing for
+/// calls that actually produced a recording.
+fn has_recorded_media(record: &CallRecord) -> bool {
+    record
+        .recorder
+        .iter()
+        .any(|media| media.track_id != "signaling")
 }
 
 /// Late-bound `[recording]` policy + derived upload storage, shared between
@@ -341,13 +424,90 @@ fn build_recording_targets(policy: &RecordingPolicy) -> Result<RecordingTargets>
     Ok(targets)
 }
 
+/// Build one recording-upload lifecycle trace event. `ts` is the millisecond
+/// offset from the call start when known (hook-time events); post-call async
+/// events (upload manager, retry worker) carry `ts = 0` because the call
+/// start time is no longer available there.
+///
+/// The trace kind follows the code: neutral/success codes (started/stopped,
+/// `recording.queued`, `recording.uploaded`, `recording.retry_succeeded`,
+/// `recording.autostart_skipped`) are `TraceKind::Recording`
+/// entries; every failure code stays a `TraceKind::Error` entry so the CDR
+/// timeline keeps flagging degraded recordings as errors.
+pub(crate) fn recording_trace_event(
+    severity: ErrSeverity,
+    code: &'static str,
+    message: impl Into<String>,
+    call_start_time: Option<chrono::DateTime<chrono::Utc>>,
+    detail: serde_json::Value,
+) -> TraceEvent {
+    let kind = match code {
+        recording_trace_codes::QUEUED
+        | recording_trace_codes::UPLOADED
+        | recording_trace_codes::RETRY_SUCCEEDED
+        | recording_trace_codes::STARTED
+        | recording_trace_codes::STOPPED
+        | recording_trace_codes::AUTOSTART_SKIPPED => TraceKind::Recording,
+        _ => TraceKind::Error,
+    };
+    let mut event = TraceEvent::new(kind, message)
+        .severity(severity)
+        .code(code)
+        .detail(detail);
+    if let Some(start) = call_start_time {
+        event.ts = (chrono::Utc::now() - start).num_milliseconds().max(0);
+    }
+    event
+}
+
+/// Append pre-built trace events to the persisted CDR row. No-op without a
+/// database handle or call id, and when the row does not exist (`[callrecord]`
+/// s3/http/local storages keep no database row — the trace stays in the logs
+/// and the `.upload_failed.*` markers).
+async fn append_recording_trace_db(
+    db: Option<&sea_orm::DatabaseConnection>,
+    call_id: Option<&str>,
+    events: &[TraceEvent],
+) {
+    let (Some(db), Some(call_id)) = (db, call_id) else {
+        return;
+    };
+    if events.is_empty() {
+        return;
+    }
+    let values = events
+        .iter()
+        .filter_map(|event| serde_json::to_value(event).ok())
+        .collect::<Vec<_>>();
+    if let Err(err) = crate::models::call_record::append_call_trace(db, call_id, values).await {
+        warn!(call_id, %err, "failed to append recording trace to call record");
+    }
+}
+
+/// Post-save trace for one record: append in-memory when metadata already
+/// exists (keeps direct-call tests consistent) and patch the persisted row,
+/// because `on_record_completed` runs *after* `CallRecordSaver::save`.
+async fn trace_post_save(
+    record: &mut CallRecord,
+    db: Option<&sea_orm::DatabaseConnection>,
+    event: TraceEvent,
+) {
+    if let Some(metadata) = record.details.metadata.as_mut() {
+        append_trace(metadata, event.clone());
+    }
+    append_recording_trace_db(db, Some(&record.call_id), &[event]).await;
+}
+
 /// One queued background S3 upload: the local file plus the canonical source
 /// tag selecting its target bucket (`[recording].sources` override or the
-/// default).
+/// default). `call_id` / `call_start_time` let the async manager append CDR
+/// trace events after the hooks are long gone.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingRecordingUpload {
     pub path: PathBuf,
     pub source_tag: String,
+    pub call_id: Option<String>,
+    pub call_start_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct RecordingUploadHook {
@@ -356,11 +516,18 @@ pub struct RecordingUploadHook {
     runtime: Arc<RecordingUploadRuntime>,
     rwi_gateway: Option<RwiGatewayRef>,
     s3_upload_sender: Option<tokio::sync::mpsc::Sender<PendingRecordingUpload>>,
+    /// Optional main-DB handle used to patch the persisted CDR row
+    /// (`metadata["trace"]` upload lifecycle events, HTTP `recording_url`
+    /// write-back) after `CallRecordSaver::save` already ran. `None` in
+    /// tests and DB-less deployments.
+    db: Option<sea_orm::DatabaseConnection>,
 }
 
 pub struct RecordingUploadManager {
     runtime: Arc<RecordingUploadRuntime>,
     receiver: tokio::sync::mpsc::Receiver<PendingRecordingUpload>,
+    /// See [`RecordingUploadHook::db`] — trace patches for async uploads.
+    db: Option<sea_orm::DatabaseConnection>,
 }
 
 const RECORDING_UPLOAD_CHANNEL_CAPACITY: usize = 65_536;
@@ -383,6 +550,15 @@ impl RecordingUploadHook {
     pub fn with_runtime(
         runtime: Arc<RecordingUploadRuntime>,
     ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
+        Self::with_runtime_and_db(runtime, None)
+    }
+
+    /// Like [`Self::with_runtime`] with a main-DB handle for post-save CDR
+    /// trace patches and HTTP `recording_url` write-back.
+    pub fn with_runtime_and_db(
+        runtime: Arc<RecordingUploadRuntime>,
+        db: Option<sea_orm::DatabaseConnection>,
+    ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
         // Validate at startup: S3 storage construction errors must fail fast
         // (historical behavior), and the storage clone seeds the console's
         // presign path until the first reload.
@@ -400,6 +576,7 @@ impl RecordingUploadHook {
                 Some(RecordingUploadManager {
                     runtime: runtime.clone(),
                     receiver,
+                    db: db.clone(),
                 }),
             )
         } else {
@@ -411,10 +588,17 @@ impl RecordingUploadHook {
                 runtime,
                 rwi_gateway: None,
                 s3_upload_sender,
+                db,
             },
             upload_manager,
             upload_storage,
         ))
+    }
+
+    /// Attach the main-DB handle (builder style, after `with_rwi_gateway`).
+    pub fn with_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// Re-exported for app wiring that reports the storage type at startup.
@@ -587,6 +771,7 @@ impl RecordingUploadHook {
 impl RecordingUploadManager {
     pub async fn serve(&mut self) {
         while let Some(pending) = self.receiver.recv().await {
+            let call_id = pending.call_id.as_deref();
             let resolved = match self.runtime.resolve_targets() {
                 Ok(Some((policy, targets))) => Some((policy, targets)),
                 Ok(None) => None,
@@ -596,6 +781,22 @@ impl RecordingUploadManager {
                         %err,
                         "recording uploader storage unavailable; local file retained"
                     );
+                    append_recording_trace_db(
+                        self.db.as_ref(),
+                        call_id,
+                        &[recording_trace_event(
+                            ErrSeverity::Error,
+                            recording_trace_codes::STORAGE_UNAVAILABLE,
+                            format!("recording uploader storage unavailable: {err}"),
+                            pending.call_start_time,
+                            serde_json::json!({
+                                "stage": "s3_upload",
+                                "path": pending.path.to_string_lossy(),
+                                "error": err.to_string(),
+                            }),
+                        )],
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -604,6 +805,21 @@ impl RecordingUploadManager {
                     path = %pending.path.display(),
                     "recording uploader disabled by policy reload; local file retained"
                 );
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    call_id,
+                    &[recording_trace_event(
+                        ErrSeverity::Warn,
+                        recording_trace_codes::UPLOADER_STOPPED,
+                        "recording uploader disabled by policy reload; local file retained",
+                        pending.call_start_time,
+                        serde_json::json!({
+                            "stage": "s3_upload",
+                            "path": pending.path.to_string_lossy(),
+                        }),
+                    )],
+                )
+                .await;
                 continue;
             };
             if targets.recording_type() != RecordingType::S3 {
@@ -612,6 +828,22 @@ impl RecordingUploadManager {
                     ty = ?targets.recording_type(),
                     "recording uploader disabled by policy reload; local file retained"
                 );
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    call_id,
+                    &[recording_trace_event(
+                        ErrSeverity::Warn,
+                        recording_trace_codes::UPLOADER_STOPPED,
+                        "recording uploader disabled by policy reload; local file retained",
+                        pending.call_start_time,
+                        serde_json::json!({
+                            "stage": "s3_upload",
+                            "path": pending.path.to_string_lossy(),
+                            "recording_type": format!("{:?}", targets.recording_type()),
+                        }),
+                    )],
+                )
+                .await;
                 continue;
             }
             // Target selection: the queued source tag's override, or the
@@ -621,6 +853,22 @@ impl RecordingUploadManager {
                     path = %pending.path.display(),
                     "recording uploader has no S3 target; local file retained"
                 );
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    call_id,
+                    &[recording_trace_event(
+                        ErrSeverity::Error,
+                        recording_trace_codes::STORAGE_UNAVAILABLE,
+                        "recording uploader has no S3 target; local file retained",
+                        pending.call_start_time,
+                        serde_json::json!({
+                            "stage": "s3_upload",
+                            "path": pending.path.to_string_lossy(),
+                            "source": pending.source_tag,
+                        }),
+                    )],
+                )
+                .await;
                 continue;
             };
             let key = RecordingUploadHook::storage_key_with_prefix(
@@ -636,6 +884,22 @@ impl RecordingUploadManager {
                         %err,
                         "recording uploader failed to read local media"
                     );
+                    append_recording_trace_db(
+                        self.db.as_ref(),
+                        call_id,
+                        &[recording_trace_event(
+                            ErrSeverity::Error,
+                            recording_trace_codes::MEDIA_MISSING,
+                            format!("recording uploader failed to read local media: {err}"),
+                            pending.call_start_time,
+                            serde_json::json!({
+                                "stage": "s3_upload",
+                                "path": pending.path.to_string_lossy(),
+                                "error": err.to_string(),
+                            }),
+                        )],
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -668,6 +932,26 @@ impl RecordingUploadManager {
                     "recording upload failed"
                 );
                 crate::metrics::recording::upload_failure("s3");
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    call_id,
+                    &[recording_trace_event(
+                        ErrSeverity::Error,
+                        recording_trace_codes::UPLOAD_FAILED,
+                        format!("recording S3 upload failed: {err}"),
+                        pending.call_start_time,
+                        serde_json::json!({
+                            "stage": "s3_upload",
+                            "path": pending.path.to_string_lossy(),
+                            "key": key,
+                            "bucket": spec.bucket,
+                            "source": pending.source_tag,
+                            "error": err.to_string(),
+                            "duration_ms": started.elapsed().as_millis() as i64,
+                        }),
+                    )],
+                )
+                .await;
                 let address = if spec.bucket.trim().is_empty() {
                     "s3".to_string()
                 } else {
@@ -705,6 +989,28 @@ impl RecordingUploadManager {
                 started.elapsed().as_secs_f64(),
                 "s3",
             );
+            append_recording_trace_db(
+                self.db.as_ref(),
+                call_id,
+                &[recording_trace_event(
+                    ErrSeverity::Info,
+                    recording_trace_codes::UPLOADED,
+                    "recording uploaded to S3",
+                    pending.call_start_time,
+                    serde_json::json!({
+                        "stage": "s3_upload",
+                        "path": pending.path.to_string_lossy(),
+                        "key": key,
+                        "bucket": spec.bucket,
+                        "source": pending.source_tag,
+                        "url": spec.s3_url(&key),
+                        "bytes": bytes,
+                        "content_type": content_type,
+                        "duration_ms": started.elapsed().as_millis() as i64,
+                    }),
+                )],
+            )
+            .await;
             if let Err(err) = tokio::fs::remove_file(&pending.path).await {
                 warn!(
                     path = %pending.path.display(),
@@ -724,11 +1030,20 @@ impl RecordingUploadManager {
 /// the configured SLA window (default 10 minutes).
 pub struct RecordingRetryWorker {
     runtime: Arc<RecordingUploadRuntime>,
+    /// See [`RecordingUploadHook::db`] — trace patches for retried uploads.
+    db: Option<sea_orm::DatabaseConnection>,
 }
 
 impl RecordingRetryWorker {
     pub fn with_runtime(runtime: Arc<RecordingUploadRuntime>) -> Self {
-        Self { runtime }
+        Self { runtime, db: None }
+    }
+
+    /// Attach the main-DB handle for post-save CDR trace patches and the
+    /// HTTP `recording_url` write-back after a successful retry.
+    pub fn with_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
+        self.db = Some(db);
+        self
     }
 
     pub async fn serve(self) {
@@ -850,7 +1165,7 @@ impl RecordingRetryWorker {
             )
             .await
         {
-            Ok(()) => {
+            Ok(uploaded_url) => {
                 let latency =
                     marker_age_secs(&marker).unwrap_or_else(|| started.elapsed().as_secs_f64());
                 crate::metrics::recording::upload_success(dest);
@@ -866,9 +1181,65 @@ impl RecordingRetryWorker {
                     latency_secs = latency,
                     "recording upload retry succeeded"
                 );
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    marker.call_id.as_deref(),
+                    &[recording_trace_event(
+                        ErrSeverity::Info,
+                        recording_trace_codes::RETRY_SUCCEEDED,
+                        "recording upload retry succeeded",
+                        None,
+                        serde_json::json!({
+                            "stage": "retry",
+                            "dest": dest,
+                            "path": source.to_string_lossy(),
+                            "attempts": marker.attempts + 1,
+                            "latency_secs": latency,
+                            "url": uploaded_url,
+                        }),
+                    )],
+                )
+                .await;
+                // The CDR row still points at the (now removed) local file
+                // when the initial attempt failed: write the final URL back.
+                if let (Some(url), Some(db), Some(call_id)) = (
+                    uploaded_url.as_deref(),
+                    self.db.as_ref(),
+                    marker.call_id.as_deref(),
+                ) && let Err(err) =
+                    crate::models::call_record::set_recording_url(db, call_id, url).await
+                {
+                    warn!(call_id, %err, "failed to write back recording_url after retry");
+                }
             }
             Err(err) => {
                 crate::metrics::recording::upload_failure(dest);
+                warn!(
+                    path = %source.display(),
+                    attempts = marker.attempts + 1,
+                    %err,
+                    "recording upload retry failed"
+                );
+                append_recording_trace_db(
+                    self.db.as_ref(),
+                    marker.call_id.as_deref(),
+                    &[recording_trace_event(
+                        ErrSeverity::Error,
+                        recording_trace_codes::UPLOAD_FAILED,
+                        format!("recording upload retry failed: {err}"),
+                        None,
+                        serde_json::json!({
+                            "stage": "retry",
+                            "dest": dest,
+                            "path": source.to_string_lossy(),
+                            "attempts": marker.attempts + 1,
+                            "address": marker.address.clone(),
+                            "error": err.to_string(),
+                            "duration_ms": started.elapsed().as_millis() as i64,
+                        }),
+                    )],
+                )
+                .await;
                 let address = marker.address.clone();
                 let _ = crate::callrecord::write_upload_failed_marker_ex(
                     &source,
@@ -884,6 +1255,9 @@ impl RecordingRetryWorker {
         Ok(())
     }
 
+    /// Upload one marker's source file. Returns the resolved remote URL on
+    /// success (`Some` for HTTP — the response may carry a CDN URL — and
+    /// `None` for S3, whose URL was pre-constructed at enrich time).
     async fn upload_source(
         &self,
         policy: &RecordingPolicy,
@@ -891,7 +1265,7 @@ impl RecordingRetryWorker {
         source: &Path,
         call_id: Option<&str>,
         source_tag: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let data = tokio::fs::read(source).await?;
         match policy.effective_recording_type() {
             RecordingType::Http => {
@@ -916,8 +1290,10 @@ impl RecordingRetryWorker {
                     ]),
                     bytes: Bytes::from(data),
                 };
-                storage.upload(request).await?;
-                Ok(())
+                let uploaded = storage.upload(request).await?;
+                Ok(Some(uploaded.url.unwrap_or_else(|| {
+                    policy.url.clone().unwrap_or_else(|| "http".to_string())
+                })))
             }
             RecordingType::S3 => {
                 // Retry the source's own target; markers written before the
@@ -948,7 +1324,7 @@ impl RecordingRetryWorker {
                     )
                     .await
                     .map_err(|e| anyhow!(e))?;
-                Ok(())
+                Ok(None)
             }
             other => Err(anyhow!("unsupported recording type for retry: {other:?}")),
         }
@@ -1189,9 +1565,56 @@ fn build_segment_recording_metadata(
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
-        let Some((policy, targets)) = self.runtime.resolve_targets()? else {
-            return Ok(());
+        // Runs BEFORE `CallRecordSaver::save`, so `append_trace` here persists
+        // with the CDR for every saver type — no database patch needed.
+        let resolved = match self.runtime.resolve_targets() {
+            Ok(Some(resolved)) => Some(resolved),
+            Ok(None) => {
+                for record in records.iter_mut() {
+                    if !has_recorded_media(record) {
+                        continue;
+                    }
+                    let event = recording_trace_event(
+                        ErrSeverity::Warn,
+                        recording_trace_codes::POLICY_MISSING,
+                        "[recording] policy absent; recording kept as local file",
+                        Some(record.start_time),
+                        serde_json::json!({
+                            "stage": "enrich",
+                            "recorder_files": record.recorder.len(),
+                        }),
+                    );
+                    append_trace(
+                        record.details.metadata.get_or_insert_with(Default::default),
+                        event,
+                    );
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                for record in records.iter_mut() {
+                    if !has_recorded_media(record) {
+                        continue;
+                    }
+                    let event = recording_trace_event(
+                        ErrSeverity::Error,
+                        recording_trace_codes::STORAGE_UNAVAILABLE,
+                        format!("recording upload storage unavailable: {err}"),
+                        Some(record.start_time),
+                        serde_json::json!({
+                            "stage": "enrich",
+                            "error": err.to_string(),
+                        }),
+                    );
+                    append_trace(
+                        record.details.metadata.get_or_insert_with(Default::default),
+                        event,
+                    );
+                }
+                return Err(err);
+            }
         };
+        let (policy, targets) = resolved.expect("resolved checked above");
         for record in records {
             match policy.effective_recording_type() {
                 RecordingType::Local => self.archive_local_artifacts(&policy, record).await,
@@ -1213,12 +1636,83 @@ impl CallRecordHook for RecordingUploadHook {
         };
         use std::time::Instant;
 
-        let Some((policy, targets)) = self.runtime.resolve_targets()? else {
-            return Ok(());
+        // Runs AFTER `CallRecordSaver::save`: the in-memory trace append keeps
+        // the record consistent for direct callers, and `trace_post_save`
+        // additionally patches the persisted database row.
+        let (policy, targets) = match self.runtime.resolve_targets() {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => {
+                for record in records.iter_mut() {
+                    if !has_recorded_media(record) {
+                        continue;
+                    }
+                    trace_post_save(
+                        record,
+                        self.db.as_ref(),
+                        recording_trace_event(
+                            ErrSeverity::Warn,
+                            recording_trace_codes::POLICY_MISSING,
+                            "[recording] policy absent; recording kept as local file",
+                            Some(record.start_time),
+                            serde_json::json!({ "stage": "completed" }),
+                        ),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                for record in records.iter_mut() {
+                    if !has_recorded_media(record) {
+                        continue;
+                    }
+                    trace_post_save(
+                        record,
+                        self.db.as_ref(),
+                        recording_trace_event(
+                            ErrSeverity::Error,
+                            recording_trace_codes::STORAGE_UNAVAILABLE,
+                            format!("recording upload storage unavailable: {err}"),
+                            Some(record.start_time),
+                            serde_json::json!({
+                                "stage": "completed",
+                                "error": err.to_string(),
+                            }),
+                        ),
+                    )
+                    .await;
+                }
+                return Err(err);
+            }
         };
         let recording_type = policy.effective_recording_type();
         if !recording_type.is_file_media() {
             return Ok(());
+        }
+        // HTTP mode needs the uploader target; a missing `url` historically
+        // aborted the batch via `?` — now every record's trace also records
+        // why nothing was uploaded.
+        if recording_type == RecordingType::Http && targets.http_storage().is_none() {
+            for record in records.iter_mut() {
+                if !has_recorded_media(record) {
+                    continue;
+                }
+                trace_post_save(
+                    record,
+                    self.db.as_ref(),
+                    recording_trace_event(
+                        ErrSeverity::Error,
+                        recording_trace_codes::STORAGE_UNAVAILABLE,
+                        "recording http upload is not configured (missing url?)",
+                        Some(record.start_time),
+                        serde_json::json!({ "stage": "completed" }),
+                    ),
+                )
+                .await;
+            }
+            return Err(anyhow!(
+                "recording http upload is not configured (missing url?)"
+            ));
         }
         let subdir = RecordingSubdir::parse(policy.subdir.as_deref());
         let root = policy.recorder_path();
@@ -1244,6 +1738,22 @@ impl CallRecordHook for RecordingUploadHook {
                         path,
                         "recording upload skipped missing local media"
                     );
+                    trace_post_save(
+                        record,
+                        self.db.as_ref(),
+                        recording_trace_event(
+                            ErrSeverity::Error,
+                            recording_trace_codes::MEDIA_MISSING,
+                            "recording upload skipped missing local media",
+                            Some(record.start_time),
+                            serde_json::json!({
+                                "stage": "completed",
+                                "path": path,
+                                "track_id": track_id,
+                            }),
+                        ),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1258,6 +1768,23 @@ impl CallRecordHook for RecordingUploadHook {
                             path,
                             "recording upload skipped: no S3 target available"
                         );
+                        trace_post_save(
+                            record,
+                            self.db.as_ref(),
+                            recording_trace_event(
+                                ErrSeverity::Error,
+                                recording_trace_codes::STORAGE_UNAVAILABLE,
+                                "recording upload skipped: no S3 target available",
+                                Some(record.start_time),
+                                serde_json::json!({
+                                    "stage": "completed",
+                                    "path": path,
+                                    "track_id": track_id,
+                                    "source": source_tag,
+                                }),
+                            ),
+                        )
+                        .await;
                         continue;
                     };
                     let key = Self::storage_key_with_prefix(
@@ -1273,29 +1800,95 @@ impl CallRecordHook for RecordingUploadHook {
                         .try_send(PendingRecordingUpload {
                             path: PathBuf::from(&path),
                             source_tag: source_tag.clone(),
-                        })
-                    {
-                        Ok(()) => info!(
-                            call_id = %record.call_id,
-                            track_id,
-                            path,
-                            key,
-                            bucket = %spec.bucket,
-                            source = %source_tag,
-                            "recording queued for upload"
-                        ),
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => warn!(
-                            call_id = %record.call_id,
-                            track_id,
-                            path,
-                            "recording upload channel full; local file retained"
-                        ),
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => warn!(
-                            call_id = %record.call_id,
-                            track_id,
-                            path,
-                            "recording uploader stopped; local file retained"
-                        ),
+                            call_id: Some(record.call_id.clone()),
+                            call_start_time: Some(record.start_time),
+                        }) {
+                        Ok(()) => {
+                            info!(
+                                call_id = %record.call_id,
+                                track_id,
+                                path,
+                                key,
+                                bucket = %spec.bucket,
+                                source = %source_tag,
+                                "recording queued for upload"
+                            );
+                            // Evidence that the pipeline accepted the artifact:
+                            // when the process dies / restarts before the
+                            // background manager uploads it, the CDR still
+                            // shows "queued" with no matching "uploaded".
+                            trace_post_save(
+                                record,
+                                self.db.as_ref(),
+                                recording_trace_event(
+                                    ErrSeverity::Info,
+                                    recording_trace_codes::QUEUED,
+                                    "recording queued for upload",
+                                    Some(record.start_time),
+                                    serde_json::json!({
+                                        "stage": "completed",
+                                        "path": path,
+                                        "track_id": track_id,
+                                        "key": key,
+                                        "bucket": spec.bucket,
+                                        "source": source_tag,
+                                    }),
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                call_id = %record.call_id,
+                                track_id,
+                                path,
+                                "recording upload channel full; local file retained"
+                            );
+                            trace_post_save(
+                                record,
+                                self.db.as_ref(),
+                                recording_trace_event(
+                                    ErrSeverity::Warn,
+                                    recording_trace_codes::CHANNEL_FULL,
+                                    "recording upload channel full; local file retained",
+                                    Some(record.start_time),
+                                    serde_json::json!({
+                                        "stage": "completed",
+                                        "path": path,
+                                        "track_id": track_id,
+                                        "key": key,
+                                        "bucket": spec.bucket,
+                                    }),
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            warn!(
+                                call_id = %record.call_id,
+                                track_id,
+                                path,
+                                "recording uploader stopped; local file retained"
+                            );
+                            trace_post_save(
+                                record,
+                                self.db.as_ref(),
+                                recording_trace_event(
+                                    ErrSeverity::Error,
+                                    recording_trace_codes::UPLOADER_STOPPED,
+                                    "recording uploader stopped; local file retained",
+                                    Some(record.start_time),
+                                    serde_json::json!({
+                                        "stage": "completed",
+                                        "path": path,
+                                        "track_id": track_id,
+                                        "key": key,
+                                        "bucket": spec.bucket,
+                                    }),
+                                ),
+                            )
+                            .await;
+                        }
                     }
                     if first_uploaded_url.is_none() && track_id != "signaling" {
                         first_uploaded_url = Some(url.clone());
@@ -1403,6 +1996,48 @@ impl CallRecordHook for RecordingUploadHook {
                                         crate::metrics::recording::upload_sla_breach("http");
                                     }
                                 }
+                                trace_post_save(
+                                    record,
+                                    self.db.as_ref(),
+                                    recording_trace_event(
+                                        ErrSeverity::Info,
+                                        recording_trace_codes::UPLOADED,
+                                        "recording uploaded via HTTP",
+                                        Some(record.start_time),
+                                        serde_json::json!({
+                                            "stage": "http_upload",
+                                            "path": path,
+                                            "track_id": track_id,
+                                            "url": url,
+                                            "bytes": data_len,
+                                            "duration_ms": elapsed_ms as i64,
+                                        }),
+                                    ),
+                                )
+                                .await;
+                                // The CDR row was persisted before this hook
+                                // ran and still points at the local file:
+                                // write the final URL back.
+                                if let Some(db) = self.db.as_ref() {
+                                    let duration_secs =
+                                        (record.end_time - record.start_time).num_seconds().max(0)
+                                            as i32;
+                                    if let Err(err) =
+                                        crate::models::call_record::update_recording_url(
+                                            db,
+                                            &record.call_id,
+                                            &url,
+                                            duration_secs,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            call_id = %record.call_id,
+                                            %err,
+                                            "failed to write back recording_url after HTTP upload"
+                                        );
+                                    }
+                                }
                                 if first_uploaded_url.is_none() && track_id != "signaling" {
                                     first_uploaded_url = Some(url.clone());
                                 }
@@ -1443,6 +2078,25 @@ impl CallRecordHook for RecordingUploadHook {
                                     "recording upload failed: {err}"
                                 );
                                 crate::metrics::recording::upload_failure("http");
+                                trace_post_save(
+                                    record,
+                                    self.db.as_ref(),
+                                    recording_trace_event(
+                                        ErrSeverity::Error,
+                                        recording_trace_codes::UPLOAD_FAILED,
+                                        format!("recording HTTP upload failed: {err}"),
+                                        Some(record.start_time),
+                                        serde_json::json!({
+                                            "stage": "http_upload",
+                                            "path": path,
+                                            "track_id": track_id,
+                                            "address": address,
+                                            "error": err.to_string(),
+                                            "duration_ms": elapsed_ms as i64,
+                                        }),
+                                    ),
+                                )
+                                .await;
                                 if let Err(write_err) = write_upload_failed_marker_ex(
                                     Path::new(&path),
                                     &address,
@@ -1968,6 +2622,7 @@ mod tests {
         let mut manager = RecordingUploadManager {
             runtime,
             receiver,
+            db: None,
         };
         let uploader = crate::utils::spawn(async move {
             manager.serve().await;
@@ -1977,6 +2632,8 @@ mod tests {
             .send(PendingRecordingUpload {
                 path: missing,
                 source_tag: "full".to_string(),
+                call_id: Some("s3-upload-test".to_string()),
+                call_start_time: None,
             })
             .await
             .expect("queue missing path");
@@ -1984,6 +2641,8 @@ mod tests {
             .send(PendingRecordingUpload {
                 path: recording.clone(),
                 source_tag: "full".to_string(),
+                call_id: Some("s3-upload-test".to_string()),
+                call_start_time: None,
             })
             .await
             .expect("queue recording");
@@ -3003,12 +3662,15 @@ mod tests {
         let mut manager = RecordingUploadManager {
             runtime,
             receiver,
+            db: None,
         };
         let uploader = crate::utils::spawn(async move { manager.serve().await });
         sender
             .send(PendingRecordingUpload {
                 path: agent_wav.clone(),
                 source_tag: "agent".to_string(),
+                call_id: Some("per-source-test".to_string()),
+                call_start_time: None,
             })
             .await
             .expect("queue agent");
@@ -3016,6 +3678,8 @@ mod tests {
             .send(PendingRecordingUpload {
                 path: full_wav.clone(),
                 source_tag: "ivr".to_string(),
+                call_id: Some("per-source-test".to_string()),
+                call_start_time: None,
             })
             .await
             .expect("queue unmapped tag → default");
@@ -3070,5 +3734,510 @@ mod tests {
         assert_eq!(json["source"], "agent");
         let parsed: UploadFailedMarker = serde_json::from_value(json).expect("round-trip");
         assert_eq!(parsed.source.as_deref(), Some("agent"));
+    }
+
+    // ── CDR call-trace integration ────────────────────────────────────────────
+
+    use crate::models::call_record::{ActiveModel, Column, Entity as CallRecordEntity};
+    use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+
+    /// Create an in-memory CDR row so post-save trace patches have a target
+    /// (the real pipeline persists the row between enrich and completed).
+    async fn trace_test_db(call_id: &str) -> DatabaseConnection {
+        let db = crate::models::connect_db("sqlite::memory:", None)
+            .await
+            .expect("in-memory db");
+        crate::callrecord::create_call_record_table(&db, "rustpbx_call_records")
+            .await
+            .expect("create table");
+        let now = chrono::Utc::now();
+        let row = ActiveModel {
+            call_id: Set(call_id.to_string()),
+            direction: Set("inbound".to_string()),
+            status: Set("completed".to_string()),
+            started_at: Set(now),
+            duration_secs: Set(0),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".to_string()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        CallRecordEntity::insert(row)
+            .exec(&db)
+            .await
+            .expect("insert row");
+        db
+    }
+
+    async fn stored_row(
+        db: &DatabaseConnection,
+        call_id: &str,
+    ) -> crate::models::call_record::Model {
+        CallRecordEntity::find()
+            .filter(Column::CallId.eq(call_id))
+            .one(db)
+            .await
+            .expect("query")
+            .expect("row must exist")
+    }
+
+    async fn stored_trace(db: &DatabaseConnection, call_id: &str) -> Vec<serde_json::Value> {
+        stored_row(db, call_id)
+            .await
+            .metadata
+            .and_then(|meta| meta.get("trace").cloned())
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    fn trace_entry<'a>(trace: &'a [serde_json::Value], code: &str) -> &'a serde_json::Value {
+        trace
+            .iter()
+            .find(|entry| entry["code"] == code)
+            .unwrap_or_else(|| panic!("trace entry {code} missing: {trace:?}"))
+    }
+
+    #[tokio::test]
+    async fn append_call_trace_merges_into_existing_metadata() {
+        let db = trace_test_db("append-trace").await;
+        crate::models::call_record::append_call_trace(
+            &db,
+            "append-trace",
+            vec![serde_json::json!({"code": "recording.upload_failed", "message": "a"})],
+        )
+        .await
+        .expect("first append");
+        crate::models::call_record::append_call_trace(
+            &db,
+            "append-trace",
+            vec![serde_json::json!({"code": "recording.uploaded", "message": "b"})],
+        )
+        .await
+        .expect("second append");
+        let trace = stored_trace(&db, "append-trace").await;
+        assert_eq!(trace.len(), 2, "events must accumulate, not replace");
+        assert_eq!(trace[0]["code"], "recording.upload_failed");
+        assert_eq!(trace[1]["code"], "recording.uploaded");
+
+        // Unknown call id: silent no-op (s3/http/local CDR storages keep no row).
+        crate::models::call_record::append_call_trace(
+            &db,
+            "no-such-row",
+            vec![serde_json::json!({"code": "x"})],
+        )
+        .await
+        .expect("no-op for missing row");
+    }
+
+    #[tokio::test]
+    async fn http_upload_failure_appends_trace_to_cdr_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fail-trace.wav");
+        tokio::fs::write(&path, b"wav-bytes")
+            .await
+            .expect("write recording");
+        let path_str = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some("http://127.0.0.1:1/recording".to_string()),
+            ..Default::default()
+        };
+        let db = trace_test_db("upload-fail-trace").await;
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy)));
+        let (hook, _, _) = RecordingUploadHook::with_runtime_and_db(runtime, Some(db.clone()))
+            .expect("hook with db");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "upload-fail-trace".to_string(),
+            start_time: now - chrono::Duration::seconds(5),
+            answer_time: Some(now - chrono::Duration::seconds(4)),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".to_string(),
+                path: path_str,
+                size: 9,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .expect("hook should not fail hard");
+
+        let trace = stored_trace(&db, "upload-fail-trace").await;
+        let entry = trace_entry(&trace, "recording.upload_failed");
+        assert_eq!(entry["kind"], "error");
+        assert_eq!(entry["detail"]["address"], "http://127.0.0.1:1/recording");
+        assert!(
+            entry["detail"]["error"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty()),
+            "error message must be captured"
+        );
+        assert!(
+            entry["detail"]["duration_ms"].as_i64().is_some(),
+            "attempt duration must be captured"
+        );
+        // ts is the ms offset from the call start.
+        assert!(entry["ts"].as_i64().is_some_and(|ts| ts >= 4_000));
+    }
+
+    #[tokio::test]
+    async fn http_upload_success_writes_back_recording_url_and_trace() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = axum::Router::new().route(
+            "/recording",
+            axum::routing::post(move |_request: axum::extract::Request| {
+                let request_count = request_count.clone();
+                async move {
+                    request_count.fetch_add(1, Ordering::Relaxed);
+                    "https://recordings.example/trace-success.wav"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace-success.wav");
+        tokio::fs::write(&path, b"wav").await.expect("write");
+        let path_str = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some(format!("http://{address}/recording")),
+            ..Default::default()
+        };
+        let db = trace_test_db("http-success-trace").await;
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy)));
+        let (hook, _, _) = RecordingUploadHook::with_runtime_and_db(runtime, Some(db.clone()))
+            .expect("hook with db");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "http-success-trace".to_string(),
+            start_time: now - chrono::Duration::seconds(8),
+            answer_time: Some(now - chrono::Duration::seconds(7)),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".to_string(),
+                path: path_str.clone(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .expect("hook");
+
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        // The row was saved before this hook ran with the local path; the
+        // successful upload must write the final URL back.
+        let row = stored_row(&db, "http-success-trace").await;
+        assert_eq!(
+            row.recording_url.as_deref(),
+            Some("https://recordings.example/trace-success.wav"),
+            "recording_url must be written back after a successful upload"
+        );
+        assert_eq!(row.recording_duration_secs, Some(8));
+        let trace = stored_trace(&db, "http-success-trace").await;
+        let entry = trace_entry(&trace, "recording.uploaded");
+        // Successful uploads are neutral `recording` timeline entries, not
+        // error-tagged ones.
+        assert_eq!(entry["kind"], "recording");
+        assert_eq!(entry["severity"], "info");
+        assert_eq!(
+            entry["detail"]["url"],
+            "https://recordings.example/trace-success.wav"
+        );
+        assert_eq!(entry["detail"]["bytes"], 3);
+    }
+
+    #[tokio::test]
+    async fn s3_manager_appends_trace_to_cdr_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder_root = dir.path().join("recorders");
+        let dated_root = recorder_root.join("20260826");
+        tokio::fs::create_dir_all(&dated_root).await.expect("mkdir");
+        let missing = dated_root.join("missing.wav");
+        let recording = dated_root.join("call.wav");
+        tokio::fs::write(&recording, b"wav").await.expect("write");
+        let object_root = dir.path().join("objects");
+        let storage = Storage::new(&StorageConfig::Local {
+            path: object_root.to_string_lossy().into_owned(),
+        })
+        .expect("local object storage");
+        let policy = RecordingPolicy {
+            path: Some(recorder_root.to_string_lossy().into_owned()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let db = trace_test_db("s3-manager-trace").await;
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy.clone())));
+        runtime.seed_storage(&policy, storage);
+        let mut manager = RecordingUploadManager {
+            runtime,
+            receiver: {
+                let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                sender
+                    .send(PendingRecordingUpload {
+                        path: missing.clone(),
+                        source_tag: "full".to_string(),
+                        call_id: Some("s3-manager-trace".to_string()),
+                        call_start_time: Some(chrono::Utc::now() - chrono::Duration::seconds(2)),
+                    })
+                    .await
+                    .expect("queue missing");
+                sender
+                    .send(PendingRecordingUpload {
+                        path: recording.clone(),
+                        source_tag: "full".to_string(),
+                        call_id: Some("s3-manager-trace".to_string()),
+                        call_start_time: Some(chrono::Utc::now() - chrono::Duration::seconds(2)),
+                    })
+                    .await
+                    .expect("queue recording");
+                receiver
+            },
+            db: Some(db.clone()),
+        };
+        manager.serve().await;
+
+        let trace = stored_trace(&db, "s3-manager-trace").await;
+        let missing_entry = trace_entry(&trace, "recording.media_missing");
+        assert_eq!(
+            missing_entry["detail"]["path"],
+            missing.to_string_lossy().as_ref()
+        );
+        let uploaded = trace_entry(&trace, "recording.uploaded");
+        // Successes are neutral `recording` entries — not error-tagged.
+        assert_eq!(uploaded["kind"], "recording");
+        assert_eq!(uploaded["severity"], "info");
+        assert_eq!(uploaded["detail"]["key"], "recordings/20260826/call.wav");
+        assert!(uploaded["detail"]["url"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn s3_enqueue_records_queued_trace_event() {
+        // The queued event is the evidence chain between "recording stopped"
+        // and "recording uploaded": when the process dies / restarts before
+        // the background manager runs, the CDR still shows `recording.queued`
+        // with no matching `recording.uploaded`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queued.wav");
+        tokio::fs::write(&path, b"wav").await.expect("write");
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::S3),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let db = trace_test_db("s3-queued-trace").await;
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy.clone())));
+        let object_root = dir.path().join("objects");
+        let storage = Storage::new(&StorageConfig::Local {
+            path: object_root.to_string_lossy().into_owned(),
+        })
+        .expect("local object storage");
+        runtime.seed_storage(&policy, storage);
+        // Binding the manager (instead of `_`) keeps the upload channel
+        // receiver alive, so `try_send` succeeds — while never serving it
+        // means the upload itself never runs, which is exactly the scenario
+        // this event covers (queued but never uploaded).
+        let (hook, _manager, _) = RecordingUploadHook::with_runtime_and_db(runtime, Some(db.clone()))
+            .expect("hook with db");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "s3-queued-trace".to_string(),
+            start_time: now - chrono::Duration::seconds(3),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        // The manager is alive but never served: the upload never runs.
+        let trace = {
+            hook.on_record_completed(std::slice::from_mut(&mut record))
+                .await
+                .expect("hook");
+            stored_trace(&db, "s3-queued-trace").await
+        };
+        let queued = trace_entry(&trace, "recording.queued");
+        assert_eq!(queued["kind"], "recording");
+        assert_eq!(queued["severity"], "info");
+        assert_eq!(queued["detail"]["bucket"], "");
+        assert!(queued["detail"]["key"].as_str().is_some());
+        // ts is the ms offset from the call start.
+        assert!(queued["ts"].as_i64().is_some_and(|ts| ts >= 3_000));
+        // No uploaded event: the manager never ran.
+        assert!(
+            trace.iter().all(|entry| entry["code"] != "recording.uploaded"),
+            "no uploaded event expected without a running manager: {trace:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_success_appends_trace_and_writes_back_recording_url() {
+        use axum::{Router, body::Bytes, routing::post};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("retry-trace.wav");
+        tokio::fs::write(&path, b"wav-bytes").await.expect("write");
+        let marker = crate::callrecord::upload_failed_marker_path(&path);
+        let body = serde_json::json!({
+            "time": chrono::Utc::now().to_rfc3339(),
+            "address": "http://placeholder",
+            "duration_ms": 1,
+            "error": "previous failure",
+            "attempts": 1,
+            "call_id": "retry-trace-call",
+        });
+        tokio::fs::write(&marker, serde_json::to_vec_pretty(&body).unwrap())
+            .await
+            .expect("write marker");
+
+        let app = Router::new().route(
+            "/recording",
+            post(|_body: Bytes| async { axum::http::StatusCode::OK }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let db = trace_test_db("retry-trace-call").await;
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            url: Some(format!("http://{addr}/recording")),
+            retry_interval_secs: Some(60),
+            ..Default::default()
+        };
+        let worker = RecordingRetryWorker::with_runtime(Arc::new(
+            RecordingUploadRuntime::for_policy(Some(policy)),
+        ))
+        .with_db(db.clone());
+        worker
+            .scan_once(worker.runtime.resolve_targets().ok().flatten())
+            .await
+            .expect("scan");
+
+        assert!(!marker.exists(), "marker cleared after retry success");
+        let row = stored_row(&db, "retry-trace-call").await;
+        assert_eq!(
+            row.recording_url.as_deref(),
+            Some(format!("http://{addr}/recording").as_str()),
+            "retry success must write the final URL back"
+        );
+        let trace = stored_trace(&db, "retry-trace-call").await;
+        let entry = trace_entry(&trace, "recording.retry_succeeded");
+        assert_eq!(entry["detail"]["attempts"], 2);
+        assert_eq!(entry["detail"]["url"], format!("http://{addr}/recording"));
+    }
+
+    #[tokio::test]
+    async fn enrich_storage_failure_appends_trace_before_save() {
+        // Valid policy at startup (with_runtime validates), then a hot-reload
+        // to a broken S3 config (partial credentials) — the exact production
+        // path where `resolve_targets` starts failing.
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(RecordingPolicy {
+            recording_type: Some(RecordingType::Local),
+            ..Default::default()
+        })));
+        let (hook, _, _) = RecordingUploadHook::with_runtime(runtime.clone()).expect("hook");
+        runtime.slot.store(Arc::new(Some(RecordingPolicy {
+            recording_type: Some(RecordingType::S3),
+            bucket: Some("bucket".into()),
+            access_key: Some("ak".into()),
+            secret_key: None,
+            ..Default::default()
+        })));
+
+        let mut record = CallRecord {
+            call_id: "enrich-fail".into(),
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".into(),
+                path: "/recorders/enrich-fail.wav".into(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        let result = hook
+            .on_record_enrich(std::slice::from_mut(&mut record))
+            .await;
+        assert!(result.is_err(), "storage build failure must propagate");
+
+        // Enrich runs BEFORE the saver persists the row, so the in-memory
+        // trace is what reaches the CDR for every saver type.
+        let metadata = record.details.metadata.expect("metadata written");
+        let trace = metadata
+            .get("trace")
+            .and_then(|value| value.as_array())
+            .expect("trace array");
+        let entry = trace_entry(trace, "recording.storage_unavailable");
+        assert!(
+            entry["detail"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("access_key and secret_key")),
+            "detail must carry the storage build error: {entry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_policy_missing_records_local_file_reason() {
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(None));
+        let (hook, _, _) = RecordingUploadHook::with_runtime(runtime).expect("hook");
+        let mut record = CallRecord {
+            call_id: "policy-missing".into(),
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".into(),
+                path: "/recorders/pm.wav".into(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_enrich(std::slice::from_mut(&mut record))
+            .await
+            .expect("enrich");
+        let metadata = record.details.metadata.expect("metadata written");
+        let trace = metadata
+            .get("trace")
+            .and_then(|value| value.as_array())
+            .expect("trace array");
+        let entry = trace_entry(trace, "recording.policy_missing");
+        assert_eq!(entry["severity"], "warn");
     }
 }

@@ -1827,6 +1827,10 @@ async fn test_persist_call_records_writes_session_id_column() {
         .expect("migrated in-memory db");
 
     let mut record = make_record();
+    record.session_id = Some("initial-root".to_string());
+    crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record))
+        .await
+        .expect("initial persist");
     record.session_id = Some("root-of-call".to_string());
     crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record))
         .await
@@ -1849,6 +1853,117 @@ async fn test_persist_call_records_writes_session_id_column() {
         .map(|metadata| metadata.get("session_id").is_some())
         .unwrap_or(false);
     assert!(!metadata_has_session, "metadata must not carry session_id");
+}
+
+#[tokio::test]
+async fn test_persist_call_records_preserves_recorded_snapshot() {
+    use rustpbx_models::call_record::{Column, Entity};
+    use sea_orm::EntityTrait;
+
+    // An explicitly supplied database must be a disposable, independently migrated test DB.
+    let url = std::env::var("RUSTPBX_CDR_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let db = rustpbx_models::create_db(&url, None).await.unwrap();
+    let uploaded_url = "https://recordings.example.com/agent.wav";
+    for (case, steps) in [
+        (
+            "upload_then_delivery",
+            vec!["owner", "upload", "delivery", "delivery"],
+        ),
+        (
+            "delivery_then_owner",
+            vec!["delivery", "owner", "upload", "delivery"],
+        ),
+        (
+            "delivery_before_upload",
+            vec!["owner", "delivery", "upload", "delivery"],
+        ),
+        (
+            "batch_owner_first",
+            vec!["batch_owner_first", "upload", "delivery"],
+        ),
+        (
+            "batch_delivery_first",
+            vec!["batch_delivery_first", "upload", "delivery"],
+        ),
+    ] {
+        let mut owner = make_record();
+        owner.call_id = format!("recorded-snapshot-{case}");
+        owner.session_id = Some(owner.call_id.clone());
+        owner.start_time = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        owner.ring_time = Some(owner.start_time + chrono::Duration::seconds(10));
+        owner.answer_time = Some(owner.start_time + chrono::Duration::seconds(17));
+        owner.end_time = owner.start_time + chrono::Duration::seconds(30);
+        owner.callee = "queue".into();
+        owner.details.recording_url = Some("recordings/agent.wav".into());
+        owner.details.recording_duration_secs = Some(13);
+        owner.details.metadata = Some(HashMap::from([
+            ("hostname".into(), serde_json::json!("origin.example.com")),
+            (
+                "recording_segments".into(),
+                serde_json::json!([{
+                    "unique_id": "agent-segment", "path": "recordings/agent.wav"
+                }]),
+            ),
+        ]));
+        let mut delivery = make_record();
+        delivery.call_id = owner.call_id.clone();
+        delivery.session_id = owner.session_id.clone();
+        delivery.start_time = owner.start_time + chrono::Duration::seconds(10);
+        delivery.end_time = owner.end_time + chrono::Duration::milliseconds(100);
+        delivery.callee = "agent".into();
+        delivery.details.metadata = Some(HashMap::from([(
+            "hostname".into(),
+            serde_json::json!("delivery.example.com"),
+        )]));
+        let mut records = [owner, delivery];
+        for step in steps {
+            match step {
+                "owner" | "delivery" => {
+                    let record = &records[usize::from(step == "delivery")];
+                    database::persist_call_records(&db, std::slice::from_ref(record))
+                        .await
+                        .unwrap();
+                }
+                "upload" => {
+                    rustpbx_models::call_record::update_recording_url(
+                        &db,
+                        &records[0].call_id,
+                        uploaded_url,
+                        13,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "batch_owner_first" => {
+                    database::persist_call_records(&db, &records).await.unwrap();
+                }
+                "batch_delivery_first" => {
+                    records.swap(0, 1);
+                    database::persist_call_records(&db, &records).await.unwrap();
+                    records.swap(0, 1);
+                }
+                _ => unreachable!(),
+            }
+        }
+        let row = Entity::find()
+            .filter(Column::CallId.eq(&records[0].call_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.recording_url.as_deref(), Some(uploaded_url), "{case}");
+        assert_eq!(row.recording_duration_secs, Some(13), "{case}");
+        assert_eq!(row.callee_uri.as_deref(), Some("queue"), "{case}");
+        assert_eq!(row.started_at, records[0].start_time, "{case}");
+        assert_eq!(row.ended_at, Some(records[0].end_time), "{case}");
+        let metadata = row.metadata.unwrap();
+        assert_eq!(metadata["hostname"], "origin.example.com", "{case}");
+        assert_eq!(
+            metadata["recording_segments"][0]["unique_id"], "agent-segment",
+            "{case}"
+        );
+    }
 }
 
 /// Cluster-shaped logical call: one root session (IVR → queue → agent) plus

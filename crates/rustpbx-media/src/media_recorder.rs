@@ -50,9 +50,52 @@ fn recorder_runtime_or_current() -> tokio::runtime::Handle {
 }
 
 pub(crate) struct CapturedRtp {
-    pub(crate) direction: PacketDirection,
+    pub(crate) profile: Option<Arc<NegotiatedLegProfile>>,
+    pub(crate) channel: CaptureChannel,
     pub(crate) packet: RtpPacket,
     pub(crate) received_at_micros: u64,
+    pub(crate) peer_addr: Option<std::net::SocketAddr>,
+}
+
+/// Which recording channel a captured packet belongs to.
+///
+/// The tap that observes a leg decides this at capture time: the caller leg
+/// maps ingress→[`CaptureChannel::Caller`] / egress→[`CaptureChannel::Callee`]
+/// (the classic bridged-call layout), while the callee leg contributes its
+/// ingress (the agent mic — the live audio the bridge no longer relays while
+/// the call is held) as [`CaptureChannel::Callee`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureChannel {
+    /// Caller-side (leg A) audio.
+    Caller,
+    /// Callee-side (leg B) audio.
+    Callee,
+}
+
+impl CaptureChannel {
+    /// Channel recorded by a leg-observed packet travelling in `direction`
+    /// (the classic caller-tap mapping).
+    pub fn for_direction(direction: PacketDirection) -> Self {
+        match direction {
+            PacketDirection::Ingress => Self::Caller,
+            PacketDirection::Egress => Self::Callee,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Caller),
+            2 => Some(Self::Callee),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn code(&self) -> u8 {
+        match self {
+            Self::Caller => 1,
+            Self::Callee => 2,
+        }
+    }
 }
 
 /// Result produced after a file recorder has drained queued RTP and rewritten
@@ -80,12 +123,30 @@ pub trait MediaRecorder: Send {
         Ok(())
     }
 
+    /// Resume the file timeline without counting deliberately paused time.
+    fn resume(&mut self) {}
+
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()>;
+
+    /// Captures from another leg retain that leg's negotiated payload mapping.
+    /// Backends that preserve raw RTP can keep the original entry point.
+    async fn write_rtp_with_profile(
+        &mut self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
+        _profile: Option<&NegotiatedLegProfile>,
+    ) -> Result<()> {
+        self.write_rtp(channel, packet, received_at_micros, peer_addr)
+            .await
+    }
 
     /// Finalize the backend. File recorders return metadata; streaming
     /// recorders return `None` after flushing.
@@ -126,6 +187,12 @@ impl MediaRecorder for FileRecorder {
         Some(&self.option.recorder_file)
     }
 
+    fn resume(&mut self) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.resume_capture_clock();
+        }
+    }
+
     async fn initialize(&mut self) -> Result<()> {
         let output_codec = self
             .caller_profile
@@ -147,9 +214,22 @@ impl MediaRecorder for FileRecorder {
 
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         _received_at_micros: u64,
+        _peer_addr: Option<std::net::SocketAddr>,
+    ) -> Result<()> {
+        self.write_rtp_with_profile(channel, packet, _received_at_micros, _peer_addr, None)
+            .await
+    }
+
+    async fn write_rtp_with_profile(
+        &mut self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        received_at_micros: u64,
+        _peer_addr: Option<std::net::SocketAddr>,
+        profile: Option<&NegotiatedLegProfile>,
     ) -> Result<()> {
         let recorder = self
             .recorder
@@ -167,12 +247,17 @@ impl MediaRecorder for FileRecorder {
             raw_packet: Some(packet.clone()),
         };
         recorder
-            .write_sample(
-                direction_to_leg(direction),
+            .write_sample_with_profile(
+                match channel {
+                    CaptureChannel::Caller => Leg::A,
+                    CaptureChannel::Callee => Leg::B,
+                },
                 &MediaSample::Audio(frame),
                 None,
                 None,
                 None,
+                profile,
+                received_at_micros,
             )
             .await
     }
@@ -200,6 +285,12 @@ impl MediaRecorder for FileRecorder {
 pub struct SipflowRecorder {
     backend: Arc<dyn SipFlowBackend>,
     call_id: String,
+    /// Swap leg ids at capture: `true` writes the callee (egress) side as
+    /// leg 0 and the caller (ingress) side as leg 1. Exported stereo WAVs
+    /// map leg 0 → left, so this is how `stereo_mode = "external_left"` /
+    /// `"external_right"` is honoured for RTP-captured (sipflow) recordings
+    /// without touching the export path.
+    swap_legs: bool,
 }
 
 impl SipflowRecorder {
@@ -207,7 +298,14 @@ impl SipflowRecorder {
         Self {
             backend,
             call_id: call_id.into(),
+            swap_legs: false,
         }
+    }
+
+    /// Flip leg ids so the callee side lands on leg 0 (the left channel).
+    pub fn with_swapped_legs(mut self, swap: bool) -> Self {
+        self.swap_legs = swap;
+        self
     }
 }
 
@@ -215,19 +313,27 @@ impl SipflowRecorder {
 impl MediaRecorder for SipflowRecorder {
     async fn write_rtp(
         &mut self,
-        direction: PacketDirection,
+        channel: CaptureChannel,
         packet: &RtpPacket,
         received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
         let raw = packet.marshal()?;
+        let leg = match channel {
+            CaptureChannel::Caller => 0,
+            CaptureChannel::Callee => 1,
+        };
+        let leg = if self.swap_legs { 1 - leg } else { leg };
         self.backend.record(
             Cow::Borrowed(self.call_id.as_str()),
             BackendSipFlowItem {
                 timestamp: received_at_micros,
                 seq: packet.header.sequence_number as u64,
-                leg: Some(direction_to_leg_id(direction)),
+                leg: Some(leg),
                 msg_type: SipFlowMsgType::Rtp,
-                src_addr: "synth".to_string(),
+                // Media storage uses `src` as the per-direction peer key;
+                // leg 0/1 identifies ingress/egress, including relay traffic.
+                src_addr: peer_addr.map(|addr| addr.to_string()).unwrap_or_default(),
                 dst_addr: String::new(),
                 payload: Bytes::from(raw),
             },
@@ -260,10 +366,12 @@ pub(crate) struct RecorderHandle {
     tx: mpsc::UnboundedSender<RecorderCommand>,
 }
 
-/// Non-blocking media-path sender installed on the caller leg's RTP tap.
+/// Non-blocking media-path sender installed on the tapped legs' RTP
+/// transports. Cloneable: every tap of the call (caller + callee legs) pushes
+/// into the same recording task.
 pub struct RecorderSender {
     tx: mpsc::Sender<CapturedRtp>,
-    dropped: AtomicU64,
+    dropped: Arc<AtomicU64>,
 }
 
 pub type RecordingCompletion = Result<Option<RecordingResult>>;
@@ -353,20 +461,37 @@ impl RecorderSender {
     pub(crate) fn new(tx: mpsc::Sender<CapturedRtp>) -> Self {
         Self {
             tx,
-            dropped: AtomicU64::new(0),
+            dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
     #[inline]
-    pub(crate) fn capture(&self, direction: PacketDirection, packet: &RtpPacket) {
+    pub(crate) fn capture(
+        &self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        peer_addr: Option<std::net::SocketAddr>,
+    ) {
+        self.capture_with_profile(channel, packet, peer_addr, None);
+    }
+
+    pub(crate) fn capture_with_profile(
+        &self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        peer_addr: Option<std::net::SocketAddr>,
+        profile: Option<Arc<NegotiatedLegProfile>>,
+    ) {
         let received_at_micros = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_micros() as u64)
             .unwrap_or_default();
         let captured = CapturedRtp {
-            direction,
+            profile,
+            channel,
             packet: packet.clone(),
             received_at_micros,
+            peer_addr,
         };
         if let Err(error) = self.tx.try_send(captured)
             && matches!(error, mpsc::error::TrySendError::Full(_))
@@ -378,8 +503,23 @@ impl RecorderSender {
         }
     }
 
+    pub(crate) fn dropped_packets(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Compatibility helper for direct injection: maps the classic caller-tap
+    /// direction onto its channel (ingress→Caller, egress→Callee).
     pub fn write_sample(&self, direction: PacketDirection, packet: &RtpPacket) {
-        self.capture(direction, packet);
+        self.capture(CaptureChannel::for_direction(direction), packet, None);
+    }
+}
+
+impl Clone for RecorderSender {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            dropped: Arc::clone(&self.dropped),
+        }
     }
 }
 
@@ -430,7 +570,22 @@ impl RecorderTask {
                             let _ = reply.send(self.status());
                         }
                         RecorderCommand::Pause => self.paused = true,
-                        RecorderCommand::Resume => self.paused = false,
+                        RecorderCommand::Resume => {
+                            if self.paused {
+                                // Commands take priority over RTP. Discard the
+                                // paused backlog before reanchoring on fresh media.
+                                let queued = self.rtp_rx.len();
+                                for _ in 0..queued {
+                                    if self.rtp_rx.try_recv().is_err() {
+                                        break;
+                                    }
+                                }
+                                if let Some(recorder) = self.recorder.as_mut() {
+                                    recorder.resume();
+                                }
+                                self.paused = false;
+                            }
+                        }
                         RecorderCommand::StopRecorder { reply } => {
                             let _ = reply.send(self.finalize_recorder().await);
                         }
@@ -494,10 +649,12 @@ impl RecorderTask {
         }
         if let Some(recorder) = self.recorder.as_mut()
             && let Err(error) = recorder
-                .write_rtp(
-                    captured.direction,
+                .write_rtp_with_profile(
+                    captured.channel,
                     &captured.packet,
                     captured.received_at_micros,
+                    captured.peer_addr,
+                    captured.profile.as_deref(),
                 )
                 .await
         {
@@ -526,20 +683,6 @@ async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-fn direction_to_leg(direction: PacketDirection) -> Leg {
-    match direction {
-        PacketDirection::Ingress => Leg::A,
-        PacketDirection::Egress => Leg::B,
-    }
-}
-
-fn direction_to_leg_id(direction: PacketDirection) -> i32 {
-    match direction {
-        PacketDirection::Ingress => 0,
-        PacketDirection::Egress => 1,
     }
 }
 
@@ -591,6 +734,7 @@ mod tests {
     struct CountingBackend {
         recorded: AtomicUsize,
         flushed: AtomicBool,
+        items: parking_lot::Mutex<Vec<(String, BackendSipFlowItem)>>,
     }
 
     impl CountingBackend {
@@ -598,13 +742,15 @@ mod tests {
             Self {
                 recorded: AtomicUsize::new(0),
                 flushed: AtomicBool::new(false),
+                items: parking_lot::Mutex::new(Vec::new()),
             }
         }
     }
 
     #[async_trait]
     impl SipFlowBackend for CountingBackend {
-        fn record(&self, _call_id: Cow<'_, str>, _item: BackendSipFlowItem) -> Result<()> {
+        fn record(&self, call_id: Cow<'_, str>, item: BackendSipFlowItem) -> Result<()> {
+            self.items.lock().push((call_id.into_owned(), item));
             self.recorded.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -643,6 +789,316 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_output_follows_each_legs_rtp_timeline_when_one_audio_clock_runs_slow() {
+        use audio_codec::{CodecType, create_encoder, create_decoder};
+        let dir = tempfile::tempdir().unwrap();
+        for (codec, rate) in [(CodecType::PCMU, Some(8000)), (CodecType::G729, Some(8000)), (CodecType::G729, None)] {
+            let path = dir.path().join(format!("drift-{codec:?}-{rate:?}.wav"));
+            let mut negotiated = profile();
+            let audio = negotiated.audio.as_mut().unwrap();
+            audio.codec = codec;
+            audio.payload_type = codec.payload_type();
+            let mut recorder = FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: rate,
+                    ..Default::default()
+                },
+                negotiated, 2, false,
+            );
+            recorder.initialize().await.unwrap();
+            let mut encoders = [create_encoder(codec), create_encoder(codec)];
+            // Both streams have contiguous sequence numbers and 20 ms RTP
+            // increments. Only capture time exposes the slower sender clock.
+            for wall_ms in 0..=12_000u64 {
+                for (side, interval_ms) in [20, 21].into_iter().enumerate() {
+                    if wall_ms % interval_ms != 0 {
+                        continue;
+                    }
+                    let sequence = (wall_ms / interval_ms) as u16;
+                    let marked = (2000..2200).contains(&wall_ms)
+                        || (10_000..10_200).contains(&wall_ms);
+                    let pcm: Vec<i16> = (0..160).map(|i| {
+                        if marked {
+                            (10_000.0 * (i as f64 * 440.0 * std::f64::consts::TAU / 8000.0).sin()) as i16
+                        } else {
+                            0
+                        }
+                    }).collect();
+                    let packet = RtpPacket::new(
+                        RtpHeader::new(codec.payload_type(), sequence, sequence as u32 * 160, 1234 + side as u32),
+                        encoders[side].encode(&pcm).to_vec(),
+                    );
+                    recorder.write_rtp(
+                        if side == 0 { CaptureChannel::Caller } else { CaptureChannel::Callee },
+                        &packet, 1_000_000 + wall_ms * 1000, None,
+                    ).await.unwrap();
+                }
+                if wall_ms % 500 == 0 {
+                    recorder.recorder.as_mut().unwrap().flush().await.unwrap();
+                }
+            }
+            let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = if rate.is_some() {
+                wav[44..].chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+            } else {
+                assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
+                create_decoder(CodecType::PCMU).decode(&wav[44..])
+            };
+            assert!((result.duration_secs - 12.02).abs() < 0.03);
+            // Each leg follows its own RTP timeline from its wall-anchored
+            // first packet: the 21 ms sender's RTP clock runs ~5% slow, so its
+            // markers land proportionally earlier than the 20 ms sender's —
+            // audio stays contiguous instead of being diluted with silence.
+            for (side, marker_expectations) in [
+                (0usize, [2.0f64, 10.0]),
+                (1, [1.90, 9.52]),
+            ] {
+                for expected_onset in marker_expectations {
+                    let from = ((expected_onset - 1.0) * 8000.0) as usize;
+                    let to = ((expected_onset + 0.6) * 8000.0) as usize;
+                    let first = (from..to).find(|i| samples[i * 2 + side].abs() > 2000)
+                        .expect("recorded tone marker is missing");
+                    let onset = first as f64 / 8000.0;
+                    assert!((onset - expected_onset).abs() <= 0.12,
+                        "{codec:?} channel={side} marker@{expected_onset}s recorded at {onset}s");
+                    let mut quiet_run = 0;
+                    let mut longest_quiet = 0;
+                    for i in first + 320..first + 1120 {
+                        if samples[i * 2 + side].abs() < 500 {
+                            quiet_run += 1;
+                            longest_quiet = longest_quiet.max(quiet_run);
+                        } else {
+                            quiet_run = 0;
+                        }
+                    }
+                    assert!(longest_quiet <= 160,
+                        "{codec:?} channel={side}: drift correction interrupted a tone for {longest_quiet} samples");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_keeps_first_speaker_timing_after_peer_startup_burst() {
+        use audio_codec::{CodecType, create_decoder, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup-burst.wav");
+        let mut recorder = FileRecorder::new(
+            RecorderOption::new(path.to_string_lossy().into_owned()), profile(), 2, false,
+        );
+        recorder.initialize().await.unwrap();
+        let mut encoder = create_encoder(CodecType::PCMU);
+        let quiet = encoder.encode(&vec![0; 160]);
+        let tone = encoder.encode(&vec![8000; 160]);
+        // A transport handshake can release already queued microphone audio
+        // before the caller sends its first RTP. It must not advance that
+        // caller's file position beyond the caller's actual capture time.
+        for sequence in 0..25 {
+            let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), tone.clone());
+            recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000, None).await.unwrap();
+        }
+        for wall_ms in 0..=12_000u64 {
+            if wall_ms % 20 == 0 {
+                let sequence = (25 + wall_ms / 20) as u16;
+                let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), tone.clone());
+                recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+            }
+            if wall_ms >= 600 && (wall_ms - 600) % 22 == 0 {
+                let sequence = ((wall_ms - 600) / 22) as u16;
+                let marked = (50..75).contains(&sequence) || (250..275).contains(&sequence);
+                let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 5678),
+                    if marked { tone.clone() } else { quiet.clone() });
+                recorder.write_rtp(CaptureChannel::Caller, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+            }
+            if wall_ms % 500 == 0 {
+                recorder.recorder.as_mut().unwrap().flush().await.unwrap();
+            }
+        }
+        Box::new(recorder).finalize().await.unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples = create_decoder(CodecType::PCMU).decode(&wav[44..]);
+        let mut onsets = Vec::new();
+        let mut previous = false;
+        for (i, frame) in samples.chunks_exact(2).enumerate() {
+            let audible = frame[0] > 6000;
+            if audible && !previous && onsets.last().is_none_or(|last| i - last > 8000) {
+                onsets.push(i);
+            }
+            previous = audible;
+        }
+        assert_eq!(onsets.len(), 2, "both caller markers must survive recording");
+        // The caller sends every 22 ms with 160-sample RTP increments (a ~10%
+        // slow RTP clock) anchored at its wall start (600 ms): its markers
+        // land on its own RTP timeline — 0.6 s + n×160 samples — contiguous,
+        // not diluted against the wall clock.
+        for (onset, expected) in onsets.into_iter().zip([1.6, 5.6]) {
+            let actual = onset as f64 / 8000.0;
+            assert!((actual - expected).abs() <= 0.12,
+                "caller marker captured at {expected}s was recorded at {actual}s");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_keeps_a_late_peer_at_its_capture_position() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for (peer_start_ms, expected_ms) in [(2500u64, 4020usize), (12500, 14020)] {
+            let path = dir.path().join(format!("late-peer-{peer_start_ms}.wav"));
+            let mut recorder = FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: Some(8000),
+                    ..Default::default()
+                }, profile(), 2, false,
+            );
+            recorder.initialize().await.unwrap();
+            let mut encoder = create_encoder(CodecType::PCMU);
+            for wall_ms in (0..=peer_start_ms + 1500).step_by(20) {
+                let packet = RtpPacket::new(
+                    RtpHeader::new(0, (wall_ms / 20) as u16, wall_ms as u32 * 8, 1234),
+                    encoder.encode(&vec![0; 160]).to_vec(),
+                );
+                recorder.write_rtp(CaptureChannel::Caller, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+                if wall_ms >= peer_start_ms {
+                    let packet = RtpPacket::new(packet.header.clone(), encoder.encode(&vec![8000; 160]).to_vec());
+                    recorder.write_rtp(CaptureChannel::Callee, &packet, 1_000_000 + wall_ms * 1000, None).await.unwrap();
+                }
+            }
+            Box::new(recorder).finalize().await.unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            assert_eq!(samples.len(), expected_ms * 8 * 2, "a peer's leading silence must not shorten either channel");
+            let first = samples.chunks_exact(2).position(|s| s[1] > 6000).unwrap();
+            assert_eq!(first, peer_start_ms as usize * 8, "late peer must retain its capture position");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_does_not_turn_capture_jitter_into_audio_gaps() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jitter.wav");
+        let mut recorder = FileRecorder::new(
+            RecorderOption {
+                recorder_file: path.to_string_lossy().into_owned(),
+                samplerate: Some(8000),
+                ..Default::default()
+            }, profile(), 2, false,
+        );
+        recorder.initialize().await.unwrap();
+        let data = create_encoder(CodecType::PCMU).encode(&vec![8000; 160]).to_vec();
+        for sequence in 0..100u16 {
+            let packet = RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), data.clone());
+            for channel in [CaptureChannel::Caller, CaptureChannel::Callee] {
+                let jitter_ms = [0, 15, 5, 25][sequence as usize % 4];
+                recorder.write_rtp(channel, &packet, 1_000_000 + sequence as u64 * 20_000 + jitter_ms * 1000, None).await.unwrap();
+            }
+        }
+        let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples: Vec<i16> = wav[44..].chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(samples.len(), 2 * 8000 * 2);
+        assert!(samples.iter().all(|s| *s > 6000), "capture jitter must not add silence to continuous audio");
+        assert_eq!(result.duration_secs, 2.0);
+    }
+
+    #[tokio::test]
+    async fn file_output_pause_excludes_paused_capture_time() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for drain_before_resume in [true, false] {
+            let path = dir.path().join(format!("pause-{drain_before_resume}.wav"));
+            let (tx, rx) = mpsc::channel(8);
+            let (command_tx, command_rx) = mpsc::unbounded_channel();
+            let (finished_tx, _finished_rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(RecorderTask::new(rx, command_rx, finished_tx).run());
+            let handle = RecorderHandle { tx: command_tx };
+            handle.set_recorder(Box::new(FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: Some(8000),
+                    ..Default::default()
+                }, profile(), 2, false,
+            )), None).await.unwrap();
+            let data = create_encoder(CodecType::PCMU).encode(&vec![8000; 160]).to_vec();
+            for (sequence, capture_micros) in [(0, 1_000_000), (1, 3_000_000), (2, 7_000_000)] {
+                for channel in [CaptureChannel::Caller, CaptureChannel::Callee] {
+                    tx.send(CapturedRtp {
+                        profile: None, channel,
+                        packet: RtpPacket::new(RtpHeader::new(0, sequence, sequence as u32 * 160, 1234), data.clone()),
+                        received_at_micros: capture_micros,
+                        peer_addr: None,
+                    }).await.unwrap();
+                }
+                if sequence != 1 || drain_before_resume {
+                    // Exercise both already-discarded and still-queued paused RTP.
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while tx.capacity() != 8 {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.unwrap();
+                }
+                if sequence == 0 {
+                    handle.pause().unwrap();
+                    assert!(handle.status().await.unwrap().paused);
+                } else if sequence == 1 {
+                    handle.resume().unwrap();
+                    assert!(!handle.status().await.unwrap().paused);
+                }
+            }
+            let result = handle.stop_recorder().await.unwrap().unwrap();
+            drop(handle);
+            task.await.unwrap();
+            let wav = std::fs::read(path).unwrap();
+            let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            assert_eq!(result.duration_secs, 0.04, "paused capture time must be excluded from the file");
+            assert_eq!(samples.len(), 320 * 2);
+            assert!(samples.iter().all(|s| *s > 6000));
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_places_dtmf_once_at_capture_time() {
+        use crate::negotiate::NegotiatedCodec;
+        use audio_codec::CodecType;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dtmf-capture.wav");
+        let mut negotiated = profile();
+        negotiated.dtmf = Some(NegotiatedCodec {
+            codec: CodecType::TelephoneEvent, payload_type: 101, clock_rate: 8000, channels: 1,
+        });
+        let mut recorder = FileRecorder::new(RecorderOption {
+            recorder_file: path.to_string_lossy().into_owned(), samplerate: Some(8000),
+            ..Default::default()
+        }, negotiated, 2, false);
+        recorder.initialize().await.unwrap();
+        recorder.write_rtp(CaptureChannel::Caller, &packet(0, 0, 0), 1_000_000, None).await.unwrap();
+        for (seq, elapsed_ms, end, duration) in [
+            (1, 1000, false, 160u16), (2, 1040, false, 800),
+            (3, 1060, true, 800), (4, 1100, true, 800),
+        ] {
+            let event = RtpPacket::new(RtpHeader::new(101, seq, 64000, 1234),
+                vec![5, if end { 0x80 } else { 0 }, (duration >> 8) as u8, duration as u8]);
+            recorder.write_rtp(CaptureChannel::Callee, &event, 1_000_000 + elapsed_ms * 1000, None).await.unwrap();
+        }
+        recorder.write_rtp(CaptureChannel::Caller, &packet(0, 5, 160), 3_000_000, None).await.unwrap();
+        Box::new(recorder).finalize().await.unwrap();
+        let wav = std::fs::read(path).unwrap();
+        let samples: Vec<i16> = wav[44..].chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let callee: Vec<i16> = samples.chunks_exact(2).map(|s| s[1]).collect();
+        assert!(callee[8000..8800].iter().any(|s| s.abs() > 2000));
+        assert!(callee[..8000].iter().all(|s| s.abs() < 100));
+        assert!(callee[8800..].iter().all(|s| s.abs() < 100), "terminal repeats must not extend the tone");
+    }
+
+    #[tokio::test]
     async fn file_output_sample_rate_resamples_audio_and_preserves_duration() {
         use audio_codec::{CodecType, create_encoder};
         let dir = tempfile::tempdir().unwrap();
@@ -674,8 +1130,14 @@ mod tests {
                             RtpHeader::new(source_codec.payload_type(), seq, seq as u32 * 160, 1234),
                             encoder.encode(&pcm).to_vec(),
                         );
-                        recorder.write_rtp(PacketDirection::Ingress, &packet, 0).await.unwrap();
-                        recorder.write_rtp(PacketDirection::Egress, &packet, 0).await.unwrap();
+                        recorder
+                            .write_rtp(CaptureChannel::Caller, &packet, 0, None)
+                            .await
+                            .unwrap();
+                        recorder
+                            .write_rtp(CaptureChannel::Callee, &packet, 0, None)
+                            .await
+                            .unwrap();
                     }
                     let result = Box::new(recorder).finalize().await.unwrap().unwrap();
                     let wav = std::fs::read(path).unwrap();
@@ -730,15 +1192,18 @@ mod tests {
                     recorder.initialize().await.unwrap();
                     let mut encoder = create_encoder(CodecType::PCMU);
                     for seq in 0..10u16 {
-                        for (direction, level) in [
-                            (PacketDirection::Ingress, 8000i16),
-                            (PacketDirection::Egress, -8000i16),
+                        for (channel, level) in [
+                            (CaptureChannel::Caller, 8000i16),
+                            (CaptureChannel::Callee, -8000i16),
                         ] {
                             let packet = RtpPacket::new(
                                 RtpHeader::new(0, seq, seq as u32 * 160, 1234),
                                 encoder.encode(&vec![level; 160]).to_vec(),
                             );
-                            recorder.write_rtp(direction, &packet, 0).await.unwrap();
+                            recorder
+                                .write_rtp(channel, &packet, 0, None)
+                                .await
+                                .unwrap();
                         }
                     }
                     Box::new(recorder).finalize().await.unwrap();
@@ -916,10 +1381,13 @@ mod tests {
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
         handle.set_recorder(Box::new(initial), None).await.unwrap();
-        sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
+        use rustrtc::peer_connection::RtpObserver;
+        let tap = crate::ingress_tap::IngressTap::new(8, vec![0], Some(sender));
+        tap.on_ingress(&packet(0, 1, 160), "127.0.0.1:4000".parse().unwrap());
+        tap.on_egress(&packet(0, 2, 320), "127.0.0.1:5000".parse().unwrap());
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
-            while backend.recorded.load(Ordering::SeqCst) == 0 {
+            while backend.recorded.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -931,8 +1399,47 @@ mod tests {
                 .is_none()
         );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
-        assert_eq!(backend.recorded.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.recorded.load(Ordering::SeqCst), 2);
+        let items = backend.items.lock();
+        assert_eq!(items[0].0, "call-1");
+        assert_eq!(items[0].1.src_addr, "127.0.0.1:4000");
+        assert_eq!(items[0].1.dst_addr, "");
+        assert_eq!(items[0].1.leg, Some(0));
+        assert_eq!(items[1].1.src_addr, "127.0.0.1:5000");
+        assert_eq!(items[1].1.dst_addr, "");
+        assert_eq!(items[1].1.leg, Some(1));
+        assert_eq!(
+            items[0].1.payload.as_ref(),
+            packet(0, 1, 160).marshal().unwrap().as_slice()
+        );
+        assert!(items[0].1.timestamp > 0);
         assert!(!backend.flushed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn sipflow_swapped_legs_put_egress_on_leg0() {
+        let backend = Arc::new(CountingBackend::new());
+        let initial = SipflowRecorder::new(backend.clone(), "call-1").with_swapped_legs(true);
+        let (handle, sender, _recorder_finished_rx) = RecorderHandle::new();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
+        use rustrtc::peer_connection::RtpObserver;
+        let tap = crate::ingress_tap::IngressTap::new(8, vec![0], Some(sender));
+        tap.on_ingress(&packet(0, 1, 160), "127.0.0.1:4000".parse().unwrap());
+        tap.on_egress(&packet(0, 2, 320), "127.0.0.1:5000".parse().unwrap());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.recorded.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let items = backend.items.lock();
+        // Swapped: egress (callee side) becomes leg 0 — the left channel of
+        // exported WAVs — and ingress (caller) becomes leg 1.
+        assert_eq!(items[0].1.leg, Some(1), "ingress must flip to leg 1");
+        assert_eq!(items[1].1.leg, Some(0), "egress must flip to leg 0");
+        assert_eq!(items[0].1.src_addr, "127.0.0.1:4000");
+        assert_eq!(items[1].1.src_addr, "127.0.0.1:5000");
     }
 
     #[tokio::test]
@@ -1005,11 +1512,22 @@ mod tests {
     }
 
     #[test]
-    fn direction_mapping_is_stable() {
-        assert_eq!(direction_to_leg(PacketDirection::Ingress), Leg::A);
-        assert_eq!(direction_to_leg(PacketDirection::Egress), Leg::B);
-        assert_eq!(direction_to_leg_id(PacketDirection::Ingress), 0);
-        assert_eq!(direction_to_leg_id(PacketDirection::Egress), 1);
+    fn channel_mapping_is_stable() {
+        // Classic caller-tap layout: ingress (received) is the caller channel,
+        // egress (sent) is the callee channel; sipflow leg ids follow.
+        assert_eq!(
+            CaptureChannel::for_direction(PacketDirection::Ingress),
+            CaptureChannel::Caller
+        );
+        assert_eq!(
+            CaptureChannel::for_direction(PacketDirection::Egress),
+            CaptureChannel::Callee
+        );
+        assert_eq!(CaptureChannel::Caller.code(), 1);
+        assert_eq!(CaptureChannel::Callee.code(), 2);
+        assert_eq!(CaptureChannel::from_code(1), Some(CaptureChannel::Caller));
+        assert_eq!(CaptureChannel::from_code(2), Some(CaptureChannel::Callee));
+        assert_eq!(CaptureChannel::from_code(0), None);
     }
 }
 
@@ -1018,6 +1536,9 @@ mod tests {
 pub struct RecordingSession {
     recorder_handle: Option<RecorderHandle>,
     recorder_finished_rx: Option<mpsc::UnboundedReceiver<RecordingCompletion>>,
+    /// Cloneable sender retained when the capture task is created so the
+    /// callee leg's tap can feed the same recording task.
+    capture_sender: Option<RecorderSender>,
 }
 
 impl RecordingSession {
@@ -1028,7 +1549,15 @@ impl RecordingSession {
         let (handle, sender, recorder_finished_rx) = RecorderHandle::new();
         self.recorder_handle = Some(handle);
         self.recorder_finished_rx = Some(recorder_finished_rx);
+        self.capture_sender = Some(sender.clone());
         Ok(sender)
+    }
+
+    /// Sender for an additional tapped leg (the callee leg's ingress feeds the
+    /// same recording task — its mic audio is the B-channel source while the
+    /// call is held). `None` until [`Self::setup_recorder_task`] ran.
+    pub fn capture_sender(&self) -> Option<RecorderSender> {
+        self.capture_sender.clone()
     }
 
     /// Start file recording from caller leg A. The task initializes the file

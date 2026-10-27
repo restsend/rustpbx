@@ -34,11 +34,17 @@ pub struct LegRtcpSnapshot {
     pub sr_ssrc: u32,
     /// Whether a remote Sender Report has been observed at all.
     pub has_sr: bool,
+    /// Matched report blocks observed for this leg's sender SSRC.
+    pub report_count: u64,
+    /// Time the latest matched report arrived (Unix microseconds).
+    pub report_observed_at_micros: u64,
+    pub jitter_valid: bool,
+    pub rtt_valid: bool,
 }
 
 impl LegRtcpSnapshot {
     pub fn jitter_ms(&self) -> Option<f64> {
-        if self.jitter_us == 0 {
+        if !self.jitter_valid {
             None
         } else {
             Some(self.jitter_us as f64 / 1000.0)
@@ -46,7 +52,7 @@ impl LegRtcpSnapshot {
     }
 
     pub fn rtt_ms(&self) -> Option<f64> {
-        if self.rtt_us == 0 {
+        if !self.rtt_valid {
             None
         } else {
             Some(self.rtt_us as f64 / 1000.0)
@@ -66,6 +72,9 @@ impl LegRtcpSnapshot {
 pub struct LegQualityReport {
     /// Which side of the bridge ("A" = caller, "B" = callee).
     pub side: &'static str,
+    /// Last observed PCM window, retained across source replacement and teardown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcm_egress: Option<PcmEgressWindow>,
     /// Negotiated audio codec name (e.g. "PCMU"), when known.
     pub codec: Option<String>,
     /// Plaintext packets received from the remote peer (ingress tap).
@@ -101,6 +110,15 @@ pub struct LegQualityReport {
     pub remote_addr: Option<String>,
 }
 
+/// Historical PCM observation; its mode belongs to the measured window, not the current route.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PcmEgressWindow {
+    pub leg_id: String,
+    pub egress_mode: crate::media_health::MediaEgressMode,
+    pub volume: crate::volume_stats::VolumeSummary,
+}
+
 /// Live RTCP stats for one leg, updated lock-free by a background listener.
 pub struct LegRtcpStats {
     jitter_us: AtomicU64,
@@ -112,6 +130,10 @@ pub struct LegRtcpStats {
     /// receive). Lets the stats task tell audio vs video SRs apart.
     sr_ssrc: AtomicU32,
     has_sr: std::sync::atomic::AtomicBool,
+    report_count: AtomicU64,
+    report_observed_at_micros: AtomicU64,
+    jitter_valid: std::sync::atomic::AtomicBool,
+    rtt_valid: std::sync::atomic::AtomicBool,
 }
 
 impl Default for LegRtcpStats {
@@ -124,6 +146,10 @@ impl Default for LegRtcpStats {
             sr_packet_count: AtomicU64::new(0),
             sr_ssrc: AtomicU32::new(0),
             has_sr: std::sync::atomic::AtomicBool::new(false),
+            report_count: AtomicU64::new(0),
+            report_observed_at_micros: AtomicU64::new(0),
+            jitter_valid: std::sync::atomic::AtomicBool::new(false),
+            rtt_valid: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -138,6 +164,10 @@ impl LegRtcpStats {
             sr_packet_count: AtomicU64::new(0),
             sr_ssrc: AtomicU32::new(0),
             has_sr: std::sync::atomic::AtomicBool::new(false),
+            report_count: AtomicU64::new(0),
+            report_observed_at_micros: AtomicU64::new(0),
+            jitter_valid: std::sync::atomic::AtomicBool::new(false),
+            rtt_valid: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -150,6 +180,10 @@ impl LegRtcpStats {
             sr_packet_count: self.sr_packet_count.load(Ordering::Relaxed),
             sr_ssrc: self.sr_ssrc.load(Ordering::Relaxed),
             has_sr: self.has_sr.load(Ordering::Relaxed),
+            report_count: self.report_count.load(Ordering::Acquire),
+            report_observed_at_micros: self.report_observed_at_micros.load(Ordering::Relaxed),
+            jitter_valid: self.jitter_valid.load(Ordering::Relaxed),
+            rtt_valid: self.rtt_valid.load(Ordering::Relaxed),
         }
     }
 }
@@ -192,7 +226,8 @@ fn update_from_report_blocks(
         if block.ssrc != ssrc {
             continue;
         }
-        if block.jitter != 0 && clock_rate != 0 {
+        stats.jitter_valid.store(clock_rate != 0, Ordering::Relaxed);
+        if clock_rate != 0 {
             let jitter_us = block.jitter as u64 * 1_000_000 / clock_rate as u64;
             stats.jitter_us.store(jitter_us, Ordering::Relaxed);
         }
@@ -202,19 +237,29 @@ fn update_from_report_blocks(
         stats
             .packets_lost
             .store(block.packets_lost, Ordering::Relaxed);
+        stats.rtt_valid.store(false, Ordering::Relaxed);
         // RTT = now − SR_sent_time − DLSR  (RFC 3550 §6.4.1)
         if block.last_sender_report != 0 {
             let times = sr_times.lock();
             if let Some(&sent_instant) = times.get(&block.last_sender_report) {
                 let dlsr = block.delay_since_last_sender_report as f64 / 65536.0;
                 let rtt = sent_instant.elapsed().as_secs_f64() - dlsr;
-                if rtt > 0.0 {
+                if rtt >= 0.0 {
                     stats
                         .rtt_us
                         .store((rtt * 1_000_000.0) as u64, Ordering::Relaxed);
+                    stats.rtt_valid.store(true, Ordering::Relaxed);
                 }
             }
         }
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_micros() as u64)
+            .unwrap_or_default();
+        stats
+            .report_observed_at_micros
+            .store(observed_at, Ordering::Relaxed);
+        stats.report_count.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -318,6 +363,37 @@ mod tests {
         }];
         update_from_report_blocks(&blocks2, 1001, &stats, &sr_times.times.clone(), 8000);
         assert_eq!(stats.snapshot().fraction_lost, 40);
+        update_from_report_blocks(
+            &[ReportBlock {
+                ssrc: 1001,
+                fraction_lost: 0,
+                packets_lost: 10,
+                highest_sequence: 5001,
+                jitter: 0,
+                last_sender_report: 0,
+                delay_since_last_sender_report: 0,
+            }],
+            1001,
+            &stats,
+            &sr_times.times,
+            8000,
+        );
+        assert_eq!(
+            stats.snapshot().jitter_ms(),
+            Some(0.0),
+            "a fresh zero-jitter report replaces the old measurement"
+        );
+        assert_eq!(
+            stats.snapshot().rtt_ms(),
+            None,
+            "no LSR means no RTT measurement"
+        );
+        assert_eq!(
+            stats.snapshot().report_count,
+            2,
+            "unrelated SSRC is not an observation"
+        );
+        assert!(stats.snapshot().report_observed_at_micros > 0);
     }
 
     #[test]

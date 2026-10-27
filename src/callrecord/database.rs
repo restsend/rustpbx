@@ -1,4 +1,4 @@
-use sea_orm::{DatabaseConnection, EntityTrait, Set};
+use sea_orm::{DatabaseConnection, DbBackend, EntityTrait, Set};
 
 use crate::callrecord::CallRecord;
 
@@ -155,23 +155,7 @@ async fn build_active_model(
         hangup_reason: Set(hangup_reason),
         sip_status_code: Set(sip_status_code),
         metadata: Set({
-            let mut m = details.metadata.clone().unwrap_or_default();
-            if !record.sip_leg_roles.is_empty() {
-                let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-                m.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
-            }
-            if let Some(ring_time) = record.ring_time {
-                m.insert(
-                    "ring_time".to_string(),
-                    serde_json::Value::String(ring_time.to_rfc3339()),
-                );
-            }
-            if let Some(answer_time) = record.answer_time {
-                m.insert(
-                    "answer_time".to_string(),
-                    serde_json::Value::String(answer_time.to_rfc3339()),
-                );
-            }
+            let mut m = record.persistence_metadata();
             // Remember the path the CDR file was actually written to so the
             // console can still locate it after the storage root is changed in
             // config (issue #237). Stored in the existing metadata JSON column
@@ -203,6 +187,7 @@ pub(crate) async fn persist_call_records(
     records: &[CallRecord],
 ) -> anyhow::Result<()> {
     use rustpbx_models::call_record::{Column, Entity};
+    use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func};
 
     if records.is_empty() {
         return Ok(());
@@ -212,10 +197,17 @@ pub(crate) async fn persist_call_records(
     for record in records {
         active_models.push(build_active_model(db, record).await?);
     }
+    let incoming = |column| -> Expr {
+        if db.get_database_backend() == DbBackend::MySql {
+            Func::cust(Alias::new("VALUES")).arg(Expr::col(column)).into()
+        } else {
+            Expr::col((Alias::new("excluded"), column))
+        }
+    };
     if let Err(e) = Entity::insert_many(active_models)
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
-                .update_columns([
+                .values([
                     Column::SessionId,
                     Column::DisplayId,
                     Column::Direction,
@@ -252,7 +244,20 @@ pub(crate) async fn persist_call_records(
                     Column::MediaJitterMs,
                     Column::MediaRttMs,
                     Column::UpdatedAt,
-                ])
+                ].map(|column| {
+                    // A peer's unrecorded CDR must not erase the recording owner's
+                    // snapshot, including segment metadata and artifact locations.
+                    // Keep the decision inside the upsert so concurrent saves are atomic.
+                    let keep_recorded = Expr::col((Entity, Column::RecordingUrl))
+                        .is_not_null()
+                        .and(incoming(Column::RecordingUrl).is_null());
+                    (
+                        column,
+                        Expr::case(keep_recorded, Expr::col((Entity, column)))
+                            .finally(incoming(column))
+                            .into(),
+                    )
+                }))
                 .to_owned(),
         )
         .exec(db)

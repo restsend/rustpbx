@@ -36,7 +36,13 @@ impl QueueExporter {
             let key = queue_utils::queue_entry_key(&entry);
             let mut queue_config = entry.queue;
             queue_config.name = Some(entry.name);
-            normalize_queue_audio_paths(&mut queue_config);
+            normalize_queue_audio_paths(
+                &mut queue_config,
+                config
+                    .queue_hold_music
+                    .as_deref()
+                    .unwrap_or(DEFAULT_QUEUE_HOLD_AUDIO),
+            );
             queues_map.insert(key, queue_config);
         }
 
@@ -77,12 +83,12 @@ impl QueueExporter {
     }
 }
 
-fn normalize_queue_audio_paths(queue_config: &mut RouteQueueConfig) {
+fn normalize_queue_audio_paths(queue_config: &mut RouteQueueConfig, default_hold_audio: &str) {
     match queue_config.hold.as_mut() {
         Some(hold) => normalize_optional_audio_path(&mut hold.audio_file),
         None => {
             queue_config.hold = Some(RouteQueueHoldConfig {
-                audio_file: Some(normalize_packaged_audio_path(DEFAULT_QUEUE_HOLD_AUDIO)),
+                audio_file: Some(normalize_packaged_audio_path(default_hold_audio)),
                 loop_playback: true,
             });
         }

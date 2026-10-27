@@ -112,10 +112,13 @@ async def _monitor_snapshot(api) -> dict:
 async def _await_released(api, *, timeout: float = 45.0) -> None:
     """Agent back to idle AND nothing waiting — the per-cycle release gate.
 
-    NOTE: the abandon / ring-timeout / reject release paths start wrapup with
-    the built-in 30 s default (they do not read the skill group's
-    ``metadata.wrapup_time_secs`` — only the customer-disconnect hook does),
-    so the idle wait needs to cover the 30 s wrapup window.
+    The phantom ringing-reservation cleanup (caller abandon, wait-timeout
+    teardown) returns the ringing agent straight to ``idle`` — no wrapup,
+    the call was never answered. The agent-reject (486) path still converts
+    the phantom ``busy`` into a short wrapup with the built-in 30 s default
+    (it does not read the skill group's ``metadata.wrapup_time_secs`` — only
+    the customer-disconnect hook does), so the idle wait keeps covering a
+    possible wrapup window.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout

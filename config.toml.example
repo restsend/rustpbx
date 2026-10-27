@@ -70,6 +70,20 @@ database_url = "sqlite://rustpbx.sqlite3"
 # registered with `;+sip.ice` are answered as ICE-lite automatically.
 # ice_lite = false
 
+# Optional per-bridge sliding diagnostics, separate from the 5s global stats log.
+# Rates use actual elapsed counter deltas; fresh RTCP reports describe remote reception.
+# Missing samples stay unavailable. Coalesced report counts disclose sampling limits.
+# [media.quality_stats]
+# enabled = false
+# sample_interval_ms = 500  # Valid: 250..10000; absent defaults to 5000.
+# window_ms = 2000          # Valid: sample interval..60000; absent defaults to 10000.
+# log_interval_ms = 2000    # Valid: 2000..60000; absent defaults to 10000.
+# Optional egress PCM energy before encoding; no extra decode on RTP direct forwarding.
+# RMS and peak use raw signed 16-bit PCM units. Attenuation is dBov: 0 loudest, 127 silence.
+# Window average uses sample-weighted energy, not an average of decibel values.
+# [media.volume_stats]
+# enabled = false
+
 # SIP Contact — host in Contact for dialogs (BYE, re-INVITE). Unset → follow external_ip.
 # sip_external_ip = "203.0.113.10"
 # auto_sip_external_ip = "http://ifconfig.me"
@@ -121,9 +135,15 @@ database_url = "sqlite://rustpbx.sqlite3"
 # username = "rustpbx" # user-id suffix, must not contain ':'; default: rustpbx
 # lifetime = 3600 # seconds; clients must fetch fresh credentials before expiry
 
-# Shared SIP and HTTP AMI cluster peers.
+# Shared SIP and HTTP AMI cluster. The peers list is the full mesh
+# manifest: it must include THIS node's own entry (matched against the
+# local listener to resolve this node's cluster address, which arms the
+# home-hop fork guard and stamps registration home_proxy) AND each peer.
 # [cluster]
-# peers = [{ addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 }]
+# peers = [
+#     { addr = "10.0.0.1", sip_port = 5060, ami_port = 8080 }, # this node
+#     { addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 },
+# ]
 
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
@@ -166,6 +186,25 @@ ws_handler= "/ws"
 ami_path = "/ami/v1"
 ice_servers_path = "/iceservers"
 media_proxy = "auto"
+
+# Global session id (RFC 7989 correlation id shared by every leg of a call,
+# also the CDR `call_id`/`session_id` key).
+# Length in hex chars of freshly generated ids. Range 8..=32; the default 32
+# mirrors the legacy UUID v4 simple form. Set 16 for short ids (64-bit random).
+# session_id_length = 32
+# Wire format of the outgoing SIP `Session-ID` header:
+#   "native"  = stamp the internal id verbatim (ids shorter than 32 hex are
+#               not strictly RFC 7989 shaped — strict peers discard the header
+#               and fall back to Call-ID correlation; same-version peers and
+#               cluster nodes inherit it normally)
+#   "rfc7989" = zero-pad the id to 32 hex chars so the header always satisfies
+#               the RFC's UUID shape
+# session_id_header_mode = "native"
+# Reuse id-shaped incoming SIP Call-IDs (32 hex or the configured length) as
+# the session id. false = only `Session-ID` headers inherit; every originate
+# gets a fresh id (removes forked-INVITE / spoofed-Call-ID collision risk at
+# the cost of correlation with legacy upstreams).
+# session_id_inherit_callid = true
 
 # Direct extension-to-extension (P2P) calls: when a callee has multiple
 # registered devices, ring ALL of them in parallel (first to answer wins).
@@ -322,8 +361,14 @@ type = "extension"
 # chain accepts SSO tokens without extra plumbing:
 #   X-Auth-Token on REGISTER, ?token= on the WebSocket URL.
 
-# Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
-# audio_codecs = ["pcma","pcmu","g722","opus"]
+# Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS, G729).
+#
+# Honored on EVERY leg — including WebRTC/WSS agent legs — and its ORDER is the
+# offer preference order (the first entry both peers support wins). Listing
+# `g729` here advertises G729 to WebRTC clients too; clients that cannot decode
+# it (browsers) simply do not select it, so it is safe for mixed fleets. When
+# unset, per-transport defaults apply (the WebRTC default excludes G729).
+# audio_codecs = ["g729","pcma","pcmu","g722","opus"]
 
 # Video codec allowlist for pass-through relay. Only codecs present in the
 # peer's SDP are retained; this setting does not create a video section.
@@ -365,6 +410,21 @@ type = "extension"
 enabled = true
 auto_start = true
 auto_start_at = "media" # default; use "answer" to wait for 200
+# Stereo channel assignment for two-party stereo recordings:
+#   caller_left   (default) caller → left, callee → right
+#   callee_left             callee → left, caller → right
+#   external_left           external party → left, internal → right; when the
+#                           sides cannot be distinguished (internal-to-internal
+#                           or both external) the caller stays on the left.
+#   external_right          external party → right, internal → left; the mirror
+#                           of external_left, falling back to caller-right when
+#                           the sides cannot be distinguished.
+# Applies to file recordings (local/http/s3) and to sipflow RTP capture
+# (capture-time leg swap, so exports inherit it).
+# stereo_mode = "external_left"
+# Deprecated direct swap; true ≡ callee_left. Honoured only when no layer
+# configures stereo_mode.
+# stereo_swap = false
 # Routed applications exempt from auto recording (only meaningful with
 # auto_start = true). With ["ivr"], IVR-routed calls install no auto recorder;
 # the IVR flow records only via its smart-node `record start`, so the IVR

@@ -8,9 +8,42 @@ silently matching.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Optional
 
 from .guards import require, require_non_empty, require_keys
+
+# Envelope `timestamp` contract: RFC 3339 with a mandatory timezone offset —
+# `Z` or `±HH:MM` (the RWI webhook emits the server's LOCAL timezone, e.g.
+# `+08:00`). It is never a bare Unix epoch number.
+_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def validate_event_timestamp(ts) -> str:
+    """Assert the envelope `timestamp` is an RFC 3339 string with an offset.
+
+    Guards the local-time wire change (`src/utils.rs::rfc3339_local`): the
+    field used to be a Unix epoch number, so a regression that reverts it
+    (int) or drops the offset (naive string) must fail loudly here.
+    """
+    if not isinstance(ts, str):
+        raise AssertionError(
+            f"[event] envelope timestamp must be an RFC 3339 string, "
+            f"got {type(ts).__name__}: {ts!r}"
+        )
+    if not _RFC3339_RE.match(ts):
+        raise AssertionError(
+            f"[event] envelope timestamp is not RFC 3339 with a timezone "
+            f"offset (e.g. +08:00 / Z): {ts!r}"
+        )
+    try:
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise AssertionError(f"[event] envelope timestamp {ts!r} is not parseable: {e}")
+    return ts
 
 # Events that are call-scoped: must carry a non-empty call_id.
 CALL_SCOPED = {
@@ -36,9 +69,9 @@ TYPE_EXTRAS: dict[str, tuple[str, ...]] = {
 # Canonical ordering constraints used by assert_event_flow().
 LIFECYCLE_ORDER = ("call_created", "call_ringing", "call_answered", "call_hangup")
 
-# `call_answered` is session-scoped: exactly one per call_id, with NO `leg_id`
-# in the payload (leg transitions no longer emit their own answered events).
-# Suites must not wait for per-leg answered events.
+# `call_answered` DUAL contract: ONE per answering leg (leg_id + leg_role in
+# the payload) plus a deprecated session-scoped duplicate (no leg_id, at most
+# one — removed next version). Suites may wait for per-leg answered events.
 
 
 def event_type(ev) -> str:
@@ -68,6 +101,8 @@ def validate_event(ev, *, expect_type: Optional[str] = None, expect_call_id: Opt
     require(ev, "event")
     if not isinstance(ev, dict):
         raise AssertionError(f"[event] event is not a dict: {ev!r:.200}")
+    if ev.get("timestamp") is not None:
+        validate_event_timestamp(ev["timestamp"])
     etype = event_type(ev)
     require_non_empty(etype, "event_type")
     if expect_type is not None and etype != expect_type:
@@ -82,6 +117,56 @@ def validate_event(ev, *, expect_type: Optional[str] = None, expect_call_id: Opt
         payload = ev.get("payload", ev)
         require_keys(payload, extras, f"{etype} payload")
     return ev
+
+
+# Canonical unregistration causes carried in `reason_code` on agent lifecycle
+# events (agent_unregistered / agent_state_changed → offline):
+#   offline       — transport dropped (WebSocket/TCP closed)
+#   expired       — REGISTER or PUBLISH TTL lapsed without an explicit goodbye
+#   unregistered  — explicit REGISTER expires=0
+AGENT_OFFLINE_REASONS = ("offline", "expired", "unregistered")
+
+
+def _event_payload(ev) -> dict:
+    """Normalize webhook (WebhookEvent) / RWI WS (dict) events to a payload dict."""
+    if isinstance(ev, dict):
+        p = ev.get("payload", ev)
+    else:
+        et = getattr(ev, "event_type", "")
+        p = getattr(ev, "payload", None)
+        if not isinstance(p, dict):
+            p = getattr(ev, "raw", {})
+        ev = {"event_type": et, "payload": p}
+    if hasattr(p, "payload"):  # nested WebhookEvent
+        p = p.payload
+    return ev, (p if isinstance(p, dict) else {})
+
+
+def assert_reason_code(ev, expected: Optional[str] = None) -> str:
+    """Assert an agent lifecycle event carries a sane `reason_code`.
+
+    expected=None only checks membership in AGENT_OFFLINE_REASONS; a string
+    requires an exact match. Accepts webhook `WebhookEvent` objects and raw
+    RWI WS dicts.
+    """
+    ev, payload = _event_payload(ev)
+    etype = event_type(ev)
+    reason = payload.get("reason_code")
+    if reason is None or reason == "":
+        raise AssertionError(
+            f"[event] {etype} must carry reason_code when going offline "
+            f"(expected {expected or AGENT_OFFLINE_REASONS}); payload: {payload}"
+        )
+    if reason not in AGENT_OFFLINE_REASONS:
+        raise AssertionError(
+            f"[event] {etype} reason_code {reason!r} not one of "
+            f"{AGENT_OFFLINE_REASONS}"
+        )
+    if expected is not None and reason != expected:
+        raise AssertionError(
+            f"[event] {etype} reason_code {reason!r} != expected {expected!r}"
+        )
+    return reason
 
 
 def assert_event_flow(
@@ -159,7 +244,8 @@ def check_call_timeline(
     """Cross-event contract over one call's event stream.
 
     Returns ``(violations, warnings)``; raises nothing. Checks lifecycle
-    shape (single call_created/call_answered), queue-agent attribution on
+    shape (single call_created; dual call_answered — per leg + one deprecated
+    session duplicate), queue-agent attribution on
     ringing/offered/connected/answered/hangup, flow ordering, and
     attribution stability.
     """
@@ -179,17 +265,48 @@ def check_call_timeline(
         )
     if "call_created" in types and types.count("call_created") > 1:
         violations.append(f"call_created emitted {types.count('call_created')}x (expected 1)")
+    # `call_answered` DUAL contract: one leg-scoped event per answering leg
+    # (leg_id + leg_role present — caller pickup, direct-answer callee,
+    # queue-dispatched agent) plus exactly ONE session-scoped duplicate
+    # (no leg_id; deprecated, removed next version).
     answered = [e for e in events if str(event_type(e)) == "call_answered"]
-    if len(answered) > 1:
+    session_answered = [e for e in answered if not _has_leg(e)]
+    if len(session_answered) > 1:
         violations.append(
-            f"call_answered emitted {len(answered)}x (expected exactly 1 — "
-            "session-scoped, no per-leg answered events)"
+            f"session-scoped call_answered emitted {len(session_answered)}x "
+            "(expected exactly 1 — per-leg answered events are the "
+            "leg-scoped ones, the no-leg_id duplicate is the deprecated "
+            "session event)"
         )
     for ev in answered:
-        if _has_leg(ev):
+        if _has_leg(ev) and _field(ev, "leg_role") is None:
             violations.append(
-                f"call_answered must be session-scoped (no leg_id), got leg_id="
-                f"{_field(ev, 'leg_id')!r}"
+                f"leg-scoped call_answered must carry leg_role, got leg_id="
+                f"{_field(ev, 'leg_id')!r} without a leg_role"
+            )
+
+    # Child-leg sessions (a cluster peer dispatched a queue agent / consult /
+    # transfer leg to another node) must not announce their own SESSION-level
+    # call lifecycle: the dispatching node already emitted call_created /
+    # call_answered for the logical call. A session-scoped lifecycle event
+    # (no leg_id) whose call_id differs from the logical session_id is
+    # exactly such a duplicate (historically the cross-node queue dispatch
+    # satellite session — see `session.meta.child_leg_role`). Leg-scoped
+    # answered events are exempt: per-leg answers are the current contract,
+    # including on child-leg sessions.
+    for ev in events:
+        etype = str(event_type(ev))
+        if etype not in ("call_created", "call_answered"):
+            continue
+        if _has_leg(ev):
+            continue
+        ev_call_id = _field(ev, "call_id")
+        ev_session = _field(ev, "session_id")
+        if ev_call_id is not None and ev_session is not None and str(ev_call_id) != str(ev_session):
+            violations.append(
+                f"{etype} must not fire from a child-leg session: "
+                f"call_id={ev_call_id!r} != session_id={ev_session!r} "
+                "(dispatching node owns the call lifecycle)"
             )
 
     # ── attribution contract ───────────────────────────────────────────
@@ -206,9 +323,7 @@ def check_call_timeline(
                     expected_agent = str(_field(ev, "agent_id"))
                     break
             if expected_agent:
-                break
-
-    # The authoritative agent must never CHANGE mid-call.
+                break    # The authoritative agent must never CHANGE mid-call.
     if expected_agent:
         for ev in events:
             aid = _field(ev, "agent_id")
@@ -241,6 +356,7 @@ def check_call_timeline(
         violations.extend(_attribution_lacking("call_ringing"))
         violations.extend(_attribution_lacking("call_answered"))
         violations.extend(_attribution_lacking("call_hangup"))
+        violations.extend(_attribution_lacking("queue_agent_rejected"))
         ringings = [e for e in events if str(event_type(e)) == "call_ringing"]
         if len(ringings) < 2:
             warnings.append(
@@ -254,10 +370,13 @@ def check_call_timeline(
     i_offered = _first_index("queue_agent_offered")
     i_connected = _first_index("queue_agent_connected")
     i_first_ring = _first_index("call_ringing")
+    i_rejected = _first_index("queue_agent_rejected")
     if i_offered is not None and i_connected is not None and i_offered > i_connected:
         violations.append("queue_agent_offered arrived AFTER queue_agent_connected")
     if i_first_ring is not None and i_offered is not None and i_first_ring > i_offered:
         violations.append("call_ringing arrived AFTER queue_agent_offered")
+    if i_rejected is not None and i_connected is not None and i_rejected > i_connected:
+        violations.append("queue_agent_rejected arrived AFTER queue_agent_connected")
 
     return (violations, warnings)
 

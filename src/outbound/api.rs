@@ -117,6 +117,9 @@ pub async fn execute_dial_core(
         caller_id,
         timeout_secs: Some(ring_timeout as u32),
         extra_headers: req.extra_headers.clone(),
+        // Not agent-attributed: this API is app/webhook-scoped, so no
+        // per-agent outbound policy applies.
+        agent: None,
         trunk: req.trunk.clone(),
         route_originated_calls: None,
         record: req.record.clone(),

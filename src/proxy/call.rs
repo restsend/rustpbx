@@ -548,6 +548,85 @@ impl CallModule {
         Self { inner }
     }
 
+    /// Session id for an inbound INVITE — the single seam `default_resolve`
+    /// resolves every inbound call through.
+    ///
+    /// Cluster child legs of an existing logical call (queue dispatch,
+    /// consult, transfer — including RE-DIAL rounds whose wire Call-ID carries
+    /// the `-r{n}` suffix) adopt the root session id their peer declares on
+    /// the wire, so the agent-answered session keeps the caller's `call_id`
+    /// and every event / CDR of the logical call stays on one id. Everything
+    /// else keeps the legacy derivation: reuse the Call-ID when it is
+    /// id-shaped (unless `session_id_inherit_callid` is disabled), else a
+    /// fresh id; plain P2P internal calls keep the raw Call-ID verbatim.
+    pub(crate) fn resolve_inbound_session_id(
+        server: &SipServerRef,
+        cookie: &TransactionCookie,
+        original: &rsipstack::sip::Request,
+        dialog_id: &str,
+        session_id_enabled: bool,
+    ) -> String {
+        if let Some(root) = Self::inherited_child_session_id(server, cookie, original) {
+            return root;
+        }
+        if session_id_enabled {
+            crate::call::session_id::derive_from_call_id(dialog_id)
+        } else {
+            dialog_id.to_string()
+        }
+    }
+
+    /// Root id a CLUSTER PEER declares for a child leg of an existing logical
+    /// call: a CC UUI `leg=` intent (`agent` / `consult` / `transfer`) plus
+    /// the root id on the `Session-ID` header (UUI data fallback).
+    ///
+    /// Why: the FIRST agent-facing leg dials with the root id as its wire
+    /// Call-ID, so Call-ID derivation lands on it. Every later leg of the
+    /// same logical call must NOT reuse a Call-ID the phone may have already
+    /// declined — it dials `{root}-r{n}`, which `derive_from_call_id` cannot
+    /// normalize, and the child session used to fall back to a fresh id (the
+    /// "sessionid changed when the agent picked up" divergence). The
+    /// Session-ID header / UUI are explicit correlation channels that survive
+    /// the re-dial, so adoption restores one id across the whole logical
+    /// call.
+    ///
+    /// `None` → legacy derivation: non-peer sources (an external PBX planting
+    /// the headers must not merge calls), INVITEs without a CC leg intent,
+    /// and the parallel-leg case where a live local session already holds the
+    /// root id (parallel agent legs on one node must not collapse into one
+    /// id; they still correlate through the enriched `session_id`).
+    fn inherited_child_session_id(
+        server: &SipServerRef,
+        cookie: &TransactionCookie,
+        original: &rsipstack::sip::Request,
+    ) -> Option<String> {
+        if !crate::proxy::proxy_call::sip_session::SipSession::from_cluster_peer(server, cookie) {
+            return None;
+        }
+        let cc_uui = crate::call::uui::extract_cc_uui(&original.headers)?;
+        // A declared dial intent marks this INVITE as a child leg of an
+        // existing logical call — the same trust seam `SipSession::new_inner`
+        // uses for `child_leg_role`.
+        cc_uui
+            .leg
+            .as_deref()
+            .filter(|leg| crate::call::uui::is_known_leg_role(leg))?;
+        let root = crate::call::session_id::extract_inherited(original)
+            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))?;
+        if server.active_call_registry.get(&root).is_some() {
+            debug!(
+                root = %root,
+                "child-leg root id already live on this node; keeping a unique session id"
+            );
+            return None;
+        }
+        info!(
+            root = %root,
+            "inbound cluster child leg adopts the root session id"
+        );
+        Some(root)
+    }
+
     async fn default_resolve(
         &self,
         original: &rsipstack::sip::Request,
@@ -567,7 +646,6 @@ impl CallModule {
                     .with_code(&crate::proxy::error_catalog::MISSING_CALL_ID)
             })?
             .value();
-        let session_id = dialog_id.to_string();
 
         let media_config = {
             let rtp = self.inner.server.rtp_config.load();
@@ -594,6 +672,8 @@ impl CallModule {
                 .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
                 .with_stall_detect_secs(rtp.stall_detect_secs)
                 .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
+                .with_quality_stats(rtp.quality_stats.clone())
+                .with_volume_stats(rtp.volume_stats.clone())
         };
 
         let caller_is_same_realm = self
@@ -831,11 +911,28 @@ impl CallModule {
                 Ok(mut results) => {
                     // A hop addressed to a registration's home node is terminal:
                     // do not fork shared contacts back to another cluster node.
+                    //
+                    // But an empty local set must NOT be treated as offline: the
+                    // callee may be homed on a peer node (client dials its own
+                    // registrar while the callee registered on a sibling). In
+                    // that case keep the peer-owned locations so the hop can be
+                    // forwarded cross-node instead of 480 "target user offline".
                     if let Some(home) = self.inner.server.cluster_self_addr.as_ref()
                         && callee_uri.host_with_port == home.addr
                     {
-                        results.retain(|location| location.home_proxy.as_ref()
-                            .is_none_or(|owner| owner.addr == home.addr));
+                        let local: Vec<_> = results
+                            .iter()
+                            .filter(|location| {
+                                location
+                                    .home_proxy
+                                    .as_ref()
+                                    .is_none_or(|owner| owner.addr == home.addr)
+                            })
+                            .cloned()
+                            .collect();
+                        if !local.is_empty() {
+                            results = local;
+                        }
                     }
                     internal_lookup_empty = results.is_empty();
                     if internal_lookup_empty {
@@ -1088,22 +1185,24 @@ impl CallModule {
             .map(|r| r.new_recording_config())
             .unwrap_or_default();
 
-        // Global session id (RFC 7989): use the Call-ID when UUID-shaped,
-        // else a fresh UUID. Plain P2P extension dialling keeps the raw
-        // Call-ID — no Session-ID is generated or injected for those calls.
-        // Cross-node/cross-entity root inheritance happens later in the
-        // session constructor via the Session-ID header (UUI fallback), so
-        // this leg id stays unique per node (cluster session registry keys
-        // on it).
+        // Global session id: use the Call-ID when id-shaped (unless
+        // `session_id_inherit_callid` is disabled), else a fresh id. Plain
+        // P2P extension dialling keeps the raw Call-ID — no Session-ID is
+        // generated or injected for those calls. Cross-node/cross-entity
+        // root inheritance happens later in the session constructor via the
+        // Session-ID header (UUI fallback), so this leg id stays unique per
+        // node (cluster session registry keys on it).
         let session_id_enabled = !(direction == DialDirection::Internal
             && pending_app.is_none()
             && pending_queue.is_none()
             && !routed);
-        let session_id = if session_id_enabled {
-            crate::call::session_id::normalize_or_generate(&dialog_id)
-        } else {
-            session_id
-        };
+        let session_id = Self::resolve_inbound_session_id(
+            &self.inner.server,
+            cookie,
+            original,
+            &dialog_id,
+            session_id_enabled,
+        );
         let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
             .with_session_id_enabled(session_id_enabled)
             .with_caller(routed_caller.unwrap_or(caller_uri))
@@ -1333,6 +1432,9 @@ impl CallModule {
                 if overrides.stereo_swap.is_some() {
                     merged.stereo_swap = overrides.stereo_swap;
                 }
+                if overrides.stereo_mode.is_some() {
+                    merged.stereo_mode = overrides.stereo_mode;
+                }
                 if overrides.path.is_some() {
                     merged.path = overrides.path.clone();
                 }
@@ -1453,6 +1555,7 @@ impl CallModule {
                 existing.samplerate = existing.samplerate.or(recorder_option.samplerate);
                 existing.ptime = existing.ptime.or(recorder_option.ptime);
                 existing.stereo_swap = existing.stereo_swap.or(recorder_option.stereo_swap);
+                existing.stereo_mode = existing.stereo_mode.or(recorder_option.stereo_mode);
             } else {
                 dialplan.recording.option = Some(recorder_option);
             }
@@ -1581,6 +1684,7 @@ impl CallModule {
             samplerate: policy.samplerate,
             ptime: policy.ptime,
             stereo_swap: policy.stereo_swap,
+            stereo_mode: policy.stereo_mode,
         };
         Some(option)
     }
@@ -2255,12 +2359,155 @@ impl CallModule {
         }
     }
 
+    /// A peer that owns an old dialog may reach the phone through its new
+    /// registration home. This is terminal delivery, not a request from the
+    /// phone to be forwarded back to the dialog owner.
+    async fn try_deliver_peer_bye_to_local_ws(
+        &self,
+        tx: &mut Transaction,
+        dialog_id: &DialogId,
+    ) -> Result<bool> {
+        use rsipstack::sip::{Header, Method, SipMessage, StatusCode, Transport};
+        use rsipstack::transaction::key::TransactionKey;
+
+        let server = &self.inner.server;
+        if tx.original.method != Method::Bye
+            || dialog_id.local_tag.is_empty()
+            || dialog_id.remote_tag.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(source) = tx
+            .connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr())
+        else {
+            return Ok(false);
+        };
+        if matches!(source.r#type, Some(Transport::Ws | Transport::Wss))
+            || !source
+                .addr
+                .host
+                .clone()
+                .try_into()
+                .ok()
+                .is_some_and(|ip: std::net::IpAddr| server.cluster_peer_ips.contains(&ip))
+        {
+            return Ok(false);
+        }
+        let Some(home) = server.cluster_self_addr.as_ref() else {
+            return Ok(false);
+        };
+        let location = server
+            .locator
+            .lookup(&tx.original.uri)
+            .await?
+            .into_iter()
+            .find(|loc| {
+                loc.aor == tx.original.uri
+                    && loc
+                        .home_proxy
+                        .as_ref()
+                        .is_some_and(|owner| owner.addr == home.addr)
+                    && loc.destination.as_ref().is_some_and(|dest| {
+                        matches!(dest.r#type, Some(Transport::Ws | Transport::Wss))
+                    })
+            });
+        let Some(destination) = location.and_then(|loc| loc.destination) else {
+            return Ok(false);
+        };
+        // Avoid dialing a client's NAT address when no registered flow is
+        // cached. Resolution and sending remain bounded if a close races this check.
+        if !server
+            .endpoint
+            .inner
+            .transport_layer
+            .get_addrs()
+            .contains(&destination)
+        {
+            tx.reply(StatusCode::TemporarilyUnavailable).await?;
+            return Ok(true);
+        }
+        let original = tx.original.clone();
+        let original_vias: Vec<_> = original
+            .headers
+            .iter()
+            .filter(|header| matches!(header, Header::Via(_)))
+            .cloned()
+            .collect();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (connection, _) = server
+                .endpoint
+                .inner
+                .transport_layer
+                .lookup(&destination, None)
+                .await?;
+            if connection
+                .cancel_token()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return Err(anyhow!("registered WebSocket flow is closed"));
+            }
+            let mut via_addr = home.clone();
+            via_addr.r#type = destination.r#type;
+            let via = server.endpoint.inner.get_via(Some(via_addr), None)?;
+            let mut request = original;
+            request.headers = std::iter::once(Header::from(via))
+                .chain(request.headers.iter().cloned())
+                .collect::<Vec<_>>()
+                .into();
+            let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
+            let mut relay = Transaction::new_client(
+                key,
+                request,
+                server.endpoint.inner.clone(),
+                Some(connection),
+            );
+            relay.destination = Some(destination);
+            relay.send().await?;
+            while let Some(message) = relay.receive().await {
+                if let SipMessage::Response(mut response) = message
+                    && response.status_code.code() >= 200
+                {
+                    // Remove this hop's Via while retaining the source peer's
+                    // transaction routing, including received/rport parameters.
+                    response.headers = original_vias
+                        .iter()
+                        .cloned()
+                        .chain(
+                            response
+                                .headers
+                                .iter()
+                                .filter(|h| !matches!(h, Header::Via(_)))
+                                .cloned(),
+                        )
+                        .collect::<Vec<_>>()
+                        .into();
+                    return Ok(response);
+                }
+            }
+            Err(anyhow!(
+                "registered WebSocket BYE transaction ended without a response"
+            ))
+        })
+        .await;
+        match response {
+            Ok(Ok(response)) => tx.respond(response).await?,
+            Ok(Err(_)) => tx.reply(StatusCode::ServiceUnavailable).await?,
+            Err(_) => tx.reply(StatusCode::from(504_u16)).await?,
+        }
+        Ok(true)
+    }
+
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
+                if self.try_deliver_peer_bye_to_local_ws(tx, &dialog_id).await? {
+                    return Ok(());
+                }
                 // Cluster: if this node has no dialog, try forwarding in-dialog
                 // BYE/INFO to the session owner (agent may have re-registered
                 // here after a mid-call WS reconnect).
@@ -2344,7 +2591,112 @@ impl CallModule {
             _ => None,
         });
 
-        info!(content_type = ?content_type, body = %body, "Received SIP MESSAGE");
+        // Admin relays carry client credentials; never include their envelope in logs.
+        let logged_body = if content_type.as_deref() == Some(crate::call::sip::ADMIN_CMD_RELAY_CT) {
+            "[redacted admin command]"
+        } else {
+            body.as_ref()
+        };
+        info!(content_type = ?content_type, body = %logged_body, "Received SIP MESSAGE");
+        if content_type.as_deref() == Some(crate::call::sip::ADMIN_CMD_RELAY_CT) {
+            // 节点间管理指令中继：peer 节点把 console 指令转给本坐席的
+            // home 节点。信任边界与 CALL_LEG_EVENT_CT 相同（cluster peer）。
+            let server = &self.inner.server;
+            let trusted = tx.connection.as_ref()
+                .and_then(|connection| connection.get_remote_addr())
+                .and_then(|source| source.addr.host.clone().try_into().ok())
+                .is_some_and(|ip: std::net::IpAddr| server.cluster_peer_ips.contains(&ip));
+            if !trusted {
+                tx.reply(rsipstack::sip::StatusCode::Forbidden).await?;
+                return Ok(());
+            }
+            // 中继信封自带 `agent`（创建节点注入），按它在本节点终端投递。
+            // 只做终端（home==self）：locator 中途漂移 → 404（创建侧长轮询
+            // 超时收场），中继消息不再二次转发。
+            //
+            // 应答以**本 RELAY MESSAGE 事务的 200 body** 带回创建节点（坐席
+            // 跳同一机制）：home 在 [`ADMIN_CMD_AGENT_WAIT`] 内等坐席 answer，
+            // 拿到即 200+body；无本地注册 404；坐席无应答 200+空 body（创建
+            // 侧按 timeout 收场）。
+            let relay_agent = serde_json::from_slice::<serde_json::Value>(tx.original.body())
+                .ok()
+                .and_then(|v| v.get("agent").and_then(|a| a.as_str()).map(str::to_string));
+            match match relay_agent {
+                Some(agent) => {
+                    crate::call::sip::deliver_admin_cmd_relayed(server, &agent, tx.original.body())
+                        .await
+                }
+                None => Err(anyhow::anyhow!("admin relay body missing agent")),
+            } {
+                Ok(crate::call::sip::AdminCmdOutcome::Answered(answer)) => {
+                    info!(
+                        bytes = answer.body.len(),
+                        "admin cmd relay: agent answer relayed via 200 body"
+                    );
+                    let headers = vec![rsipstack::sip::Header::ContentType(
+                        answer
+                            .content_type
+                            .unwrap_or_else(|| crate::call::sip::ADMIN_CMD_ANSWER_CT.into())
+                            .into(),
+                    )];
+                    tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(answer.body))
+                        .await?;
+                }
+                Ok(crate::call::sip::AdminCmdOutcome::NoAnswer) => {
+                    // 坐席无应答（离线/崩溃/老版本）：200 + 空 body，创建侧
+                    // 按 timeout 收场——不让创建侧空等到自己的超时。
+                    info!("admin cmd relay: agent did not answer in time");
+                    tx.reply(rsipstack::sip::StatusCode::OK).await?;
+                }
+                Ok(crate::call::sip::AdminCmdOutcome::NotRegistered) => {
+                    // 目标坐席在本节点无本地注册（stale locator / 已注销）。
+                    tx.reply(rsipstack::sip::StatusCode::NotFound).await?;
+                }
+                Err(error) => {
+                    warn!(%error, "admin cmd relay terminal delivery failed");
+                    tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await?;
+                }
+            }
+            return Ok(());
+        }
+        if content_type.as_deref() == Some(crate::call::sip::CALL_LEG_EVENT_CT) {
+            use rsipstack::sip::ToTypedHeader;
+            let server = &self.inner.server;
+            let trusted = tx.connection.as_ref()
+                .and_then(|connection| connection.get_remote_addr())
+                .and_then(|source| source.addr.host.clone().try_into().ok())
+                .is_some_and(|ip: std::net::IpAddr| server.cluster_peer_ips.contains(&ip));
+            if !trusted {
+                tx.reply(rsipstack::sip::StatusCode::Forbidden).await?;
+                return Ok(());
+            }
+            // This is a terminal home hop: a live local registration is required.
+            // Never route an expiry back to another home or fall back to URI resolution.
+            let locations = server.locator.lookup(&tx.original.uri).await?;
+            let location = locations.into_iter().find(|location| {
+                location.registered_aor.is_some() && location.destination.is_some()
+                    && location.home_proxy.as_ref().is_none_or(|owner| {
+                        server.cluster_self_addr.as_ref().is_some_and(|home| home.addr == owner.addr)
+                    })
+            });
+            let Some(location) = location else {
+                tx.reply(rsipstack::sip::StatusCode::NotFound).await?;
+                return Ok(());
+            };
+            let offer = Box::new(InviteOption {
+                callee: location.aor.clone(),
+                caller: tx.original.from_header()?.typed()?.uri,
+                contact: server.contact_uri_for_location(&location)
+                    .ok_or_else(|| anyhow!("No SIP Contact for ring timeout relay"))?,
+                destination: location.destination,
+                ..Default::default()
+            });
+            crate::call::sip::send_call_leg_event(
+                &server.dialog_layer, server.endpoint.inner.clone(), offer, tx.original.body.clone(),
+            )?;
+            tx.reply(rsipstack::sip::StatusCode::OK).await?;
+            return Ok(());
+        }
         // Default: accept but do nothing
         tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
             .await?;
@@ -2494,6 +2846,7 @@ mod tests {
     use crate::call::{DialDirection, RouteInvite, SipUser, TransactionCookie};
     use crate::config::RouteResult;
     use crate::proxy::tests::common::{create_test_server, create_test_server_with_config};
+    use crate::proxy::proxy_call::sip_session::SipSession;
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
 
@@ -2514,6 +2867,309 @@ mod tests {
             },
             ..Default::default()
         }]
+    }
+
+    #[tokio::test]
+    async fn peer_ring_timeout_message_reaches_only_a_local_registered_phone() {
+        use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use rsipstack::sip::{Method, SipMessage};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+        for (trusted, local_home) in [(true, true), (false, true), (true, false)] {
+            let (mut server, config) = create_test_server().await;
+            let mut local: SipAddr = "sip:127.0.0.1:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut remote: SipAddr = "sip:192.0.2.44:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut destination: SipAddr = "sip:127.0.0.1:5070"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            local.r#type = Some(rsipstack::sip::Transport::Udp);
+            remote.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let inner = Arc::get_mut(&mut server).unwrap();
+            inner.cluster_peer_ips = if trusted {
+                vec!["192.0.2.44".parse().unwrap()]
+            } else {
+                vec![]
+            };
+            inner.cluster_self_addr = Some(local.clone());
+            for addr in server.endpoint.inner.transport_layer.get_addrs() {
+                server.endpoint.inner.transport_layer.del_transport(&addr);
+            }
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transport = ChannelConnection::create_connection(
+                incoming_rx, outgoing, local.clone(), None,
+            ).await.unwrap();
+            server.endpoint.inner.transport_layer.add_transport(transport.into());
+            let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
+            server.locator.register("agent", Some("127.0.0.1"), Location {
+                aor: contact.clone(),
+                registered_aor: Some(canonical),
+                home_proxy: Some(if local_home { local.clone() } else { remote.clone() }),
+                destination: Some(destination),
+                expires: 3600,
+                last_modified: Some(std::time::Instant::now()),
+                ..Default::default()
+            }).await.unwrap();
+            let mut request = create_test_request(Method::Message, "caller", None, "example.test", None);
+            request.uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            request.headers.push(rsipstack::sip::Header::ContentType(crate::call::sip::CALL_LEG_EVENT_CT.into()));
+            request.body = br#"{"event":"ring_timeout","call_id":"upstream-call","offer":"urn:uuid:offer-a"}"#.to_vec();
+            let body = request.body.clone();
+            let (mut transaction, _) = create_transaction(request).await;
+            let (_source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+            transaction.connection = Some(ChannelConnection::create_connection(
+                source_rx, response_tx, remote, None,
+            ).await.unwrap().into());
+            let module = CallModule::new(config, server);
+            module.handle_message(&mut transaction, &TransactionCookie::default())
+                .await.unwrap();
+            let Some(TransportEvent::Incoming(SipMessage::Response(response), _, _)) =
+                response_rx.recv().await
+            else { panic!("the peer transaction must receive a response"); };
+            if trusted && local_home {
+                assert_eq!(response.status_code, rsipstack::sip::StatusCode::OK);
+                let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                            outgoing_rx.recv().await
+                        {
+                            if request.method == Method::Message {
+                                break request;
+                            }
+                        }
+                    }
+                }).await.expect("the home proxy must deliver expiry to its registered phone");
+                assert_eq!(received.uri, contact);
+                assert_eq!(received.body, body);
+            } else {
+                assert!(outgoing_rx.try_recv().is_err(),
+                    "untrusted or remote-home events must not relay");
+                assert_eq!(
+                    response.status_code,
+                    if trusted {
+                        rsipstack::sip::StatusCode::NotFound
+                    } else {
+                        rsipstack::sip::StatusCode::Forbidden
+                    },
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_admin_cmd_message_reaches_only_the_home_registered_phone() {
+        use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use std::io::{Read, Seek, SeekFrom};
+        use tracing::instrument::WithSubscriber;
+        use rsipstack::sip::{Method, SipMessage};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+        for (trusted, local_home) in [(true, true), (false, true), (true, false)] {
+            let (mut server, config) = create_test_server().await;
+            let mut local: SipAddr = "sip:127.0.0.1:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut remote: SipAddr = "sip:192.0.2.44:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut destination: SipAddr = "sip:127.0.0.1:5070"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            local.r#type = Some(rsipstack::sip::Transport::Udp);
+            remote.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let inner = Arc::get_mut(&mut server).unwrap();
+            inner.cluster_peer_ips = if trusted {
+                vec!["192.0.2.44".parse().unwrap()]
+            } else {
+                vec![]
+            };
+            inner.cluster_self_addr = Some(local.clone());
+            for addr in server.endpoint.inner.transport_layer.get_addrs() {
+                server.endpoint.inner.transport_layer.del_transport(&addr);
+            }
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transport = ChannelConnection::create_connection(
+                incoming_rx, outgoing, local.clone(), None,
+            ).await.unwrap();
+            server.endpoint.inner.transport_layer.add_transport(transport.into());
+            let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
+            server.locator.register("agent", Some("127.0.0.1"), Location {
+                aor: contact.clone(),
+                registered_aor: Some(canonical),
+                home_proxy: Some(if local_home { local.clone() } else { remote.clone() }),
+                destination: Some(destination),
+                expires: 3600,
+                last_modified: Some(std::time::Instant::now()),
+                ..Default::default()
+            }).await.unwrap();
+            let mut request = create_test_request(Method::Message, "caller", None, "example.test", None);
+            request.uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            request.headers.push(rsipstack::sip::Header::ContentType(
+                crate::call::sip::ADMIN_CMD_RELAY_CT.into()));
+            request.body = br#"{"v":1,"cmd":"shot","trans_id":"tx-1","agent":"agent","offer":"v=0","token":"admin-secret-regression"}"#.to_vec();
+            let body = request.body.clone();
+            let (mut transaction, _) = create_transaction(request).await;
+            let (_source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+            transaction.connection = Some(ChannelConnection::create_connection(
+                source_rx, response_tx, remote, None,
+            ).await.unwrap().into());
+            let module = CallModule::new(config, server);
+            let mut log_file = tempfile::tempfile().unwrap();
+            let writer = log_file.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            module.handle_message(&mut transaction, &TransactionCookie::default())
+                .with_subscriber(subscriber)
+                .await.unwrap();
+            log_file.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            log_file.read_to_string(&mut logs).unwrap();
+            assert!(logs.contains("Received SIP MESSAGE"));
+            assert!(
+                !logs.contains("admin-secret-regression"),
+                "admin credentials must not be logged"
+            );
+            let Some(TransportEvent::Incoming(SipMessage::Response(response), _, _)) =
+                response_rx.recv().await
+            else { panic!("the peer transaction must receive a response"); };
+            if trusted && local_home {
+                assert_eq!(response.status_code, rsipstack::sip::StatusCode::OK);
+                let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                            outgoing_rx.recv().await
+                        {
+                            if request.method == Method::Message {
+                                break request;
+                            }
+                        }
+                    }
+                }).await.expect("the home proxy must deliver the admin cmd to its registered phone");
+                assert_eq!(received.uri, contact);
+                assert_eq!(received.body, body);
+                // 终端投递用客户端信封 CT（不再带 RELAY 标记）。
+                assert!(received.headers.iter().any(|h| matches!(h,
+                    rsipstack::sip::Header::ContentType(ct)
+                        if ct.value() == crate::call::sip::ADMIN_CMD_CT)));
+            } else {
+                assert!(outgoing_rx.try_recv().is_err(),
+                    "untrusted or remote-home admin cmds must not deliver");
+                assert_eq!(
+                    response.status_code,
+                    if trusted {
+                        rsipstack::sip::StatusCode::NotFound
+                    } else {
+                        rsipstack::sip::StatusCode::Forbidden
+                    },
+                );
+            }
+        }
+    }
+
+    /// AMI 创建入口的跨节点分支：home 在对端 → RELAY CT pager 到对端
+    /// destination（不是终端 CT）；home 在本节点 → 终端 CT 直达坐席。
+    #[tokio::test]
+    async fn admin_cmd_entry_relays_only_when_home_is_remote() {
+        use crate::proxy::tests::common::{
+            create_register_request, create_test_server, create_transaction,
+        };
+        use rsipstack::sip::{Method, SipMessage};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
+        for (clustered, home_is_remote, want_ct) in [
+            (true, true, crate::call::sip::ADMIN_CMD_RELAY_CT),
+            (true, false, crate::call::sip::ADMIN_CMD_CT),
+            (false, false, crate::call::sip::ADMIN_CMD_CT),
+        ] {
+            let (mut server, config) = create_test_server().await;
+            let mut local: SipAddr = "sip:127.0.0.1:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut remote: SipAddr = "sip:192.0.2.44:5060"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            let mut destination: SipAddr = "sip:127.0.0.1:5070"
+                .parse::<rsipstack::sip::Uri>().unwrap().try_into().unwrap();
+            local.r#type = Some(rsipstack::sip::Transport::Udp);
+            remote.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let inner = Arc::get_mut(&mut server).unwrap();
+            inner.cluster_self_addr = clustered.then(|| local.clone());
+            for addr in server.endpoint.inner.transport_layer.get_addrs() {
+                server.endpoint.inner.transport_layer.del_transport(&addr);
+            }
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transport = ChannelConnection::create_connection(
+                incoming_rx, outgoing, local.clone(), None,
+            ).await.unwrap();
+            server.endpoint.inner.transport_layer.add_transport(transport.into());
+            let canonical: rsipstack::sip::Uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
+            let contact: rsipstack::sip::Uri = "sip:agent@phone.invalid".parse().unwrap();
+            if !clustered {
+                // Exercise the registrar's real single-node home_proxy fallback.
+                let mut request = create_register_request("agent", "127.0.0.1", Some(3600));
+                request.headers.unique_push(rsipstack::sip::Header::Contact(
+                    "<sip:agent@phone.invalid>".into(),
+                ));
+                let (mut transaction, _) = create_transaction(request).await;
+                crate::proxy::registrar::RegistrarModule::new(server.clone(), config)
+                    .on_transaction_begin(
+                        CancellationToken::new(),
+                        &mut transaction,
+                        TransactionCookie::default(),
+                    )
+                    .await.unwrap();
+                let locations = server.locator.lookup(&canonical).await.unwrap();
+                assert_eq!(locations.len(), 1);
+                assert!(locations[0].home_proxy.is_some());
+            } else {
+                server.locator.register("agent", Some("127.0.0.1"), Location {
+                    aor: contact.clone(),
+                    registered_aor: Some(canonical),
+                    home_proxy: Some(if home_is_remote { remote.clone() } else { local.clone() }),
+                    destination: Some(destination),
+                    expires: 3600,
+                    last_modified: Some(std::time::Instant::now()),
+                    ..Default::default()
+                }).await.unwrap();
+            }
+            let body = br#"{"v":1,"cmd":"log","trans_id":"tx-2","agent":"agent","days":1}"#.to_vec();
+            // 短等待窗口：本 harness 无人应答 MESSAGE——投递即证路由正确，
+            // 结果应为 NoAnswer（而非 NotRegistered）。
+            let outcome = crate::call::sip::deliver_admin_cmd_with_wait(
+                &server,
+                "agent",
+                &body,
+                std::time::Duration::from_millis(300),
+            )
+            .await
+            .expect("delivery attempt must not error");
+            assert!(
+                matches!(outcome, crate::call::sip::AdminCmdOutcome::NoAnswer),
+                "registered agent must be found and paged, got {outcome:?}"
+            );
+            let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if let Some(TransportEvent::Incoming(SipMessage::Request(request), _, _)) =
+                        outgoing_rx.recv().await
+                    {
+                        if request.method == Method::Message {
+                            break request;
+                        }
+                    }
+                }
+            }).await.expect("a pager MESSAGE must go out");
+            assert_eq!(received.uri, contact);
+            assert_eq!(received.body, body);
+            assert!(received.headers.iter().any(|h| matches!(h,
+                rsipstack::sip::Header::ContentType(ct) if ct.value() == want_ct)),
+                "expected CT {want_ct}");
+        }
     }
 
     struct NotHandledRouteInvite;
@@ -4515,6 +5171,184 @@ mod tests {
         assert!(
             targets[1].destination.is_none(),
             "external-realm target should NOT have destination resolved"
+        );
+    }
+
+    // ── cluster child-leg session id contract ───────────────────────────────
+
+    /// A child-leg INVITE exactly as the DISPATCHING node's production builders
+    /// serialize it (`initiate_sip_leg_with_deadline`): the agent-leg Call-ID
+    /// from `agent_leg_call_id`, the root id stamped on the `Session-ID`
+    /// header (`build_wire_header`) and the CC UUI `leg=agent` dial intent
+    /// (`build_uui_header`). No hand-written correlation formats here — the
+    /// parsing side must accept what the sending side actually emits.
+    fn child_leg_invite(call_id: &str, root: &str) -> rsipstack::sip::Request {
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(rsipstack::sip::Header::CallId(
+            rsipstack::sip::headers::CallId::new(call_id.to_string()),
+        ));
+        // The dispatching node stamps the root id on the `Session-ID` header —
+        // a 32-hex root rides `InviteOption.session_id`, which rsipstack
+        // serializes on the wire through `SessionId::from_local`.
+        headers.push(
+            rsipstack::sip::headers::SessionId::from_local(root)
+                .expect("32-hex root passes rsipstack validation")
+                .into(),
+        );
+        headers.push(crate::call::uui::build_uui_header(
+            root,
+            None,
+            None,
+            None,
+            Some("agent"),
+        ));
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:1001@rustpbx.com".parse().unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    async fn peer_server_and_cookie() -> (SipServerRef, TransactionCookie) {
+        let (mut server, _config) = create_test_server().await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips =
+            vec!["192.0.2.44".parse().unwrap()];
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
+        (server, cookie)
+    }
+
+    /// REPRO (queue re-dial loses the call id): when the first offered agent
+    /// misses, the re-dial INVITE cannot reuse the Call-ID the phone already
+    /// declined — it dials `{root}-r2`. The agent-home node terminates that
+    /// INVITE as its own session and, per the CTI contract, the agent's
+    /// answered session must keep the ROOT id: every event / CDR of the
+    /// logical call shares one `call_id`. A fresh per-leg id here is exactly
+    /// the "sessionid changed when the agent picked up" divergence.
+    #[tokio::test]
+    async fn redial_child_leg_session_id_adopts_root() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        // Second agent-facing dial of the session → wire Call-ID `{root}-r2`.
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        assert_eq!(call_id, format!("{root}-r2"));
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_eq!(
+            resolved, root,
+            "a cluster child leg must adopt the root session id, not a fresh per-leg id"
+        );
+    }
+
+    /// The session-id layer can be disabled for the child INVITE (plain
+    /// internal dialplan, no app/queue): the legacy fallback is the RAW
+    /// Call-ID — `{root}-r2` verbatim. Adoption must work there too, since
+    /// that is the branch queue dispatch actually takes on the agent node.
+    #[tokio::test]
+    async fn redial_child_leg_adopts_root_even_without_session_id_layer() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, false,
+        );
+        assert_eq!(
+            resolved, root,
+            "raw-Call-ID fallback must not leak the -r2 suffix into the session id"
+        );
+    }
+
+    /// First dial (seq == 0): the wire Call-ID IS the root id, so the legacy
+    /// Call-ID derivation already lands on it. Pins the case that was never
+    /// broken — the closed loop from `agent_leg_call_id` to the inbound
+    /// derivation.
+    #[tokio::test]
+    async fn first_dial_child_leg_keeps_root_via_call_id() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        let call_id = SipSession::agent_leg_call_id(root, 0);
+        assert_eq!(call_id, root);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_eq!(resolved, root);
+    }
+
+    /// A non-peer source (external PBX planting the same headers) must NOT
+    /// get its id adopted — the legacy derivation keeps a unique id.
+    #[tokio::test]
+    async fn non_peer_redial_keeps_unique_id() {
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (mut server, _config) = create_test_server().await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips =
+            vec!["192.0.2.44".parse().unwrap()];
+        // No CallerPeerContext: the INVITE did not arrive from a peer.
+        let cookie = TransactionCookie::default();
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_ne!(resolved, root);
+        assert_eq!(
+            resolved.len(),
+            32,
+            "legacy derivation must still yield an id-shaped session id"
+        );
+    }
+
+    /// Parallel agent legs on ONE node: a live local session already holds
+    /// the root id, so adoption must back off — parallel legs must not
+    /// collapse into one session id. (They still correlate through the
+    /// enriched `session_id` field; uniqueness wins here.)
+    #[tokio::test]
+    async fn live_local_root_id_blocks_adoption() {
+        use crate::proxy::active_call_registry::ActiveProxyCallEntry;
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        // A live local session occupying the root id (parallel leg already
+        // serving on this node).
+        let dialplan = Dialplan::new(
+            "parallel-leg-probe".to_string(),
+            crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            DialDirection::Inbound,
+        );
+        let (_session, handle, _rx) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        server.active_call_registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: root.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: chrono::Utc::now(),
+                answered_at: None,
+                status: ActiveProxyCallStatus::Ringing,
+            },
+            handle,
+        );
+
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let request = child_leg_invite(&call_id, root);
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_ne!(
+            resolved, root,
+            "a live local session with the root id must block adoption"
         );
     }
 }

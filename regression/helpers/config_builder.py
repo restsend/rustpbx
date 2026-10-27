@@ -900,6 +900,11 @@ class ConfigBuilder:
             'voicemail_extension = "*97"',
             'ivr_extension = "ivr"',
             'callback_retry_secs = 300',
+            # Fast offline-watchdog reconcile: the tier2 presence suites wait
+            # out a full watchdog tick for their "sticks / recovered" bounds.
+            '[presence]',
+            'offline_watchdog_interval_secs = 10',
+            "",
             "",
             "[transfer]",
             'mode = "refer"',
@@ -923,7 +928,7 @@ class ConfigBuilder:
             'addons = ["' + '", "'.join(self.addons) + '"]',
             "registrar_expires = 3600",
             'codec_strategy = "quality"',
-            f"modules = {_toml_value(self.proxy_modules or ['acl', 'auth', 'registrar', 'call'])}",
+            f"modules = {_toml_value(self.proxy_modules or ['acl', 'auth', 'registrar', 'call', 'presence'])}",
             "# File sources for routes/trunks/queues/ivr — WITHOUT these the proxy",
             "# reloads 0 entries and no route/trunk/queue/ivr file is ever read.",
             "# Use GLOB patterns: a non-glob path makes the proxy's generated-",

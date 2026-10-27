@@ -91,11 +91,28 @@ macro_rules! rwi_event {
 /// struct: it is injected via `EventCallContext.direction` enrichment.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallCreated {
+    /// The leg the call was created for: the caller leg of an inbound session
+    /// (`"caller"`), the outgoing INVITE leg of an API originate (`leg_id`
+    /// `None`, `leg_role` `"caller"` — no leg registry entry exists
+    /// pre-answer). Child-leg sessions (a cluster peer dispatched a queue
+    /// agent / consult / transfer leg to this node) emit no `call_created`
+    /// at all — the dispatching node already announced the logical call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// `caller` | `callee` | `agent` | `consult` | `transfer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub context: String,
     pub caller: String,
     pub callee: String,
     pub trunk: Option<String>,
+    /// Every SIP header of the request that created the call, minus the
+    /// transport/dialog headers with typed representations (Via, Call-ID,
+    /// CSeq, Content-Length/Type, From, To, User-Agent, Allow, Max-Forwards).
+    /// Route-injected headers replace same-name entries (case-insensitive).
+    /// Populated on every production emission point (inbound INVITE, RWI app,
+    /// API originate — extracted from the actual outgoing INVITE).
     #[serde(default)]
     pub sip_headers: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -118,8 +135,26 @@ rwi_event!(CallCreated, "call_created");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {
     /// Present for an individual leg event; absent for a session event.
+    /// Per-leg events fire for every registered leg's ring transition
+    /// (queue-dispatched agent, consult target, …) AND for the originate
+    /// A dialog: the outgoing INVITE leg (`"caller"`) emits its own ringing
+    /// on ring-state change (first provisional, then the upgrade to early
+    /// media), so an API/CTI outbound carries the same leg-level contract as
+    /// inbound flows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `transfer` — present on leg events and on the
+    /// session events of a child-leg session (a cluster peer dispatched the
+    /// leg to this node). `agent` identifies the CC agent leg (queue
+    /// dispatch, consult to a registered agent, agent-initiated call).
+    ///
+    /// Multiple `call_ringing` per call are the per-leg contract: every
+    /// agent attempt (sequential re-dial, escalation stage, parallel fork)
+    /// rings its own leg. After a blind/REFER transfer the departing agent's
+    /// attribution is cleared — the replacement target's ringing does not
+    /// inherit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     /// `true` when the ringing provisional response carried SDP (183 Session
     /// Progress or 180 with SDP — early media), `false` for a plain 180
@@ -137,28 +172,106 @@ pub struct CallRinging {
 }
 rwi_event!(CallRinging, "call_ringing");
 
+/// A call leg ANSWERED. Emitted per leg — every leg answer (caller pickup,
+/// direct-answer callee, queue-dispatched agent, consult / transfer target)
+/// carries its own `leg_id` + `leg_role`.
+///
+/// A session-scoped duplicate (`leg_id: None`) is emitted at most once per
+/// call at the agent / remote connect moment. **Deprecated**: it will be
+/// removed in the next version — consume the leg-level events and drop the
+/// session-scoped one. Child-leg sessions (a cluster peer dispatched the leg
+/// to this node) never emit the session-scoped duplicate; their leg-level
+/// event carries the leg.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallAnswered {
-    /// Present for an individual leg event; absent for a session event.
+    /// The leg that answered — emitted for EVERY leg answer: the caller
+    /// pickup under a queue/IVR app (`"caller"`), a direct-answer callee,
+    /// a queue-dispatched agent leg (`"agent"`), consult / transfer targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `transfer` | `caller` | `callee` — the leg's own
+    /// role, same semantics as `call_ringing` / `call_hangup` leg events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallAnswered, "call_answered");
 
+/// The lifecycle owner whose termination a hangup reports.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallHangupScope {
+    /// The root session ends the logical call.
+    Call,
+    /// A leg or a cluster-dispatched child session ends.
+    Leg,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHangup {
+    /// Explicit lifecycle scope; independent of optional leg attribution.
+    pub scope: CallHangupScope,
     /// Present for an individual leg event; absent for a session event.
+    ///
+    /// Leg-scoped events fire for:
+    /// * a mid-session leg exit the session survives (setup failure, BYE on
+    ///   a dial leg, REFER / conference detach),
+    /// * an in-setup leg CANCELLED by the app — queue ring timeout
+    ///   (`reason: "ring_timeout"`), escalation stage switch
+    ///   (`"stage_switch"`), superseded parallel dial (`"superseded"`),
+    ///   other explicit removals (`"cancelled"`).
+    /// * CC-role legs (agent / consult / transfer) still CONNECTED when the
+    ///   session tears down — emitted right before the session-scoped event
+    ///   with identical `reason` / `hangup_by` / `duration_secs`, so
+    ///   `leg_role == "agent"` consumers see the agent leg's teardown even
+    ///   when the OTHER side hung up first (e.g. a CTI click-to-dial where
+    ///   the customer ends the call). Plain caller/callee legs stay covered
+    ///   by the session-scoped event alone.
+    /// Miss hangups are what agent workbenches clear the ringing UI and
+    /// analytics count unanswered calls against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `transfer` — present on leg events and on the
+    /// session events of a child-leg session (a cluster peer dispatched the
+    /// leg to this node; the role is the intent the dispatcher declared).
+    /// `agent` identifies the CC agent leg (queue dispatch, consult to a
+    /// registered agent, agent-initiated call).
+    ///
+    /// Lifecycle contract: a leg-scoped `call_hangup` IS the leg's terminal
+    /// transition — every emission site completes it by removing the leg, so
+    /// a leg is reported exactly once. The session-scoped event of a
+    /// child-leg session carries the declared role only while that leg is
+    /// still registered (its teardown has not been reported yet); once the
+    /// leg exited through its own terminal transition, the session event
+    /// carries no role. After a blind/REFER transfer the departing agent's
+    /// attribution is cleared — the call's next stage (IVR / extension /
+    /// another agent) does not inherit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
-    /// | `"unknown"`. Consistent with the former CC-layer `cc_hangup.hangup_by`.
+    /// | `"unknown"` (plus the `"callee"` fallback for non-CC calls).
+    /// Consistent with the former CC-layer `cc_hangup.hangup_by`.
+    ///
+    /// Leg-scoped events attribute only established-dialog terminations: a
+    /// remote BYE normalizes exactly like the session event (`"agent"` in a
+    /// CC context, `"callee"` otherwise), a locally issued BYE reports
+    /// `"system"`. Setup failures (never-connected dials) carry `None` —
+    /// `queue_agent_no_answer` / `queue_agent_rejected` already describe
+    /// those with `leg_role: "agent"`.
+    ///
+    /// Direction-aware correction: on an OUTBOUND call whose first terminal
+    /// BYE came from the caller/A dialog's remote party, the initiator is
+    /// the dialed CUSTOMER (`"callee"`), never `"agent"` — the CC-centric
+    /// callee→agent mapping only applies when the BYE came from a
+    /// callee/agent dialog or an inbound session.
     pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
     /// Talk time in seconds (answer → hangup). `None` when the call was never
-    /// answered (originate setup failures).
+    /// answered (originate setup failures). Leg-scoped events carry it only
+    /// for a BYE-terminated established dialog; session-scoped events always
+    /// carry it once the session ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<u64>,
 }
@@ -170,6 +283,9 @@ rwi_event!(CallHangup, "call_hangup");
 /// replaces the former `cc_held` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHeld {
+    /// `agent` | `consult` | `caller` | `callee`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub leg_id: String,
 }
@@ -179,6 +295,9 @@ rwi_event!(CallHeld, "call_held");
 /// `cc_unheld` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallUnheld {
+    /// `agent` | `consult` | `caller` | `callee`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub leg_id: String,
 }
@@ -197,14 +316,28 @@ pub struct CallUserDataUpdated {
 }
 rwi_event!(CallUserDataUpdated, "call_userdata_updated");
 
+/// The originate target leg did not answer (ring timeout / 408 / 480 / 487)
+/// or reported busy (486 / 600). The unanswered leg is the outgoing INVITE
+/// leg — the session's `caller` leg: `leg_role` is `"caller"`, `leg_id` is
+/// `None` (no leg registry entry exists pre-answer).
 #[derive(Debug, Clone, Serialize)]
 pub struct CallNoAnswer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallNoAnswer, "call_no_answer");
 
+/// The originate target leg reported busy (486 / 600). Same leg semantics as
+/// [`CallNoAnswer`].
 #[derive(Debug, Clone, Serialize)]
 pub struct CallBusy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallBusy, "call_busy");
@@ -515,6 +648,10 @@ impl RwiEventSpec for MediaRingbackPassthroughStarted {
 pub struct MediaPlayStarted {
     pub call_id: String,
     pub leg_id: Option<String>,
+    /// Role of the target leg (`caller`/`callee`/`agent`/…) — resolved via
+    /// the session's leg table when the target leg is tracked there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub track_id: String,
 }
 rwi_event!(MediaPlayStarted, "media_play_started");
@@ -523,6 +660,9 @@ rwi_event!(MediaPlayStarted, "media_play_started");
 pub struct MediaPlayFinished {
     pub call_id: String,
     pub leg_id: Option<String>,
+    /// Role of the target leg — resolved via the session's leg table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub track_id: String,
     pub interrupted: bool,
 }
@@ -533,6 +673,10 @@ pub struct Dtmf {
     pub call_id: String,
     pub digit: String,
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `caller` | `callee` — present when the source leg
+    /// is tracked by the session (always, for session-originated DTMF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
 rwi_event!(Dtmf, "dtmf");
@@ -568,6 +712,28 @@ pub struct QueueJoined {
     /// not skill-group routed (mirrors `QueueLeft::skill_groups`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_groups: Option<Vec<String>>,
+    /// Per-call ACD queue priority (higher preempts earlier waiters). `None`
+    /// for the default priority 0 — absent and 0 are equivalent, so
+    /// default-priority flows keep the exact pre-field wire payload. Consumed
+    /// by the shared-queue event tap to persist `cc_acd_queue.priority`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+    /// Re-entry counter: absent on the call's FIRST join (wire-compatible
+    /// with the pre-field payload), `2`, `3`, … on every re-entry after an
+    /// agent attempt failed (no-answer / cancel / reject) and the call keeps
+    /// queuing in the SAME queue — next candidate or another wait-retention
+    /// round. A skill-GROUP switch is a different contract: it emits
+    /// `queue_left{overflow}` + `queue_overflow_joined`, never a re-entry
+    /// `queue_joined`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    /// Explicit `null` on the wire: join events describe the CALL's entry,
+    /// not an agent. Without this key the gateway's context enrichment would
+    /// merge the session's current `agent_id` into RE-ENTRY joins — after a
+    /// reject / no-answer round that attributes the rejoin to the FAILED
+    /// agent (and races the failed leg's own teardown events the other way).
+    /// `null` blocks the merge and keeps every join unattributed.
+    pub agent_id: Option<String>,
 }
 rwi_event!(QueueJoined, "queue_joined");
 
@@ -576,6 +742,13 @@ pub struct QueueAgentOffered {
     pub call_id: String,
     pub queue_id: String,
     pub agent_id: String,
+    /// Session leg id of the dial toward this agent — joins `queue_agent_*`
+    /// with the leg-scoped `call_*` events (`call_ringing` / `call_hangup`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// Always `"agent"` — these events describe the CC agent leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(QueueAgentOffered, "queue_agent_offered");
 
@@ -584,6 +757,12 @@ pub struct QueueAgentConnected {
     pub call_id: String,
     pub queue_id: String,
     pub agent_id: String,
+    /// Session leg id that connected (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// Always `"agent"` — these events describe the CC agent leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(QueueAgentConnected, "queue_agent_connected");
 
@@ -593,6 +772,12 @@ pub struct QueueAgentNoAnswer {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
+    /// Session leg id of the failed dial (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// Always `"agent"` — these events describe the CC agent leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(QueueAgentNoAnswer, "queue_agent_no_answer");
 
@@ -602,6 +787,12 @@ pub struct QueueAgentRejected {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
+    /// Session leg id of the rejected dial (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// Always `"agent"` — these events describe the CC agent leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(QueueAgentRejected, "queue_agent_rejected");
 
@@ -624,6 +815,12 @@ pub struct QueueOverflowJoined {
     pub queue_id: String,
     /// Overflow / escalation skill group just joined.
     pub skill_group: String,
+    /// Per-call ACD queue priority carried through the move — the shared-
+    /// queue tap re-registers the row on this event (delete + insert), so
+    /// dropping it would reset the caller to the default tier. `None` ==
+    /// default priority 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 rwi_event!(QueueOverflowJoined, "queue_overflow_joined");
 
@@ -694,6 +891,10 @@ rwi_event!(CallUnbridged, "call_unbridged");
 pub struct DtmfCollected {
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leg that delivered the digits ("caller" for IVR
+    /// interactions). `None` when the role cannot be determined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub digits: String,
 }
 rwi_event!(DtmfCollected, "dtmf_collected");
@@ -702,6 +903,9 @@ rwi_event!(DtmfCollected, "dtmf_collected");
 pub struct DtmfCollectionTimeout {
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leg that was collecting (see [`DtmfCollected::leg_role`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(DtmfCollectionTimeout, "dtmf_collection_timeout");
 
@@ -874,6 +1078,10 @@ pub struct ConferenceJoined {
     pub conf_id: String,
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the joining leg ("caller" for room dial-in, "agent" /
+    /// "consult" for bridged participants). `None` when undeterminable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceJoined, "conference_joined");
 
@@ -883,6 +1091,9 @@ pub struct ConferenceLeft {
     pub conf_id: String,
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leaving leg (see [`ConferenceJoined::leg_role`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceLeft, "conference_left");
 
@@ -1051,9 +1262,92 @@ pub struct IvrStepTrace {
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
 
+impl IvrStepTrace {
+    /// Completion contract: every emitted entry carries BOTH stamps, so
+    /// consumers can rely on them unconditionally — `step_end_time` is the
+    /// completion marker, and `step_start_time` falls back to it (never
+    /// later than the end). `duration_ms` is already non-optional by type.
+    /// Idempotent: entries that already carry stamps pass through untouched.
+    pub fn with_completion_stamps(mut self) -> Self {
+        if self.step_end_time.is_none() {
+            self.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+        }
+        if self.step_start_time.is_none() {
+            self.step_start_time = self.step_end_time.clone();
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Completion contract on the RWI event type itself: an entry built
+    /// without stamps is repaired (end = now, start = end) and an entry that
+    /// already carries stamps passes through untouched (idempotent).
+    #[test]
+    fn ivr_step_trace_completion_stamps_backfilled_and_idempotent() {
+        let mk = |start: Option<String>, end: Option<String>| IvrStepTrace {
+            call_id: "call-1".into(),
+            session_id: "sess-1".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger: TriggerInfo::new("ivr_fallback"),
+            action_type: "ivr_fallback".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: start,
+            step_end_time: end,
+            extra: None,
+            sip_headers: None,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        };
+
+        // Both missing → both backfilled, end >= start.
+        let repaired = mk(None, None).with_completion_stamps();
+        let start = repaired
+            .step_start_time
+            .as_deref()
+            .expect("start backfilled");
+        let end = repaired.step_end_time.as_deref().expect("end backfilled");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(end).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(start).unwrap(),
+            "backfilled end must not precede start"
+        );
+
+        // Start missing with an explicit end → start falls back to end.
+        let end_only = mk(None, Some("2026-01-01T00:00:05+00:00".into())).with_completion_stamps();
+        assert_eq!(
+            end_only.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:05+00:00"),
+            "start falls back to the explicit end"
+        );
+
+        // Already complete → untouched.
+        let untouched = mk(
+            Some("2026-01-01T00:00:00+00:00".into()),
+            Some("2026-01-01T00:00:01+00:00".into()),
+        )
+        .with_completion_stamps();
+        assert_eq!(
+            untouched.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
+        assert_eq!(
+            untouched.step_end_time.as_deref(),
+            Some("2026-01-01T00:00:01+00:00")
+        );
+    }
 
     #[test]
     fn ivr_events_serialize_extra_field() {
@@ -1116,6 +1410,7 @@ mod tests {
                 call_id: "call-1".into(),
                 digit: "5".into(),
                 leg_id: None,
+                leg_role: None,
                 extra: None,
             },
             None,
@@ -1125,6 +1420,7 @@ mod tests {
                 call_id: "call-2".into(),
                 digit: "9".into(),
                 leg_id: Some("caller".into()),
+                leg_role: None,
                 extra: Some(serde_json::json!({"foo": "bar"})),
             },
             None,
@@ -1256,11 +1552,29 @@ mod tests {
                 call_id: "call-1".into(),
                 queue_id: "support".into(),
                 skill_group: "support_l2".into(),
+                priority: None,
             },
             None,
         );
         assert_eq!(joined["queue_id"], "support");
         assert_eq!(joined["skill_group"], "support_l2");
+        assert!(
+            joined.get("priority").is_none(),
+            "default priority must stay absent from the wire payload"
+        );
+        let joined_prio = to_flat_payload(
+            &QueueOverflowJoined {
+                call_id: "call-1".into(),
+                queue_id: "support".into(),
+                skill_group: "support_l2".into(),
+                priority: Some(7),
+            },
+            None,
+        );
+        assert_eq!(
+            joined_prio["priority"], 7,
+            "non-default priority rides along"
+        );
     }
 
     #[test]

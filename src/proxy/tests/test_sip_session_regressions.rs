@@ -224,6 +224,59 @@ impl AppRuntime for StartOnlyRuntime {
     }
 }
 
+/// Records every event injected into the app runtime so tests can assert the
+/// session's post-start kicks (`dial_next_agent`, ...).
+struct RecordingInjectRuntime {
+    injected: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl RecordingInjectRuntime {
+    fn new() -> Self {
+        Self {
+            injected: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Injected event names, in delivery order.
+    fn injected_names(&self) -> Vec<String> {
+        self.injected
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl AppRuntime for RecordingInjectRuntime {
+    async fn start_app(
+        &self,
+        _app_name: &str,
+        _params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        self.injected.lock().unwrap().push(event);
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn current_app(&self) -> Option<String> {
+        None
+    }
+}
+
 #[async_trait]
 impl AppRuntime for BridgeReturnRuntime {
     async fn start_app(
@@ -545,7 +598,7 @@ fn recording_test_offer() -> String {
     "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string()
 }
 
-async fn setup_recording_test_media(session: &mut SipSession) {
+pub(crate) async fn setup_recording_test_media(session: &mut SipSession) {
     session.media.caller_offer = Some(recording_test_offer());
     session
         .create_callee_track(false)
@@ -686,6 +739,273 @@ async fn test_connected_dynamic_leg_ended_hangs_up_caller_even_without_bridge() 
     assert!(
         session.pending_hangup.contains(&caller_dialog_id),
         "a connected agent leg hanging up must release the caller even when the media bridge was never established"
+    );
+}
+
+// ── Leg-scoped call_hangup attribution contract ─────────────────────────
+// `leg_role == "agent"` is the analytics / CTI filter surface: the leg event
+// must be complete (hangup_by + duration_secs) and exact (never attribute a
+// setup failure to the agent, never mislabel a local BYE), and teardown-
+// cascade leg exits must not race the session event with a contradictory
+// duplicate. 2026-10 customer regression: the event advertised
+// leg_role "agent" while shipping hangup_by null and no duration_secs.
+
+async fn build_rwi_session(
+    dialplan: Dialplan,
+) -> (
+    SipSession,
+    tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry>,
+) {
+    use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock as PlRwLock;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let events = gateway.read().subscribe_events();
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let session = build_session_on_server(server, dialplan).await;
+    (session, events)
+}
+
+fn leg_hangup_events(
+    events: &mut tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry>,
+) -> Vec<serde_json::Value> {
+    let mut found = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "call_hangup" {
+            found.push(entry.event.payload.clone());
+        }
+    }
+    found
+}
+
+fn connected_agent_leg(id: &str) -> Leg {
+    let mut leg = Leg::new(LegId::from(id));
+    leg.state = LegState::Connected;
+    leg.agent_id = Some("489218".into());
+    leg
+}
+
+#[tokio::test]
+async fn test_agent_leg_remote_bye_carries_complete_attribution() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    let result = session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+    assert!(result.success, "{:?}", result.message);
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("agent leg remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["leg_role"], "agent");
+    assert_eq!(leg_event["reason"], "UasBye");
+    assert_eq!(
+        leg_event["hangup_by"],
+        "agent",
+        "CC-normalized exactly like the session-scoped event"
+    );
+    assert!(
+        leg_event["duration_secs"].is_u64(),
+        "established dialog must carry talk time, got {leg_event}"
+    );
+}
+
+#[tokio::test]
+async fn test_plain_call_leg_remote_bye_downgrades_to_callee() {
+    // Without queue/agent context the same remote BYE must normalize to
+    // "callee", matching the session-scoped downgrade contract.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    // No agent_id on the leg: outside CC the role is the positional fallback.
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["hangup_by"], "callee", "no CC context → no agent attribution");
+    assert_eq!(leg_event["leg_role"], "callee", "positional fallback without agent_id");
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
+async fn test_consult_leg_remote_bye_is_not_attributed_to_agent() {
+    // A consult leg to an EXTERNAL target has a non-agent remote: when that
+    // party hangs up (UasBye on the dial leg), the initiator is the remote
+    // party ("callee") — never "agent", even though the SESSION carries full
+    // CC context (queue + resolved agent). Leg-local identity decides.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let consult_leg = LegId::from("consult-1");
+    let mut consult = Leg::new(consult_leg.clone());
+    consult.state = LegState::Connected;
+    consult.purpose = Some(crate::call::domain::LegPurpose::Consult);
+    // External expert: NOT a registered agent → no agent_id → leg_role "consult".
+    session.legs.insert(consult_leg.clone(), consult);
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+    session
+        .extensions
+        .write()
+        .insert(std::collections::HashMap::from([(
+            "resolved_agent_id".to_string(),
+            "489218".to_string(),
+        )]));
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: consult_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "consult-1")
+        .expect("consult leg remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["leg_role"], "consult");
+    assert_eq!(
+        leg_event["hangup_by"],
+        "callee",
+        "external consult target hung up — CC context must not mislabel it as the agent, got {leg_event}"
+    );
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
+async fn test_local_leg_bye_attributed_to_system() {
+    // On a dial leg WE are the UAC: a UAC-side BYE is our own teardown, never
+    // the remote party's — it must report "system", not "agent"/"callee".
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UacBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("local BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["hangup_by"], "system");
+    assert_eq!(leg_event["leg_role"], "agent");
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
+async fn test_setup_failure_leg_hangup_claims_no_initiator() {
+    // A never-connected dial must claim NO initiator and NO talk time —
+    // labeling it "agent hung up" would corrupt hangup-initiator analytics;
+    // queue_agent_no_answer/rejected already describe failures.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = connected_agent_leg("queue-agent");
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Rejected with 486".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("setup failure must still emit the leg lifecycle event");
+    assert_eq!(leg_event["sip_status"], 486);
+    assert!(
+        leg_event["hangup_by"].is_null(),
+        "failed dial must not claim an initiator, got {leg_event}"
+    );
+    assert!(
+        leg_event["duration_secs"].is_null(),
+        "never-connected leg must not inherit the session answer time"
+    );
+}
+
+#[tokio::test]
+async fn test_teardown_cascade_suppresses_leg_hangup_events() {
+    // Legs ended by the session teardown cascade are covered by the
+    // session-scoped call_hangup; a per-leg duplicate with null attribution
+    // racing it is exactly the 2026-10 regression. Cancelled session → no
+    // leg-scoped hangup AT THIS COMMAND PATH (the cancel gate in
+    // `emit_rwi_leg_hangup`). Established CC-role legs still registered when
+    // the session actually tears down get their attributed leg-level event
+    // from `cleanup()` instead — see
+    // `teardown_emits_leg_scoped_hangup_for_connected_cc_legs`.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.cancel_token.cancel();
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    assert!(
+        !hangups.iter().any(|e| e["leg_id"] == "queue-agent"),
+        "teardown-cascade leg exit must not emit a leg-scoped call_hangup, got {hangups:?}"
     );
 }
 
@@ -1179,6 +1499,7 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1215,6 +1536,7 @@ async fn file_recording_default_starts_at_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1259,6 +1581,7 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Answer,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1287,6 +1610,22 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         std::path::Path::new(&path).exists(),
         "answer timing must install the recorder at the final answer"
     );
+    // The call trace must explain that recording actually started, and the
+    // resolved dialplan snapshot must be the first timeline entry.
+    assert!(
+        session.meta.trace.iter().any(|ev| {
+            ev.kind == crate::call_errors::TraceKind::Recording
+                && ev.code.as_deref() == Some("recording.started")
+        }),
+        "expected a recording.started trace event; trace = {:?}",
+        session.meta.trace
+    );
+    assert_eq!(
+        session.meta.trace.first().map(|ev| ev.kind),
+        Some(crate::call_errors::TraceKind::Dialplan),
+        "the first trace entry must be the dialplan snapshot: {:?}",
+        session.meta.trace.first()
+    );
     {
         let recording = &mut session.media.recording;
         recording
@@ -1294,6 +1633,76 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
             .await
             .expect("stop file recorder");
     }
+}
+
+#[tokio::test]
+async fn recording_stop_leaves_stopped_trace_event_with_segment_detail() {
+    // A stopped recording segment must leave a `recording.stopped` timeline
+    // entry (path + duration + segment type) so a missing
+    // `recording.uploaded` points at the upload pipeline, not the capture.
+    use rustrtc::peer_connection::RtpObserver;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("stopped-trace.wav")
+        .to_string_lossy()
+        .into_owned();
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
+        auto_start: true,
+        auto_start_at: crate::config::RecordingAutoStartAt::Answer,
+        recording_type: crate::config::RecordingType::Local,
+        stereo_swap: false,
+        stereo_mode: None,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+    session
+        .set_auto_recorder()
+        .await
+        .expect("start recorder at final answer");
+
+    // Feed a few RTP packets so the segment carries real media.
+    let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+    let tap = peer.ingress_tap();
+    let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    let addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    for seq in 0..10u16 {
+        let packet = RtpPacket::new(
+            RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+            encoder.encode(&vec![8000i16; 160]).to_vec(),
+        );
+        tap.on_ingress(&packet, addr);
+    }
+
+    session.finalize_recording_for_app_shutdown().await;
+
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "the finalized segment must be on disk"
+    );
+    let stopped = session
+        .meta
+        .trace
+        .iter()
+        .find(|ev| ev.code.as_deref() == Some("recording.stopped"))
+        .expect("recording.stopped trace event after finalize");
+    assert_eq!(stopped.kind, crate::call_errors::TraceKind::Recording);
+    assert!(
+        stopped.detail.as_ref().is_some_and(|d| {
+            d.get("segment_type").and_then(|v| v.as_str()) == Some("full")
+                && d.get("path").and_then(|v| v.as_str()) == Some(path.as_str())
+        }),
+        "stopped event must carry segment_type=full and the file path: {:?}",
+        stopped.detail
+    );
 }
 
 #[tokio::test]
@@ -1315,6 +1724,7 @@ async fn sipflow_recording_default_starts_at_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1369,6 +1779,7 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -2417,6 +2828,142 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
     );
 }
 
+/// Regression: a skill-group queue whose pre-resolution finds ZERO agents
+/// (every agent busy/wrapup at that instant) must STILL receive the
+/// `dial_next_agent` kick.
+///
+/// `on_enter` re-resolves the group against the live registry
+/// (`QueueApp::resolve_agents`), so an agent that flips to Idle in the window
+/// between pre-resolution and app start ends up on the sequential dial list.
+/// The session used to gate the kick on the *pre-resolution* result
+/// (`has_resolved_agents`), so in that window the app had agents but nothing
+/// triggered the first INVITE — the caller sat on hold music until abandoning
+/// while the agent stayed Idle (missed ring, no SIP INVITE to the agent).
+///
+/// Trace: call `bd2e9d5d740a453cb3362111a478dc60` (2026-10-16,
+/// 10.193.244.54) — agent 489220 went wrapup→idle 0.27s after the empty
+/// pre-resolve, `Queue: resolved 1 dynamic agents` followed, yet no dial was
+/// ever issued for 215s until the caller hung up.
+#[tokio::test]
+async fn skill_group_empty_preresolve_still_injects_dial_kick() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "support".to_string(),
+        RouteQueueConfig {
+            name: Some("support".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                // No registry in this harness → the skill group resolves to an
+                // empty agent list, exactly the "empty pre-resolve" case.
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:runtime-idle".to_string(),
+                    label: Some("runtime-idle".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(RecordingInjectRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer("support", None, Vec::new(), None)
+        .await
+        .expect("queue app should start");
+
+    let names = runtime.injected_names();
+    assert!(
+        names.iter().any(|n| n == "dial_next_agent"),
+        "a skill-group queue with an empty pre-resolve must still be kicked to dial \
+         (on_enter may re-resolve an Idle agent); injected events were: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn queue_hold_music_real_ingress_respects_global_and_explicit_audio() {
+    for global in [None, Some("sounds/wait.wav".to_string())] {
+        for ingress in ["app", "skill-group", "agent", "named"] {
+            let mut config = ProxyConfig::default();
+            config.queue_hold_music = global.clone();
+            config.queues.insert(
+                "explicit".into(),
+                RouteQueueConfig {
+                    hold: Some(crate::proxy::routing::RouteQueueHoldConfig {
+                        audio_file: Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.into()),
+                        loop_playback: false,
+                    }),
+                    ..Default::default()
+                },
+            );
+            let mut session = build_session_with_config(
+                build_dialplan_with_mode(MediaProxyMode::Auto),
+                config,
+            )
+            .await;
+            let ctx = Arc::new(ApplicationContext::new(
+                sea_orm::DatabaseConnection::default(),
+                CallInfo {
+                    session_id: "queue-music-test".into(),
+                    caller: "1001".into(),
+                    callee: "1002".into(),
+                    direction: "inbound".into(),
+                    started_at: chrono::Utc::now(),
+                    sip_headers: Default::default(),
+                    route_name: None,
+                },
+                Arc::new(crate::config::Config::default()),
+                reqwest::Client::new(),
+            ));
+            let mut runtime = RoutePointRuntime::new(&[]);
+            runtime.context = Some(ctx.clone());
+            session.app_runtime = Arc::new(runtime);
+            if ingress == "app" {
+                let result = session
+                    .execute_command(
+                        CallCommand::StartApp {
+                            app_name: "queue".into(),
+                            params: Some(serde_json::json!({"queue": "skill-group:support"})),
+                            auto_answer: false,
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(result.success, "queue app must start: {result:?}");
+            } else {
+                let target = match ingress {
+                    "skill-group" => "skill-group:support",
+                    "agent" => "agent:1001",
+                    _ => "explicit",
+                };
+                session
+                    .handle_queue_transfer(target, None, Vec::new(), None)
+                    .await
+                    .unwrap();
+            }
+            let pending = ctx.pending_queue.lock();
+            let hold = pending.as_ref().unwrap().plan.hold.as_ref().unwrap();
+            let expected = if ingress == "named" {
+                crate::call::DEFAULT_QUEUE_HOLD_AUDIO
+            } else {
+                global
+                    .as_deref()
+                    .unwrap_or(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
+            };
+            assert_eq!(
+                hold.audio_file.as_deref(),
+                Some(expected),
+                "ingress={ingress}"
+            );
+            if ingress == "named" {
+                assert!(!hold.loop_playback);
+            }
+        }
+    }
+}
+
 /// `session_hook_ctx().queue_name` feeds cc_* RWI webhook events (`queue_id`
 /// field). It must be populated from CallMeta when the queue app starts — not
 /// deferred to QueueApp::on_enter's old ApplicationContext mirror.
@@ -3017,6 +3564,104 @@ async fn stop_playback_without_leg_stops_both_legs() {
 
     // BOTH legs stopped → both handles resolve → watcher restores the route.
     assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+/// Regression: the recorder's channel routing must switch with hold state.
+///
+/// While bridged the caller leg owns both channels (ingress->A, relayed
+/// egress->B) and the callee leg captures nothing -- a second live source on
+/// the sequential B channel would interleave into garbage. While held, the B
+/// channel switches to the callee leg's ingress (the agent mic -- the audio
+/// the bridge no longer relays) and the caller egress capture (comfort
+/// noise / MOH) is dropped. Unhold restores the default layout.
+#[tokio::test]
+async fn hold_unhold_flips_recording_capture_routes() {
+    use crate::media::media_recorder::{CaptureChannel, RecordingSession};
+
+    let (mut session, mut _cmd_rx) = bridged_session_for_play_test("hold-rec-routes").await;
+    session.caller_dialog = None;
+    session.media.caller_offer = Some(recording_test_offer());
+
+    // Wire real legs whose taps carry the call's recorder sender -- the same
+    // wiring the production leg-creation paths perform.
+    let mut recording = RecordingSession::default();
+    let sender = recording.setup_recorder_task().unwrap();
+    for id in ["caller", "callee"] {
+        let leg = crate::media::leg::LegInner::new(
+            id,
+            &crate::media::leg::LegConfig::rtp_pcmu(),
+            Some(sender.clone()),
+        )
+        .unwrap();
+        if id == "callee" {
+            // Production creation sites start the callee tap fully off.
+            leg.ingress_tap().set_capture_route(None, None);
+        }
+        session.legs.set_media_leg(&LegId::from(id), leg);
+    }
+
+    let route = |session: &SipSession, leg: &str| {
+        session
+            .legs
+            .media_leg(&LegId::from(leg))
+            .unwrap()
+            .ingress_tap()
+            .capture_route()
+    };
+
+    // Bridged default: caller tap owns both channels, callee tap captures
+    // nothing.
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), Some(CaptureChannel::Callee)),
+        "bridged caller tap must record ingress->A / egress->B"
+    );
+    assert_eq!(
+        route(&session, "callee"),
+        (None, None),
+        "callee tap must not double-feed the B channel while bridged"
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::Hold {
+                leg_id: LegId::from("caller"),
+                music: None,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Hold must succeed: {:?}", result.message);
+    assert_eq!(
+        route(&session, "callee"),
+        (Some(CaptureChannel::Callee), None),
+        "hold must switch the B channel to the callee mic"
+    );
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), None),
+        "hold must drop the caller egress capture (comfort noise / MOH)"
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::Unhold {
+                leg_id: LegId::from("caller"),
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Unhold must succeed: {:?}", result.message);
+    assert_eq!(
+        route(&session, "caller"),
+        (Some(CaptureChannel::Caller), Some(CaptureChannel::Callee)),
+        "unhold must restore the caller tap's default layout"
+    );
+    assert_eq!(
+        route(&session, "callee"),
+        (None, None),
+        "unhold must turn the callee tap capture back off"
+    );
 }
 
 #[tokio::test]
@@ -4100,7 +4745,8 @@ async fn record_stopped_event_carries_recording_unique_id() {
     let mut events = gateway.write().subscribe_events();
     let (server, _) =
         create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
-    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".into(), None, true);
     let mut session = build_session_on_server(server, dialplan).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -4111,24 +4757,17 @@ async fn record_stopped_event_carries_recording_unique_id() {
         .into_owned();
     session.media_profile.path = MediaPathMode::Anchored;
     setup_recording_test_media(&mut session).await;
-    let profile = session
-        .legs
-        .media_leg(&LegId::from("caller"))
-        .unwrap()
-        .negotiated()
-        .unwrap();
-    session
-        .media
-        .recording
-        .start_recording(
-            profile,
-            crate::media::recorder::RecorderOption::new(path),
-            1,
-            true,
-            None,
-        )
-        .await
-        .unwrap();
+    let reserved_id = "12345678-1234-4123-8123-123456789abc";
+    let result = session.execute_command(CallCommand::StartRecording {
+        config: crate::call::domain::RecordConfig {
+            path,
+            segment_type: Some("agent".into()),
+            label: Some("agent-example".into()),
+            unique_id: Some(reserved_id.into()),
+            ..Default::default()
+        },
+    }, None).await;
+    assert!(result.success, "{result:?}");
     assert!(session.media.bridge.is_none());
 
     session.finalize_recording_for_app_shutdown().await;
@@ -4153,6 +4792,12 @@ async fn record_stopped_event_carries_recording_unique_id() {
         !unique_id.is_empty() && unique_id.len() == 36 && unique_id.contains('-'),
         "unique_id must be a UUID v4 string, got {unique_id:?}"
     );
+    assert_eq!(unique_id, reserved_id, "recording completion must preserve the reserved popup UUID");
+    let snapshot = session.record_snapshot();
+    assert_eq!(snapshot.recording_segments.len(), 1);
+    assert_eq!(snapshot.recording_segments[0].unique_id.as_deref(), Some(reserved_id));
+    assert_eq!(snapshot.recording_segments[0].segment_type, "agent");
+    assert_eq!(snapshot.recording_segments[0].label, "agent-example");
     assert_ne!(
         unique_id, call_id,
         "unique_id must identify the recording, not duplicate the call id"
@@ -4166,6 +4811,53 @@ async fn record_stopped_event_carries_recording_unique_id() {
         "record_stopped payload shape must stay intact: {}",
         entry.event.payload
     );
+}
+
+#[tokio::test]
+async fn screenpop_supplied_recording_ids_distinguish_artifacts_across_nodes() {
+    let mut filenames = Vec::new();
+    for unique_id in [
+        None,
+        Some("12345678-1234-4123-8123-123456789abc"),
+        Some("12345678-1234-4123-8123-123456789abd"),
+    ] {
+        // Separate directories reproduce nodes that cannot see each other's files.
+        let dir = tempfile::tempdir().unwrap();
+        let (server, _) = create_test_server().await;
+        server.recording_policy.store(Arc::new(Some(crate::config::RecordingPolicy {
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })));
+        let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+            .with_application("ivr".into(), None, true);
+        let mut session = build_session_on_server(server, dialplan).await;
+        session.meta.root_session_id = Some("shared-recording-call".into());
+        session.media_profile.path = MediaPathMode::Anchored;
+        setup_recording_test_media(&mut session).await;
+        let result = session.execute_command(CallCommand::StartRecording {
+            config: crate::call::domain::RecordConfig {
+                segment_type: Some("agent".into()),
+                label: Some("agent-example".into()),
+                unique_id: unique_id.map(str::to_string),
+                ..Default::default()
+            },
+        }, None).await;
+        assert!(result.success, "{result:?}");
+        session.finalize_recording_for_app_shutdown().await;
+        let snapshot = session.record_snapshot();
+        assert_eq!(snapshot.recording_segments.len(), 1);
+        let segment = &snapshot.recording_segments[0];
+        assert_eq!(segment.label, "agent-example");
+        assert_eq!(segment.seq, 1);
+        if let Some(unique_id) = unique_id {
+            assert_eq!(segment.unique_id.as_deref(), Some(unique_id));
+        }
+        let path = std::path::Path::new(&segment.path);
+        assert!(std::fs::metadata(path).unwrap().len() >= 44);
+        filenames.push(path.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    assert_eq!(filenames[0], "shared-recording-call_01_agent-example.wav");
+    assert_ne!(filenames[1], filenames[2], "distinct recording IDs must not deduplicate as one artifact");
 }
 
 #[tokio::test]
@@ -4548,6 +5240,37 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
     );
 }
 
+#[tokio::test]
+async fn screenpop_route_metadata_reaches_live_session_hooks() {
+    let mut dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    dialplan
+        .extensions
+        .insert(std::collections::HashMap::from([(
+            "recording_delivery".to_string(),
+            "true".to_string(),
+        )]));
+    let (mut server, _config) = create_test_server().await;
+    let (hook, ringing, _, _) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
+    let leg_id = LegId::from("queue-agent");
+    session
+        .legs
+        .insert(leg_id.clone(), Leg::new(leg_id.clone()));
+    session
+        .execute_command(CallCommand::LegRinging { leg_id }, None)
+        .await;
+    assert_eq!(ringing.load(Ordering::SeqCst), 1);
+    let extensions = session.extensions.read();
+    assert_eq!(
+        extensions
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|data| data.get("recording_delivery"))
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
 /// Queue agent attribution: the pin lands BEFORE the LegAdd, so BOTH
 /// `call_ringing` events carry `agent_id` with no ring-time hook race.
 #[tokio::test]
@@ -4604,11 +5327,15 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("Alice")
     );
 
-    // ...then the dynamic leg is added and receives 180 Ringing.
+    // ...then the dynamic leg is added and receives 180 Ringing. The leg
+    // mirrors what the queue's LegAdd path builds: purpose=Agent with the
+    // pinned attribution snapshotted onto the leg at insert time — that is
+    // what drives `leg_role_of` → "agent" on the leg-level event.
     let agent_leg = LegId::from("queue-agent");
-    session
-        .legs
-        .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+    let mut inserted = Leg::new(agent_leg.clone());
+    inserted.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    inserted.agent_id = Some("1001".to_string());
+    session.legs.insert(agent_leg.clone(), inserted);
     session
         .execute_command(
             CallCommand::LegRinging {
@@ -4646,6 +5373,11 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("Alice"),
         "leg-level call_ringing must carry the agent name: {leg_event}"
     );
+    assert_eq!(
+        leg_event["leg_role"].as_str(),
+        Some("agent"),
+        "leg-level call_ringing must carry leg_role agent for a queue-dispatched leg: {leg_event}"
+    );
 
     let session_event = ringings
         .iter()
@@ -4656,6 +5388,10 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("1001"),
         "session-level call_ringing must be enriched with the pinned agent \
          from the call meta: {session_event}"
+    );
+    assert!(
+        session_event.get("leg_role").is_none(),
+        "session-level call_ringing must not carry leg_role (leg events only): {session_event}"
     );
 }
 
@@ -5877,6 +6613,53 @@ async fn file_output_policy_applies_to_automatic_and_on_demand_recording() {
     }
 }
 
+/// End-to-end: a global `stereo_mode = "external_left"` policy swaps the
+/// channels on an outbound call so the callee (external party, fed as the
+/// egress stream here) lands on the left channel of the WAV.
+#[tokio::test]
+async fn file_output_external_left_swaps_outbound_call_channels() {
+    use crate::config::RecordingPolicy;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use rustrtc::peer_connection::RtpObserver;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("external-left.wav");
+    let (server, _) = create_test_server().await;
+    let policy: RecordingPolicy =
+        toml::from_str("stereo_mode = \"external_left\"\nsamplerate = 16000").unwrap();
+    server.recording_policy.store(Arc::new(Some(policy)));
+    let mut dialplan = build_dialplan_with_mode(MediaProxyMode::All);
+    // Extension-dialed outbound: the external party is the callee (leg B).
+    dialplan.direction = DialDirection::Outbound;
+    dialplan.recording.option = Some(crate::media::recorder::RecorderOption::new(
+        path.to_string_lossy().into_owned(),
+    ));
+    let mut session = build_session_on_server(server, dialplan).await;
+    session.media_profile.path = MediaPathMode::Anchored;
+    setup_recording_test_media(&mut session).await;
+    session.set_auto_recorder().await.unwrap();
+    let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+    let tap = peer.ingress_tap();
+    let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    let addr = "127.0.0.1:12345".parse().unwrap();
+    for seq in 0..10u16 {
+        let ingress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+            encoder.encode(&vec![8000; 160]).to_vec());
+        let egress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 5678),
+            encoder.encode(&vec![-8000; 160]).to_vec());
+        tap.on_ingress(&ingress, addr);
+        tap.on_egress(&egress, addr);
+    }
+    session.finalize_recording_for_app_shutdown().await;
+    let wav = std::fs::read(path).unwrap();
+    let samples: Vec<i16> = wav[44..].chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    assert!(!samples.is_empty());
+    let middle = samples.len() / 4 * 2;
+    // External (egress, -8000) must be the LEFT channel.
+    assert!(samples[middle] < -6000, "left must carry the external party");
+    assert!(samples[middle + 1] > 6000, "right must carry the caller");
+}
+
 #[test]
 fn recording_option_preserves_legacy_json_and_output_settings() {
     use crate::media::recorder::RecorderOption;
@@ -5896,6 +6679,257 @@ fn recording_option_preserves_legacy_json_and_output_settings() {
     assert_eq!(roundtrip.samplerate, Some(16000));
     assert_eq!(roundtrip.ptime, Some(20));
     assert_eq!(roundtrip.stereo_swap, Some(false));
+}
+
+/// `stereo_mode = "external_left"` (and its mirror `external_right`) resolves
+/// the effective channel swap from the call shape: trunk/realm-derived
+/// direction, inbound trunk context, originate (UAC) topology, and the legacy
+/// `stereo_swap` override.
+#[tokio::test]
+async fn stereo_external_left_resolves_swap_per_call_shape() {
+    use crate::call::{OutboundTrunkContext, TransactionCookie, TrunkContext};
+    use crate::media::recorder::{RecorderOption, StereoChannelMode};
+
+    async fn build_uas_session(
+        direction: DialDirection,
+        cookie: TransactionCookie,
+        dialplan_extensions: Option<http::Extensions>,
+    ) -> SipSession {
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("server dialog");
+        let mut dialplan = Dialplan::new(
+            "test-session".to_string(),
+            create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            direction,
+        );
+        if let Some(extensions) = dialplan_extensions {
+            dialplan.extensions = extensions;
+        }
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let use_media_proxy =
+            SipSession::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
+        let (session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            use_media_proxy,
+        );
+        session
+    }
+
+    async fn build_uac_session(direction: DialDirection) -> SipSession {
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let dialplan =
+            Dialplan::new("test-session".to_string(), request, direction);
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:1001@rustpbx.com".to_string(),
+            original_callee: "sip:+862161952290@trunk.example".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (session, _handle, _cmd_rx) =
+            SipSession::new_uac(server, CancellationToken::new(), None, context, true);
+        session
+    }
+
+    fn resolved_swap(session: &SipSession) -> bool {
+        let mut option = RecorderOption::new("a.wav".into());
+        option.stereo_mode = Some(StereoChannelMode::ExternalLeft);
+        resolved_swap_with(session, option)
+    }
+
+    fn resolved_swap_with(session: &SipSession, option: RecorderOption) -> bool {
+        let mut option = option;
+        session.resolve_stereo_assignment(&mut option, None, None);
+        option.stereo_swap.unwrap_or(false)
+    }
+
+    // Inbound (external caller → internal callee): caller leg already left.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Extension-dialed outbound (internal caller → external callee): the
+    // external party is on leg B → swap.
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_swap(&session));
+
+    // Internal-to-internal: indistinguishable → caller stays left.
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Same-realm caller arriving from a trunk: the caller leg is the external
+    // party even though direction says Outbound (realm lied).
+    let cookie = TransactionCookie::default();
+    cookie.insert_extension(TrunkContext {
+        id: Some(1),
+        name: "inbound-trunk".to_string(),
+        did_numbers: vec![],
+    });
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        cookie,
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Internal call forwarded out through a trunk: callee leg is external.
+    let mut extensions = http::Extensions::new();
+    extensions.insert(OutboundTrunkContext {
+        id: Some(2),
+        name: "outbound-trunk".to_string(),
+        dest: None,
+        tenant_id: None,
+    });
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        Some(extensions),
+    ).await;
+    assert!(resolved_swap(&session));
+
+    // RWI/CC originate: leg A is the dialed destination — external customer
+    // sits on the left without a swap.
+    let session = build_uac_session(DialDirection::Outbound).await;
+    assert!(!resolved_swap(&session));
+
+    // Deprecated stereo_swap is honoured only when no layer configures a
+    // stereo mode — a configured mode supersedes it (including legacy true).
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_mode = Some(StereoChannelMode::ExternalLeft);
+    option.stereo_swap = Some(true);
+    assert!(!resolved_swap_with(&session, option));
+
+    // Legacy stereo_swap still applies when no mode is configured anywhere.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_swap = Some(true);
+    assert!(resolved_swap_with(&session, option));
+
+    // callee_left without any legacy swap flips the channels.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_mode = Some(StereoChannelMode::CalleeLeft);
+    assert!(resolved_swap_with(&session, option));
+
+    // `external_right` is the mirror of `external_left`: it negates the
+    // resolved external-party classification for every call shape.
+    fn resolved_external_right(session: &SipSession) -> bool {
+        let mut option = RecorderOption::new("a.wav".into());
+        option.stereo_mode = Some(StereoChannelMode::ExternalRight);
+        resolved_swap_with(session, option)
+    }
+
+    // Inbound (external caller → internal callee): external on the right, so
+    // the caller leg swaps to the right.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // Extension-dialed outbound (internal caller → external callee): the
+    // external callee already sits on the right → no swap.
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_external_right(&session));
+
+    // Internal-to-internal: indistinguishable → caller-right fallback.
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // Trunk inbound caller under an Outbound realm: still external caller on
+    // the right.
+    let cookie = TransactionCookie::default();
+    cookie.insert_extension(TrunkContext {
+        id: Some(1),
+        name: "inbound-trunk".to_string(),
+        did_numbers: vec![],
+    });
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        cookie,
+        None,
+    ).await;
+    assert!(resolved_external_right(&session));
+
+    // RWI/CC originate: the external customer rides leg A → swap to the right.
+    let session = build_uac_session(DialDirection::Outbound).await;
+    assert!(resolved_external_right(&session));
 }
 
 /// The trunk black-hole regression: a connected bridge whose legs receive
@@ -5961,6 +6995,18 @@ async fn media_stalled_fires_when_connected_leg_receives_nothing() {
         if seen_stall && seen_health_trace {
             break;
         }
+    }
+    let health = session.meta.trace.iter()
+        .find(|event| event.kind == crate::call_errors::TraceKind::MediaHealth)
+        .expect("health sample reaches persistent trace metadata");
+    let detail = health.detail.as_ref().unwrap();
+    assert_eq!(detail["relay_mode"], true);
+    let legs = detail["legs"].as_array().unwrap();
+    assert_eq!(legs.len(), 2);
+    for leg in legs {
+        assert!(matches!(leg["leg_id"].as_str(), Some("caller" | "callee")));
+        assert_eq!(leg["egress_mode"], "direct_rtp_forwarding");
+        assert!(leg.get("volume_egress").is_none(), "disabled or direct media has no PCM volume");
     }
     assert!(seen_health_trace, "periodic media_health trace entry expected");
     assert!(seen_stall, "proxy.media_stalled call_error expected for silent legs");

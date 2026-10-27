@@ -95,7 +95,7 @@ impl NatInspector {
     }
 }
 
-/// Core rewrite logic operating on an inbound INVITE/REGISTER request.
+/// Core rewrite logic operating on an inbound INVITE request.
 ///
 /// `source_port` is the actual transport source port, used as a fallback when
 /// the Via has no `rport`.
@@ -103,10 +103,9 @@ fn fix_nated_contact_in_request(
     req: &mut rsipstack::sip::Request,
     source_port: Option<u16>,
 ) -> bool {
-    if !matches!(
-        req.method,
-        rsipstack::sip::Method::Invite | rsipstack::sip::Method::Register
-    ) {
+    // REGISTER Contact identifies the binding across reconnects; the registrar
+    // stores the reachable transport flow separately as its destination.
+    if req.method != rsipstack::sip::Method::Invite {
         return false;
     }
 
@@ -147,8 +146,7 @@ fn fix_nated_contact_in_request(
     }
     if changed {
         debug!(
-            received = %received_ip,
-            port = ?target.port,
+            source = %target,
             method = %req.method,
             "Fixed NATed Contact on inbound INVITE/REGISTER"
         );
@@ -276,7 +274,18 @@ impl MessageInspector for NatInspector {
             return msg;
         }
 
-        // ── Request side: fix Caller Contact for INVITE/REGISTER ────────
+        // WebSocket clients keep their registered Contact across reconnects;
+        // the locator stores the current reachable flow separately. Rewriting
+        // a dialog Contact to this flow's peer address breaks that identity and
+        // strands in-dialog requests at the old address after a reconnect.
+        if matches!(
+            from.r#type,
+            Some(rsipstack::sip::Transport::Ws | rsipstack::sip::Transport::Wss)
+        ) {
+            return msg;
+        }
+
+        // ── Request side: fix Caller Contact for INVITE ────────────────
         if let SipMessage::Request(ref mut req) = msg {
             let source_port = from.addr.port.map(|p| p.0);
             fix_nated_contact_in_request(req, source_port);
@@ -559,6 +568,53 @@ mod tests {
     }
 
     #[test]
+    fn websocket_contacts_preserve_registration_identity() {
+        use rsipstack::sip::{Response, StatusCode, Transport, Version};
+
+        for transport in [
+            Transport::Ws,
+            Transport::Wss,
+            Transport::Udp,
+            Transport::Tcp,
+        ] {
+            let from = SipAddr {
+                r#type: Some(transport),
+                addr: "198.51.100.24:15060".try_into().unwrap(),
+            };
+            let mut request = nated_invite();
+            // The actual transport determines whether a Contact is rewritten;
+            // a peer-supplied transport parameter must not select this policy.
+            *request.contact_header_mut().unwrap() =
+                "<sip:41111112222@10.10.10.10:15060;transport=wss>".into();
+            let original = request.contact_header().unwrap().value().to_owned();
+            let response = Response {
+                version: Version::V2,
+                status_code: StatusCode::OK,
+                headers: request.headers.clone(),
+                body: vec![],
+                wire_reason: None,
+            };
+            for message in [SipMessage::Request(request), SipMessage::Response(response)] {
+                let inspected = NatInspector::new(true).after_received(message, Some(&from));
+                let contact = match &inspected {
+                    SipMessage::Request(request) => request.contact_header().unwrap(),
+                    SipMessage::Response(response) => response.contact_header().unwrap(),
+                };
+                let expected = if matches!(transport, Transport::Ws | Transport::Wss) {
+                    original.as_str()
+                } else {
+                    "<sip:41111112222@198.51.100.24:15060;transport=wss>"
+                };
+                assert_eq!(
+                    contact.value(),
+                    expected,
+                    "transport={transport}, message={inspected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_fix_nated_contact_invite_rewrites_private_contact() {
         let mut req = nated_invite();
         assert!(super::fix_nated_contact_in_request(&mut req, None));
@@ -569,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fix_nated_contact_register_rewrites_private_contact() {
+    fn test_fix_nated_contact_register_preserves_binding_identity() {
         let raw = concat!(
             "REGISTER sip:rustpbx.com SIP/2.0\r\n",
             "Via: SIP/2.0/UDP 192.168.1.50:5060;rport=60780;received=203.0.113.9;branch=z9hG4bKreg1\r\n",
@@ -586,10 +642,10 @@ mod tests {
         else {
             panic!("expected request")
         };
-        assert!(super::fix_nated_contact_in_request(&mut req, None));
+        assert!(!super::fix_nated_contact_in_request(&mut req, None));
         assert_eq!(
             contact_line(&req),
-            "Contact: <sip:1001@203.0.113.9:60780;transport=udp>;expires=3600"
+            "Contact: <sip:1001@192.168.1.50:5060;transport=udp>;expires=3600"
         );
     }
 

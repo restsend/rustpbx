@@ -81,6 +81,7 @@ instant-acme = { version = "0.8.5", default-features = false, features = [
     "time",
 ], optional = true }
 anyhow = "1"
+flate2 = "1"
 async-trait = "0.1.88"
 axum = { version = "0.8.9", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
@@ -116,6 +117,9 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.7"
+# 0.4.11 fixes a G.711 µ-law (PCMU) encoder bug: ~12% of samples were
+# emitted as non-standard codes, adding audible quantization noise ("hiss")
+# on recordings when decoded by standard players/peers.
 audio-codec = "0.4.13"
 rustrtc = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = [
@@ -139,10 +143,12 @@ dotenvy = "0.15.7"
 md-5 = "0.11.0"
 once_cell = "1.21.4"
 regex = "1.12.4"
+aho-corasick = "1.1.4"
 http = "1.4.2"
 urlencoding = "2.1.3"
 ipnet = "2.11.0"
 local-ip-address = "0.6"
+hostname = "0.4"
 prefix-trie = "0.10.1"
 sqlx = { version = "0.9.0", features = [
     "runtime-tokio",
@@ -224,11 +230,15 @@ portpicker = { version = "0.1.1", optional = true }
 [[test]]
 name = "e2e_core"
 
+[[test]]
+name = "step_ivr_trace_e2e"
+
 [dev-dependencies]
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 ctor = "1.0.7"
 metrics-util = "0.20.4"
+url = "2.5.8"
 sea-orm = { version = "2", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",

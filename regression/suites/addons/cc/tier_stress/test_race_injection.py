@@ -37,6 +37,22 @@ SECOND = "1002"
 OTHERS = ("1003",)
 
 
+@pytest.fixture(autouse=True)
+async def _reset_agents_after(api):
+    """Belt-and-suspenders isolation: a failed/red call in this file can
+    leave an agent parked in wrapup/cooldown, which cascades into the next
+    test's dispatch expectations (seen 2026-10: race1's leftover state
+    flipped race2's idle assert to wrapup and starved race3's dispatch).
+    Force every agent back to a clean schedulable Idle after each test."""
+    yield
+    for aid in (AGENT, SECOND, *OTHERS):
+        try:
+            await api.update_agent_status(aid, "offline")
+            await api.update_agent_status(aid, "idle")
+        except Exception:  # noqa: BLE001 — teardown best-effort
+            pass
+
+
 async def _setup(api):
     for aid in OTHERS:
         try:
@@ -55,6 +71,25 @@ async def _await_status(api, agent_id, want, timeout=15.0):
             return last
         await asyncio.sleep(0.5)
     return last
+
+
+async def _publish_idle_until_idle(api, agent: RestsendAgent, timeout: float = 30.0):
+    """publish_idle + wait until the CC registry ACTUALLY reports Idle,
+    re-publishing if a stale sweep / late unregistration landed Offline in
+    between (a previous test's dead UA lease expiring mid-test flips the
+    shared agent identity offline despite this fresh registration)."""
+    deadline = time.time() + timeout
+    re_sent = False
+    while time.time() < deadline:
+        st = (await api.get_agent(agent.user))["status"]
+        if st == "idle":
+            return
+        if st == "offline" and not re_sent:
+            await agent.publish_idle()
+            re_sent = True
+        await asyncio.sleep(1.0)
+    raise AssertionError(
+        f"{agent.user}: publish_idle never reached Idle (last={st!r})")
 
 
 async def _spawn_caller(pbx, pool, hangup, port):
@@ -87,10 +122,12 @@ async def _drain(api, timeout=50.0):
 # ── R-race1: late answer at the ring-timeout boundary ───────────────────────
 async def test_race1_late_answer_keeps_capacity_accounted(
         pbx, sipbot_pool, api, event_checker):
-    """Answer lands just AFTER the 30s ring timeout flipped the agent into
-    no-answer Wrapup. The bridge must still stand and the agent must be Busy
-    (not Wrapup) with current_calls=1 — otherwise the cooldown timer flips
-    them Idle mid-call and the ACD double-dispatches."""
+    """Contract (2026-10 ring-no-answer policy — release to Idle): the 200 OK
+    that crosses the ring-timeout CANCEL must NOT bridge a stale leg. The
+    agent is released straight to Idle with zero capacity held and the queue
+    keeps serving the caller (re-dial / fallback) — no double-dispatch, no
+    zombie bridge. (The 2026-09 Wrapup→Busy late-answer bridge was removed
+    by the CANCEL-at-ring-timeout policy; the default release is Idle.)"""
     await _setup(api)
     late = RestsendAgent(pbx, AGENT, local_port=25201)
     await late.start()
@@ -100,36 +137,28 @@ async def test_race1_late_answer_keeps_capacity_accounted(
         assert await _await_status(api, AGENT, "idle") == "idle"
 
         caller = await _spawn_caller(pbx, sipbot_pool, hangup=110, port=25310)
-        t0 = time.time()
 
-        # Do NOT answer when it rings; wait until the registry shows the
-        # no-answer Wrapup (ring timeout ~30s), then answer immediately —
-        # the 200 OK lands right after the timeout's transition.
-        status = await _await_status(api, AGENT, "wrapup", timeout=45)
-        assert status == "wrapup", f"expected wrapup after ring timeout, got {status}"
+        # Do NOT answer when it rings. Ring timeout (~30s): the ringing leg
+        # is CANCELled and the agent is released straight to Idle (default
+        # policy — no cooldown configured for this session).
+        status = await _await_status(api, AGENT, "idle", timeout=45)
+        assert status == "idle", (
+            f"ring timeout must release the agent to Idle (default "
+            f"release-to-Idle policy), got {status!r}")
+
+        # The stale UA answers anyway (200 OK racing the CANCEL): the leg is
+        # already torn down — it must not bridge.
         await late.cmd({"cmd": "sip_answer"})
-
         ev = await late.wait_event(
             "state_changed",
             predicate=lambda e: e.get("name") == "connected",
-            timeout=15,
+            timeout=8,
         )
-        assert ev, "late answer did not connect the call"
-        pytest.log.info(f"race1: connected at t+{time.time() - t0:.0f}s")
+        assert ev is None, "late answer must NOT bridge the timed-out leg"
 
-        # THE assertion: agent must now be Busy on this call, not stuck in
-        # wrapup, and capacity consumed.
-        st = await _await_status(api, AGENT, "busy", timeout=8)
-        assert st == "busy", (
-            f"late answer left agent in {st!r} — cooldown timer will flip "
-            "them Idle mid-call (double-dispatch window)"
-        )
+        # Capacity fully released: no call held on the agent.
         info = await api.get_agent(AGENT)
-        assert info["current_calls"] == 1, info
-
-        await asyncio.sleep(4)
-        await late.hangup()
-        await asyncio.sleep(2)
+        assert info["current_calls"] == 0, info
     finally:
         sipbot_pool.terminate_user("2204")
         await _drain(api)
@@ -150,9 +179,8 @@ async def test_race2_reservation_window_abandon_releases_agent(
     try:
         assert await a1.register(expires=120)
         assert await a2.register(expires=120)
-        await a1.publish_idle(); await a2.publish_idle()
-        assert await _await_status(api, AGENT, "idle") == "idle"
-        assert await _await_status(api, SECOND, "idle") == "idle"
+        await _publish_idle_until_idle(api, a1)
+        await _publish_idle_until_idle(api, a2)
 
         caller = await _spawn_caller(pbx, sipbot_pool, hangup=90, port=25311)
         # Kill the caller the moment the call joins the queue (first agent

@@ -225,7 +225,19 @@ impl CallSessionBuilder {
         }
 
         let mut events: Vec<serde_json::Value> = Vec::new();
-        // Unified error entry first (detailed, registry code + severity),
+        // Dialplan snapshot first: even rejected calls record which routing/
+        // media/recording parameters were resolved before the failure.
+        let dialplan_snapshot = dialplan.snapshot_json();
+        if let Ok(v) = serde_json::to_value(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Dialplan,
+                dialplan.summary_line(),
+            )
+            .detail(dialplan_snapshot.clone()),
+        ) {
+            events.push(v);
+        }
+        // Unified error entry (detailed, registry code + severity),
         // followed by the terminal `end` entry for continuity with existing
         // consumers/tests.
         if err_code.is_some() {
@@ -252,6 +264,8 @@ impl CallSessionBuilder {
             events.push(v);
         }
         metadata.insert("trace".to_string(), serde_json::Value::Array(events));
+        // Full dialplan parameter block, mirroring the session-path CDR.
+        metadata.insert("dialplan".to_string(), dialplan_snapshot);
 
         let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
             ring_time: None,
@@ -340,22 +354,32 @@ mod tests {
             .get("trace")
             .and_then(|v| v.as_array())
             .expect("trace array present");
-        // Unified error entry first (registry code + severity), then the
-        // terminal `end` entry carrying the SIP reason. The wholesale code is
-        // not part of the default registry, so this resolves through the
-        // ROUTE_FAILED fallback — WARN since business rejections must not
-        // trip ERROR alerting.
-        assert_eq!(trace[0]["kind"], "error");
-        assert_eq!(trace[0]["severity"], "warn");
-        assert_eq!(trace[0]["code"], "wholesale.insufficient_funds");
-        assert_eq!(trace[1]["kind"], "end");
+        // Dialplan snapshot first, then the unified error entry (registry code
+        // + severity), then the terminal `end` entry carrying the SIP reason.
+        // The wholesale code is not part of the default registry, so this
+        // resolves through the ROUTE_FAILED fallback — WARN since business
+        // rejections must not trip ERROR alerting.
+        assert_eq!(trace[0]["kind"], "dialplan");
+        assert_eq!(
+            trace[0]["detail"]["direction"], "inbound",
+            "the dialplan snapshot entry carries the routing parameters"
+        );
+        assert_eq!(trace[1]["kind"], "error");
         assert_eq!(trace[1]["severity"], "warn");
         assert_eq!(trace[1]["code"], "wholesale.insufficient_funds");
+        assert_eq!(trace[2]["kind"], "end");
+        assert_eq!(trace[2]["severity"], "warn");
+        assert_eq!(trace[2]["code"], "wholesale.insufficient_funds");
         assert!(
-            trace[1]["message"]
+            trace[2]["message"]
                 .as_str()
                 .unwrap()
                 .contains("Insufficient funds")
         );
+        // The full dialplan parameter block mirrors the session-path CDR.
+        let dialplan_meta = meta.get("dialplan").expect("dialplan metadata present");
+        assert_eq!(dialplan_meta["direction"], "inbound");
+        assert_eq!(dialplan_meta["recording"]["enabled"], false);
+        assert!(dialplan_meta["media"]["proxy_mode"].is_string());
     }
 }

@@ -374,7 +374,20 @@ impl StepIvrApp {
         }
     }
 
-    fn record_trace(&self, entry: IvrTraceEntry) {
+    fn record_trace(&self, mut entry: IvrTraceEntry) {
+        // Completion contract, enforced at the SINGLE choke point every step
+        // trace passes through: each emitted entry carries `step_end_time`
+        // (the completion marker) and `step_start_time` (falling back to the
+        // end so `end >= start` always holds) — `duration_ms` is non-optional
+        // by type. A site that left a stamp unset is repaired here, so
+        // consumers can rely on both fields unconditionally. The same
+        // normalized entry feeds the CDR collector and the RWI fan-out.
+        if entry.step_end_time.is_none() {
+            entry.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+        }
+        if entry.step_start_time.is_none() {
+            entry.step_start_time = entry.step_end_time.clone();
+        }
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
             crate::utils::spawn(async move {
@@ -405,7 +418,11 @@ impl StepIvrApp {
                 next_node_id: entry.next_node_id,
                 next_step_id: entry.next_step_id,
                 end: entry.end,
-            };
+            }
+            // Belt-and-braces: the entry was normalized above, so this is a
+            // no-op today — it keeps the "emitted event always carries both
+            // stamps" guarantee local to the construction site as well.
+            .with_completion_stamps();
             let guard = gw.read();
             guard.fan_out(&call_id, &ev);
         }
@@ -2790,10 +2807,13 @@ impl CallApp for StepIvrApp {
             );
         }
 
-        if !skip_provider_end {
-            let provider_session = self.provider_session_context();
+        // Cancellation can win before on_enter establishes a provider invocation.
+        // An unentered invocation has no provider lifecycle to finalize.
+        if !skip_provider_end
+            && let Some(provider_session) = self.provider_session.as_ref()
+        {
             self.provider
-                .on_session_end_context(&end_reason, &provider_session)
+                .on_session_end_context(&end_reason, provider_session)
                 .await
                 .ok();
         }
@@ -7557,6 +7577,11 @@ mod tests {
             .variables
             .insert("session_id".into(), "test-session".into());
 
+        app.provider_session = Some(SessionContext {
+            app_execution_id: 4,
+            ..app.build_session_context_from_vars()
+        });
+
         app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
             .await
             .expect("remote hangup exit should succeed");
@@ -7605,6 +7630,11 @@ mod tests {
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
+
+        app.provider_session = Some(SessionContext {
+            app_execution_id: 1,
+            ..app.build_session_context_from_vars()
+        });
 
         app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
             .await
@@ -7775,6 +7805,110 @@ mod tests {
         );
     }
 
+    /// Consumer contract for the [prompt → hangup] natural-completion flow:
+    /// the FULL trace sequence must reach BOTH the CDR collector and the RWI
+    /// gateway — prompt step (`session_start`), hangup step (`audio_complete`,
+    /// `end=true`), and the `session_end` entry (`end=true`, `end_reason`).
+    /// These three are emitted back-to-back in one burst; the webhook's
+    /// former same-type same-microsecond dedup collapsed such bursts and
+    /// silently dropped the flow's end marker, so the exact COUNT is
+    /// asserted here as the regression guard.
+    #[tokio::test]
+    async fn test_prompt_natural_completion_emits_full_trace_sequence() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+        use crate::rwi::gateway::RwiGateway;
+
+        let trace = IvrTraceCollector::new();
+        let gateway = RwiGateway::new();
+        let mut rwi_events = gateway.subscribe_events();
+
+        let prompt = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+            delay_before_ms: 0,
+            delay_after_ms: 0,
+        });
+        let mut app = mock_app(vec![prompt, ActionNode::new(EntryAction::hangup_none())]);
+        app.trace = Some(trace.clone());
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| play_file_cmd(c, "hello.wav"))
+            .await;
+
+        // Prompt finishes naturally → the provider's next node (hangup) runs.
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .await;
+        // on_exit records the session_end entry; give the spawned collector
+        // write a moment to land.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Expected (trigger, end-marker) pairs in emission order.
+        let expected: [(&str, Option<bool>); 3] = [
+            ("session_start", None),    // prompt step — flow continues
+            ("audio_complete", Some(true)), // hangup step — terminal
+            ("session_end", Some(true)),    // session close — end_reason carrier
+        ];
+
+        // ── CDR collector side ──
+        let entries = trace.query_by_session("test-session").await;
+        assert_eq!(
+            entries.len(),
+            3,
+            "exactly three trace entries must be recorded, got: {:?}",
+            entries.iter().map(|e| e.trigger.r#type.clone()).collect::<Vec<_>>()
+        );
+        for (entry, (trigger, end)) in entries.iter().zip(expected) {
+            assert_eq!(entry.trigger.r#type, trigger, "trace order mismatch");
+            assert_eq!(entry.end, end, "end-marker mismatch on trigger={trigger}");
+            assert!(
+                entry.step_end_time.is_some(),
+                "trigger={trigger} must carry step_end_time (completion marker)"
+            );
+        }
+        let session_end = &entries[2];
+        assert_eq!(
+            session_end.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::Hangup),
+            "session_end entry must carry the end reason"
+        );
+
+        // ── RWI fan-out side: the same burst must arrive uncollapsed ──
+        let mut rwi_traces: Vec<serde_json::Value> = Vec::new();
+        while let Ok(ev) = rwi_events.try_recv() {
+            if ev.event.event_type == "ivr_step_trace" {
+                rwi_traces.push(ev.event.payload);
+            }
+        }
+        assert_eq!(
+            rwi_traces.len(),
+            3,
+            "all three ivr_step_trace events must be fanned out, got: {rwi_traces:?}"
+        );
+        for (payload, (trigger, end)) in rwi_traces.iter().zip(expected) {
+            assert_eq!(payload["trigger"]["type"], trigger, "fan-out order mismatch");
+            assert_eq!(
+                payload["end"].as_bool(),
+                end,
+                "fan-out end-marker mismatch on trigger={trigger}"
+            );
+        }
+        assert!(
+            rwi_traces[2]["end_reason"].is_string(),
+            "fan-out session_end must carry end_reason"
+        );
+    }
+
     #[tokio::test]
     async fn test_step_trace_events_are_enqueued_in_record_order() {
         use crate::rwi::gateway::RwiGateway;
@@ -7825,6 +7959,201 @@ mod tests {
             .expect("session end trace must be enqueued");
         assert_eq!(first.event.payload["step_id"], "step-normal");
         assert_eq!(second.event.payload["step_id"], "step-end");
+    }
+
+    /// Completion contract guard: `record_trace` is the single choke point
+    /// every executor step trace passes through. An entry that reaches it
+    /// without stamps must be repaired, so an emitted `ivr_step_trace` can
+    /// NEVER lack `step_end_time` / `step_start_time` (`duration_ms` is
+    /// non-optional by type). Covers the theoretical `None` site directly.
+    #[tokio::test]
+    async fn test_record_trace_backfills_missing_completion_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut app = mock_app(vec![]);
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        // Worst case: a site leaves BOTH stamps unset.
+        app.record_trace(IvrTraceEntry {
+            session_id: "test-session".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger: crate::rwi::TriggerInfo::new("ivr_fallback"),
+            provider_url: None,
+            action_type: "ivr_fallback".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: None,
+            step_end_time: None,
+            extra: None,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        });
+
+        let ev = events.try_recv().expect("trace must be enqueued");
+        let payload = ev.event.payload;
+        let start = payload["step_start_time"]
+            .as_str()
+            .expect("step_start_time must be backfilled");
+        let end = payload["step_end_time"]
+            .as_str()
+            .expect("step_end_time must be backfilled");
+        let start_t = chrono::DateTime::parse_from_rfc3339(start).expect("start RFC3339");
+        let end_t = chrono::DateTime::parse_from_rfc3339(end).expect("end RFC3339");
+        assert!(
+            end_t >= start_t,
+            "backfilled start/end must satisfy end >= start: {payload}"
+        );
+        assert!(
+            payload["duration_ms"].is_u64(),
+            "duration_ms must be present: {payload}"
+        );
+    }
+
+    /// Every step trace emitted by ANY executor flow carries the completion
+    /// contract: `step_start_time` + `step_end_time` present, `end >= start`,
+    /// `duration_ms` present and equal to the stamp window (±50ms). Driven
+    /// through the RWI fan-out (the wire shape consumers see).
+    #[tokio::test]
+    async fn test_every_emitted_step_trace_carries_completion_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        fn assert_stamps(payloads: &[serde_json::Value], flow: &str) {
+            assert!(!payloads.is_empty(), "{flow}: no traces captured");
+            for (i, p) in payloads.iter().enumerate() {
+                let start = p["step_start_time"].as_str().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing step_start_time: {p}")
+                });
+                let end = p["step_end_time"].as_str().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing step_end_time: {p}")
+                });
+                let duration = p["duration_ms"].as_u64().unwrap_or_else(|| {
+                    panic!("{flow} trace[{i}] missing duration_ms: {p}")
+                });
+                let start_t = chrono::DateTime::parse_from_rfc3339(start)
+                    .unwrap_or_else(|e| panic!("{flow} trace[{i}] start not RFC3339: {e}"));
+                let end_t = chrono::DateTime::parse_from_rfc3339(end)
+                    .unwrap_or_else(|e| panic!("{flow} trace[{i}] end not RFC3339: {e}"));
+                assert!(
+                    end_t >= start_t,
+                    "{flow} trace[{i}] step_end_time < step_start_time: {p}"
+                );
+                let expected = (end_t - start_t).num_milliseconds();
+                assert!(
+                    (duration as i64 - expected).abs() <= 50,
+                    "{flow} trace[{i}] duration_ms {duration} != stamp window {expected}ms: {p}"
+                );
+            }
+        }
+
+        fn drain_traces(
+            events: &mut tokio::sync::broadcast::Receiver<
+                crate::rwi::gateway::EventCacheEntry,
+            >,
+        ) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            while let Ok(ev) = events.try_recv() {
+                if ev.event.event_type == "ivr_step_trace" {
+                    out.push(ev.event.payload);
+                }
+            }
+            out
+        }
+
+        fn prompt_node(file: &str, interruptible: bool) -> ActionNode {
+            ActionNode::new(EntryAction::Prompt {
+                file: Some(file.into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            })
+        }
+
+        let wire_gateway = |app: &mut StepIvrApp| -> tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry> {
+            let gateway = RwiGateway::new();
+            let rx = gateway.subscribe_events();
+            app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+            rx
+        };
+
+        // ── (a) natural completion: [prompt, hangup] ──
+        {
+            let mut app = mock_app(vec![
+                prompt_node("hello.wav", false),
+                ActionNode::new(EntryAction::hangup_none()),
+            ]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "hello.wav"))
+                .await;
+            stack.audio_complete("ivr_prompt");
+            stack
+                .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "natural completion");
+        }
+
+        // ── (b) barge-in on an interruptible prompt ──
+        {
+            let mut app = mock_app(vec![
+                prompt_node("welcome.wav", true),
+                ActionNode::new(EntryAction::hangup_none()),
+            ]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "welcome.wav"))
+                .await;
+            stack.dtmf("5");
+            stack
+                .assert_cmd(2000, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "barge-in");
+        }
+
+        // ── (c) caller hangup mid-prompt (the zero-await on_exit burst) ──
+        {
+            let mut app = mock_app(vec![prompt_node("long.wav", false)]);
+            let mut events = wire_gateway(&mut app);
+            let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+            stack
+                .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack
+                .assert_cmd(2000, "play", |c| play_file_cmd(c, "long.wav"))
+                .await;
+            stack.remote_hangup();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_stamps(&drain_traces(&mut events), "caller hangup mid-prompt");
+        }
     }
 
     // ── Invariant: step_end_time implies step_start_time ──
@@ -8698,7 +9027,7 @@ mod tests {
         _listener: std::net::TcpListener,
     }
 
-    fn start_mock_step_provider() -> MockStepProviderServer {
+    fn start_mock_step_provider(start_action: &'static [u8]) -> MockStepProviderServer {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
         let url = format!(
             "http://{}/ivr/step",
@@ -8712,7 +9041,7 @@ mod tests {
                 let Ok(stream) = stream else { continue };
                 let connection_requests = recorded_requests.clone();
                 std::thread::spawn(move || {
-                    let _ = serve_connection(stream, connection_requests);
+                    let _ = serve_connection(stream, connection_requests, start_action);
                 });
             }
         });
@@ -8726,6 +9055,7 @@ mod tests {
     fn serve_connection(
         mut stream: std::net::TcpStream,
         requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+        start_action: &[u8],
     ) -> std::io::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -8762,7 +9092,7 @@ mod tests {
             if let Ok(value) = serde_json::from_slice(&body) {
                 requests.lock().unwrap().push((path.clone(), value));
             }
-            let payload = mock_step_response(&path, &body);
+            let payload = mock_step_response(&path, &body, start_action);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                  Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
@@ -8774,7 +9104,7 @@ mod tests {
         }
     }
 
-    fn mock_step_response(path: &str, body: &[u8]) -> Vec<u8> {
+    fn mock_step_response(path: &str, body: &[u8], start_action: &[u8]) -> Vec<u8> {
         if path != "/ivr/step" {
             // /ivr/step/start and /ivr/step/end are fire-and-forget.
             return br#"{"status":"ok"}"#.to_vec();
@@ -8782,8 +9112,7 @@ mod tests {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
             let event_type = value["event"]["type"].as_str().unwrap_or("");
             if event_type == "session_start" {
-                return br#"{"type":"prompt","tts_text":"IVR step announcement.","interruptible":false,"ignore_prompt_dtmf":true}"#
-                    .to_vec();
+                return start_action.to_vec();
             }
             if event_type == "dtmf" && value["event"]["digit"].as_str() == Some("2") {
                 return br#"{"type":"queue","target":"sales"}"#.to_vec();
@@ -8796,7 +9125,9 @@ mod tests {
     async fn test_step_provider_http_contract() {
         use crate::call::app::ivr::provider::StepProvider;
 
-        let provider = start_mock_step_provider();
+        let provider = start_mock_step_provider(
+            br#"{"type":"prompt","tts_text":"IVR step announcement.","interruptible":false,"ignore_prompt_dtmf":true}"#,
+        );
         let step_provider = StepProvider::new(&provider.url, reqwest::Client::new());
 
         let session = SessionContext {
@@ -8916,6 +9247,121 @@ mod tests {
             .expect("end request");
         assert_eq!(end["session_id"], "test-session");
         assert_eq!(end["app_execution_id"], 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_stop_preserves_provider_hangup_notification() {
+        use crate::call::app::ivr::provider::StepProvider;
+        use crate::call::runtime::{AppFactory, AppRuntime, AppRuntimeConfig, DefaultAppRuntime};
+        use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+
+        struct Factory(String);
+        #[async_trait]
+        impl AppFactory for Factory {
+            async fn create_app(
+                &self,
+                _name: &str,
+                _params: Option<serde_json::Value>,
+                _context: &ApplicationContext,
+            ) -> Result<Option<Box<dyn CallApp>>, anyhow::Error> {
+                Ok(Some(Box::new(StepIvrApp::with_provider(Box::new(
+                    StepProvider::new(&self.0, reqwest::Client::new()),
+                )))))
+            }
+        }
+
+        let mut failures = Vec::new();
+        let scenarios = [
+            ("caller_hangup", true),
+            ("shutdown", true),
+            ("text_hangup", true),
+        ]
+        .into_iter()
+        .chain(std::iter::repeat_n(("early_hangup", false), 16));
+        for (reason, ready) in scenarios {
+            let server = start_mock_step_provider(
+                br#"{"type":"prompt","file":"hello.wav","interruptible":false}"#,
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
+                session_id: "test-session".into(),
+                handle: SipSessionHandle::new_for_test("test-session", tx),
+                context: Arc::new(make_test_context()),
+            })
+            .with_factory(Arc::new(Factory(server.url.clone())));
+            runtime.start_app("ivr", None, false).await.unwrap();
+            // Immediate cancellation exercises startup before the spawned app is polled.
+            // Ready scenarios retain the real provider-start/play boundary.
+            while ready {
+                let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("IVR must become ready")
+                    .expect("command channel must remain open");
+                if matches!(command, CallCommand::FromApplication { ref command }
+                    if matches!(command.as_ref(), CallCommand::Play { .. }))
+                {
+                    break;
+                }
+            }
+            let stop_reason = if reason == "text_hangup" || reason == "early_hangup" {
+                "caller_hangup"
+            } else {
+                reason
+            };
+            if reason == "caller_hangup" || reason == "early_hangup" {
+                runtime
+                    .stop_app_with_exit_reason(
+                        Some(stop_reason.into()),
+                        crate::call::app::ExitReason::RemoteHangup(None),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                runtime.stop_app(Some(stop_reason.into())).await.unwrap();
+            }
+            loop {
+                let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("IVR must exit")
+                    .expect("command channel must remain open");
+                if matches!(command, CallCommand::AppExited { .. }) {
+                    break;
+                }
+            }
+            let requests = server.requests.lock().unwrap();
+            let ends: Vec<_> = requests
+                .iter()
+                .filter(|(path, _)| path == "/ivr/step/end")
+                .collect();
+            if reason == "early_hangup" {
+                for (_, end) in &ends {
+                    if end["session_id"] != "test-session" || end["app_execution_id"] != 1 {
+                        failures.push(format!(
+                            "startup cancellation sent an unidentified end: {end}"
+                        ));
+                    }
+                }
+            } else if reason == "text_hangup" {
+                if !ends.is_empty() {
+                    failures.push("public stop text must not become a user hangup".into());
+                }
+            } else if reason == "caller_hangup" {
+                assert_eq!(
+                    ends.len(),
+                    1,
+                    "caller BYE must finalize the provider session exactly once"
+                );
+                assert_eq!(ends[0].1["session_id"], "test-session");
+                assert_eq!(ends[0].1["app_execution_id"], 1);
+                assert_eq!(ends[0].1["reason"], "user_hangup");
+            } else {
+                assert!(
+                    ends.is_empty(),
+                    "system shutdown must retain cancellation semantics"
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     // ── DTMF delivery in step-provider mode ──────────────────────────────

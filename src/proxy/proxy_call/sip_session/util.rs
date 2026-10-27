@@ -6,11 +6,85 @@ pub(super) fn normalize_call_hangup_by(
     hangup_by: &str,
     queue_name: Option<&str>,
     has_resolved_agent: bool,
+    hangup_by_side: Option<&str>,
 ) -> String {
+    // Outbound correction: on a CTI click-to-dial / originate call the
+    // caller/A dialog's UAS is the dialed CUSTOMER. A UAS BYE there is the
+    // customer hanging up (stamped `caller_remote`), so the CC-centric
+    // `ByCallee → "agent"` mapping must not fire — the initiator is the
+    // customer ("callee"). A remote BYE on a callee/agent dialog
+    // (`callee_remote`) IS the agent hanging up and keeps "agent"; inbound
+    // sessions never stamp `caller_remote` (their caller-dialog UAS is the
+    // proxy, so a UasBye there is the callee-side cascade, correctly
+    // attributed through the existing mapping below).
+    if hangup_by == "agent" && hangup_by_side == Some("caller_remote") {
+        return "callee".to_string();
+    }
     if hangup_by == "agent" && queue_name.is_none() && !has_resolved_agent {
         "callee".to_string()
     } else {
         hangup_by.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_call_hangup_by;
+
+    #[test]
+    fn inbound_agent_hangup_stays_agent_with_cc_context() {
+        // Inbound CC call, agent (callee side) hangs up: ByCallee → "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, Some("callee_remote")),
+            "agent"
+        );
+        // First-BYE side not stamped (legacy paths): CC context keeps "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, None),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn outbound_customer_hangup_normalizes_to_callee() {
+        // Outbound click-to-dial, CUSTOMER hangs up first: the caller/A
+        // dialog's remote BYE was stamped `caller_remote` — the CC-centric
+        // "agent" attribution must be corrected to "callee".
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("caller_remote")),
+            "callee"
+        );
+        // Even with a queue name present (customer hung while queued).
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, Some("caller_remote")),
+            "callee"
+        );
+    }
+
+    #[test]
+    fn outbound_agent_hangup_stays_agent() {
+        // Outbound call, the AGENT bridge leg hangs up: remote BYE on the
+        // callee dialog (`callee_remote`) — attribution stays "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("callee_remote")),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn local_bye_and_non_agent_initiators_untouched() {
+        // We tore the call down ourselves: never rewritten.
+        assert_eq!(
+            normalize_call_hangup_by("system", None, false, Some("local")),
+            "system"
+        );
+        // Plain customer/caller initiator: untouched.
+        assert_eq!(
+            normalize_call_hangup_by("caller", None, false, Some("caller_remote")),
+            "caller"
+        );
+        // No CC context at all: existing "callee" fallback keeps working.
+        assert_eq!(normalize_call_hangup_by("agent", None, false, None), "callee");
     }
 }
 
@@ -177,12 +251,14 @@ pub(super) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
 /// the injection succeeds). Returns `true` only when a running app consumed
 /// the event — `false` means no app is running (starting up / between apps /
 /// none scheduled) and the caller may want to buffer the digit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn inject_dtmf_into_app(
     digit: char,
     leg_id: &str,
     session_id: &str,
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
+    leg_role: Option<String>,
 ) -> bool {
     if !app_runtime.is_running() {
         return false;
@@ -207,6 +283,7 @@ pub(super) fn inject_dtmf_into_app(
                     call_id: session_id.to_string(),
                     digit: digit_str.clone(),
                     leg_id: Some(leg_id.to_string()),
+                    leg_role,
                     extra: None,
                 });
             }
@@ -249,6 +326,7 @@ pub(super) async fn trace_sip_headers(
 pub(super) fn forward_dtmf_event(
     digit: char,
     leg_id: &str,
+    application_leg: &str,
     session_id: &str,
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
@@ -258,11 +336,11 @@ pub(super) fn forward_dtmf_event(
     caller: &str,
     callee: &str,
     sip_headers: Option<std::collections::HashMap<String, String>>,
+    leg_role: Option<String>,
 ) -> bool {
-    // Call applications are attached to the caller leg. Agent-side INFO must
-    // still be forwarded to its SIP peer, but it is never authoritative input
-    // for an IVR/menu application (the RTP path already listens to caller only).
-    if leg_id != "caller" {
+    // A transferred application serves its bound participant, which can be
+    // the callee. Input from the other leg must not drive the customer menu.
+    if leg_id != application_leg {
         return false;
     }
     let digit_str = digit.to_string();
@@ -319,14 +397,23 @@ pub(super) fn forward_dtmf_event(
                 next_node_id: None,
                 next_step_id: None,
                 end: None,
-            };
+            }
+            // Completion contract: both stamps present on every emitted entry.
+            .with_completion_stamps();
             gw.read().fan_out(session_id, &ev);
         }
         // The bridge owns media while active. Injecting the same digit into
         // the suspended app would replay one physical key as a second input.
         return true;
     }
-    inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway)
+    inject_dtmf_into_app(
+        digit,
+        leg_id,
+        session_id,
+        app_runtime,
+        rwi_gateway,
+        leg_role,
+    )
 }
 
 /// Map the session teardown cause to the compensating `session_end` reason
@@ -416,7 +503,9 @@ pub(super) fn emit_suspended_flow_session_end(
         next_node_id: None,
         next_step_id: None,
         end: Some(true),
-    };
+    }
+    // Completion contract: both stamps present on every emitted entry.
+    .with_completion_stamps();
     gw.read().fan_out(session_id, &ev);
 }
 

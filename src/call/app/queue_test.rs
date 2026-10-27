@@ -15,7 +15,55 @@ mod tests {
         VoicePrompts,
     };
     use rsipstack::sip::Uri;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct QueueLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for QueueLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_queue_logs() -> (
+        QueueLogWriter,
+        tracing::subscriber::DefaultGuard,
+        tracing::Dispatch,
+    ) {
+        // With one dispatch, tracing-core caches first-callsite interest from
+        // the registering thread, which may be an uncaptured parallel test.
+        let interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
+        let logs = QueueLogWriter(Arc::new(Mutex::new(Vec::new())));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        (logs, tracing::subscriber::set_default(subscriber), interest_guard)
+    }
+
+    fn assert_queue_log_call(logs: &QueueLogWriter, call_id: &str, messages: &[&str]) {
+        let bytes = logs.0.lock().unwrap().clone();
+        let text = String::from_utf8(bytes).unwrap();
+        for message in messages {
+            let line = text
+                .lines()
+                .find(|line| line.contains(message))
+                .unwrap_or_else(|| panic!("Missing queue lifecycle log {message}: {text}"));
+            assert!(
+                line.split_whitespace().any(|field| field == format!("call_id={call_id}")),
+                "Queue lifecycle log must identify its owning call: {line}"
+            );
+        }
+    }
 
     /// Build a registered-agent [`Location`] for the given SIP URI.
     fn test_location(uri: &str) -> Location {
@@ -110,6 +158,27 @@ mod tests {
             ring_timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         }
+    }
+
+    fn queue_test_context(proxy_settings: &str) -> crate::call::app::ApplicationContext {
+        let config: crate::config::Config = toml::from_str(&format!(
+            "[proxy]\naddr = \"0.0.0.0\"\n{proxy_settings}"
+        ))
+        .unwrap();
+        crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "caller".into(),
+                callee: "1000".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(config),
+            reqwest::Client::new(),
+        )
     }
 
     // ── 1. Basic queue enter with immediate answer and hold music ──
@@ -277,6 +346,179 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    #[tokio::test]
+    async fn test_agent_ringing_preserves_hold_music_by_default() {
+        let config = build_sequential_queue_config();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(config.to_plan(), config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let hold_cmd = stack.next_cmd(2000).await.expect("queue hold music");
+        assert_eq!(play_path(&hold_cmd), "sounds/hold_music.wav");
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("first agent INVITE");
+        let first_leg = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        assert!(
+            stack.next_cmd(100).await.is_none(),
+            "vendor default must keep the configured queue music"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_ringing_switches_hold_music_to_ringback_and_restores_on_retry() {
+        let config = build_sequential_queue_config();
+        let app = QueueApp::new(config.to_plan(), config);
+        let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let hold_cmd = stack.next_cmd(2000).await.expect("queue hold music");
+        assert_eq!(play_path(&hold_cmd), "sounds/hold_music.wav");
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("first agent INVITE");
+        let first_leg = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        let ringback_cmd = stack.next_cmd(2000).await.expect("agent ringback");
+        assert_eq!(play_path(&ringback_cmd), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
+        assert!(
+            matches!(&ringback_cmd, CallCommand::Play { options: Some(options), .. }
+                if options.loop_playback),
+            "agent ringback must loop until answer or ring timeout instead of completing into hold music"
+        );
+
+        // Repeated 180 responses for the same leg must not restart ringback.
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        assert!(
+            stack.next_cmd(100).await.is_none(),
+            "duplicate ringing must not restart playback"
+        );
+
+        stack.custom("agent_busy", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
+        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
+        stack
+            .assert_cmd(2000, "second agent INVITE", |cmd| {
+                matches!(cmd, CallCommand::LegAdd { .. })
+            })
+            .await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_ringing_releases_ringback_on_answer_or_timeout() {
+        for answered in [true, false] {
+            let config = build_sequential_queue_config();
+            let app = QueueApp::new(config.to_plan(), config);
+            let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+            let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+            stack
+                .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+                .await;
+            let _ = stack.next_cmd(2000).await.expect("queue hold music");
+            stack.custom("dial_next_agent", serde_json::json!({}));
+            let leg_id = match stack.next_cmd(2000).await.expect("agent INVITE") {
+                CallCommand::LegAdd { leg_id, .. } => leg_id.expect("agent leg ID"),
+                other => panic!("expected agent leg, got {other:?}"),
+            };
+            stack.custom("agent_ringing", serde_json::json!({ "leg_id": leg_id }));
+            let ringback = stack.next_cmd(2000).await.expect("agent ringback");
+            assert!(matches!(&ringback, CallCommand::Play { options: Some(options), .. }
+                if options.loop_playback));
+            let ringback_track = play_track_id(&ringback);
+
+            if answered {
+                stack.custom("agent_connected", serde_json::json!({
+                    "agent_uri": "sip:agent1@example.com", "leg_id": leg_id,
+                }));
+                stack
+                    .assert_cmd(2000, "bridge replaces ringback", |cmd| {
+                        matches!(cmd, CallCommand::Bridge { .. })
+                    })
+                    .await;
+                stack.join().await.expect("connected queue exits");
+            } else {
+                stack.timeout("agent_ring_timeout");
+                stack
+                    .assert_cmd(2000, "cancel ringing agent", |cmd| {
+                        matches!(cmd, CallCommand::LegRemove { leg_id: removed, .. } if removed == &leg_id)
+                    })
+                    .await;
+                let hold = stack.next_cmd(2000).await.expect("hold replaces ringback");
+                assert_eq!(play_path(&hold), "sounds/hold_music.wav");
+                stack
+                    .assert_cmd(2000, "next agent INVITE", |cmd| {
+                        matches!(cmd, CallCommand::LegAdd { .. })
+                    })
+                    .await;
+                // Replacement playback can report the old track's completion late.
+                stack.audio_complete(ringback_track);
+                assert!(stack.next_cmd(100).await.is_none());
+                stack.cancel();
+                let _ = stack.join().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_answer_prompt_can_be_disabled_without_skipping_fallback() {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts::zh());
+        let app = QueueApp::new(config.to_plan(), config);
+        let ctx = queue_test_context(
+            "queue_transfer_prompt_enabled = false\nqueue_no_answer_prompt_enabled = false\n",
+        );
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let _ = stack.next_cmd(2000).await.expect("queue hold music");
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+        stack.custom("agent_no_answer", serde_json::json!({ "leg_id": leg_id }));
+        stack
+            .assert_cmd(2000, "fallback hangup", |cmd| matches!(cmd, CallCommand::Hangup(_)))
+            .await;
+
+        stack.join().await.unwrap();
+    }
+
     // ── 6. Remote hangup during queue ──
 
     #[tokio::test]
@@ -353,6 +595,123 @@ mod tests {
             .join()
             .await
             .expect("should exit after agent connected");
+    }
+
+    /// A registered browser Contact must not replace the answering agent identity.
+    #[cfg(feature = "contact-center")]
+    #[tokio::test]
+    async fn test_browser_contact_preserves_answering_agent_reservation() {
+        use crate::addons::cc::agent::AgentStatus;
+        use crate::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+        use std::sync::Arc;
+
+        let cc = crate::addons::cc::CcAddonState::new();
+        cc.agent_registry.register("agent1".into(), vec![], 1).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Idle).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Ringing {
+            call_id: "test-session".into(), since: Instant::now(),
+        }).await.unwrap();
+        let registry = Arc::new(CcAgentRegistryAdapter::new(
+            cc.agent_registry.clone(), cc.acd_engine.clone(), "pbx.invalid",
+        ));
+        let contact = "sip:browser-contact@browser.invalid;transport=WS";
+        let mut config = build_simple_queue_config();
+        config.hold = None;
+        config.agents = vec![Location {
+            aor: contact.parse().unwrap(),
+            registered_aor: Some("sip:agent1@pbx.invalid".parse().unwrap()),
+            registered_username: Some("agent1".into()),
+            expires: 3600,
+            ..Default::default()
+        }];
+        config.strategy = DialStrategy::Sequential(config.agents.clone());
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_agent_registry(registry)
+            .with_call_id("test-session".into());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack.assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. })).await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+        let pinned = stack.pinned_agent_meta.lock().unwrap().last().unwrap().0.clone();
+        // Feed the SIP layer the identity actually produced by queue dispatch.
+        stack.custom("agent_connected", serde_json::json!({
+            "agent_uri": contact, "leg_id": leg_id, "agent_id": pinned,
+        }));
+        stack.assert_cmd(2000, "Bridge winner", |cmd| matches!(cmd, CallCommand::Bridge { .. })).await;
+        stack.assert_cmd(2000, "Unhold caller", |cmd| matches!(cmd, CallCommand::Unhold { .. })).await;
+        stack.join().await.expect("queue handoff");
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(matches!(agent.status, AgentStatus::Ringing { ref call_id, .. }
+            if call_id == "test-session"),
+            "queue must leave the answering agent bound for the connected hook, got {}", agent.status);
+    }
+
+    /// Caller cancels while the agent's phone is ringing: the queue exit must
+    /// release the ringing reservation straight to Idle — NO wrapup for a call
+    /// that was never answered (CC adapter release_call semantics; previously
+    /// this landed in a 30 s Wrapup window).
+    #[cfg(feature = "contact-center")]
+    #[tokio::test]
+    async fn test_caller_abandon_while_ringing_releases_agent_to_idle() {
+        use crate::addons::cc::agent::AgentStatus;
+        use crate::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+        use std::sync::Arc;
+
+        let cc = crate::addons::cc::CcAddonState::new();
+        cc.agent_registry.register("agent1".into(), vec![], 1).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Idle).await.unwrap();
+        let registry = Arc::new(CcAgentRegistryAdapter::new(
+            cc.agent_registry.clone(), cc.acd_engine.clone(), "pbx.invalid",
+        ));
+        let mut config = build_simple_queue_config();
+        config.hold = None;
+        config.agents = vec![Location {
+            aor: "sip:agent1@pbx.invalid".parse().unwrap(),
+            ..Default::default()
+        }];
+        config.strategy = DialStrategy::Sequential(config.agents.clone());
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("test-session".into());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack.assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. })).await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        // 180 Ringing from the agent leg binds the reservation via the
+        // queue's real presence-update path (same as production). The custom
+        // event is queued — give the app loop a beat to process it.
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": leg_id, "agent_uri": "sip:agent1@pbx.invalid",
+            "agent_id": "agent1",
+        }));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(
+            matches!(agent.status, AgentStatus::Ringing { .. }),
+            "agent must be Ringing while the leg rings, got {}", agent.status
+        );
+
+        // Caller abandons pre-answer → queue exits → phantom cleanup.
+        stack.remote_hangup();
+        stack.join().await.expect("queue exits on caller abandon");
+
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(
+            matches!(agent.status, AgentStatus::Idle),
+            "caller abandon while ringing must return the agent to Idle \
+             immediately (no wrapup), got {}",
+            agent.status
+        );
+        assert_eq!(agent.current_calls, 0, "no capacity leak");
     }
 
     // ── 8. Queue with agent busy event - retry next agent ──
@@ -639,7 +998,7 @@ mod tests {
 
     /// Test agent ring timeout handling (origin/0.5.1 semantics: the
     /// no-answer event fires, the ringing leg is CANCELLED, and the agent is
-    /// moved to Wrapup — no Bridge: nothing answered).
+    /// released back to Idle — no Bridge: nothing answered).
     /// NOTE: origin uses DbRegistry (pruned here in 179c4bef) — the memory
     /// registry stands in with identical presence semantics.
     #[tokio::test]
@@ -713,7 +1072,7 @@ mod tests {
         let removed_legs: Vec<_> = cmds
             .iter()
             .filter_map(|c| match c {
-                CallCommand::LegRemove { leg_id } => Some(leg_id),
+                CallCommand::LegRemove { leg_id, .. } => Some(leg_id),
                 _ => None,
             })
             .collect();
@@ -723,12 +1082,12 @@ mod tests {
             "ring timeout must CANCEL the ringing agent leg, got {removed_legs:?}"
         );
 
-        // After a ring timeout the agent must be left NON-idle (wrapup),
-        // not silently returned to Idle.
+        // After a ring timeout the agent must be released back to Idle
+        // (immediately schedulable — no-answer no longer costs a cooldown).
         let agent = registry.get_agent("agent-001").await.unwrap();
         assert!(
-            matches!(agent.presence, PresenceState::Wrapup { .. }),
-            "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
+            matches!(agent.presence, PresenceState::Idle),
+            "ring timeout must release the agent to Idle, got {:?}",
             agent.presence
         );
         stack.cancel();
@@ -1152,11 +1511,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_busy_prompt_max_wait_timeout() {
+        let (logs, _log_guard, _interest_guard) = capture_queue_logs();
         let mut config = build_queue_config_with_prompts();
         config.max_wait_secs = 0;
         let plan = config.to_plan();
 
-        let app = QueueApp::new(plan, config);
+        let app = QueueApp::new(plan, config).with_call_id("call-timeout-1".to_string());
 
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
@@ -1185,6 +1545,16 @@ mod tests {
         stack
             .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
+        stack.join().await.unwrap();
+        assert_queue_log_call(
+            &logs,
+            "call-timeout-1",
+            &[
+                "Queue: entering queue application",
+                "Queue: max wait timeout, executing fallback",
+                "Queue: hangup fallback",
+            ],
+        );
     }
 
     #[tokio::test]
@@ -1427,7 +1797,7 @@ mod tests {
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
         let remove = stack.next_cmd(2000).await.expect("LegRemove");
         match &remove {
-            CallCommand::LegRemove { leg_id } => {
+            CallCommand::LegRemove { leg_id, .. } => {
                 assert_eq!(
                     format!("{leg_id:?}"),
                     format!("{leg_id_1:?}"),
@@ -1500,7 +1870,7 @@ mod tests {
         let mut saw_hangup = false;
         for _ in 0..20 {
             match stack.next_cmd(2000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Hangup(_)) => { saw_hangup = true; break; }
                 Some(CallCommand::InjectAppEvent { .. }) => continue,
                 Some(other) => panic!("expected Hangup/LegRemove/InjectAppEvent, got {other:?}"),
@@ -1670,6 +2040,7 @@ mod tests {
     /// hook invocations for assertions.
     struct HookRecordingRegistry {
         inner: crate::call::app::agent_registry::memory::MemoryRegistry,
+        ring_timeout: Option<Duration>,
         escalation_calls: std::sync::Mutex<Vec<(String, Vec<String>, bool)>>,
         /// `include_primary` flag of each resolve_escalation_targets call
         /// (same order as `escalation_calls`).
@@ -1689,15 +2060,30 @@ mod tests {
         timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
         fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
         /// strict-FIFO gate hook counters (register/begin/release call ids).
-        fifo_registers: std::sync::Mutex<Vec<(String, String)>>,
+        /// `fifo_registers` entries carry the priority the app passed so
+        /// tests can pin the config→gate priority flow.
+        fifo_registers: std::sync::Mutex<Vec<(String, String, i32)>>,
+        /// Callers seen by `fifo_register_wait` (same order as registers).
+        fifo_callers: std::sync::Mutex<Vec<String>>,
         fifo_begins: std::sync::Mutex<Vec<String>>,
         fifo_releases: std::sync::Mutex<Vec<String>>,
+        /// 486 reconciliations seen by `note_agent_rejected`:
+        /// (agent_id, call_id, policy_present).
+        rejects: std::sync::Mutex<Vec<(String, String, bool)>>,
+        /// Alerts seen by `emit_assign_failed_alert`.
+        assign_alerts: std::sync::Mutex<Vec<crate::call::app::agent_registry::AssignFailedAlert>>,
+        /// Whether the mock declares full skill-group dispatch support
+        /// (`supports_skill_group_dispatch`). Mirrors the CC adapter — the
+        /// queue app's `resolve_agents` re-resolve takes the adapter route
+        /// only when this is set.
+        skill_group_dispatch: bool,
     }
 
     impl HookRecordingRegistry {
         fn new() -> Self {
             Self {
                 inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
+                ring_timeout: None,
                 escalation_calls: std::sync::Mutex::new(Vec::new()),
                 escalation_include_primary: std::sync::Mutex::new(Vec::new()),
                 group_switches: std::sync::Mutex::new(Vec::new()),
@@ -1709,9 +2095,18 @@ mod tests {
                 timeouts: std::sync::Mutex::new(Vec::new()),
                 fallbacks: std::sync::Mutex::new(Vec::new()),
                 fifo_registers: std::sync::Mutex::new(Vec::new()),
+                fifo_callers: std::sync::Mutex::new(Vec::new()),
                 fifo_begins: std::sync::Mutex::new(Vec::new()),
                 fifo_releases: std::sync::Mutex::new(Vec::new()),
+                rejects: std::sync::Mutex::new(Vec::new()),
+                assign_alerts: std::sync::Mutex::new(Vec::new()),
+                skill_group_dispatch: false,
             }
+        }
+
+        fn with_skill_group_dispatch(mut self, supported: bool) -> Self {
+            self.skill_group_dispatch = supported;
+            self
         }
 
         fn with_escalation_uris(mut self, uris: Vec<Vec<String>>) -> Self {
@@ -1737,6 +2132,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentRegistry for HookRecordingRegistry {
+        fn agent_ring_timeout(&self) -> Option<Duration> {
+            self.ring_timeout
+        }
+
         async fn register(
             &self,
             agent_id: String,
@@ -1813,6 +2212,10 @@ mod tests {
                 .await
         }
 
+        fn supports_skill_group_dispatch(&self) -> bool {
+            self.skill_group_dispatch
+        }
+
         async fn resolve_escalation_targets(
             &self,
             primary_target_uri: &str,
@@ -1841,13 +2244,17 @@ mod tests {
             &self,
             queue_id: &str,
             call_id: &str,
-            _caller: &str,
-            _priority: i32,
+            caller: &str,
+            priority: i32,
         ) {
             self.fifo_registers
                 .lock()
                 .unwrap()
-                .push((queue_id.to_string(), call_id.to_string()));
+                .push((queue_id.to_string(), call_id.to_string(), priority));
+            self.fifo_callers
+                .lock()
+                .unwrap()
+                .push(caller.to_string());
         }
 
         async fn fifo_begin_dispatch(&self, call_id: &str) {
@@ -1901,6 +2308,29 @@ mod tests {
                 action.to_string(),
             ));
         }
+
+        async fn note_agent_rejected(
+            &self,
+            agent_id: &str,
+            call_id: &str,
+            policy: Option<&crate::call::app::agent_registry::AgentRingPolicy>,
+        ) -> crate::call::app::agent_registry::AgentRejectOutcome {
+            self.rejects.lock().unwrap().push((
+                agent_id.to_string(),
+                call_id.to_string(),
+                policy.is_some(),
+            ));
+            self.inner
+                .note_agent_rejected(agent_id, call_id, policy)
+                .await
+        }
+
+        async fn emit_assign_failed_alert(
+            &self,
+            info: &crate::call::app::agent_registry::AssignFailedAlert,
+        ) {
+            self.assign_alerts.lock().unwrap().push(info.clone());
+        }
     }
 
     /// The escalation timer must arm itself in `on_enter` and fire WITHOUT
@@ -1910,6 +2340,7 @@ mod tests {
     #[tokio::test]
     async fn test_escalation_timer_auto_arms_and_widens_fairly() {
         use std::sync::Arc;
+        let (logs, _log_guard, _interest_guard) = capture_queue_logs();
 
         let mut config = build_simple_queue_config();
         config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
@@ -1970,6 +2401,15 @@ mod tests {
         assert_eq!(calls[0].0, "skill-group:support");
         assert_eq!(calls[0].1, vec!["support_l2".to_string()]);
         assert!(calls[0].2, "fair flag must reach the registry");
+
+        assert_queue_log_call(
+            &logs,
+            "call-esc-1",
+            &[
+                "Queue: entering queue application",
+                "Queue: escalation triggered",
+            ],
+        );
 
         stack.cancel();
         let _ = stack.join().await;
@@ -2061,7 +2501,8 @@ mod tests {
             .with_agent_registry(registry.clone())
             .with_call_id("call-esc-replace".to_string());
 
-        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
 
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
@@ -2070,10 +2511,14 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(2000, "LegAdd-primary", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+        stack.custom("agent_ringing", serde_json::json!({ "leg_id": primary_leg }));
+        let ringback = stack.next_cmd(2000).await.expect("agent ringback");
+        assert_eq!(play_path(&ringback), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
 
         // Replace escalation: the pending primary leg is removed first …
         stack
@@ -2081,6 +2526,8 @@ mod tests {
                 matches!(c, CallCommand::LegRemove { .. })
             })
             .await;
+        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
+        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
         // … then ONLY the widened agent is dialled (no duplicate primary).
         stack.assert_cmd(2000, "LegAdd-widened", |c| {
             matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
@@ -2098,6 +2545,41 @@ mod tests {
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_escalation_grace_uses_registry_ring_timeout() {
+        for backend_timeout in [None, Some(Duration::from_millis(600))] {
+            let mut config = build_simple_queue_config();
+            config.ring_timeout = Some(Duration::from_millis(100));
+            config.max_wait_secs = 999;
+            let mut registry = HookRecordingRegistry::new();
+            registry.ring_timeout = backend_timeout;
+            let mut queue = QueueApp::new(config.to_plan(), config)
+                .with_agent_registry(Arc::new(registry));
+            queue.escalated_groups = vec!["overflow".into()];
+            let mut stack = MockCallStack::run(Box::new(queue), "caller", "support");
+            stack.enter().await;
+            stack.assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. })).await;
+            stack.drain_cmds();
+            stack.timeout("max_wait_timeout");
+            let started = Instant::now();
+            loop {
+                if matches!(stack.next_cmd(1500).await, Some(CallCommand::Hangup { .. })) {
+                    break;
+                }
+                assert!(started.elapsed() < Duration::from_secs(2), "grace must eventually fall back");
+            }
+            if backend_timeout.is_some() {
+                assert!(started.elapsed() >= Duration::from_millis(500),
+                    "the route timeout must not cut short the backend ring window");
+            } else {
+                assert!(started.elapsed() < Duration::from_millis(500),
+                    "a backend without a timeout must retain the route window");
+            }
+            stack.cancel();
+            let _ = stack.join().await;
+        }
     }
 
     /// `next_escalation_check_delay` clamps long thresholds to the 10s
@@ -3126,7 +3608,7 @@ mod tests {
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(300).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed_legs.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed_legs.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -3225,8 +3707,8 @@ mod tests {
         // at most one so far.
         let registers = registry.fifo_registers.lock().unwrap().clone();
         assert!(
-            registers.contains(&("support".to_string(), "call-fifo-1".to_string())),
-            "wait entry must fifo_register_wait, got {registers:?}"
+            registers.contains(&("support".to_string(), "call-fifo-1".to_string(), 0)),
+            "wait entry must fifo_register_wait with the default priority, got {registers:?}"
         );
         assert!(
             registry.fifo_releases.lock().unwrap().len() <= 1,
@@ -3269,6 +3751,133 @@ mod tests {
                 .unwrap()
                 .contains(&"call-fifo-1".to_string()),
             "return to wait retention must fifo_release_dispatch"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// The queue app's configured priority MUST flow into `fifo_register_wait`:
+    /// the shared-queue row written there is what the cross-node strict-FIFO
+    /// gate orders by (priority DESC, enqueued_at ASC). A revert to the
+    /// hardcoded `0` would silently demote every high-priority caller back to
+    /// the default tier — this test pins the flow.
+    #[tokio::test]
+    async fn test_fifo_gate_registers_configured_priority() {
+        use std::sync::Arc;
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec!["sip:agent-001@localhost".to_string()], vec![]]),
+        );
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = false;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+        config.priority = 5;
+
+        let plan = config.to_plan();
+        assert_eq!(plan.priority, 5, "config→plan must carry the priority");
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-prio-5".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
+
+        let registers = registry.fifo_registers.lock().unwrap().clone();
+        assert!(
+            registers.contains(&("support".to_string(), "call-prio-5".to_string(), 5)),
+            "wait entry must register the configured priority 5, got {registers:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Wait-retention row writes must carry the CALLER id: the monitor's
+    /// queued list shows `caller_number`, and a row written with an empty
+    /// caller degrades the board to raw call ids. (Row writes themselves are
+    /// unconditional — the `strict_fifo` gate no longer suppresses them; see
+    /// the adapter test `test_fifo_register_wait_writes_row_even_with_strict_fifo_off`.)
+    #[tokio::test]
+    async fn test_fifo_gate_registers_caller_id() {
+        use std::sync::Arc;
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![], vec![]]),
+        );
+        // No agents at all: every resolution comes back empty → wait
+        // retention immediately, no dispatch episode.
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-caller-1".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
+
+        let registers = registry.fifo_registers.lock().unwrap().clone();
+        assert_eq!(
+            registers,
+            vec![("support".to_string(), "call-caller-1".to_string(), 0)],
+            "wait entry must register the shared row, got {registers:?}"
+        );
+        assert_eq!(
+            registry.fifo_callers.lock().unwrap().as_slice(),
+            ["1001"],
+            "the caller id must ride the shared-queue row"
         );
 
         stack.cancel();
@@ -3368,6 +3977,10 @@ mod tests {
         for _ in 0..20 {
             while let Ok(v) = gws_rx.try_recv() {
                 if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_no_answer") {
+                    assert_eq!(
+                        v["agent_id"], "agent-001",
+                        "queue_agent_no_answer must name the agent"
+                    );
                     saw = true;
                 }
             }
@@ -3379,6 +3992,414 @@ mod tests {
         assert!(
             saw,
             "queue_agent_no_answer event must be emitted on ring timeout"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Skill-group RE-ENTRY: an assigned agent misses (ring timeout → PBX
+    /// cancels) and the call keeps queuing on the NEXT candidate in the SAME
+    /// group. The re-entry must announce itself with a second `queue_joined`
+    /// carrying `attempt: 2` (first join keeps the pre-field wire payload) —
+    /// ordered AFTER the miss (`queue_agent_no_answer`) and BEFORE the next
+    /// offer. Before the fix the re-entry was invisible: only the miss event
+    /// fired, no joined.
+    #[tokio::test]
+    async fn test_agent_miss_reentry_emits_queue_joined_with_attempt() {
+        use crate::call::app::agent_registry::PresenceState;
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![vec![
+                "sip:agent1@example.com".to_string(),
+                "sip:agent2@example.com".to_string(),
+            ]]),
+        );
+        for (id, name, uri) in [
+            ("agent-001", "Alice", "sip:agent1@example.com"),
+            ("agent-002", "Bob", "sip:agent2@example.com"),
+        ] {
+            registry
+                .inner
+                .register(id.to_string(), name.to_string(), uri.to_string(), vec!["support".to_string()], 1)
+                .await
+                .unwrap();
+            registry
+                .inner
+                .update_presence(id, PresenceState::Idle)
+                .await
+                .unwrap();
+        }
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-reentry".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Kick the sequential dial of the first resolved candidate (the kick
+        // path is what registers the leg as ringing in the app), then fire
+        // the ring timeout — the PBX cancels and moves to the next candidate.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stack.timeout("agent_ring_timeout");
+
+        // Collect the queue lifecycle events in order: the first join, the
+        // miss, and (the fix) the re-entry join with attempt = 2.
+        let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+        for _ in 0..40 {
+            while let Ok(v) = gws_rx.try_recv() {
+                let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
+                if matches!(t, "queue_joined" | "queue_agent_no_answer") {
+                    events.push((t.to_string(), v));
+                }
+            }
+            if events.iter().any(|(t, v)| {
+                t == "queue_joined" && v.get("attempt").and_then(|a| a.as_u64()) == Some(2)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let types: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        let joins: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|(t, _)| t == "queue_joined")
+            .map(|(_, v)| v)
+            .collect();
+
+        assert!(
+            types.contains(&"queue_agent_no_answer"),
+            "the miss must be announced, got {types:?}"
+        );
+        assert!(
+            types.contains(&"queue_joined"),
+            "the first join must be announced, got {types:?}"
+        );
+        // Contract: exactly two joins — first without attempt, re-entry with
+        // attempt = 2 — and the re-entry AFTER the miss.
+        assert_eq!(
+            joins.len(),
+            2,
+            "re-entry must emit a second queue_joined, got {types:?}"
+        );
+        assert!(
+            joins[0].get("attempt").is_none(),
+            "first join keeps the wire-compatible payload, got {joins:?}"
+        );
+        assert_eq!(
+            joins[1]["attempt"], 2,
+            "re-entry join carries attempt = 2, got {joins:?}"
+        );
+        let miss_pos = types.iter().position(|t| *t == "queue_agent_no_answer").unwrap();
+        let rejoin_pos = types.iter().rposition(|t| *t == "queue_joined").unwrap();
+        assert!(
+            rejoin_pos > miss_pos,
+            "re-entry join must follow the miss (no_answer → joined), got {types:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// A 486-busy rejection must emit the documented `queue_agent_rejected`
+    /// RWI event (leg_role "agent", bound to the dialed leg). Before the fix
+    /// the event was defined and documented but never broadcast.
+    #[tokio::test]
+    async fn test_queue_agent_reject_emits_rejected_event() {
+        use crate::call::app::agent_registry::MemoryRegistry;
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+
+        // The agent rejects with 486 → the SIP session reports agent_busy.
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({
+                "leg_id": "agent-leg-1",
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent-001",
+                "reason": "Rejected with 486",
+            }),
+        );
+
+        // The rejection event is broadcast synchronously from the handler;
+        // poll briefly before the fallback tears the caller down.
+        let mut saw: Option<serde_json::Value> = None;
+        for _ in 0..20 {
+            while let Ok(v) = gws_rx.try_recv() {
+                if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_rejected") {
+                    saw = Some(v);
+                }
+            }
+            if saw.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let rejected = saw.expect("queue_agent_rejected event must be emitted on agent busy");
+        assert_eq!(rejected["call_id"], "call-001");
+        assert_eq!(rejected["queue_id"], "test-queue");
+        assert_eq!(rejected["agent_id"], "agent-001");
+        assert_eq!(
+            rejected["leg_id"], "agent-leg-1",
+            "rejection must bind to the dialed leg"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// A 486 rejection drives the full anti-loop contract:
+    /// `note_agent_rejected` reconciliation, the round exclusion set (the
+    /// same agent is NOT re-dialed within the round), the terminal CDR
+    /// trace entry, and the instant assigned-not-answered alert.
+    #[tokio::test]
+    async fn test_queue_agent_reject_reconciles_excludes_and_alerts() {
+        use crate::call::app::agent_registry::AssignFailReason;
+        use std::sync::Arc;
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .register(
+                "agent-002".to_string(),
+                "Bob".to_string(),
+                "sip:agent2@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        for id in ["agent-001", "agent-002"] {
+            registry
+                .inner
+                .update_presence(id, crate::call::app::agent_registry::PresenceState::Idle)
+                .await
+                .unwrap();
+        }
+
+        let mut config = build_sequential_queue_config();
+        config.fallback = Some(QueueFallbackAction::Failure(FailureAction::Hangup {
+            code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            reason: Some("All agents busy".to_string()),
+        }));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+
+        // The agent rejects with 486.
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({
+                "leg_id": "agent-leg-1",
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent-001",
+                "reason": "Rejected with 486",
+            }),
+        );
+
+        // Reconciliation + alert are dispatched synchronously in the handler.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let rejected = !registry.rejects.lock().unwrap().is_empty();
+            let alerted = !registry.assign_alerts.lock().unwrap().is_empty();
+            if (rejected && alerted) || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let rejects = registry.rejects.lock().unwrap().clone();
+        assert_eq!(
+            rejects,
+            vec![("agent-001".to_string(), "call-001".to_string(), false)],
+            "the 486 must drive note_agent_rejected exactly once"
+        );
+        let alerts = registry.assign_alerts.lock().unwrap().clone();
+        assert_eq!(alerts.len(), 1, "one instant assigned-not-answered alert");
+        assert_eq!(alerts[0].agent_id, "agent-001");
+        assert_eq!(alerts[0].queue_id, "sequential-queue");
+        assert_eq!(alerts[0].reason, AssignFailReason::Rejected);
+        assert_eq!(alerts[0].sip_status, Some(486));
+
+        // The sequential re-dial offers the NEXT agent (never the rejecting
+        // one); notify-event echoes may interleave — drain them.
+        let mut redial_target = None;
+        for _ in 0..20 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::InjectAppEvent { .. }) => continue,
+                Some(CallCommand::LegAdd { target, .. }) => {
+                    redial_target = Some(target);
+                    break;
+                }
+                Some(other) => panic!("expected re-dial LegAdd, got {other:?}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            redial_target.as_deref(),
+            Some("sip:agent2@example.com"),
+            "the rejecting agent must be skipped in the same round"
         );
 
         stack.cancel();
@@ -4061,7 +5082,7 @@ mod tests {
         let mut hold_restarted = false;
         for _ in 0..10 {
             match stack.next_cmd(1000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -4173,7 +5194,7 @@ mod tests {
         let mut hold_restarted = false;
         for _ in 0..10 {
             match stack.next_cmd(1000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -4234,7 +5255,7 @@ mod tests {
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(1000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Hangup(_)) => {
                     hung_up = true;
                     break;
@@ -4388,6 +5409,233 @@ mod tests {
             stack.next_cmd(150).await.is_none(),
             "busy agent2 must not be dialed in parallel mode"
         );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Regression: the session injects `dial_next_agent` for skill-group queues
+    /// even when the pre-resolution listed no agents (because `on_enter` may
+    /// re-resolve). Two invariants when a LATE kick lands on an already-waiting
+    /// app with no dialable agents:
+    /// 1. It must NOT restart hold music / retention prompts (duplicate entry);
+    /// 2. It must preserve the live poll timer so an agent becoming Idle
+    ///    after the ignored kick is still offered the waiting call.
+    #[tokio::test]
+    async fn test_dial_kick_in_wait_retention_is_noop() {
+        use crate::call::app::agent_registry::PresenceState;
+        use std::sync::Arc;
+
+        // The registry starts EMPTY: `on_enter` sees no agents (exactly the
+        // production trace — resolve empty → wait retention), and agent-001
+        // only appears after the late kick, mirroring the wrapup→idle flip.
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![vec![
+                "sip:agent-001@localhost".to_string(),
+            ]]),
+        );
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-kick-1".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Wait-retention hold music.
+        stack.next_cmd(2000).await.expect("hold while waiting");
+
+        // The late session kick arrives while already waiting with no agents.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::Play { .. }),
+                "dial kick in wait retention must NOT restart hold music, got {cmd:?}"
+            );
+            assert!(
+                !matches!(cmd, CallCommand::Hangup(_)),
+                "dial kick in wait retention must NOT abandon the call, got {cmd:?}"
+            );
+        }
+
+        // The agent flips to Idle after the kick. Let the real poll timer
+        // resolve and dial instead of manually injecting a timeout event.
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence("agent-001", PresenceState::Idle)
+            .await
+            .unwrap();
+        let mut dialed = false;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            match stack.next_cmd(2500).await {
+                Some(CallCommand::LegAdd { target, .. }) if target.contains("agent-001") => {
+                    dialed = true;
+                    break;
+                }
+                Some(cmd) => seen.push(format!("{cmd:?}")),
+                None => break,
+            }
+        }
+        assert!(
+            dialed,
+            "the late kick must preserve queue_retry — the real poll must dial; saw: {seen:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// REGRESSION (production call cdb5ab9c…, 2026-10-21): a CC-adapter-backed
+    /// skill-group queue whose resolve REFUSES (acd_blocked / strict-FIFO
+    /// deferral → empty URI list) must NOT dial from the legacy
+    /// `find_available_agents` listing at `on_enter`. The old code dialled the
+    /// agent anyway — `queue_agent_offered` with NO
+    /// `skill_group_agent_assigned`, breaking the offered ≤ assigned parity
+    /// that dequeue analytics depend on. With the adapter route wired, the
+    /// refused resolve leaves the call in wait retention: the late
+    /// `dial_next_agent` kick must produce NO dial, and the next REAL poll
+    /// (which consults the adapter again) is the only dial source.
+    #[tokio::test]
+    async fn test_resolve_agents_refused_skill_group_does_not_bypass_dial() {
+        use crate::call::app::agent_registry::PresenceState;
+        use std::sync::Arc;
+
+        // Adapter route refuses (no resolve URIs queued), while the legacy
+        // listing WOULD find an Idle agent — exactly the production shape
+        // that produced the stealth dial.
+        let registry = Arc::new(HookRecordingRegistry::new().with_skill_group_dispatch(true));
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence("agent-001", PresenceState::Idle)
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-refused-1".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Wait-retention hold music proves the refused resolve entered
+        // retention instead of the dial path.
+        stack
+            .next_cmd(2000)
+            .await
+            .expect("hold music while waiting after a refused resolve");
+
+        // The adapter route WAS consulted for the skill group (not the
+        // legacy listing).
+        let targets = registry.resolve_targets.lock().unwrap().clone();
+        assert!(
+            targets.iter().any(|t| t == "skill-group:support"),
+            "on_enter re-resolve must consult the adapter skill-group route, saw: {targets:?}"
+        );
+
+        // The late session kick must NOT originate a dial: the adapter
+        // refused this round, and `find_available_agents` is no longer a
+        // dial source for skill-group backends.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::LegAdd { .. }),
+                "a refused skill-group resolve must not bypass-dial on the late kick, got {cmd:?}"
+            );
+        }
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_dial_kick_after_busy_prompt_is_noop() {
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config.hold = None;
+        // NOTE: no agent registry attached — this is the P1 case.
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config);
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _ = stack.next_cmd(2000).await.expect("busy prompt Play");
+
+        // The late session kick arrives while the busy prompt is playing.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::Play { .. }),
+                "late dial kick must NOT replay the busy prompt, got {cmd:?}"
+            );
+            assert!(
+                !matches!(cmd, CallCommand::Hangup(_)),
+                "late dial kick must NOT double-execute the fallback, got {cmd:?}"
+            );
+        }
 
         stack.cancel();
         let _ = stack.join().await;

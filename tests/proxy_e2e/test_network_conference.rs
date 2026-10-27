@@ -279,6 +279,86 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
     }
 }
 
+/// Attended REFER from the CALLER leg (agent-placed outbound call): alice
+/// (agent) dials charlie (customer) — alice is the session's caller leg —
+/// consults bob, then sends the attended REFER on her caller-leg dialog.
+/// RFC 5589 allows either party to transfer; the guard must not reject the
+/// REFER for not originating from the callee leg.
+#[tokio::test]
+async fn test_attended_refer_from_caller_leg_agent_outbound() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let port = portpicker::pick_unused_port().unwrap();
+    let mut config = crate::common::test_helpers::test_proxy_config(port);
+    config.media_proxy = MediaProxyMode::All;
+    let mut users = crate::common::test_helpers::standard_test_users();
+    for user in &mut users { user.is_support_webrtc = false; }
+    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+        users, ..Default::default()
+    }).await.unwrap());
+    let alice = server.create_ua("alice").await.unwrap();
+    let bob = server.create_ua("bob").await.unwrap();
+    let charlie = server.create_ua("charlie").await.unwrap();
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
+    let mut original = Vec::new();
+    // call1: alice (agent, caller) -> charlie (customer); call2: alice -> bob (consult)
+    for (caller, callee, name) in [(alice.clone(), charlie.clone(), "charlie"), (alice.clone(), bob.clone(), "bob")] {
+        let dial = rustpbx::utils::spawn({ let caller = caller.clone(); let sdp = sdp.clone(); async move { caller.make_call(name, Some(sdp)).await.unwrap() } });
+        let received = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                for event in callee.process_dialog_events().await.unwrap() {
+                    if let TestUaEvent::IncomingCall(id, _) = event {
+                        callee.answer_call(&id, Some(sdp.clone())).await.unwrap();
+                        return id;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let sent = dial.await.unwrap();
+        caller.set_answer_sdp(&sent, &sdp).await;
+        callee.set_answer_sdp(&received, &sdp).await;
+        original.push((sent, received));
+    }
+    let registry = &server.server_ref.active_call_registry;
+    let s1 = registry.get_handle_by_dialog(&original[0].0.call_id).unwrap();
+    let s2 = registry.get_handle_by_dialog(&original[1].0.call_id).unwrap();
+    assert_ne!(s1.session_id(), s2.session_id(), "consult must be a separate session");
+    let consult = &original[1].0;
+    let replaces = format!("{};to-tag={};from-tag={}", consult.call_id, consult.remote_tag, consult.local_tag);
+    let target = format!("sip:bob@{}?Replaces={}", server.proxy_addr, urlencoding::encode(&replaces));
+    assert_eq!(alice.send_refer(&original[0].0, &target).await.unwrap(), 202);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            for event in alice.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::ReferNotify(_, body, state) = event {
+                    if state.starts_with("terminated") {
+                        assert!(body.contains("SIP/2.0 200"), "attended REFER from the caller leg must succeed: {body}");                        return;
+                    }
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("final NOTIFY must arrive");
+    // The transferor releases its superseded dialogs (client-side duty, same
+    // as the existing test); a transfer room bridges the surviving parties.
+    alice.hangup(&original[0].0).await.unwrap();
+    alice.hangup(&original[1].0).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry.count() == 2 { break; }
+            alice.process_dialog_events().await.unwrap();
+            charlie.process_dialog_events().await.unwrap();
+            bob.process_dialog_events().await.unwrap();
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("transferor legs must be released after hand-off");
+    let room = server.server_ref.conference_server.list_conferences_detail().await.into_iter()
+        .find(|room| room.participant_count() == 2)
+        .expect("transfer room bridges the surviving parties");
+    assert!(room.focus_uri.is_none());
+    server.stop();
+}
+
 #[tokio::test]
 async fn test_blind_refer_from_replacement_leg() {
     let _ = tracing_subscriber::fmt::try_init();

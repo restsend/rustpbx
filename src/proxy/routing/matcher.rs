@@ -1173,7 +1173,11 @@ fn describe_rewrite_ops(rewrite: &crate::proxy::routing::RewriteRules) -> Vec<St
     push("request_uri.host", &rewrite.request_uri_host);
     push("request_uri.port", &rewrite.request_uri_port);
 
-    for header in rewrite.headers.keys() {
+    // HashMap iteration order is randomized per process; sort so that
+    // cluster consistency checks and UI display get a stable order.
+    let mut header_keys: Vec<&String> = rewrite.headers.keys().collect();
+    header_keys.sort();
+    for header in header_keys {
         ops.push(header.to_string());
     }
 
@@ -1692,6 +1696,44 @@ mod apply_trunk_config_tests {
         assert_eq!(
             option.destination.unwrap().addr.to_string(),
             "registrar.carrier.example:5080"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_ops_tests {
+    use super::*;
+    use crate::proxy::routing::RewriteRules;
+
+    /// Header rewrite ops must come out in a deterministic order: the trace
+    /// feeds cluster consistency checks that compare the lists verbatim, and
+    /// HashMap iteration order varies between processes.
+    #[test]
+    fn describe_rewrite_ops_sorts_header_keys() {
+        let rewrite = RewriteRules {
+            from_user: Some("1001".to_string()),
+            headers: [
+                ("header.x-entry-node-id", "3420000"),
+                ("header.x-business-type", "34"),
+                ("header.tenantid", "didi"),
+                ("header.x-customer-type", "2"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            ..Default::default()
+        };
+
+        let ops = describe_rewrite_ops(&rewrite);
+        assert_eq!(
+            ops,
+            vec![
+                "from.user",
+                "header.tenantid",
+                "header.x-business-type",
+                "header.x-customer-type",
+                "header.x-entry-node-id",
+            ]
         );
     }
 }

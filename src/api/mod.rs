@@ -71,6 +71,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::notifications::api_urls())
         .merge(crate::console::handlers::metrics::api_urls())
         .merge(crate::console::handlers::reports::api_urls())
+        .merge(crate::console::handlers::release::api_urls())
+        .merge(crate::console::handlers::client_report::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
     // Addon API routes (collected at runtime via Addon trait hooks), including
@@ -138,6 +140,28 @@ async fn api_auth_middleware(
 ) -> Response {
     let headers = req.headers().clone();
 
+    // Release reads (version check / list / artifact download) are
+    // intentionally public: desktop update clients cannot authenticate.
+    // The list is exact so that other GETs under `/release` (e.g. the
+    // storage settings) still require credentials. Mutations under
+    // `/release` always fall through to the checks below.
+    let path = req.uri().path();
+    if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && (path == "/release"
+            || path == "/release/list"
+            || (path.starts_with("/release/") && path.ends_with("/download")))
+    {
+        return next.run(req).await;
+    }
+
+    // The telemetry collector is public too (restsend-call uploads
+    // unauthenticated, see `crates/pc/src/telemetry.rs`). The client never
+    // holds cookies, so there is no CSRF surface; abuse is bounded by the
+    // handler's own rate limiter.
+    if *req.method() == axum::http::Method::POST && path.ends_with("/report") {
+        return next.run(req).await;
+    }
+
     if let Some(bearer) = extract_bearer_token(&headers) {
         if let Some(scopes) = auth_state.api_tokens.get(bearer.as_str()) {
             let user = if scopes.is_empty() {
@@ -158,6 +182,21 @@ async fn api_auth_middleware(
 
         if let Some(ref validator) = auth_state.phone_auth {
             if let Some(_agent_id) = validator.validate_token(&bearer) {
+                // Phone tokens authorize call clients, not executable release publishing.
+                if matches!(
+                    *req.method(),
+                    axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::DELETE
+                ) && (req.uri().path() == "/release" || req.uri().path().starts_with("/release/"))
+                {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({
+                            "status": "error",
+                            "message": "release administration requires console credentials"
+                        })),
+                    )
+                        .into_response();
+                }
                 let mut perms = std::collections::HashSet::new();
                 for p in PHONE_TOKEN_PERMISSIONS {
                     perms.insert(p.to_string());
@@ -252,6 +291,8 @@ fn make_scoped_synthetic_user(synthetic_id: i64) -> crate::models::user::Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
 
     #[test]
     fn synthetic_ids_are_negative_and_stable() {
@@ -269,5 +310,82 @@ mod tests {
         assert!(!make_synthetic_user(false).is_superuser);
         assert!(make_scoped_synthetic_user(-42).id < 0);
         assert!(!make_scoped_synthetic_user(-42).is_superuser);
+    }
+
+    #[tokio::test]
+    async fn release_mutations_reject_phone_token_but_accept_api_token() {
+        use crate::console::handlers::release::{
+            self,
+            tests::{multipart_body, setup_release_stack},
+        };
+        let (state, tmp, _app) = setup_release_stack().await;
+        let phone_auth =
+            crate::auth::phone_auth::PhoneAuth::with_secret("release-phone-test".into());
+        let phone_token = phone_auth.generate_token("2001");
+        let auth = ApiAuthState {
+            console: state.clone(),
+            api_tokens: Arc::new(HashMap::from([("release-test-token".into(), Vec::new())])),
+            phone_auth: Some(phone_auth),
+        };
+        let routes = release::api_urls().layer(axum::middleware::from_fn_with_state(
+            auth,
+            api_auth_middleware,
+        ));
+        let router = Router::new().nest("/api", routes).with_state(state);
+        let upload = multipart_body(
+            "release-auth",
+            &[("version", "0.1.13")],
+            Some(("file", "app.zip", b"authorized package")),
+        );
+        for (token, expected) in [
+            (phone_token.as_str(), StatusCode::FORBIDDEN),
+            ("release-test-token", StatusCode::OK),
+        ] {
+            let mut statuses = Vec::new();
+            for (method, uri, content_type, body) in [
+                (
+                    "POST",
+                    "/api/release",
+                    "multipart/form-data; boundary=release-auth",
+                    upload.clone(),
+                ),
+                (
+                    "PUT",
+                    "/api/release/0.1.13",
+                    "application/json",
+                    b"{\"published\":true}".to_vec(),
+                ),
+                (
+                    "DELETE",
+                    "/api/release/0.1.13",
+                    "application/json",
+                    Vec::new(),
+                ),
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", content_type)
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                statuses.push(response.status());
+            }
+            assert_eq!(
+                statuses,
+                vec![expected; 3],
+                "POST/PUT/DELETE require release administration credentials"
+            );
+        }
+        assert!(
+            !tmp.path().join("0.1.13/app.zip").exists(),
+            "authorized deletion must remove its artifact"
+        );
     }
 }

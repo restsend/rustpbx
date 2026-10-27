@@ -796,6 +796,7 @@ async fn test_originate_no_server_returns_error() {
                 caller_id: None,
                 timeout_secs: Some(30),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: None,
                 record: None,
@@ -822,6 +823,7 @@ async fn test_originate_invalid_destination_returns_error() {
                 caller_id: None,
                 timeout_secs: None,
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: None,
                 record: None,
@@ -882,6 +884,7 @@ async fn test_originate_routes_when_enabled_and_reject_aborts() {
                 caller_id: None,
                 timeout_secs: Some(5),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: Some(true),
                 record: None,
@@ -954,6 +957,7 @@ async fn test_originate_explicit_trunk_skips_route() {
                 caller_id: None,
                 timeout_secs: Some(2),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: Some("gw1".to_string()),
                 route_originated_calls: Some(true),
                 record: None,
@@ -1051,6 +1055,7 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
                 caller_id: Some("sip:1001@127.0.0.1".into()),
                 timeout_secs: Some(15),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: None,
                 record: None,
@@ -1081,20 +1086,50 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
     }
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
 
-    // call_ringing must arrive after the 180, enriched with agent_id = 1001.
+    // call_ringing must arrive after the 180 — now the DUAL contract like
+    // every other flow: the leg-level event first (leg_id "caller", the
+    // outgoing INVITE leg = the customer), then the session-level event.
+    // Both enriched with agent_id = 1001 via call-meta.
     let ringing = wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
         .await
         .expect("call_ringing expected after 180 Ringing");
+    assert_eq!(ringing.call_id, call_id);
+    assert_eq!(
+        ringing.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the customer leg's ringing must carry its leg_id, got: {:?}",
+        ringing.event.payload
+    );
+    assert_eq!(
+        ringing.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg rings as the caller, got: {:?}",
+        ringing.event.payload
+    );
     assert_eq!(
         ringing.event.payload["agent_id"].as_str(),
         Some("1001"),
         "call_ringing must carry the originating agent's id"
     );
-    assert_eq!(ringing.call_id, call_id);
     assert_eq!(
         ringing.event.payload["early_media"].as_bool(),
         Some(false),
         "plain 180 must carry early_media=false"
+    );
+    let session_ringing =
+        wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-level call_ringing expected after the leg event");
+    assert!(
+        session_ringing.event.payload["leg_id"].is_null()
+            && session_ringing.event.payload["leg_role"].is_null(),
+        "session-level ringing must carry no leg fields, got: {:?}",
+        session_ringing.event.payload
+    );
+    assert_eq!(
+        session_ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "session-level call_ringing must carry the originating agent's id"
     );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
@@ -1109,22 +1144,37 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
         .await
         .expect("bob answers");
 
-    // call_answered must arrive after the 200 OK, still attributed to 1001.
+    // call_answered is per leg now. In the UAC originate the OUTGOING
+    // INVITE leg IS the session's "caller" leg — its answer IS the customer
+    // answer. So exactly two answered events: the leg-level one (leg_id
+    // "caller") + the session-scoped duplicate (deprecated, no leg_id).
     let answered = wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
         .await
         .expect("call_answered expected after 200 OK");
-    assert_eq!(
-        answered.event.payload["agent_id"].as_str(),
-        Some("1001"),
-        "call_answered must carry the agent's id"
-    );
     assert_eq!(answered.call_id, call_id);
-    // Session-level-only policy: the answered event carries no `leg_id` — the
-    // customer-leg connect must not emit its own answered event.
-    assert!(
-        answered.event.payload["leg_id"].is_null(),
-        "call_answered must be session-level (no leg_id), got: {:?}",
+    assert_eq!(
+        answered.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the outgoing leg's answer must carry its leg_id, got: {:?}",
         answered.event.payload
+    );
+    assert_eq!(
+        answered.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg answers as the caller, got: {:?}",
+        answered.event.payload
+    );
+
+    // The session-scoped duplicate (deprecated) follows from originate
+    // completion, without leg fields.
+    let session_answered =
+        wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-scoped call_answered expected after the leg event");
+    assert!(
+        session_answered.event.payload["leg_id"].is_null(),
+        "session-scoped duplicate must carry no leg_id, got: {:?}",
+        session_answered.event.payload
     );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
@@ -1191,6 +1241,7 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
                 caller_id: Some("sip:1001@127.0.0.1".into()),
                 timeout_secs: Some(15),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: None,
                 record: None,
@@ -1224,12 +1275,14 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
     bob.ring_call(&bob_id).await.expect("bob rings plain 180");
 
-    // Drain the tap: first `call_ringing` must carry early_media=true (the
-    // 183), the second early_media=false (the 180). No `call_early_media`
-    // event may appear.
+    // Drain the tap: the 183 and the 180 each yield a leg-level + session-level
+    // `call_ringing` pair (leg first). The leg-level event follows the
+    // ring-state cadence: it fires for the 183 (early_media=true) and again
+    // when the plain 180 DOWNGRADES the state (early_media=false). No
+    // `call_early_media` event may appear.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut ringing_flags: Vec<bool> = Vec::new();
-    while ringing_flags.len() < 2 {
+    let mut ringing: Vec<(bool, bool)> = Vec::new(); // (has_leg_id, early_media)
+    while ringing.len() < 4 {
         let entry = match tokio::time::timeout_at(deadline, tap.recv()).await {
             Ok(Ok(entry)) => entry,
             _ => break,
@@ -1245,14 +1298,15 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
                 "call_ringing must carry a boolean early_media flag: {}",
                 entry.event.payload
             );
-            ringing_flags.push(flag.unwrap());
+            let has_leg = entry.event.payload["leg_id"].is_string();
+            ringing.push((has_leg, flag.unwrap()));
         }
     }
     assert_eq!(
-        ringing_flags,
-        vec![true, false],
-        "expected call_ringing(early_media=true) for the 183 then \
-         call_ringing(early_media=false) for the 180"
+        ringing,
+        vec![(true, true), (false, true), (true, false), (false, false)],
+        "expected (leg,session) call_ringing pairs for the 183 (early_media=true) \
+         then the 180 (early_media=false)"
     );
 
     bob.hangup(&bob_id).await.expect("bob hangs up");
@@ -1324,6 +1378,7 @@ async fn test_originate_rejected_releases_agent_and_emits_call_hangup() {
                 caller_id: Some("sip:1001@127.0.0.1".into()),
                 timeout_secs: Some(15),
                 extra_headers: std::collections::HashMap::new(),
+                agent: None,
                 trunk: None,
                 route_originated_calls: None,
                 record: None,
@@ -3192,6 +3247,153 @@ async fn test_queue_set_priority_not_in_queue_fails() {
     assert!(result.unwrap_err().to_string().contains("not in queue"));
 }
 
+/// Legacy semantics guard: WITHOUT a shared-queue DB (no CC addon) the command
+/// must keep succeeding — pre-existing integrations rely on the old stub's
+/// success return, and the in-memory path is all there is.
+#[tokio::test]
+async fn test_queue_set_priority_without_shared_db_still_succeeds() {
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    // NOTE: no `set_shared_queue_db` — the None path.
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    assert!(result.is_ok(), "no-DB path must keep the legacy success");
+}
+
+/// With the CC shared-queue DB injected, `queue.set_priority` must MUTATE the
+/// caller's unclaimed `cc_acd_queue` row — the strict-FIFO gate and the
+/// monitor order by that row. A stub regression (log-only, no write) keeps
+/// this red.
+#[cfg(feature = "addon-cc")]
+#[tokio::test]
+async fn test_queue_set_priority_updates_shared_queue_row() {
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    rustpbx::addons::cc::migration::Migrator::up(&db, None)
+        .await
+        .unwrap();
+
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    gateway.write().set_shared_queue_db(Some(db.clone()));
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    // The caller is parked in the shared queue (event-tap mirror / wait
+    // retention) at the default tier.
+    rustpbx::addons::cc::stats_writer::shared_enqueue(
+        &db,
+        "call-1",
+        "support",
+        "tap",
+        "1001",
+        &[],
+        0,
+    )
+    .await;
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    assert!(result.is_ok());
+
+    let rows = rustpbx::addons::cc::stats_writer::unclaimed_rows_for_queue(&db, "support").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].priority, 10,
+        "set_priority must mutate the shared row the gate orders by"
+    );
+}
+
+/// A queued call with NO shared-queue row (queue tracking disabled / tap
+/// lagging) must surface an explicit error — not a silent fake success.
+#[cfg(feature = "addon-cc")]
+#[tokio::test]
+async fn test_queue_set_priority_missing_shared_row_fails() {
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    rustpbx::addons::cc::migration::Migrator::up(&db, None)
+        .await
+        .unwrap();
+
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    gateway.write().set_shared_queue_db(Some(db));
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    let err = result.expect_err("missing shared row must fail explicitly");
+    assert!(
+        err.to_string().contains("No unclaimed shared-queue row"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_queue_assign_agent_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
@@ -3268,6 +3470,13 @@ async fn test_queue_requeue_success() {
     assert_eq!(
         joined.event.payload["skill_groups"],
         serde_json::json!(["G_Srzj_1043133_382_G"])
+    );
+    // Regression guard: the shared-queue tap re-registers the row from this
+    // event — a dropped priority field would reset the caller to the default
+    // tier on EVERY requeue.
+    assert_eq!(
+        joined.event.payload["priority"], 5,
+        "requeue must carry the requested priority on queue_joined"
     );
 }
 

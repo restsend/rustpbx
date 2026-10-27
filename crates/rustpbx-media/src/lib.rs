@@ -18,11 +18,13 @@ pub mod media_recorder;
 pub mod media_stream;
 pub mod mixer;
 pub mod negotiate;
+pub mod quality_stats;
 pub mod recorder;
 pub mod rtc_track;
 pub mod rtp_track_builder;
 pub mod telemetry;
 pub mod telephone_event;
+pub mod volume_stats;
 pub mod wav_reader;
 pub mod wav_writer;
 

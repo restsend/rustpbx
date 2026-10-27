@@ -69,6 +69,23 @@ def test_cdr_schema_and_event_flow():
     A.assert_event_flow(evs, ["call_created", "call_answered", "call_hangup"], call_id="c1")
 
 
+def test_event_envelope_timestamp_is_rfc3339_local():
+    """Webhook envelope `timestamp` is an RFC 3339 string with a timezone
+    offset (server local time, e.g. `+08:00`) — the wire change means an epoch
+    number or a naive local string must fail validation."""
+    good = {
+        "event_type": "call_created",
+        "call_id": "c1",
+        "timestamp": "2026-09-10T16:54:18.312004+08:00",
+    }
+    assert A.validate_event(good) is good
+    # UTC `Z` remains valid RFC 3339 even though `+08:00` is the new norm.
+    assert A.validate_event_timestamp("2026-09-10T08:54:18Z") == "2026-09-10T08:54:18Z"
+    for bad in (1716212345, "2026-09-10T08:54:18", "not-a-time"):
+        with pytest.raises(AssertionError):
+            A.validate_event_timestamp(bad)
+
+
 def test_evidence_store_attaches(evidence: EvidenceStore):
     wav = evidence.dir / "tone.wav"
     av.generate_sine_wav(wav, freq_hz=620, duration_s=0.4)

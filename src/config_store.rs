@@ -373,6 +373,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_content_upgrade_widens_text_and_skips_existing_mediumtext() {
+        use sea_orm::{DbBackend, MockDatabase, MockExecResult, Statement, Transaction};
+        use sea_orm_migration::{MigratorTrait, SchemaManager};
+
+        for column_type in ["text", "mediumtext"] {
+            let db = MockDatabase::new(DbBackend::MySql)
+                .append_query_results([vec![std::collections::BTreeMap::from([(
+                    "DATA_TYPE".to_string(),
+                    sea_orm::Value::from(column_type),
+                )])]])
+                .append_exec_results([MockExecResult::default()])
+                .into_connection();
+            let migrations = crate::models::migration::Migrator::migrations();
+            let migration = migrations
+                .iter()
+                .find(|migration| migration.name() == "m20261012_000001_config_entries_mediumtext")
+                .unwrap();
+            migration.up(&SchemaManager::new(&db)).await.unwrap();
+            let statements = db.into_transaction_log();
+            if column_type == "text" {
+                assert_eq!(
+                    statements.last(),
+                    Some(&Transaction::one(Statement::from_string(
+                        DbBackend::MySql,
+                        "ALTER TABLE config_entries MODIFY COLUMN content MEDIUMTEXT NOT NULL",
+                    )))
+                );
+            } else {
+                assert_eq!(statements.len(), 1, "only schema inspection is needed");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn db_exists() {
         let db = setup_db().await;
         let store = GeneratedConfigStore::Database { db: db.clone() };

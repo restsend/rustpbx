@@ -66,7 +66,13 @@ pub struct LocatorEventDto {
     pub location: Option<LocationDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<LocationDto>>,
-    pub timestamp: u64,
+    /// Why the bindings went offline — `"offline"` (transport closed) or
+    /// `"expired"` (REGISTER TTL lapsed). Only present on offline events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// RFC 3339 timestamp in the server's local timezone (see
+    /// [`crate::utils::rfc3339_local`]).
+    pub timestamp: String,
 }
 
 pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: LocatorEventReceiver) {
@@ -86,16 +92,14 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
         };
 
         let (event_name, dto) = match event {
-            LocatorEvent::Registered(loc) => (
+            LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => (
                 "registered",
                 LocatorEventDto {
                     event: "registered".to_string(),
                     location: Some(LocationDto::from(&loc)),
                     locations: None,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    reason: None,
+                    timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
             LocatorEvent::Unregistered(loc) => (
@@ -104,22 +108,18 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
                     event: "unregistered".to_string(),
                     location: Some(LocationDto::from(&loc)),
                     locations: None,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    reason: None,
+                    timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
-            LocatorEvent::Offline(locs) => (
+            LocatorEvent::Offline(locs, reason) => (
                 "offline",
                 LocatorEventDto {
                     event: "offline".to_string(),
                     location: None,
                     locations: Some(locs.iter().map(LocationDto::from).collect()),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    reason: Some(reason.as_str().to_string()),
+                    timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
                 },
             ),
         };
@@ -163,5 +163,24 @@ mod tests {
             .expect("serialize locator webhook location");
 
         assert_eq!(payload["home_proxy"], expected_home_proxy);
+    }
+
+    /// The locator webhook `timestamp` is a fully-qualified RFC 3339 string in
+    /// the server's local timezone (was a `u64` Unix epoch before).
+    #[test]
+    fn locator_event_timestamp_is_rfc3339_local() {
+        let dto = LocatorEventDto {
+            event: "registered".to_string(),
+            location: None,
+            locations: None,
+            reason: None,
+            timestamp: crate::utils::rfc3339_local(chrono::Utc::now()),
+        };
+        let payload = serde_json::to_value(&dto).expect("serialize locator event");
+        let ts = payload["timestamp"]
+            .as_str()
+            .expect("timestamp must serialize as a string");
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap_or_else(|e| panic!("timestamp {ts:?} is not RFC3339: {e}"));
     }
 }

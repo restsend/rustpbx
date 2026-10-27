@@ -421,6 +421,37 @@ impl SipFlowBackend for LocalBackend {
         Ok(stats)
     }
 
+    async fn query_media_quality(
+        &self,
+        call_id: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        bucket_ms: u64,
+        max_bytes: usize,
+        max_packets: usize,
+    ) -> Result<Vec<crate::SipFlowQualityPoint>> {
+        // Keep the read in the caller's future so the HTTP deadline cancels it.
+        let mut storage = StorageManager::new(
+            &PathBuf::from(&self.root),
+            self.subdirs.clone(),
+            None,
+            None,
+            0,
+            1,
+            None,
+        );
+        storage
+            .query_media_quality(
+                call_id,
+                start_time,
+                end_time,
+                bucket_ms,
+                max_bytes,
+                max_packets,
+            )
+            .await
+    }
+
     async fn query_media(
         &self,
         call_id: &str,

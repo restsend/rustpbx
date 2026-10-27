@@ -168,7 +168,7 @@ WebRTC 仍然通过 ICE 跨网卡收集候选地址，不受此固定绑定地�
 ```json
 {
   "event": "registered",
-  "timestamp": 1708201234,
+  "timestamp": "2026-02-18T00:20:34+08:00",
   "location": {
     "aor": "sip:1001@1.2.3.4:12345",
     "home_proxy": "10.0.0.12:5060",
@@ -186,7 +186,7 @@ WebRTC 仍然通过 ICE 跨网卡收集候选地址，不受此固定绑定地�
 | 字段 | 含义 |
 | --- | --- |
 | `event` | `registered`、`unregistered` 或 `offline` |
-| `timestamp` | RustPBX 构造 Webhook 载荷时的 UNIX 时间戳，单位为秒 |
+| `timestamp` | RFC 3339 时间戳，RustPBX 构造 Webhook 载荷时的**服务器本地时区**（如 `+08:00`；宿主未设 `TZ` 时为 `+00:00`） |
 | `aor` | 来自 REGISTER 的 `Contact` 头的设备 Contact URI；它不一定是用户的规范身份 |
 | `home_proxy` | 接受并持有该注册的 RustPBX 节点所公布的 SIP 地址 |
 | `destination` | RustPBX 观察到的设备网络地址，包括可用的传输协议信息 |
@@ -202,7 +202,7 @@ Locator Webhook 不包含 REGISTER 的 Request-URI。在直接连接的单节点
 ```json
 {
   "event": "offline",
-  "timestamp": 1708201294,
+  "timestamp": "2026-02-18T00:21:34+08:00",
   "locations": [
     {
       "aor": "sip:1001@1.2.3.4:12345",

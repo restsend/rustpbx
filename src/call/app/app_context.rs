@@ -222,29 +222,46 @@ impl ApplicationContext {
     }
 }
 
+/// Whether a SIP header is a standard transport/dialog header already
+/// represented by typed fields elsewhere in the event (kept out of the
+/// `sip_headers` snapshots).
+pub fn is_sip_transport_header(h: &rsipstack::sip::Header) -> bool {
+    matches!(
+        h,
+        rsipstack::sip::Header::Via(_)
+            | rsipstack::sip::Header::MaxForwards(_)
+            | rsipstack::sip::Header::CallId(_)
+            | rsipstack::sip::Header::CSeq(_)
+            | rsipstack::sip::Header::ContentLength(_)
+            | rsipstack::sip::Header::ContentType(_)
+            | rsipstack::sip::Header::From(_)
+            | rsipstack::sip::Header::To(_)
+            | rsipstack::sip::Header::UserAgent(_)
+            | rsipstack::sip::Header::Allow(_)
+    )
+}
+
 /// Extract all SIP headers from a request into a `HashMap`, skipping standard
 /// transport/dialog headers that already have typed representations.
 pub fn extract_sip_headers(request: &rsipstack::sip::Request) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     for h in request.headers.iter() {
-        let skip = matches!(
-            h,
-            rsipstack::sip::Header::Via(_)
-                | rsipstack::sip::Header::MaxForwards(_)
-                | rsipstack::sip::Header::CallId(_)
-                | rsipstack::sip::Header::CSeq(_)
-                | rsipstack::sip::Header::ContentLength(_)
-                | rsipstack::sip::Header::ContentType(_)
-                | rsipstack::sip::Header::From(_)
-                | rsipstack::sip::Header::To(_)
-                | rsipstack::sip::Header::UserAgent(_)
-                | rsipstack::sip::Header::Allow(_)
-        );
-        if !skip {
+        if !is_sip_transport_header(h) {
             headers.insert(h.name().to_string(), h.value().to_string());
         }
     }
     headers
+}
+
+/// Snapshot standalone SIP headers (e.g. the custom headers riding an
+/// outgoing originate INVITE) with the same transport-header filter as
+/// [`extract_sip_headers`].
+pub fn sip_headers_from(headers: &[rsipstack::sip::Header]) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter(|h| !is_sip_transport_header(h))
+        .map(|h| (h.name().to_string(), h.value().to_string()))
+        .collect()
 }
 
 /// Merge route-produced headers into an existing snapshot using SIP's

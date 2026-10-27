@@ -164,6 +164,41 @@ pub fn pct(numerator: f64, denominator: f64) -> f64 {
     }
 }
 
+/// SQL fragment extracting a top-level text field from a JSON column, for
+/// GROUP BY / filter use (`data` JSON payloads on the runtime-snapshot table).
+/// `column_sql` is interpolated — callers must only pass identifiers they own.
+/// NULL when the key is missing (or the column is NULL) on every backend.
+pub fn json_text_sql(
+    backend: sea_orm::DatabaseBackend,
+    column_sql: &str,
+    key: &str,
+) -> String {
+    // `key` comes from compile-time call sites, not user input; still keep it
+    // to identifier characters so the interpolation stays safe by construction.
+    debug_assert!(
+        key.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "json_text_sql key must be an identifier"
+    );
+    match backend {
+        sea_orm::DatabaseBackend::Sqlite => format!("json_extract({column_sql}, '$.{key}')"),
+        sea_orm::DatabaseBackend::MySql => {
+            format!("JSON_UNQUOTE(JSON_EXTRACT({column_sql}, '$.{key}'))")
+        }
+        sea_orm::DatabaseBackend::Postgres => format!("({column_sql} ->> '{key}')"),
+        _ => "NULL".to_string(),
+    }
+}
+
+/// Expression form of [`json_text_sql`].
+pub fn json_text_expr(
+    backend: sea_orm::DatabaseBackend,
+    column_sql: &str,
+    key: &str,
+) -> SimpleExpr {
+    sea_orm::sea_query::Expr::cust(json_text_sql(backend, column_sql, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

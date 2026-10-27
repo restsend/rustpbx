@@ -14,13 +14,35 @@ pub struct WebhookPayload<'a> {
     pub callee: &'a str,
     /// When the call was answered (post-answer payloads). `None` for failure
     /// notifications, which carry `failure_reason` instead.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Serialized as RFC 3339 in the server's local timezone (not UTC `Z`) so
+    /// every outgoing webhook timestamp shares one shape — see
+    /// [`crate::utils::rfc3339_local`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_answered_at"
+    )]
     pub answered_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Machine-readable failure reason (e.g. `busy`, `no_answer`, `timeout`)
     /// on failure notifications. Absent on successful post-answer payloads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
     pub metadata: &'a HashMap<String, String>,
+}
+
+/// `serialize_with` helper for [`WebhookPayload::answered_at`]: renders the
+/// answer time as RFC 3339 in the server's local timezone.
+fn serialize_answered_at<S>(
+    dt: &Option<chrono::DateTime<chrono::Utc>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match dt {
+        Some(dt) => serializer.serialize_str(&crate::utils::rfc3339_local(*dt)),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Response expected from the sync webhook.
@@ -69,5 +91,43 @@ pub async fn call_sync_webhook(
             Err(e) => WebhookOutcome::Err(format!("invalid webhook response: {e}")),
         },
         Err(e) => WebhookOutcome::Err(format!("webhook request failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(answered_at: Option<chrono::DateTime<chrono::Utc>>) -> serde_json::Value {
+        let metadata = HashMap::new();
+        serde_json::to_value(WebhookPayload {
+            call_id: "call-1",
+            leg_id: None,
+            caller: "1001",
+            callee: "2000",
+            answered_at,
+            failure_reason: None,
+            metadata: &metadata,
+        })
+        .expect("serialize webhook payload")
+    }
+
+    /// `answered_at` is an RFC 3339 string in the server's local timezone
+    /// (e.g. `+08:00`), matching every other outgoing webhook timestamp.
+    #[test]
+    fn answered_at_serializes_as_local_rfc3339() {
+        let value = payload(Some(chrono::Utc::now()));
+        let ts = value["answered_at"]
+            .as_str()
+            .expect("answered_at must serialize as a string");
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap_or_else(|e| panic!("answered_at {ts:?} is not RFC3339: {e}"));
+    }
+
+    /// Failure notifications omit `answered_at` entirely.
+    #[test]
+    fn answered_at_omitted_when_none() {
+        let value = payload(None);
+        assert!(value.get("answered_at").is_none());
     }
 }

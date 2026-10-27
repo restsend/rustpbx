@@ -1,0 +1,292 @@
+"""Tier 2 — user offline reasons (offline / expired / unregistered) on RWI events.
+
+Full e2e chain: a SIP endpoint disappears → the locator / presence layer
+emits the CAUSE → the CC registrar bridge stamps `reason_code` on BOTH
+`agent_unregistered` and the `agent_state_changed` (→ offline) event → the
+RWI webhook (and RWI WS) fan-out receives them.
+
+Scenarios (restsend-cli = the real production client, not a mock):
+  1. WS transport drop  — process killed, WebSocket closes:
+        agent_unregistered.reason_code == "offline"
+  2. REGISTER TTL lapses with NO goodbye (UDP client killed, browser crash
+     equivalent) — expiry sweeper reclaims the binding:
+        reason_code == "expired"
+  3. Explicit REGISTER expires=0 (sip_unregister):
+        reason_code == "unregistered"   (historical behaviour, guarded)
+  4. PUBLISH presence TTL lapses while the REGISTER stays alive (the
+     restsend-call shape: publishes once at login, never re-publishes) —
+     the agent MUST STAY ONLINE; the locator's live binding is
+     authoritative (regression 2026-10-14: the sweeper used to log out
+     every connected agent ~5 minutes after login).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+import pytest
+import pytest_asyncio
+
+from helpers.assertions.event_schema import assert_reason_code
+from helpers.restsend_agent import CLI as RESTSEND_CLI
+from helpers.restsend_agent import RestsendAgent
+
+pytestmark = [pytest.mark.tier2, pytest.mark.presence]
+
+AGENT = "1001"
+
+# Binding expiry = client expires + LOCATOR_EXPIRE_GRACE_SECS (30s), observed
+# by the locator sweeper (e2e workdir config: 5s cadence).
+EXPIRY_DEADLINE = 60.0
+# Presence TTL sweep cadence is config-driven in e2e (3s) — a lapsed
+# publication resolves within expires + sweep + margin.
+PUBLISH_TTL_DEADLINE = 25.0
+
+
+def _restsend_available() -> bool:
+    return os.path.exists(RESTSEND_CLI)
+
+
+async def _wait_agent_status(api, agent_id: str, wanted: str, timeout: float) -> str:
+    """Poll GET /api/cc/agents/{id} until status == wanted; return last seen."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    status = ""
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            info = await api.get_agent(agent_id)
+            status = ((info.get("data") or info).get("status") or "").lower()
+        except Exception:  # noqa: BLE001 — transient 5xx during restarts
+            status = ""
+        if status == wanted:
+            return status
+        await asyncio.sleep(1)
+    return status
+
+
+async def _bring_online(agent: RestsendAgent, api, *, transport=None,
+                        expires: int = 120) -> None:
+    """Register (+wait until the bridge lists the agent idle)."""
+    assert await agent.register(expires=expires, transport=transport), (
+        f"{AGENT} REGISTER failed (transport={transport})"
+    )
+    status = await _wait_agent_status(api, AGENT, "idle", 20.0)
+    assert status == "idle", (
+        f"agent must be idle while registered, got {status!r}"
+    )
+    # Outlive UNREGISTER_GRACE_SECS (5s): a transport-close arriving inside
+    # the grace window is deliberately ignored by the locator (rapid
+    # reconnect / NAT port reuse protection), so an immediate kill would
+    # leave the binding alive and never produce an offline event.
+    await asyncio.sleep(6)
+
+
+async def _assert_offline_events(checker, reason: str, timeout: float) -> None:
+    """Both RWI events must arrive carrying reason_code == reason.
+
+    Asserted on the webhook channel; `checker.rwi` (RWI WebSocket) is
+    additionally asserted for the event types when available — the two
+    transports are fanned out from the same gateway dispatch.
+    """
+    webhook = checker.webhook
+    unreg = await webhook.wait_for_event(
+        "agent_unregistered",
+        match={"payload.agent_id": AGENT, "payload.reason_code": reason},
+        timeout=timeout,
+    )
+    assert unreg is not None, (
+        f"agent_unregistered(reason_code={reason!r}) never arrived; "
+        f"got {webhook.event_types()}"
+    )
+    state = await webhook.wait_for_event(
+        "agent_state_changed",
+        match={
+            "payload.agent_id": AGENT,
+            "payload.to_status": "offline",
+            "payload.reason_code": reason,
+        },
+        timeout=10,
+    )
+    assert state is not None, (
+        f"agent_state_changed(to=offline, reason_code={reason!r}) never "
+        f"arrived; got {webhook.event_types()}"
+    )
+    # Strict schema: reason_code must be present and canonical.
+    assert_reason_code(unreg, expected=reason)
+    assert_reason_code(state, expected=reason)
+    # RWI WebSocket must mirror the same reason (real-time consumers).
+    # Scan the received buffer for the OFFLINE transition — earlier
+    # idle-boundary transitions (offline→idle on REGISTER) share the type.
+    if checker.rwi is not None:
+        deadline = asyncio.get_event_loop().time() + 10
+
+        def _offline_ws_event():
+            for e in reversed(checker.rwi.events):
+                p = e.get("payload") or e
+                if (
+                    (e.get("event_type") or e.get("type")) == "agent_state_changed"
+                    and p.get("agent_id") == AGENT
+                    and p.get("to_status") == "offline"
+                ):
+                    return p
+            return None
+
+        payload = _offline_ws_event()
+        while payload is None and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.3)
+            payload = _offline_ws_event()
+        assert payload is not None, (
+            "RWI WS never delivered agent_state_changed(to=offline); "
+            f"got {[e.get('event_type') for e in checker.rwi.events]}"
+        )
+        assert payload.get("reason_code") == reason, (
+            f"RWI WS agent_state_changed.reason_code must be {reason!r}, "
+            f"got {payload.get('reason_code')!r}"
+        )
+
+
+@pytest_asyncio.fixture
+async def restsend_agent(pbx):
+    if not _restsend_available():
+        pytest.skip(f"restsend-cli not built: {RESTSEND_CLI}")
+    agent = RestsendAgent(pbx, AGENT)
+    await agent.start()
+    yield agent
+    agent.kill()
+
+
+@pytest.mark.asyncio
+async def test_ws_drop_offline_reason(pbx, api, event_checker, restsend_agent):
+    """WS transport drop (browser killed) → reason_code = "offline"."""
+    await _bring_online(restsend_agent, api, transport="ws")
+    event_checker.webhook.clear()
+
+    # Kill -9: no unregister, no close frame from the client side — the PBX
+    # still sees the WS connection die (read error / close), which is the
+    # transport-close path.
+    restsend_agent.kill()
+
+    await _assert_offline_events(event_checker, "offline", 30.0)
+    status = await _wait_agent_status(api, AGENT, "offline", 15.0)
+    assert status == "offline", f"panel must show offline, got {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_register_expiry_expired_reason(pbx, api, event_checker,
+                                              restsend_agent):
+    """REGISTER TTL lapses with no goodbye (UDP) → sweeper → reason "expired"."""
+    # Short client expiry: binding dies at expires+30s grace, sweeper (15s
+    # tick) picks it up. UDP has no transport-close — only the TTL remains.
+    await _bring_online(restsend_agent, api, transport="udp", expires=10)
+    event_checker.webhook.clear()
+
+    restsend_agent.kill()
+
+    await _assert_offline_events(event_checker, "expired", EXPIRY_DEADLINE)
+    status = await _wait_agent_status(api, AGENT, "offline", 15.0)
+    assert status == "offline", f"panel must show offline, got {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_explicit_unregister_reason(pbx, api, event_checker,
+                                          restsend_agent):
+    """REGISTER expires=0 → reason_code = "unregistered" (historical)."""
+    await _bring_online(restsend_agent, api, transport="udp")
+    event_checker.webhook.clear()
+
+    assert await restsend_agent.unregister(), "sip_unregister did not complete"
+
+    await _assert_offline_events(event_checker, "unregistered", 30.0)
+    status = await _wait_agent_status(api, AGENT, "offline", 15.0)
+    assert status == "offline", f"panel must show offline, got {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_publish_ttl_lapse_keeps_registered_agent_online(
+    pbx, api, event_checker, restsend_agent
+):
+    """PUBLISH TTL lapses while REGISTER stays alive → agent MUST stay online.
+
+    Regression 2026-10-14 (production: restsend-call publishes presence ONCE
+    at login with Expires=300 and never re-publishes; the presence-TTL
+    sweeper then logged out EVERY connected agent ~5 minutes after login —
+    "莫名 offline notify 但没踢下线").
+
+    The old e2e asserted the buggy behaviour (it expected the agent to go
+    offline with reason_code="expired" while the registration was alive),
+    which is why the regression shipped green. The correct contract:
+    the locator's live binding is authoritative — a stale soft-state
+    publication is not a logout. A lapsed PUBLISH with a truly GONE client
+    is covered by test_register_expiry_expired_reason (locator sweep,
+    same "expired" reason).
+    """
+    await _bring_online(restsend_agent, api, transport="udp")
+    # Single-shot publication (refresh=False): the publication is left to
+    # go stale while the client's REGISTER refresher keeps the binding
+    # alive — the exact pre-fix restsend shape. The server guard must keep
+    # the agent online (locator liveness beats the stale soft state).
+    await restsend_agent.publish_idle(expires=10, refresh=False)
+    event_checker.webhook.clear()
+
+    # Outlive the publication TTL + the (e2e: 3s) presence-sweep cadence.
+    await asyncio.sleep(PUBLISH_TTL_DEADLINE)
+
+    webhook = event_checker.webhook
+    offline = await webhook.wait_for_event(
+        "agent_state_changed",
+        match={"payload.agent_id": AGENT, "payload.to_status": "offline"},
+        timeout=1,
+    )
+    assert offline is None, (
+        "a lapsed PUBLISH with a LIVE registration must not log the agent "
+        f"offline; got {offline} among {webhook.event_types()}"
+    )
+    status = await _wait_agent_status(api, AGENT, "idle", 1.0)
+    assert status == "idle", (
+        f"connected agent must stay schedulable, got {status!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_notify_note_vocabulary_stays_closed(pbx, api, event_checker,
+                                                   restsend_agent):
+    """Every client-visible presence note stays inside the CLOSED vocabulary.
+
+    The PIDF note is a cross-component contract: restsend-call's brain
+    matches ``note == "offline"`` (et al.) EXACTLY to follow a
+    server-forced logout and toast it. Reason detail must ride
+    ``reason_code`` (webhook / status history), never suffixed into the
+    note — ``offline:expired`` would fall through the client's match arm
+    and silently desync its state (found in review 2026-10-14).
+    """
+    CLOSED = {"idle", "offline", "away", "dnd", "busy", "ringing", "wrapup"}
+
+    def _in_vocabulary(note) -> bool:
+        return note in CLOSED or (note or "").startswith("away:")
+
+    # Lifecycle exercises every offline CAUSE: explicit unregister
+    # ("unregistered"), re-login, manual REST offline ("manual") — notes
+    # observed client-side must stay bare regardless of the reason.
+    await _bring_online(restsend_agent, api, transport="udp")
+    assert await restsend_agent.unregister(), "sip_unregister did not complete"
+    assert await restsend_agent.register(transport="udp"), "re-REGISTER failed"
+    status = await _wait_agent_status(api, AGENT, "idle", 20.0)
+    assert status == "idle", f"re-login must flip the agent idle, got {status!r}"
+
+    await api.update_agent_status(AGENT, "offline")
+    status = await _wait_agent_status(api, AGENT, "offline", 10.0)
+    assert status == "offline", f"manual offline must apply, got {status!r}"
+
+    notes = [
+        (e.get("note") or "")
+        for e in restsend_agent.events
+        if e.get("evt") == "presence_notify"
+    ]
+    assert notes, "client received no presence NOTIFY events at all"
+    offenders = sorted({n for n in notes if not _in_vocabulary(n)})
+    assert not offenders, (
+        f"presence notes outside the closed vocabulary: {offenders} "
+        f"(all notes seen: {sorted(set(notes))}) — the PIDF note is an "
+        "exact-match contract with soft-phone reconcilers; reason detail "
+        "belongs in reason_code, not the note"
+    )

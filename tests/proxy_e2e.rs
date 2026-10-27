@@ -52,6 +52,12 @@ mod live_transcript_e2e;
 #[path = "proxy_e2e/test_cluster_home_proxy_e2e.rs"]
 mod test_cluster_home_proxy_e2e;
 
+#[path = "proxy_e2e/test_cluster_recursive_fork_guard_e2e.rs"]
+mod test_cluster_recursive_fork_guard_e2e;
+
+#[path = "proxy_e2e/test_hold_recording_e2e.rs"]
+mod test_hold_recording_e2e;
+
 #[path = "proxy_e2e/test_cluster_session_registry.rs"]
 mod test_cluster_session_registry;
 

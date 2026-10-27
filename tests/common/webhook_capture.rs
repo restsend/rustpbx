@@ -19,17 +19,22 @@ pub struct WebhookCapture {
 
 impl WebhookCapture {
     pub async fn start() -> Self {
+        Self::start_with_response(&["/hook"], serde_json::json!({"status":"ok"})).await
+    }
+
+    pub async fn start_with_response(paths: &[&str], response: serde_json::Value) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-        let rc = received.clone();
-
-        let app = axum::Router::new().route(
-            "/hook",
-            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+        let mut app = axum::Router::new();
+        for path in paths {
+            let rc = received.clone();
+            let response = response.clone();
+            app = app.route(path, axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
                 rc.lock().unwrap().push(body);
-                async { axum::Json(serde_json::json!({"status":"ok"})) }
-            }),
-        );
+                let response = response.clone();
+                async { axum::Json(response) }
+            }));
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

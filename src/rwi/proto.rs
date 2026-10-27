@@ -90,6 +90,8 @@ pub struct CallMeta {
     /// `None` for calls without CC agent participation.
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    /// Preallocated agent-stage recording identity retained through terminal event dispatch.
+    pub recording_id: Option<String>,
     pub queue_id: Option<String>,
     pub root: Option<RootCallInfo>,
     /// Flow-origin snapshot captured when a transfer starts on the session
@@ -97,6 +99,8 @@ pub struct CallMeta {
     /// Consumed by transfer events only — deliberately NOT mapped into
     /// [`EventCallContext`] so ordinary call events stay unchanged.
     pub transfer_source: Option<crate::rwi::event::TransferSource>,
+    /// Departing stage identity captured before target attribution or stage cleanup.
+    pub transfer_recording_id: Option<String>,
 }
 
 impl From<CallMeta> for EventCallContext {
@@ -142,6 +146,15 @@ impl CallMetaStore {
     /// Whether live call meta exists for `call_id`.
     pub fn contains_key(&self, call_id: &str) -> bool {
         self.store.contains_key(call_id)
+    }
+
+    /// Whether a local call still consumes this session's business context.
+    pub(crate) fn uses_user_data(&self, session_id: &str) -> bool {
+        self.contains_key(session_id)
+            || self
+                .store
+                .iter()
+                .any(|entry| entry.session_id.as_deref() == Some(session_id))
     }
 
     pub fn remove(&self, call_id: &str) {

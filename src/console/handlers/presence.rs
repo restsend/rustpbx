@@ -1,19 +1,21 @@
 use crate::console::ConsoleState;
-use crate::proxy::presence::{PresenceState, PresenceStatus};
+use crate::proxy::presence::PresenceState;
 use axum::{
     Json, Router,
     extract::{Path, State},
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 
 /// API routes (nested under api_prefix)
+///
+/// Read-only by design: a POST here used to write the SIP presence mirror
+/// directly, bypassing the CC agent state machine and desyncing BLF/monitor
+/// state until the next CC `project_presence` overwrote it. CC agent
+/// presence must go through `POST /cc/agents/{agent_id}/status`.
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
-    Router::new().route(
-        "/presence/{extension}",
-        get(get_presence).post(set_presence),
-    )
+    Router::new().route("/presence/{extension}", get(get_presence))
 }
 
 #[derive(Serialize)]
@@ -31,45 +33,6 @@ pub async fn get_presence(
         Json(PresenceResponse {
             success: true,
             data: Some(presence),
-        })
-    } else {
-        Json(PresenceResponse {
-            success: false,
-            data: None,
-        })
-    }
-}
-
-#[derive(Deserialize)]
-pub struct SetPresenceRequest {
-    pub status: PresenceStatus,
-    pub note: Option<String>,
-    pub activity: Option<String>,
-}
-
-pub async fn set_presence(
-    State(state): State<Arc<ConsoleState>>,
-    Path(extension): Path<String>,
-    Json(payload): Json<SetPresenceRequest>,
-) -> Json<PresenceResponse> {
-    if let Some(sip_server) = state.get_sip_server() {
-        let new_state = PresenceState {
-            status: payload.status,
-            note: payload.note,
-            activity: payload.activity,
-            last_updated: chrono::Utc::now().timestamp(),
-        };
-        sip_server
-            .presence_manager
-            .update_state(
-                &extension,
-                new_state.clone(),
-                &crate::proxy::cluster_event::EventSource::Local,
-            )
-            .await;
-        Json(PresenceResponse {
-            success: true,
-            data: Some(new_state),
         })
     } else {
         Json(PresenceResponse {

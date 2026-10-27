@@ -18,7 +18,10 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
+use super::agent_registry::{
+    AgentRegistry, AgentRingPolicy, AssignFailReason, AssignFailedAlert, PresenceState,
+    RoutingStrategy,
+};
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
@@ -32,6 +35,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+#[path = "queue_diagnostics.rs"]
+mod diagnostics;
+pub use diagnostics::{QueueDiagnosticRequest, QueueDispatchDiagnostic};
 
 // ===================================================================
 // Queue Statistics (built-in)
@@ -119,6 +126,11 @@ pub struct QueueConfig {
     /// escalation resolves the primary group ∪ overflow groups as one
     /// candidate set through the agent registry.
     pub skill_group: Option<String>,
+    /// Per-call ACD queue priority (higher preempts earlier waiters, 0 =
+    /// default). Copied from [`crate::call::QueuePlan::priority`] at the app
+    /// factory; feeds `fifo_register_wait`, inline-ACD enqueue and the
+    /// `queue_joined` / `queue_overflow_joined` event payloads.
+    pub priority: u32,
 }
 
 /// Escalation mode for overflow/skill-group escalation.
@@ -187,7 +199,11 @@ impl Default for QueueConfig {
             fallback: None,
             agents: Vec::new(),
             strategy: DialStrategy::Sequential(Vec::new()),
-            ring_timeout: Some(Duration::from_secs(30)),
+            // `None` = not explicitly configured: the effective timeout falls
+            // back to the CC desk policy / registry default (30 s). A `Some`
+            // value here would silently shadow the desk-behavior ring policy
+            // for every default-constructed queue.
+            ring_timeout: None,
             skill_routing_enabled: false,
             required_skills: Vec::new(),
             sla_threshold_secs: 20,
@@ -205,6 +221,7 @@ impl Default for QueueConfig {
             escalation_mode: EscalationMode::Replace,
             escalation_timeline: Vec::new(),
             skill_group: None,
+            priority: 0,
         }
     }
 }
@@ -222,6 +239,7 @@ impl QueueConfig {
             label: Some(self.name.clone()),
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone(),
+            priority: self.priority,
         }
     }
 }
@@ -386,6 +404,12 @@ impl QueueSignal {
     }
 }
 
+/// Async dial-target locality check: REMOVED — `queue_agent_*` events are
+/// single-source (only the queue node emits them; the agent node never does),
+/// so they carry `leg_role: "agent"` unconditionally regardless of where the
+/// agent is registered. The call-node/agent-node split only applies to the
+/// `call_*` leg lifecycle events (see `Leg::remote_registered`).
+
 /// A built-in Queue application for call distribution.
 ///
 /// Routes incoming calls to available agents using configured dialing
@@ -424,6 +448,7 @@ pub struct QueueApp {
     plan: QueuePlan,
     /// Extended queue configuration.
     config: QueueConfig,
+    ring_policy: Option<AgentRingPolicy>,
     /// Current state machine state.
     state: QueueState,
     /// Current hold music playback handle (if any).
@@ -446,6 +471,10 @@ pub struct QueueApp {
     location_enricher: Option<QueueLocationEnricherSetup>,
     /// Call ID for tracking.
     call_id: String,
+    /// Caller identity (CallInfo.caller) captured at `on_enter` — written to
+    /// the shared-queue row so the monitor's queued list can show the number
+    /// instead of falling back to the call id.
+    caller: String,
     /// When the call entered the queue.
     pub(crate) enqueued_at: Option<Instant>,
     /// Queue statistics.
@@ -458,6 +487,9 @@ pub struct QueueApp {
     /// resolved agent presence and moved the call on (wait retention / next
     /// agent / fallback). Cleared per leg when the stale signal is consumed.
     timed_out_legs: HashSet<String>,
+    /// Agent legs that have returned 180 Ringing. Queue music is restored only
+    /// after every ringing leg has stopped, which matters for parallel offers.
+    ringing_agent_legs: HashSet<String>,
     // ── Comfort announcement ──
     /// Comfort prompt playback state.
     comfort_index: usize,
@@ -480,6 +512,11 @@ pub struct QueueApp {
     /// Transfer prompt already started for this queue entry (no replays on
     /// agent retries / escalation re-dials).
     transfer_prompt_played: bool,
+    transfer_prompt_enabled: bool,
+    comfort_prompt_enabled: bool,
+    busy_prompt_enabled: bool,
+    agent_ringback_enabled: bool,
+    no_answer_prompt_enabled: bool,
     /// In-flight prompt tokens; completions are matched by track id so stale
     /// events cannot advance the wrong state.
     transfer_token: Option<PlaybackToken>,
@@ -500,6 +537,15 @@ pub struct QueueApp {
     /// agent the queue marked Busy/Ringing for this call that never actually
     /// connected (e.g. rejected with 486 while another agent answered).
     attempted_agents: Vec<String>,
+    /// Agent ids this call rang that never answered (ring timeout / late
+    /// no-answer signal). Wait-retention polls exclude them when picking the
+    /// next offer so a no-answer round-trip rotates to a FRESH agent; once
+    /// every resolved candidate is in the set a new rotation starts over the
+    /// original list. Never cleared on requeue (that is the point) — only
+    /// when a full rotation completes. Distinct from `attempted_agents`,
+    /// which is transient phantom-release bookkeeping and is drained by
+    /// `release_phantom_agents`.
+    no_answer_agents: Vec<String>,
     /// Whether the `max_wait_timeout` has been armed for this queue entry.
     /// Re-entering wait retention (e.g. after a failed dial round) must NOT
     /// re-arm it — `set_timeout` replaces timers, which would extend the
@@ -513,6 +559,13 @@ pub struct QueueApp {
     /// (before agent resolution) so it stays the FIRST queue event. When set,
     /// `on_enter` must not emit a duplicate.
     joined_emitted_externally: bool,
+    /// ACD re-entry counter. 1 = first join (the on_enter / start_queue_app
+    /// emission carries no `attempt`); each re-entry after an agent miss
+    /// (no-answer / cancel / reject) that keeps the call queued increments it
+    /// and emits `queue_joined{attempt: n}`.
+    join_attempt: u32,
+    targeted_recovery: bool,
+    recovery_requests: std::collections::VecDeque<(String, Vec<String>)>,
 }
 
 impl QueueApp {
@@ -521,6 +574,7 @@ impl QueueApp {
         Self {
             plan,
             config,
+            ring_policy: None,
             state: QueueState::Init,
             hold_playback: None,
             answered: false,
@@ -530,9 +584,11 @@ impl QueueApp {
             agent_registry: None,
             location_enricher: None,
             call_id: String::new(),
+            caller: String::new(),
             enqueued_at: None,
             pending_agents: Vec::new(),
             timed_out_legs: HashSet::new(),
+            ringing_agent_legs: HashSet::new(),
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
@@ -540,6 +596,11 @@ impl QueueApp {
             stage_started_at: None,
             rwi_gateway: None,
             transfer_prompt_played: false,
+            transfer_prompt_enabled: true,
+            comfort_prompt_enabled: true,
+            busy_prompt_enabled: true,
+            agent_ringback_enabled: false,
+            no_answer_prompt_enabled: true,
             transfer_token: None,
             service_token: None,
             busy_token: None,
@@ -549,9 +610,13 @@ impl QueueApp {
             abandoned_recorded: false,
             fallback_executed: false,
             attempted_agents: Vec::new(),
+            no_answer_agents: Vec::new(),
             max_wait_armed: false,
             max_wait_grace_used: false,
             joined_emitted_externally: false,
+            join_attempt: 1,
+            targeted_recovery: false,
+            recovery_requests: std::collections::VecDeque::new(),
         }
     }
 
@@ -656,6 +721,67 @@ impl QueueApp {
         }
     }
 
+    /// Notify the agent dispatcher that a dialled agent leg timed out
+    /// without answering (the queue retries). CC addon translates this into
+    /// `skill_group_agent_no_answer` (per-round retry analytics).
+    async fn notify_no_answer(&self, agent_id: &str, attempt: u32, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let _ = registry
+                .notify_agent_no_answer(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    attempt,
+                    leg_id,
+                )
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a dialled agent leg REJECTED the
+    /// call (486; the queue re-dials). CC addon translates this into
+    /// `skill_group_agent_rejected` (per-round retry analytics).
+    async fn notify_rejected(&self, agent_id: &str, attempt: u32, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let _ = registry
+                .notify_agent_rejected(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    attempt,
+                    leg_id,
+                )
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a queued call CONNECTED to an agent
+    /// — the queue's success terminal. CC addon translates this into
+    /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.
+    async fn notify_connected(&self, agent_id: &str, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let _ = registry
+                .notify_call_connected(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    leg_id,
+                    wait_secs,
+                )
+                .await;
+        }
+    }
+
     /// Notify the agent dispatcher that a queued call could not be serviced
     /// and a fallback action executed. CC addon translates this into
     /// `skill_group_service_unavailable`.
@@ -747,9 +873,24 @@ impl QueueApp {
         }
     }
 
+    /// Remember an agent that rang for THIS call without being answered, so
+    /// wait-retention polls prefer a fresh candidate (no-answer rotation).
+    fn record_no_answer_agent(&mut self, agent_id: String) {
+        if agent_id.is_empty() || self.no_answer_agents.contains(&agent_id) {
+            return;
+        }
+        self.no_answer_agents.push(agent_id);
+    }
+
     /// Resolve the registry agent_id behind a dialed URI (falls back to the
     /// URI user part).
     async fn agent_id_for_uri(&self, uri: &str) -> String {
+        // Browser Contacts have temporary user parts; the registration owns the agent identity.
+        let registered_uri = self.get_agents().into_iter()
+            .find(|location| location.aor.to_string() == uri)
+            .and_then(|location| location.registered_aor.as_ref())
+            .map(ToString::to_string);
+        let uri = registered_uri.as_deref().unwrap_or(uri);
         if let Some(ref registry) = self.agent_registry {
             let agents = registry.list_agents().await;
             if let Some(a) = agents.iter().find(|a| a.uri == uri) {
@@ -767,7 +908,37 @@ impl QueueApp {
             return;
         }
         let name = self.resolve_agent_display_name(uri).await;
-        ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name));
+        ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name.clone()));
+        // Record the agent assignment in the CDR trace so the timeline shows
+        // WHICH agent the queue offered the call to (id + display name) and
+        // the queue / skill group it was dispatched from. Complements the
+        // RWI `queue_agent_offered` event; the terminal answer/reject traces
+        // then close the story.
+        let queue = self.config.name.clone();
+        let skill_group = self.skill_queue_id().to_string();
+        let label = if name.is_empty() {
+            agent_id.to_string()
+        } else {
+            format!("{} ({})", name, agent_id)
+        };
+        let mut detail = serde_json::json!({ "agent_id": agent_id });
+        if !name.is_empty() {
+            detail["agent_name"] = serde_json::Value::String(name);
+        }
+        if !queue.is_empty() {
+            detail["queue_name"] = serde_json::Value::String(queue.clone());
+        }
+        if !skill_group.is_empty() && skill_group != queue {
+            detail["skill_group"] = serde_json::Value::String(skill_group);
+        }
+        ctrl.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                format!("Offering call to agent {}", label),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info)
+            .detail(detail),
+        );
     }
 
     /// Release phantom agent states bound to THIS call (never-connected
@@ -814,6 +985,25 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<AppAction> {
+        // Idempotent re-entry: the app is ALREADY in wait retention. Restarting
+        // hold music / retention prompts / the announce here would duplicate
+        // them, so drop any stale dispatch claim and make sure the poll timer
+        // stays armed instead.
+        //
+        // The timer matters: `try_offer_from_wait` CANCELS `queue_retry` right
+        // before dialing, so a poll round whose resolved agents all became
+        // unavailable (or a late `dial_next_agent` kick from the session)
+        // depends on this re-entry to keep the clock running.
+        if matches!(
+            self.state,
+            QueueState::WaitingForAgent | QueueState::PlayingComfortPrompt
+        ) {
+            if let Some(ref registry) = self.agent_registry {
+                registry.fifo_release_dispatch(&self.call_id).await;
+            }
+            self.arm_queue_retry(ctrl);
+            return Ok(AppAction::Continue);
+        }
         info!(
             queue = %self.config.name,
             skill_group = ?self.config.skill_group,
@@ -821,7 +1011,9 @@ impl QueueApp {
         );
         // Self-heal: an agent stuck on a dead session would keep the queue
         // empty until the periodic watchdog tick.
-        if let Some(ref registry) = self.agent_registry {
+        if !self.targeted_recovery
+            && let Some(ref registry) = self.agent_registry
+        {
             let released = registry.reconcile_dead_call_bindings().await;
             if released > 0 {
                 info!(
@@ -842,19 +1034,36 @@ impl QueueApp {
         // alone is lossy under backpressure. Both are idempotent: an
         // existing row keeps its original enqueued_at → queue position is
         // preserved across dial-fail round-trips.
+        //
+        // The row write is UNCONDITIONAL (see `AgentRegistry::fifo_register_wait`
+        // docs): the monitor's queued list, longest-wait alerts and 30s queue
+        // snapshots all read it, so a wait-retention call must never skip it
+        // (gating it on `strict_fifo` used to hide entire queues). Skill-group
+        // rows use the group id — what the dispatch gate queries and what the
+        // monitor joins on; `allows_wait_retention` guarantees a skill group
+        // here, the display id is only a safety net.
         if let Some(ref registry) = self.agent_registry {
             registry.fifo_release_dispatch(&self.call_id).await;
-            let gate_group = self
+            let row_group = self
                 .current_group
                 .clone()
-                .or_else(|| self.config.skill_group.clone());
-            if let Some(gate_group) = gate_group {
-                registry
-                    .fifo_register_wait(&gate_group, &self.call_id, "", 0)
-                    .await;
-            }
+                .or_else(|| self.config.skill_group.clone())
+                .unwrap_or_else(|| self.config.name.clone());
+            // Carry the per-call priority so higher-priority waiters
+            // preempt earlier default-priority ones in the gate order
+            // (priority DESC, then enqueued_at ASC); the caller id keeps
+            // the monitor's queued list showing the real number.
+            registry
+                .fifo_register_wait(
+                    &row_group,
+                    &self.call_id,
+                    &self.caller,
+                    crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                )
+                .await;
         }
         self.state = QueueState::WaitingForAgent;
+        self.ringing_agent_legs.clear();
         self.start_hold_music(ctrl).await?;
         if self.config.announce_position {
             self.announce_position(ctrl).await?;
@@ -910,20 +1119,44 @@ impl QueueApp {
         };
 
         let target = format!("skill-group:{}", sg);
+        let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
         let mut uris = registry
-            .resolve_target_with_policy(&target, None, &self.call_id)
+            .resolve_target_with_exclusions(
+                &target,
+                None,
+                &self.call_id,
+                priority,
+                &self.no_answer_agents,
+            )
             .await;
+        // Exclusions must reach the resolver BEFORE it reserves or announces
+        // an agent. Once every eligible agent has rung, start a new rotation;
+        // keep the history if even an unrestricted poll has no candidates.
+        if uris.is_empty() && !self.no_answer_agents.is_empty() {
+            uris = registry
+                .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                .await;
+            if !uris.is_empty() {
+                self.no_answer_agents.clear();
+            }
+        }
         if uris.is_empty() {
             // Self-heal, then re-poll: heals this caller within one poll
             // instead of waiting for the periodic watchdog.
-            if registry.reconcile_dead_call_bindings().await > 0 {
+            if !self.targeted_recovery && registry.reconcile_dead_call_bindings().await > 0 {
                 info!(
                     queue = %self.config.name,
                     skill_group = %sg,
                     "Queue: dead agent bindings healed — re-polling candidates"
                 );
                 uris = registry
-                    .resolve_target_with_policy(&target, None, &self.call_id)
+                    .resolve_target_with_exclusions(
+                        &target,
+                        None,
+                        &self.call_id,
+                        priority,
+                        &self.no_answer_agents,
+                    )
                     .await;
             }
         }
@@ -971,7 +1204,7 @@ impl QueueApp {
             ctrl.cancel_timeout("agent_ring_timeout");
             self.timed_out_legs.extend(ringing.iter().cloned());
             info!(legs = ?ringing, "Queue: cancelling agent legs before fallback");
-            ctrl.remove_legs(&ringing);
+            ctrl.remove_legs(&ringing, "ring_timeout");
         }
 
         let (action, info) = match &self.plan.fallback {
@@ -981,7 +1214,7 @@ impl QueueApp {
             ),
             Some(QueueFallbackAction::Redirect { target }) => (
                 {
-                    info!(target = %target, "Queue: fallback redirect");
+                    info!(call_id = %self.call_id, target = %target, "Queue: fallback redirect");
                     AppAction::Transfer(target.to_string())
                 },
                 // The reason for the fallback, not the redirect's outcome.
@@ -1031,7 +1264,7 @@ impl QueueApp {
     fn get_fallback_action(&self, action: &FailureAction) -> AppAction {
         match action {
             FailureAction::Hangup { code, reason } => {
-                info!(?code, ?reason, "Queue: hangup fallback");
+                info!(call_id = %self.call_id, ?code, ?reason, "Queue: hangup fallback");
                 AppAction::Hangup {
                     reason: reason
                         .as_ref()
@@ -1045,7 +1278,7 @@ impl QueueApp {
                 status_code,
                 reason,
             } => {
-                info!("Queue: play then hangup fallback");
+                info!(call_id = %self.call_id, "Queue: play then hangup fallback");
                 AppAction::Hangup {
                     reason: reason
                         .as_ref()
@@ -1054,7 +1287,7 @@ impl QueueApp {
                 }
             }
             FailureAction::Transfer(endpoint) => {
-                info!(target = ?endpoint, "Queue: transfer fallback");
+                info!(call_id = %self.call_id, target = ?endpoint, "Queue: transfer fallback");
                 match endpoint {
                     crate::call::TransferEndpoint::Uri(uri) => AppAction::Transfer(uri.to_string()),
                     crate::call::TransferEndpoint::Queue(queue_name) => {
@@ -1088,6 +1321,23 @@ impl QueueApp {
             debug!(file = %audio_file, "Queue: starting hold music");
             self.hold_playback = Some(ctrl.play_audio(audio_file, true).await?);
         }
+        Ok(())
+    }
+
+    /// Replace queue music with the ringback callers expect after an agent's
+    /// leg has actually returned 180 Ringing.
+    async fn start_agent_ringback(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        debug!(file = %crate::call::DEFAULT_QUEUE_HOLD_AUDIO, "Queue: starting agent ringback");
+        self.transfer_token = None;
+        self.comfort_token = None;
+        self.state = QueueState::DialingAgents {
+            attempt: self.dial_attempts,
+        };
+        // Keep ringback active until the answer or timeout path replaces it.
+        self.hold_playback = Some(
+            ctrl.play_audio_with_options(crate::call::DEFAULT_QUEUE_HOLD_AUDIO, None, true, true)
+                .await?,
+        );
         Ok(())
     }
 
@@ -1133,7 +1383,29 @@ impl QueueApp {
     /// Locations already enriched (plan / dynamic lists) pass through
     /// unchanged; raw-URI dials (escalation `dial_agents`, autonomous
     /// auto-select, overflow) are enriched on the fly.
-    async fn leg_headers_for(&self, uri: &str) -> Vec<rsipstack::sip::Header> {
+    async fn leg_headers_for(&mut self, uri: &str) -> Vec<rsipstack::sip::Header> {
+        if self.pending_agents.is_empty() {
+            self.ring_policy = self.agent_registry.as_ref()
+                .and_then(|registry| registry.agent_ring_policy());
+        }
+        let mut headers = self.enriched_leg_headers_for(uri).await;
+        // Only the backend's explicit client mode opts an offer into expiry events.
+        headers.retain(|header| {
+            crate::call::sip::ring_timeout_offer(std::slice::from_ref(header)).is_none()
+        });
+        if let Some(policy) = self.ring_policy.as_ref().filter(|policy| !policy.server_owned)
+            && let Some(registry) = &self.agent_registry
+            && let Some(token) = registry.prepare_client_ring_offer(uri, &self.call_id, policy).await
+        {
+            headers.push(rsipstack::sip::Header::Other(
+                "Call-Info".into(),
+                format!("<{token}>;purpose=ring-timeout"),
+            ));
+        }
+        headers
+    }
+
+    async fn enriched_leg_headers_for(&self, uri: &str) -> Vec<rsipstack::sip::Header> {
         if let Some(loc) = self
             .get_agents()
             .into_iter()
@@ -1157,6 +1429,11 @@ impl QueueApp {
     }
 
     /// Check if we should use parallel dialing.
+    /// NOTE: an explicit `Parallel` dial strategy is honored even for
+    /// skill-group queues — it is an operator opt-in to ring-all. The default
+    /// (sequential) mode offers ONE agent at a time; the no-answer rotation
+    /// (`no_answer_agents` filter + per-agent wait-retention re-entry) applies
+    /// to that default path.
     fn is_parallel(&self) -> bool {
         matches!(self.plan.dial_strategy, Some(DialStrategy::Parallel(_)))
     }
@@ -1216,6 +1493,54 @@ impl QueueApp {
     async fn resolve_agents(&mut self) {
         if let Some(ref registry) = self.agent_registry {
             let queue_id = self.config.name.as_str();
+
+            // Skill-group queues MUST re-resolve through the CC adapter's
+            // dispatch route, never via `find_available_agents`: that helper
+            // is a skill-filtered listing with NO strict-FIFO gate, NO ACD
+            // policy and NO `skill_group_*` announcements. Production
+            // evidence (call cdb5ab9c…, 2026-10-21 03:21): the adapter
+            // resolve had just answered `acd_blocked`, yet this path dialled
+            // the agent anyway — `queue_agent_offered` with NO
+            // `skill_group_agent_assigned`, breaking the offered ≤ assigned
+            // parity that dequeue analytics (and `assert_skill_group_parity`)
+            // depend on. The adapter route emits the same event family as
+            // the pre-resolve: an assignment when it dispatches, a
+            // queued/no-agent announcement otherwise (the call then stays in
+            // wait retention and polls like any deferred caller).
+            // Plain backends (memory / test registries) declare no skill-group
+            // dispatch support and keep the legacy listing below.
+            if registry.supports_skill_group_dispatch()
+                && let Some(skill_group) = self
+                    .current_group
+                    .clone()
+                    .or_else(|| self.config.skill_group.clone())
+            {
+                let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
+                let target = format!("skill-group:{}", skill_group);
+                let uris = registry
+                    .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                    .await;
+                if !uris.is_empty() {
+                    let locations: Vec<Location> = uris
+                        .into_iter()
+                        .map(|uri| Location {
+                            aor: uri.parse().unwrap_or_default(),
+                            contact_raw: Some(uri),
+                            ..Default::default()
+                        })
+                        .collect();
+                    let locations = self.enrich_locations(locations).await;
+                    info!(
+                        "Queue: resolved {} dynamic agents for queue '{}' (skill group {})",
+                        locations.len(),
+                        queue_id,
+                        skill_group
+                    );
+                    self.dynamic_agents = Some(locations);
+                }
+                return;
+            }
+
             let skills = &self.config.required_skills;
 
             let agents = registry.find_available_agents(skills).await;
@@ -1251,7 +1576,8 @@ impl QueueApp {
     /// Answer the call if not already answered and a busy prompt is configured
     /// (playing it requires a media path).
     async fn answer_if_busy_prompt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
-        if !self.answered
+        if self.busy_prompt_enabled
+            && !self.answered
             && self
                 .prompts()
                 .and_then(|p| p.busy_prompt.as_ref())
@@ -1263,10 +1589,31 @@ impl QueueApp {
         Ok(())
     }
 
+    fn effective_ring_timeout(&self) -> Duration {
+        const DEFAULT_RING_SECS: u64 = 30;
+        let desk = self
+            .agent_registry
+            .as_ref()
+            .and_then(|registry| registry.agent_ring_timeout());
+        // Timer ownership: an explicitly configured desk window (≠ the 30 s
+        // default) is the operator's deliberate choice and WINS over the
+        // queue-configured per-ring timeout. A queue-configured timeout wins
+        // only over the desk DEFAULT — otherwise the default would silently
+        // shadow every queue's `wait_timeout_secs`.
+        if let Some(configured) = self.config.ring_timeout
+            && desk.is_none_or(|t| t == Duration::from_secs(DEFAULT_RING_SECS))
+        {
+            return configured;
+        }
+        if !self.pending_agents.is_empty() && let Some(policy) = &self.ring_policy {
+            return policy.timeout;
+        }
+        desk.unwrap_or(Duration::from_secs(DEFAULT_RING_SECS))
+    }
+
     /// Arm the per-agent ring timeout (default 30s).
     fn arm_ring_timeout(&self, ctrl: &mut CallController) {
-        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
-        ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+        ctrl.set_timeout("agent_ring_timeout", self.effective_ring_timeout());
     }
 
     /// Announce queue position.
@@ -1290,6 +1637,31 @@ impl QueueApp {
     }
 
     /// Handle agent unavailable (busy or no answer).
+    /// The call re-enters the queue after an agent attempt failed (no-answer
+    /// / cancel / reject) and keeps queuing in the SAME queue — next
+    /// candidate or another wait-retention round. Announce the re-entry with
+    /// `queue_joined{attempt: n}` so consumers that keyed on `queue_joined`
+    /// see the call is queued again; the first join keeps the pre-field
+    /// wire payload (no `attempt`). A skill-GROUP switch is a different
+    /// contract (`queue_left` + `queue_overflow_joined`) and never lands
+    /// here.
+    fn emit_queue_rejoined(&mut self) {
+        self.join_attempt = self.join_attempt.saturating_add(1);
+        let groups = self.all_skill_groups();
+        self.emit_rwi(&crate::rwi::event::QueueJoined {
+            call_id: self.call_id.clone(),
+            queue_id: self.config.name.clone(),
+            skill_groups: if groups.is_empty() {
+                None
+            } else {
+                Some(groups)
+            },
+            priority: (self.config.priority != 0).then_some(self.config.priority),
+            attempt: (self.join_attempt > 1).then_some(self.join_attempt),
+            agent_id: None,
+        });
+    }
+
     /// Tries next agent if available; otherwise plays fallback prompt.
     async fn handle_agent_unavailable(
         &mut self,
@@ -1309,6 +1681,15 @@ impl QueueApp {
             );
             return Ok(AppAction::Continue);
         }
+        let ringback_ended = if let Some(failed_leg_id) = failed_leg_id {
+            self.ringing_agent_legs.remove(failed_leg_id)
+        } else if !self.is_parallel() {
+            let was_ringing = !self.ringing_agent_legs.is_empty();
+            self.ringing_agent_legs.clear();
+            was_ringing
+        } else {
+            false
+        };
         if self.is_parallel() {
             if let Some(failed_leg_id) = failed_leg_id {
                 let pending_before = self.pending_agents.len();
@@ -1329,6 +1710,9 @@ impl QueueApp {
                     remaining_agents = self.pending_agents.len(),
                     "Queue: parallel agent failed; waiting for remaining agents"
                 );
+                if ringback_ended && self.ringing_agent_legs.is_empty() {
+                    self.start_hold_music(ctrl).await?;
+                }
                 return Ok(AppAction::Continue);
             }
 
@@ -1340,6 +1724,7 @@ impl QueueApp {
                 self.release_phantom_agents(None).await;
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;
+                self.emit_queue_rejoined();
                 return self.enter_waiting_for_agent(ctrl).await;
             }
 
@@ -1354,6 +1739,34 @@ impl QueueApp {
         }
         self.current_agent_idx += 1;
         self.dial_attempts += 1;
+
+        // Skill-group queues: a ring NO-ANSWER round-trips the call through
+        // wait retention after EVERY failed agent instead of burning the rest
+        // of the resolved round. The next poll offers a fresh candidate (the
+        // just-failed agent is excluded via `no_answer_agents`), exactly one
+        // agent rings at a time, and the webhook observes
+        // `queue_joined{attempt:n}` per assignment. Explicit rejections
+        // (Busy/486) now share that exclusion — the rejecting agent is also
+        // recorded in `no_answer_agents` for the round and reconciled via
+        // `note_agent_rejected` (break restore / cooldown), because a client
+        // auto-rejecting while the server shows idle is presence drift, and
+        // re-dialing it loops (see test_queue_rejected_rwi_e2e). Non-skill-
+        // group queues keep the legacy dial-next behavior entirely.
+        if matches!(reason, AgentUnavailableReason::NoAnswer) && self.allows_wait_retention() {
+            if self.fallback_executed {
+                debug!(
+                    queue = %self.config.name,
+                    "Queue: fallback already executed — skipping wait-retention re-entry"
+                );
+                return Ok(AppAction::Continue);
+            }
+            info!("Queue: agent no-answer — returning to wait retention for the next offer");
+            self.release_phantom_agents(None).await;
+            self.dynamic_agents = None;
+            self.current_agent_idx = 0;
+            self.emit_queue_rejoined();
+            return self.enter_waiting_for_agent(ctrl).await;
+        }
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
@@ -1372,6 +1785,7 @@ impl QueueApp {
                 self.release_phantom_agents(None).await;
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;
+                self.emit_queue_rejoined();
                 return self.enter_waiting_for_agent(ctrl).await;
             }
             return self
@@ -1379,7 +1793,16 @@ impl QueueApp {
                 .await;
         }
 
-        // More agents remaining — dial the next one immediately
+        // More agents remain in the SAME resolve round — dial the next one
+        // immediately (a 486 rejection continues the round: the next candidate
+        // of the SAME resolve rings without a new skill_group announcement).
+        // This is a round CONTINUATION, not a re-entry: no
+        // `queue_joined{attempt}` here (it would break the queue_joined ↔
+        // skill_group_call_joined parity — the round's join was announced
+        // once at its first result-bearing activity).
+        if ringback_ended && self.ringing_agent_legs.is_empty() {
+            self.start_hold_music(ctrl).await?;
+        }
         self.dial_next_agent(ctrl).await
     }
 
@@ -1429,7 +1852,10 @@ impl QueueApp {
 
         let prompts = self.prompts();
         let prompt_path = match reason {
+            // Skip only the announcement; queue failure handling must still run.
+            AgentUnavailableReason::Busy if !self.busy_prompt_enabled => None,
             AgentUnavailableReason::Busy => prompts.and_then(|p| p.busy_prompt.as_ref()),
+            AgentUnavailableReason::NoAnswer if !self.no_answer_prompt_enabled => None,
             AgentUnavailableReason::NoAnswer => prompts.and_then(|p| p.no_answer_prompt.as_ref()),
         };
         // The fallback MUST run even when the prompt cannot be played (e.g.
@@ -1501,6 +1927,10 @@ impl QueueApp {
 
     /// Check and play comfort prompts between hold music loops.
     async fn maybe_play_comfort_or_ewt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        // Suppress wait announcements at both queue entry and music completion.
+        if !self.comfort_prompt_enabled {
+            return Ok(());
+        }
         let now = Instant::now();
 
         // 1. Comfort prompts
@@ -1577,6 +2007,32 @@ impl QueueApp {
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             warn!("Queue: no more agents to dial");
+            // The session injects this kick for skill-group queues regardless
+            // of the pre-resolve result, so a LATE kick can arrive in any
+            // state. Only a dial round that genuinely exhausted its list may
+            // proceed past this point; a kick arriving during the busy /
+            // no-answer / final prompts, the fallback itself or a terminal
+            // state must not replay the prompt nor double-execute the
+            // fallback (`play_unavailable_prompt_and_then_fallback` re-runs it
+            // — it has no `abandoned_recorded` early return).
+            if self.abandoned_recorded
+                || matches!(
+                    self.state,
+                    QueueState::PlayingBusyPrompt
+                        | QueueState::PlayingNoAnswerPrompt
+                        | QueueState::PlayingFinalPrompt
+                        | QueueState::ExecutingFallback
+                        | QueueState::Done
+                )
+            {
+                debug!(
+                    queue = %self.config.name,
+                    state = ?self.state,
+                    abandoned_recorded = self.abandoned_recorded,
+                    "Queue: late dial kick after fallback started — ignoring"
+                );
+                return Ok(AppAction::Continue);
+            }
             if self.allows_wait_retention() {
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;
@@ -1613,7 +2069,7 @@ impl QueueApp {
         }
         self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
         match ctrl
-            .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+            .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
             .await
         {
             Ok(call_id) => {
@@ -1625,9 +2081,11 @@ impl QueueApp {
                 // the INVITE never went out, so the agent must be released
                 // immediately or it stays Ringing forever.
                 if let Some(ref registry) = self.agent_registry
-                    && registry
-                        .release_call(&attempt_agent_id, &self.call_id)
-                        .await
+                    && if self.targeted_recovery {
+                        registry.release_unanswered_reservation(&attempt_agent_id, &self.call_id).await
+                    } else {
+                        registry.release_call(&attempt_agent_id, &self.call_id).await
+                    }
                 {
                     info!(agent = %uri, "Queue: released reservation after originate failure");
                 }
@@ -1731,6 +2189,7 @@ impl QueueApp {
                 && !self.escalated_groups.contains(&step.add_skill_group)
             {
                 info!(
+                    call_id = %self.call_id,
                     queue = %self.config.name,
                     wait_secs,
                     threshold = step.threshold_secs,
@@ -1770,6 +2229,10 @@ impl QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: self.config.name.clone(),
                     skill_group: step.add_skill_group.clone(),
+                    // The tap re-registers the shared-queue row on this event
+                    // (MoveOverflow = delete + insert) — carry the priority or
+                    // the call would silently drop back to the default tier.
+                    priority: (self.config.priority != 0).then_some(self.config.priority),
                 });
 
                 if let Some(ref registry) = self.agent_registry {
@@ -1873,8 +2336,14 @@ impl QueueApp {
                 .iter()
                 .map(|(_, cid)| cid.clone())
                 .collect();
-            ctrl.remove_legs(&old_legs);
+            ctrl.remove_legs(&old_legs, "stage_switch");
             self.pending_agents.clear();
+        }
+        if !self.ringing_agent_legs.is_empty() {
+            self.ringing_agent_legs.clear();
+            if let Err(error) = self.start_hold_music(ctrl).await {
+                warn!(error = %error, "Queue: failed to restore hold music after cancelling agent legs");
+            }
         }
         // The ring timeout armed for the OLD group's dial must die with the
         // legs — a stale fire after the group switch drains the NEW group's
@@ -1917,7 +2386,7 @@ impl QueueApp {
             self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
             let leg_headers = self.leg_headers_for(uri).await;
             match ctrl
-                .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers)
+                .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                 .await
             {
                 Ok(call_id) => {
@@ -1945,7 +2414,8 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<()> {
-        if self.transfer_prompt_played {
+        // Apply the global policy before resolving queue or escalation prompts.
+        if !self.transfer_prompt_enabled || self.transfer_prompt_played {
             return Ok(());
         }
         let prompts = self.prompts();
@@ -2050,6 +2520,14 @@ impl QueueApp {
 
 #[async_trait]
 impl CallApp for QueueApp {
+    async fn on_queue_diagnostic(
+        &mut self,
+        request: &QueueDiagnosticRequest,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        self.diagnose_dispatch(request, ctrl).await
+    }
+
     fn app_type(&self) -> CallAppType {
         CallAppType::Queue
     }
@@ -2064,9 +2542,15 @@ impl CallApp for QueueApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
-        info!(queue = %queue_id, "Queue: entering queue application");
+        info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
+        self.caller = ctx.call_info.caller.clone();
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
+        self.transfer_prompt_enabled = ctx.config.proxy.queue_transfer_prompt_enabled;
+        self.comfort_prompt_enabled = ctx.config.proxy.queue_comfort_prompt_enabled;
+        self.busy_prompt_enabled = ctx.config.proxy.queue_busy_prompt_enabled;
+        self.agent_ringback_enabled = ctx.config.proxy.queue_agent_ringback_enabled;
+        self.no_answer_prompt_enabled = ctx.config.proxy.queue_no_answer_prompt_enabled;
 
         // Capture the RWI gateway so that `on_exit` (which has no context) can
         // still emit abandon events later in the lifecycle.
@@ -2096,6 +2580,13 @@ impl CallApp for QueueApp {
                 } else {
                     Some(groups)
                 },
+                // Absent == 0 so default-priority flows keep the exact same
+                // wire payload as before the field existed.
+                priority: (self.config.priority != 0).then_some(self.config.priority),
+                // First join of this entry — re-joins after an agent miss
+                // carry attempt >= 2 (see `emit_queue_rejoined`).
+                attempt: None,
+                agent_id: None,
             });
         }
 
@@ -2172,7 +2663,13 @@ impl CallApp for QueueApp {
             let strategy = self.config.routing_strategy;
 
             if let Some(agent) = registry
-                .select_agent_with_policy(skills, strategy, None, &self.call_id)
+                .select_agent_with_priority(
+                    skills,
+                    strategy,
+                    None,
+                    &self.call_id,
+                    crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                )
                 .await
             {
                 info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
@@ -2192,11 +2689,12 @@ impl CallApp for QueueApp {
                     .await;
                 let leg_headers = self.leg_headers_for(&agent.uri).await;
                 let call_id = ctrl
-                    .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers)
+                    .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                     .await?;
 
                 self.record_attempted_agent(agent.agent_id.clone());
-                self.pending_agents.push((agent.uri.clone(), call_id));
+                self.pending_agents
+                    .push((agent.uri.clone(), call_id.clone()));
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -2217,6 +2715,8 @@ impl CallApp for QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: queue_id.clone(),
                     agent_id: agent.agent_id.clone(),
+                    leg_id: Some(call_id.clone()),
+                    leg_role: None,
                 });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
@@ -2308,7 +2808,7 @@ impl CallApp for QueueApp {
                     self.record_attempted_agent(attempt_agent_id.clone());
                     self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
                     match ctrl
-                        .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+                        .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                         .await
                     {
                         Ok(call_id) => {
@@ -2475,6 +2975,12 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
 
+        if let super::AppEvent::Custom { name, data } = &event
+            && name == "queue_recovery_dial_failed"
+        {
+            return self.recovery_dial_failed(data, ctrl).await;
+        }
+
         match event {
             super::AppEvent::Custom { name, data } => match QueueSignal::from_custom(&name, &data)
             {
@@ -2504,7 +3010,7 @@ impl CallApp for QueueApp {
                                 leg = %agent_leg,
                                 "Queue: ignoring late answer for a ring-timeout-cancelled leg"
                             );
-                            ctrl.remove_legs(&[agent_leg]);
+                            ctrl.remove_legs(&[agent_leg], "superseded");
                             return Ok(AppAction::Continue);
                         }
                         // Select the winner before prompts or cleanup can resume media.
@@ -2522,6 +3028,7 @@ impl CallApp for QueueApp {
                         // A queued stop could run after
                         // that switch and interrupt the connected media.
                         self.hold_playback = None;
+                        self.ringing_agent_legs.clear();
                         self.transfer_token = None;
                         self.comfort_token = None;
 
@@ -2550,7 +3057,7 @@ impl CallApp for QueueApp {
                                     "Queue: cancelling {} non-answering parallel legs",
                                     other_legs.len()
                                 );
-                                ctrl.remove_legs(&other_legs);
+                                ctrl.remove_legs(&other_legs, "superseded");
                             }
                         }
 
@@ -2572,12 +3079,20 @@ impl CallApp for QueueApp {
                             .await;
 
                         // Emit RWI queue lifecycle events at connect time: agent
-                        // connected, then the call left the queue (dequeue). This
-                        // mirrors the ACD engine's Connected/CallDequeued emission.
+                        // connected, then the call left the queue (dequeue).
+                        // `queue_left` is TERMINAL in the Option-A contract: it
+                        // fires only on the final transition out of the queue
+                        // (connected / abandoned / timeout / overflow) — never
+                        // at assignment. Assignment is reported by the CC
+                        // adapter via `skill_group_agent_assigned`, and the
+                        // ringing window (offered → connected) must carry no
+                        // `queue_left` at all.
                         self.emit_rwi(&crate::rwi::event::QueueAgentConnected {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: connected_agent_id.clone(),
+                            leg_role: None,
+                            leg_id: Some(agent_leg.clone()),
                         });
                         self.emit_rwi(&crate::rwi::event::QueueLeft {
                             call_id: self.call_id.clone(),
@@ -2592,6 +3107,12 @@ impl CallApp for QueueApp {
                                 }
                             },
                         });
+
+                        // CC adapter analytics: agent answered →
+                        // `skill_group_agent_connected` +
+                        // `skill_group_call_left{connected}` (full history).
+                        self.notify_connected(&connected_agent_id, &agent_leg)
+                            .await;
 
                         // The winner's bridge command precedes playback. Play the
                         // caller-only service prompt if configured, then exit.
@@ -2608,6 +3129,12 @@ impl CallApp for QueueApp {
                     if self.timed_out_legs.contains(&leg_id) {
                         debug!(leg = %leg_id, "Queue: ignoring ringing for a ring-timeout-cancelled leg");
                         return Ok(AppAction::Continue);
+                    }
+                    if self.agent_ringback_enabled
+                        && self.ringing_agent_legs.insert(leg_id.clone())
+                        && self.ringing_agent_legs.len() == 1
+                    {
+                        self.start_agent_ringback(ctrl).await?;
                     }
                     if let Some(agent_id) = agent_id.as_deref() {
                         info!(agent = %agent_id, "Queue: agent ringing");
@@ -2628,6 +3155,8 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: agent_id.to_string(),
+                            leg_role: None,
+                            leg_id: Some(leg_id),
                         });
                     }
                     Ok(AppAction::Continue)
@@ -2652,10 +3181,97 @@ impl CallApp for QueueApp {
                         debug!(leg, "Queue: ignoring busy for a ring-timeout-cancelled leg");
                         return Ok(AppAction::Continue);
                     }
-                    if !agent_id.is_empty()
-                        && let Some(ref registry) = self.agent_registry
-                    {
-                        let _ = registry.release_call(&agent_id, &self.call_id).await;
+                    if !agent_id.is_empty() {
+                        // Documented RWI contract that was never wired: the
+                        // 486-busy rejection broadcasts `queue_agent_rejected`
+                        // (leg_role "agent"), mirroring the ring-timeout
+                        // `queue_agent_no_answer` path (notify → broadcast →
+                        // release → unavailable handling).
+                        ctrl.notify_event(
+                            "queue.agent_rejected",
+                            serde_json::json!({
+                                "call_id": self.call_id,
+                                "agent_id": &agent_id,
+                                "queue_id": self.config.name,
+                            }),
+                        )
+                        .await?;
+
+                        self.emit_rwi(&crate::rwi::event::QueueAgentRejected {
+                            call_id: self.call_id.clone(),
+                            queue_id: self.config.name.clone(),
+                            agent_id: agent_id.clone(),
+                            attempt: self.dial_attempts,
+                            leg_role: None,
+                            leg_id: leg_id.clone(),
+                        });
+
+                        // CC adapter analytics: `skill_group_agent_rejected`
+                        // for this round (attempt aligns with the assignment).
+                        self.notify_rejected(
+                            &agent_id,
+                            self.dial_attempts,
+                            leg_id.as_deref().unwrap_or(""),
+                        )
+                        .await;
+
+                        if let Some(registry) = self.agent_registry.clone() {
+                            // A 486 is a client-side readiness signal, not a
+                            // capacity signal: reconcile the agent like a
+                            // no-answer (restore the client-declared break /
+                            // cooldown / streak) BEFORE the generic release,
+                            // then record them in THIS round's exclusion set
+                            // so wait retention cannot immediately re-dial
+                            // the same auto-rejecting agent (the 486 loop).
+                            let outcome = registry
+                                .note_agent_rejected(
+                                    &agent_id,
+                                    &self.call_id,
+                                    self.ring_policy.as_ref(),
+                                )
+                                .await;
+                            let _ = registry.release_call(&agent_id, &self.call_id).await;
+                            self.record_no_answer_agent(agent_id.clone());
+
+                            // Terminal CDR trace: closes the "Offering call
+                            // to agent X" entry so the timeline shows the
+                            // assignment was made and refused.
+                            let state_mismatch = outcome.state_mismatch();
+                            let outcome_detail =
+                                serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+                            ctrl.record_trace(
+                                crate::call_errors::TraceEvent::new(
+                                    crate::call_errors::TraceKind::Queue,
+                                    format!(
+                                        "Agent {} rejected the assignment (486 Busy)",
+                                        &agent_id
+                                    ),
+                                )
+                                .severity(crate::call_errors::ErrSeverity::Warn)
+                                .detail(serde_json::json!({
+                                    "agent_id": &agent_id,
+                                    "sip_status": 486,
+                                    "attempt": self.dial_attempts,
+                                    "queue_id": self.config.name,
+                                    "outcome": outcome_detail,
+                                    "state_mismatch": state_mismatch,
+                                })),
+                            );
+
+                            // Instant "assigned but not answered" alert —
+                            // a burned ring slot is immediately actionable.
+                            registry
+                                .emit_assign_failed_alert(&AssignFailedAlert {
+                                    call_id: self.call_id.clone(),
+                                    queue_id: self.config.name.clone(),
+                                    agent_id: agent_id.clone(),
+                                    attempt: self.dial_attempts as u32,
+                                    reason: AssignFailReason::Rejected,
+                                    sip_status: Some(486),
+                                    outcome: Some(outcome),
+                                })
+                                .await;
+                        }
                     }
                     self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy, leg_id.as_deref())
                         .await
@@ -2675,9 +3291,47 @@ impl CallApp for QueueApp {
                         return Ok(AppAction::Continue);
                     }
                     if !agent_id.is_empty()
-                        && let Some(ref registry) = self.agent_registry
+                        && let Some(registry) = self.agent_registry.clone()
                     {
+                        // Same no-answer policy as the ring-timeout handler:
+                        // the agent did not answer, so release them per
+                        // `no_answer_cooldown_secs` (default: straight back to
+                        // Idle). `release_call` then only mops up an exotic
+                        // phantom `Busy` (it no-ops once the agent is Idle).
+                        registry
+                            .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
+                            .await;
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
+                        self.record_no_answer_agent(agent_id.clone());
+
+                        // Terminal CDR trace for the missed assignment
+                        // (mirrors the 486 reject entry).
+                        ctrl.record_trace(
+                            crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Queue,
+                                format!("Agent {} did not answer (ring timeout)", &agent_id),
+                            )
+                            .severity(crate::call_errors::ErrSeverity::Warn)
+                            .detail(serde_json::json!({
+                                "agent_id": &agent_id,
+                                "attempt": self.dial_attempts,
+                                "queue_id": self.config.name,
+                            })),
+                        );
+
+                        // Instant "assigned but not answered" alert — same
+                        // plane as the 486 reject path.
+                        registry
+                            .emit_assign_failed_alert(&AssignFailedAlert {
+                                call_id: self.call_id.clone(),
+                                queue_id: self.config.name.clone(),
+                                agent_id: agent_id.clone(),
+                                attempt: self.dial_attempts as u32,
+                                reason: AssignFailReason::NoAnswer,
+                                sip_status: None,
+                                outcome: None,
+                            })
+                            .await;
                     }
                     self.handle_agent_unavailable(
                         ctrl,
@@ -2694,7 +3348,18 @@ impl CallApp for QueueApp {
                     )
                     .await
                 }
-                Some(QueueSignal::DialNext) => self.dial_next_agent(ctrl).await,
+                Some(QueueSignal::DialNext) => {
+                    // A delayed original kick must not repeat a recovered offer or
+                    // re-enter dialing after the customer has already connected.
+                    if !matches!(self.state, QueueState::DialingAgents { .. })
+                        || !self.pending_agents.is_empty()
+                        || !self.ringing_agent_legs.is_empty()
+                        || self.call_already_connected()
+                    {
+                        return Ok(AppAction::Continue);
+                    }
+                    self.dial_next_agent(ctrl).await
+                }
                 None => Ok(AppAction::Continue),
             },
             _ => Ok(AppAction::Continue),
@@ -2709,7 +3374,15 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         match id.as_str() {
             "agent_ring_timeout" => {
-                info!("Queue: agent ring timeout, handling no-answer");
+                // A recovery rejection can cancel a timer after its event was queued.
+                // With no pending or ringing leg it cannot represent a no-answer.
+                if !self.recovery_requests.is_empty()
+                    && self.pending_agents.is_empty()
+                    && self.ringing_agent_legs.is_empty()
+                {
+                    return Ok(AppAction::Continue);
+                }
+                info!(call_id = %self.call_id, "Queue: agent ring timeout, handling no-answer");
 
                 // Second line of defense (the timer is cancelled on connect):
                 // if an agent already answered, a late fire must not reset
@@ -2745,16 +3418,31 @@ impl CallApp for QueueApp {
                     self.timed_out_legs.insert(leg_id.clone());
                 }
                 if !timed_out_legs.is_empty() {
+                    if let Some(registry) = &self.agent_registry {
+                        // Arm acknowledgement before CANCEL can deliver the expiry event.
+                        for (uri, _) in &timed_out_agents {
+                            registry.expire_client_ring_offer(uri, &self.call_id).await;
+                        }
+                    }
                     info!(
                         legs = ?timed_out_legs,
                         "Queue: cancelling agent legs after ring timeout"
                     );
-                    ctrl.remove_legs(&timed_out_legs);
+                    ctrl.remove_legs(&timed_out_legs, "ring_timeout");
+                    // The leg-scoped `call_hangup{reason:"ring_timeout"}` is
+                    // emitted by the SESSION when it processes the LegRemove
+                    // above (a different task). Yield the dispatch loop briefly
+                    // so the miss hangup lands BEFORE this round's no-answer
+                    // fan-out — consumers read the per-leg miss teardown as
+                    // the round's opening terminal. Kept short: unit tests
+                    // advance the fallback within ~100 ms of the trigger.
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                 }
 
+                let mut timed_out_agent_ids: Vec<String> = Vec::new();
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
-                    for (uri, _) in &timed_out_agents {
+                    for (uri, leg_id) in &timed_out_agents {
                         let agent_id = all_agents
                             .iter()
                             .find(|a| a.uri == *uri)
@@ -2763,7 +3451,34 @@ impl CallApp for QueueApp {
                                 extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
                             });
                         let _ = registry
-                            .note_agent_no_answer(&agent_id, &self.call_id)
+                            .note_agent_no_answer_with_policy(&agent_id, &self.call_id, self.ring_policy.as_ref())
+                            .await;
+                        timed_out_agent_ids.push(agent_id.clone());
+
+                        // Terminal CDR trace + instant alert for the missed
+                        // assignment (mirrors the 486 reject entry).
+                        ctrl.record_trace(
+                            crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Queue,
+                                format!("Agent {} did not answer (ring timeout)", &agent_id),
+                            )
+                            .severity(crate::call_errors::ErrSeverity::Warn)
+                            .detail(serde_json::json!({
+                                "agent_id": &agent_id,
+                                "attempt": self.dial_attempts,
+                                "queue_id": self.config.name,
+                            })),
+                        );
+                        registry
+                            .emit_assign_failed_alert(&AssignFailedAlert {
+                                call_id: self.call_id.clone(),
+                                queue_id: self.config.name.clone(),
+                                agent_id: agent_id.clone(),
+                                attempt: self.dial_attempts as u32,
+                                reason: AssignFailReason::NoAnswer,
+                                sip_status: None,
+                                outcome: None,
+                            })
                             .await;
 
                         ctrl.notify_event(
@@ -2781,8 +3496,18 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
+                            leg_role: None,
+                            leg_id: Some(leg_id.clone()),
                         });
+
+                        // CC adapter analytics: `skill_group_agent_no_answer`
+                        // for this round (attempt aligns with the assignment).
+                        self.notify_no_answer(&agent_id, self.dial_attempts, leg_id)
+                            .await;
                     }
+                }
+                for agent_id in timed_out_agent_ids {
+                    self.record_no_answer_agent(agent_id);
                 }
 
                 self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer, None)
@@ -2812,7 +3537,7 @@ impl CallApp for QueueApp {
                     // the caller mid-ring. One-shot: without the flag the
                     // handler would re-grant the grace forever.
                     self.max_wait_grace_used = true;
-                    let grace = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
+                    let grace = self.effective_ring_timeout();
                     debug!(
                         queue = %self.config.name,
                         grace = grace.as_secs(),
@@ -2821,7 +3546,7 @@ impl CallApp for QueueApp {
                     ctrl.set_timeout("max_wait_timeout", grace);
                     return Ok(AppAction::Continue);
                 }
-                info!("Queue: max wait timeout, executing fallback");
+                info!(call_id = %self.call_id, "Queue: max wait timeout, executing fallback");
                 ctrl.cancel_timeout("queue_retry");
                 // The wait is over — the fallback path owns the call now.
                 // Without this cancel a same-tick escalation_check could
@@ -2855,6 +3580,14 @@ impl CallApp for QueueApp {
             }
             "queue_retry" => {
                 debug!("Queue: wait retention poll");
+                // Static queues reach this retry only after a guarded dial rejection.
+                if !self.allows_wait_retention()
+                    && matches!(self.state, QueueState::DialingAgents { .. })
+                    && self.pending_agents.is_empty()
+                    && self.recovery_requests.iter().any(|(_, legs)| !legs.is_empty())
+                {
+                    return self.dial_next_agent(ctrl).await;
+                }
                 self.try_offer_from_wait(ctrl).await
             }
             "escalation_check" => {
@@ -2879,7 +3612,11 @@ impl CallApp for QueueApp {
         // served by another agent). Without this the agent stays Busy forever
         // — `on_call_ended` attributes the session to the agent that actually
         // answered, so nobody else clears the phantom.
-        self.release_phantom_agents(None).await;
+        if self.targeted_recovery {
+            self.release_unanswered_recovery_reservations(None, false).await;
+        } else {
+            self.release_phantom_agents(None).await;
+        }
 
         // Update statistics if call was not connected (abandoned). A transfer
         // prompt with `connected_agent: Some(_)` means the agent already

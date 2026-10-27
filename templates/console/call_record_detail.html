@@ -132,6 +132,32 @@
                             <span x-text="record.route_name"></span>
                         </span>
                     </template>
+                    <template x-if="record.agent || record.agent_id">
+                        <span class="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-semibold text-indigo-700"
+                            :title="record.agent_id ? 'Agent ID: ' + record.agent_id : ''">
+                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M10 10a3 3 0 100-6 3 3 0 000 6z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 17a6 6 0 0112 0" />
+                            </svg>
+                            <span x-text="record.agent || record.agent_id"></span>
+                            <span class="font-mono text-indigo-500"
+                                x-show="record.agent && record.agent_id" x-text="'· ' + record.agent_id"></span>
+                        </span>
+                    </template>
+                    <template x-if="record.queue || record.skill_group">
+                        <span class="inline-flex items-center gap-1 rounded-full bg-teal-50 px-3 py-1 text-[11px] font-semibold text-teal-600"
+                            :title="record.skill_group ? 'Skill group: ' + record.skill_group : ''">
+                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 7a2 2 0 100-4 2 2 0 000 4z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16a4 4 0 018 0" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 7.5a1.8 1.8 0 100-3.6 1.8 1.8 0 000 3.6z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 16a3.2 3.2 0 016.5 0" />
+                            </svg>
+                            <span x-text="record.queue || record.skill_group"></span>
+                            <span x-show="record.queue && record.skill_group && record.queue !== record.skill_group"
+                                x-text="'· ' + record.skill_group"></span>
+                        </span>
+                    </template>
                     <template x-if="record.self_ip">
                         <span
                             class="inline-flex items-center gap-1 rounded-full bg-violet-50 px-3 py-1 text-[11px] font-semibold text-violet-700"
@@ -162,7 +188,7 @@
             </div>
             <div class="flex flex-wrap items-center gap-3 text-sm">
                 <a :href="actions.download_cdr_json || '#'" download
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                    class="inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round"
                             d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 15.5h12" />
@@ -560,13 +586,90 @@
                                             </template>
                                         </div>
                                         <p class="mt-0.5 text-sm text-slate-600" x-text="ev.message"></p>
-                                        <template x-if="hasTraceDetail(ev)">
-                                            <pre class="mt-1 max-h-40 overflow-auto rounded-md bg-slate-50 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-slate-500 ring-1 ring-slate-200"
-                                                x-text="traceDetail(ev)"></pre>
-                                        </template>
                                         <template x-if="ev.kind === 'play' && ev.duration_ms != null">
                                             <p class="mt-0.5 text-xs text-slate-400"
                                                 x-text="'duration: ' + formatTraceMs(ev.duration_ms) + (ev.interrupted ? ' · interrupted' : ' · completed')"></p>
+                                        </template>
+                                        <template x-if="hasTraceDetail(ev)">
+                                            <div class="mt-2">
+                                                <!-- Per-leg media stat cards (media_health snapshots) -->
+                                                <template x-if="traceLegs(ev).length">
+                                                    <div class="grid gap-2 lg:grid-cols-2">
+                                                        <template x-for="(leg, li) in traceLegs(ev)" :key="li">
+                                                            <div class="rounded-lg px-3 py-2 ring-1"
+                                                                :class="leg.stalled ? 'bg-red-50/40 ring-red-200' : 'bg-slate-50 ring-slate-200'">
+                                                                <div class="flex flex-wrap items-center gap-1.5">
+                                                                    <span class="text-[11px] font-semibold text-slate-700"
+                                                                        x-text="traceLegTitle(leg)"></span>
+                                                                    <template x-if="leg.codec">
+                                                                        <span
+                                                                            class="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-500 ring-1 ring-slate-200"
+                                                                            x-text="leg.codec"></span>
+                                                                    </template>
+                                                                    <template x-if="leg.transport_mode">
+                                                                        <span class="text-[10px] text-slate-400"
+                                                                            x-text="leg.transport_mode"></span>
+                                                                    </template>
+                                                                    <template x-if="leg.stalled">
+                                                                        <span
+                                                                            class="ml-auto rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-600">stalled</span>
+                                                                    </template>
+                                                                </div>
+                                                                <div
+                                                                    class="mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[10px] text-slate-500">
+                                                                    <template x-for="stat in traceLegStats(leg)"
+                                                                        :key="stat.label">
+                                                                        <span>
+                                                                            <span class="text-slate-400"
+                                                                                x-text="stat.label"></span>
+                                                                            <span class="font-semibold text-slate-600"
+                                                                                x-text="stat.value"></span>
+                                                                        </span>
+                                                                    </template>
+                                                                </div>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                                <!-- Scalar detail fields (answer, play, error, queue, ...) -->
+                                                <template x-if="traceScalarRows(ev).length">
+                                                    <div class="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                                                        <template x-for="row in traceScalarRows(ev)" :key="row.key">
+                                                            <div class="flex min-w-0 items-baseline gap-1.5 text-xs">
+                                                                <span class="shrink-0 text-slate-400"
+                                                                    x-text="row.label"></span>
+                                                                <template x-if="row.href">
+                                                                    <a :href="row.href" target="_blank" rel="noopener"
+                                                                        class="min-w-0 truncate font-mono text-[11px] text-sky-600 hover:underline"
+                                                                        x-text="row.value"></a>
+                                                                </template>
+                                                                <template x-if="!row.href">
+                                                                    <span class="min-w-0 truncate font-mono text-[11px] text-slate-600"
+                                                                        :title="row.value" x-text="row.value"></span>
+                                                                </template>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                                <!-- Full raw JSON, collapsed by default -->
+                                                <div class="mt-2">
+                                                    <button type="button"
+                                                        class="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 transition hover:text-slate-600"
+                                                        @click="toggleTraceDetail(i)">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                            class="h-3 w-3 transition-transform"
+                                                            :class="traceDetailOpen[i] ? '' : '-rotate-90'" viewBox="0 0 24 24"
+                                                            fill="none" stroke="currentColor" stroke-width="2"
+                                                            stroke-linecap="round" stroke-linejoin="round">
+                                                            <path d="m6 9 6 6 6-6" />
+                                                        </svg>
+                                                        <span x-text="traceRawLabel()"></span>
+                                                    </button>
+                                                    <pre x-show="traceDetailOpen[i]" x-cloak
+                                                        class="mt-1 max-h-40 overflow-auto rounded-md bg-slate-50 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-slate-500 ring-1 ring-slate-200"
+                                                        x-text="traceDetail(ev)"></pre>
+                                                </div>
+                                            </div>
                                         </template>
                                     </div>
                                 </li>
@@ -1023,6 +1126,7 @@
                     ? ((recordingSegments[0].unique_id && String(recordingSegments[0].unique_id).trim()) || recordingSegments[0].track_id || '')
                     : '';
                 this.trace = Array.isArray(data.trace) ? data.trace : [];
+                this.traceDetailOpen = {};
                 const recordRewrite = (this.record && this.record.rewrite && typeof this.record.rewrite === 'object')
                     ? this.record.rewrite
                     : null;
@@ -1112,6 +1216,7 @@
             },
             record: {},
             trace: [],
+            traceDetailOpen: {},
             sipFlowEntries: [],
             sipLanes: [],
             sipMessages: [],
@@ -2530,6 +2635,12 @@
                     case 'media_health':
                         // signal (per-leg media counters snapshot)
                         return svg('M2 20h.01M7 20v-4m5 4v-8m5 4V8m5 4v8');
+                    case 'recording':
+                        // dot-in-circle (record lifecycle)
+                        return svg('M12 21a9 9 0 110-18 9 9 0 010 18zM12 15a3 3 0 110-6 3 3 0 010 6z');
+                    case 'dialplan':
+                        // adjustments-horizontal (resolved call parameters)
+                        return svg('M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75');
                     case 'error':
                         // exclamation-triangle (call-affecting subsystem error)
                         return svg('M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z');
@@ -2562,13 +2673,19 @@
                     rtp_timeout: 'RTP timeout',
                     media_issue: 'Media issue',
                     media_health: 'Media health',
+                    recording: 'Recording',
+                    dialplan: 'Dialplan',
                     error: 'Error',
                     end: 'Call end',
                 };
                 return map[kind] || kind;
             },
             hasTraceDetail(ev) {
-                return ev && ev.detail != null && (ev.kind === 'error' || ev.kind === 'media_health');
+                if (!ev || ev.detail == null) return false;
+                if (typeof ev.detail !== 'object') return true;
+                return Array.isArray(ev.detail)
+                    || this.traceLegs(ev).length > 0
+                    || this.traceScalarRows(ev).length > 0;
             },
             traceDetail(ev) {
                 if (!ev || ev.detail == null) return '';
@@ -2579,6 +2696,105 @@
                 } catch (e) {
                     return String(ev.detail);
                 }
+            },
+            traceTd() {
+                return (this.t && this.t.call_record_detail) || {};
+            },
+            traceRawLabel() {
+                return this.traceTd().trace_raw_json || 'Raw JSON';
+            },
+            toggleTraceDetail(i) {
+                this.traceDetailOpen = { ...this.traceDetailOpen, [i]: !this.traceDetailOpen[i] };
+            },
+            traceLegs(ev) {
+                const legs = ev && ev.detail && ev.detail.legs;
+                return Array.isArray(legs) ? legs : [];
+            },
+            traceLegTitle(leg) {
+                return (leg && (leg.side || leg.leg_id)) || 'leg';
+            },
+            traceLegStats(leg) {
+                if (!leg || typeof leg !== 'object') return [];
+                const stats = [];
+                if (leg.ingress_packets != null) stats.push({ label: 'rx', value: leg.ingress_packets });
+                if (leg.egress_packets != null) stats.push({ label: 'tx', value: leg.egress_packets });
+                if (leg.fraction_lost_pct != null) stats.push({ label: 'loss', value: this.formatTracePct(leg.fraction_lost_pct) });
+                if (leg.jitter_ms != null) stats.push({ label: 'jitter', value: this.traceMs(leg.jitter_ms) });
+                if (leg.rtt_ms != null) stats.push({ label: 'rtt', value: this.traceMs(leg.rtt_ms) });
+                return stats;
+            },
+            traceScalarRows(ev) {
+                const d = ev && ev.detail;
+                if (!d || typeof d !== 'object' || Array.isArray(d)) return [];
+                const rows = [];
+                for (const [key, value] of Object.entries(d)) {
+                    // `legs` is rendered as stat cards; nested objects fall back to raw JSON.
+                    if (key === 'legs') continue;
+                    if (value === null || value === undefined || value === '') continue;
+                    if (typeof value === 'object') continue;
+                    rows.push({
+                        key,
+                        label: this.traceRowLabel(key),
+                        value: this.traceRowValue(key, value),
+                        href: this.traceRowHref(key, value),
+                    });
+                }
+                return rows;
+            },
+            traceRowLabel(key) {
+                const named = {
+                    agent: 'agent',
+                    agent_id: 'agent id',
+                    agent_name: 'agent name',
+                    bytes: 'size',
+                    duration_ms: 'duration',
+                    duration_secs: 'duration',
+                    queue_name: 'queue',
+                    queue_label: 'queue label',
+                    route_age_secs: 'route age',
+                    skill_group: 'skill group',
+                    track_id: 'track',
+                };
+                return named[key] || String(key).replace(/_/g, ' ');
+            },
+            traceRowValue(key, value) {
+                if (typeof value === 'boolean') return value ? 'yes' : 'no';
+                if (typeof value === 'number') {
+                    if (key === 'bytes' || key.endsWith('_bytes')) return this.humanTraceBytes(value);
+                    if (key === 'duration_ms' || key.endsWith('_ms')) return this.traceMs(value);
+                    if (key === 'duration_secs' || key.endsWith('_secs')) return this.traceSecs(value);
+                }
+                return String(value);
+            },
+            traceRowHref(key, value) {
+                if (typeof value !== 'string') return null;
+                if (key !== 'url' && !key.endsWith('_url')) return null;
+                return value.startsWith('http://') || value.startsWith('https://') ? value : null;
+            },
+            humanTraceBytes(n) {
+                const v = Number(n) || 0;
+                if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' MB';
+                if (v >= 1024) return (v / 1024).toFixed(1) + ' KB';
+                return v + ' B';
+            },
+            traceMs(v) {
+                const n = Number(v) || 0;
+                if (n >= 1000) return (n / 1000).toFixed(1) + 's';
+                if (n >= 10) return Math.round(n) + 'ms';
+                return (Math.round(n * 100) / 100) + 'ms';
+            },
+            traceSecs(v) {
+                const n = Number(v) || 0;
+                if (n >= 60) {
+                    const m = Math.floor(n / 60);
+                    return m + 'm ' + Math.round(n - m * 60) + 's';
+                }
+                return n.toFixed(1) + 's';
+            },
+            formatTracePct(v) {
+                const n = Number(v) || 0;
+                const rounded = Math.round(n * 100) / 100;
+                return (Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')) + '%';
             },
             formatTraceTs(ts) {
                 const v = Number(ts) || 0;

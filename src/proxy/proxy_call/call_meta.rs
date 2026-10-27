@@ -16,12 +16,50 @@ pub struct CallMeta {
     /// network boundary via the RFC 7433 `User-to-User` header
     /// (`purpose=call-center`, see `call::uui`).
     pub root_session_id: Option<String>,
+    /// Declared dial intent inherited from the dispatching node when this
+    /// session terminates a child-leg INVITE of another node's logical call
+    /// (`"agent"` / `"consult"` / `"transfer"` — the UUI `leg=` parameter,
+    /// trusted only from cluster peers). A child session is one leg of an
+    /// existing logical call, not a new call: its `call_created` /
+    /// `call_answered` are suppressed (the dispatching node already emitted
+    /// them) and its remaining lifecycle events are stamped with this value
+    /// as `leg_role`. `None` for ordinary inbound calls.
+    pub child_leg_role: Option<String>,
+    /// Dial intent declared by the *caller's own device* on the initial
+    /// INVITE through the RFC 7433 `User-to-User` header's `leg=` parameter
+    /// (`consult` / `transfer` — restsend-call tags its consult/求助 and
+    /// Replaces transfer-target dials; `X-*` headers are not allowed on the
+    /// wire). A stats marker: persisted into `cc_calls.leg_role` by the CC
+    /// hook and excluded from the agent's today metrics (legs of an existing
+    /// logical call, not new business calls); it never shapes the call
+    /// lifecycle. `None` for ordinary calls.
+    pub dial_leg_role: Option<String>,
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
     pub callee_call_ids: HashSet<String>,
+    /// Dial sequence for agent-leg Call-IDs (`LegPurpose::Agent` / `Consult`
+    /// legs). The first such leg dials with the primary session id as its SIP
+    /// Call-ID; every subsequent leg appends `-r{n}` so re-dials (queue
+    /// retries, consult legs) never reuse a Call-ID a phone may have already
+    /// declined (Linphone rejects reused declined Call-IDs).
+    pub agent_leg_seq: u32,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
+    /// Which dialog sent the FIRST BYE of the terminal hangup — attribution
+    /// context for the RWI `call_hangup.hangup_by` normalization. `ByCallee`
+    /// means different parties in different call shapes: on an inbound CC
+    /// call the callee side IS the agent (`"agent"`), but on an outbound
+    /// (CTI click-to-dial) call the remote party of the caller/A dialog is
+    /// the CUSTOMER, so `ByCallee` must normalize to `"callee"`. Written
+    /// once, together with the FIRST `hangup_reason` assignment from a
+    /// dialog termination; later cascade BYEs must not overwrite it.
+    /// Values: `"caller_remote"` (remote BYE on the caller/A dialog —
+    /// stamped for OUTBOUND sessions only, where that remote is the
+    /// customer), `"callee_remote"` (remote BYE on a callee/agent dialog —
+    /// the agent hung up), `"local"` (we sent the BYE). `None` for
+    /// non-BYE terminal paths (cancel, autohangup, IVR/system hangup).
+    pub hangup_by_side: Option<String>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     /// The SIP status of the INVITE transaction's final response, captured once
@@ -109,6 +147,11 @@ pub struct CallMeta {
     /// session's bridge (writes `media_health` trace entries + fires
     /// `proxy.media_stalled`).
     pub media_health_monitor_spawned: bool,
+    /// One-shot: the deferred-bridge `MediaIssue` trace event has been recorded
+    /// for this session. `setup_bridge` can defer the same pair repeatedly
+    /// (every re-entry while media is still landing); the CDR timeline needs
+    /// the state once, not per attempt.
+    pub media_bridge_defer_traced: bool,
     /// True once a supervisor takeover kicked the agent leg and moved the
     /// customer into the takeover conference. While set, B-leg termination
     /// must NOT cascade into a caller hangup (the customer keeps talking to

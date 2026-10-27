@@ -92,6 +92,8 @@ async fn test_registrar_register_success() {
     // Create test server with user backend and locator
     let (server_inner, config) = create_test_server().await;
 
+    let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
+
     // Create REGISTER request
     let request = create_register_request("alice", "rustpbx.com", Some(50));
 
@@ -138,6 +140,115 @@ async fn test_registrar_register_success() {
         location.home_proxy.is_some(),
         "registrar should stamp home_proxy for clustered routing"
     );
+
+    #[cfg(feature = "contact-center")]
+    {
+        use crate::addons::cc::agent::{AgentRegistry, AgentStatus};
+        use crate::addons::cc::registrar_bridge::CcRegistrarBridge;
+        use crate::proxy::cluster_event::{ClusterEventHandler, ClusterLocatorMessage, EventSource};
+        use crate::proxy::locator::LocatorEvent;
+        use crate::proxy::presence::{PresenceManager, PresenceStatus};
+        use sea_orm::ActiveModelTrait;
+        use sea_orm_migration::MigratorTrait;
+
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        crate::models::migration::Migrator::up(&db, None).await.unwrap();
+        crate::addons::cc::migration::Migrator::up(&db, None).await.unwrap();
+        crate::addons::cc::models::cc_agent::ActiveModel {
+            agent_id: sea_orm::Set("agent-alice".to_string()),
+            primary_endpoint: sea_orm::Set(Some("alice".to_string())),
+            skills: sea_orm::Set(serde_json::json!([])),
+            max_concurrency: sea_orm::Set(1),
+            is_active: sea_orm::Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let local = Arc::new(AgentRegistry::with_db(db.clone()));
+        let peer = Arc::new(AgentRegistry::with_db(db));
+        let local_bridge = CcRegistrarBridge::new(local.clone());
+        let peer_bridge = CcRegistrarBridge::new(peer.clone());
+        let local_presence = PresenceManager::new(None);
+        let peer_presence = PresenceManager::new(None);
+        let remote_source = EventSource::Remote("127.0.0.2:5060".parse().unwrap());
+
+        for stage in ["initial", "refresh", "unregister", "relogin", "new-contact", "explicit"] {
+            if matches!(stage, "refresh" | "new-contact" | "explicit") {
+                for registry in [&local, &peer] {
+                    if stage == "explicit" {
+                        // Expiry is a real transition; repeating Offline preserves its old reason.
+                        registry.update_status("agent-alice", AgentStatus::Idle).await.unwrap();
+                    }
+                    registry
+                        .update_status_with_reason(
+                            "agent-alice",
+                            AgentStatus::Offline,
+                            (stage == "explicit").then(|| "expired".to_string()),
+                        )
+                        .await
+                        .unwrap();
+                }
+                for manager in [&local_presence, &peer_presence] {
+                    let mut state = manager.get_state("alice");
+                    state.status = PresenceStatus::Offline;
+                    state.offline_reason = (stage == "explicit").then(|| "expired".to_string());
+                    manager.update_state("alice", state, &EventSource::Local).await;
+                }
+            }
+            if stage != "initial" {
+                let mut request = create_register_request(
+                    "alice", "rustpbx.com", Some(if stage == "unregister" { 0 } else { 50 }),
+                );
+                if matches!(stage, "new-contact" | "explicit") {
+                    request.headers.retain(|h| !matches!(h, Header::Contact(_)));
+                    request.headers.push(Header::Contact("<sip:alice-new@127.0.0.1:5060>".into()));
+                }
+                if stage == "explicit" {
+                    request.headers.push(Header::Other("X-CC-Presence".into(), "idle".into()));
+                }
+                let (mut tx, _) = create_transaction(request).await;
+                module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+                    .await.unwrap();
+            }
+            let event = events.try_recv().unwrap();
+            // A new Contact on an already registered identity is still a refresh.
+            assert!(
+                matches!(
+                    (&event, stage),
+                    (LocatorEvent::Registered(_), "initial" | "relogin")
+                        | (
+                            LocatorEvent::Refreshed(_),
+                            "refresh" | "new-contact" | "explicit"
+                        )
+                        | (LocatorEvent::Unregistered(_), "unregister")
+                ),
+                "unexpected locator event for registration stage {stage}"
+            );
+            let wire = serde_json::to_vec(&ClusterLocatorMessage::from(&event)).unwrap();
+            let peer_event = serde_json::from_slice::<ClusterLocatorMessage>(&wire).unwrap().to_event().unwrap();
+            local_presence.handle_locator_event(event.clone(), &EventSource::Local).await;
+            peer_presence.handle_locator_event(peer_event.clone(), &remote_source).await;
+            local_bridge.on_locator_event(&event, &EventSource::Local).await;
+            peer_bridge.on_locator_event(&peer_event, &remote_source).await;
+            // A keepalive preserves deliberate logout; fresh login and a
+            // fault-offline registration can recover initial readiness.
+            let expected = if matches!(stage, "unregister" | "refresh" | "new-contact") {
+                "offline"
+            } else {
+                "idle"
+            };
+            for registry in [&local, &peer] {
+                assert_eq!(registry.get_agent("agent-alice").await.unwrap().status.to_string(), expected,
+                    "registration stage {stage} must preserve the agent's business state");
+            }
+            assert_eq!(local_presence.get_state("alice").status.to_string(),
+                if stage == "explicit" { "idle" } else { expected }, "presence stage {stage}");
+            if stage != "explicit" {
+                assert_eq!(peer_presence.get_state("alice").status.to_string(), expected, "peer presence stage {stage}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -190,6 +301,151 @@ async fn test_registrar_unregister() {
 
     if let Ok(v) = locations {
         assert!(v.is_empty(), "Expected no locations after unregister")
+    }
+}
+
+#[tokio::test]
+async fn nat_reconnect_unregister_preserves_contact_identity() {
+    use crate::proxy::locator::DialogTargetLocator;
+    use crate::proxy::locator_db::DbLocator;
+    use crate::proxy::nat::NatInspector;
+    use rsipstack::transaction::endpoint::MessageInspector;
+    use rsipstack::transport::{SipConnection, channel::ChannelConnection};
+
+    for database in [true, false] {
+        let locator: Arc<Box<dyn Locator>> = if database {
+            Arc::new(Box::new(
+                DbLocator::new("sqlite::memory:".into()).await.unwrap(),
+            ))
+        } else {
+            Arc::new(Box::new(MemoryLocator::new()))
+        };
+        let (server, config) = create_test_server_with_config_and_locator(
+            ProxyConfig {
+                realms: Some(vec!["example.com".into()]),
+                ..Default::default()
+            },
+            locator.clone(),
+        )
+        .await;
+        let registrar = RegistrarModule::new(server, config);
+        let identity = "sip:alice@example.com".try_into().unwrap();
+        let contact = "sip:alice@192.168.1.50:60558;transport=ws"
+            .try_into()
+            .unwrap();
+        let other_contact = "sip:alice@192.168.1.50:60559;transport=ws"
+            .try_into()
+            .unwrap();
+        let old_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:43494".try_into().unwrap(),
+        };
+        let new_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:60850".try_into().unwrap(),
+        };
+        let other_flow = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: "198.51.100.10:45000".try_into().unwrap(),
+        };
+        let mut reconnected_target = None;
+
+        for (local_port, flow, expires) in [
+            (60559, &other_flow, 50),
+            (60558, &old_flow, 50),
+            (60558, &new_flow, 50),
+            (60558, &new_flow, 0),
+            (60559, &other_flow, 0),
+        ] {
+            let mut request = create_register_request("alice", "example.com", Some(expires));
+            request.headers.retain(|header| {
+                !matches!(
+                    header,
+                    Header::Via(_) | Header::Contact(_) | Header::From(_) | Header::To(_)
+                )
+            });
+            request
+                .headers
+                .push(Header::From("<sip:alice@example.com>;tag=reconnect".into()));
+            request
+                .headers
+                .push(Header::To("<sip:alice@example.com>".into()));
+            request.headers.push(Header::Via(format!(
+                "SIP/2.0/WSS 192.168.1.50:{local_port};received=198.51.100.10;rport={};branch=z9hG4bK{local_port}{expires}",
+                flow.addr.port.unwrap().0,
+            ).into()));
+            request.headers.push(Header::Contact(
+                format!("<sip:alice@192.168.1.50:{local_port};transport=ws>").into(),
+            ));
+            let rsipstack::sip::SipMessage::Request(request) =
+                NatInspector::new(true).after_received(request.into(), Some(flow))
+            else {
+                panic!("expected request")
+            };
+            let (mut tx, _endpoint) = create_transaction(request).await;
+            let (outgoing, _outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.connection = Some(SipConnection::Channel(
+                ChannelConnection::create_connection(
+                    incoming_rx,
+                    outgoing,
+                    flow.clone(),
+                    Some(CancellationToken::new()),
+                )
+                .await
+                .unwrap(),
+            ));
+            registrar
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut tx,
+                    TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+
+            if local_port == 60558 && expires != 0 {
+                // The real close falls inside the existing freshness guard.
+                // Reconnecting must replace this Contact, not add a flow-shaped identity.
+                assert!(
+                    locator
+                        .unregister_with_address(&old_flow)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                if flow == &new_flow {
+                    reconnected_target = Some(
+                        DialogTargetLocator::new(locator.clone(), vec![], false)
+                            .locate(&contact)
+                            .await
+                            .unwrap(),
+                    );
+                }
+            }
+            if expires == 0 {
+                let remaining = locator.lookup(&identity).await.unwrap();
+                if local_port == 60558 {
+                    assert_eq!(
+                        remaining.len(),
+                        1,
+                        "quitting reconnected client must leave only the other terminal"
+                    );
+                    assert_eq!(remaining[0].aor, other_contact);
+                    assert_eq!(remaining[0].destination.as_ref(), Some(&other_flow));
+                    assert_eq!(
+                        reconnected_target.as_ref(),
+                        Some(&new_flow),
+                        "Contact must route over the new flow"
+                    );
+                } else {
+                    assert!(
+                        remaining.is_empty(),
+                        "both clients quit: no active bindings may remain"
+                    );
+                }
+            }
+        }
     }
 }
 

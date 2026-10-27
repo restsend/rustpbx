@@ -51,6 +51,11 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
         .route("/sipflow/media/{call_id}", get(query_sipflow_media));
+    #[cfg(feature = "console")]
+    let r = r.route(
+        "/cluster/client-reports/body",
+        get(crate::console::handlers::client_report::cluster_body_handler),
+    );
     #[cfg(feature = "commerce")]
     let r = r.route("/calls", get(calls_query_handler));
 
@@ -67,35 +72,37 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
     };
 
     #[cfg(feature = "commerce")]
-    let r = {
-        let r = r
-            .route("/cluster/ping", post(cluster_ping_handler))
-            .route("/cluster/reload_config", get(cluster_reload_config_handler))
-            .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
-            .route(
-                "/cluster/evaluate_route",
-                post(cluster_evaluate_route_handler),
-            )
-            .route(
-                "/cluster/dispatch_command",
-                post(cluster_dispatch_command_handler),
-            )
-            .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
-            .route(
-                "/cluster/show_session/{session_id}",
-                get(cluster_show_session_handler),
-            )
-            .route(
-                "/cluster/session_owner/{call_id}",
-                get(cluster_session_owner_handler),
-            )
-            .route("/cluster/list_calls", get(cluster_list_calls_handler))
-            .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
-            .route("/cluster/logs/follow", get(cluster_logs_follow_handler));
-        // Addon-owned AMI routes (e.g. CC `/cluster/cc_owner_op`) — core stays
-        // free of addon path knowledge.
-        r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()))
-    };
+    let r = r
+        .route("/cluster/ping", post(cluster_ping_handler))
+        .route("/cluster/reload_config", get(cluster_reload_config_handler))
+        .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
+        .route(
+            "/cluster/evaluate_route",
+            post(cluster_evaluate_route_handler),
+        )
+        .route(
+            "/cluster/dispatch_command",
+            post(cluster_dispatch_command_handler),
+        )
+        .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
+        .route(
+            "/cluster/show_session/{session_id}",
+            get(cluster_show_session_handler),
+        )
+        .route(
+            "/cluster/session_owner/{call_id}",
+            get(cluster_session_owner_handler),
+        )
+        .route("/cluster/list_calls", get(cluster_list_calls_handler))
+        .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
+        .route("/cluster/logs/follow", get(cluster_logs_follow_handler))
+        .route("/cluster/logs/search", get(cluster_logs_search_handler));
+    // Addon-owned AMI routes (e.g. CC `/cc/admin_cmd` collect-logs/screenshot,
+    // `/cluster/cc_owner_op`) — core stays free of addon path knowledge.
+    // NOT commerce-gated: any enabled addon may contribute routes (the trait
+    // default contributes none), and the cc console needs them in plain
+    // `contact-center` builds too.
+    let r = r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()));
 
     // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE).
     // NOT commerce-gated: the broadcast side initializes for ANY build with
@@ -2312,6 +2319,8 @@ async fn cluster_show_session_handler(
 
     Json(serde_json::json!({
         "data": {
+            "node": state.sip_server().inner.cluster_self_addr.as_ref().map(|addr| addr.to_string())
+                .unwrap_or_else(|| "local".to_string()),
             "meta": registry.get(&session_id),
             "state": handle.snapshot(),
         }
@@ -2378,9 +2387,22 @@ async fn cluster_list_calls_handler(
 #[derive(Deserialize, Default)]
 struct ClusterLogsQuery {
     #[serde(default)]
+    file_identity: Option<String>,
+    #[serde(default)]
     limit: Option<usize>,
     #[serde(default)]
     position: Option<u64>,
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_logs_search_handler(
+    State(state): State<AppState>,
+    Query(query): Query<crate::log_viewer::SearchQuery>,
+) -> Response {
+    crate::log_viewer::search_response(
+        crate::log_viewer::log_file_path_from_config(state.config()),
+        query,
+    ).await
 }
 
 #[cfg(feature = "commerce")]
@@ -2390,8 +2412,11 @@ async fn cluster_logs_recent_handler(
 ) -> Response {
     let limit = crate::log_viewer::normalize_log_limit(query.limit);
     let path = crate::log_viewer::log_file_path_from_config(state.config());
-    match crate::log_viewer::recent_log_payload(path.as_deref(), limit) {
-        Ok(payload) => Json(payload).into_response(),
+    match crate::log_viewer::recent_log_payload(path.as_deref(), limit).await {
+        Ok(mut payload) => {
+            payload["logging"] = crate::log_viewer::logging_metadata_from_config(state.config());
+            Json(payload).into_response()
+        }
         Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "status": "error", "message": message })),
@@ -2405,10 +2430,15 @@ async fn cluster_logs_follow_handler(
     State(state): State<AppState>,
     Query(query): Query<ClusterLogsQuery>,
 ) -> Response {
+    if query.file_identity.as_deref().is_some_and(|identity| !crate::log_viewer::valid_file_identity(identity)) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "status": "error", "message": "Invalid log file identity",
+        }))).into_response();
+    }
     let position = query.position.unwrap_or(0);
     let limit = crate::log_viewer::normalize_log_limit(query.limit);
     let path = crate::log_viewer::log_file_path_from_config(state.config());
-    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit) {
+    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit, query.file_identity.as_deref()).await {
         Ok(payload) => Json(payload).into_response(),
         Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2972,6 +3002,76 @@ mod calls_query_tests {
 #[cfg(feature = "commerce")]
 mod cluster_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cluster_logs_recent_reports_owner_active_logging() {
+        use tower::ServiceExt;
+
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("runtime.log");
+            std::fs::write(&log, "owner-log-row\n").unwrap();
+            let app = crate::app::AppStateBuilder::new()
+                .with_config(crate::config::Config {
+                    database_url: "sqlite::memory:".into(),
+                    ami: Some(crate::config::AmiConfig::default()),
+                    log_file: Some(log.to_string_lossy().into_owned()),
+                    log_level: Some("debug".into()),
+                    media: Some(crate::config::MediaSection {
+                        quality_stats: crate::media::quality_stats::QualityStatsConfig {
+                            enabled,
+                            sample_interval_ms: 500,
+                            window_ms: 2000,
+                            log_interval_ms: 2000,
+                        },
+                        volume_stats: crate::media::volume_stats::VolumeStatsConfig { enabled },
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .with_skip_sip_bind()
+                .build()
+                .await
+                .unwrap();
+            let router = ami_router(app.clone()).with_state(app);
+            for (ip, status) in [
+                ("203.0.113.42:8080", StatusCode::FORBIDDEN),
+                ("127.0.0.1:8080", StatusCode::OK),
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/ami/v1/cluster/logs/recent?limit=1")
+                            .extension(axum::extract::ConnectInfo(
+                                ip.parse::<std::net::SocketAddr>().unwrap(),
+                            ))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                if status != StatusCode::OK {
+                    continue;
+                }
+                let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(payload["lines"], serde_json::json!(["owner-log-row"]));
+                assert_eq!(payload["logging"]["quality_stats"]["enabled"], enabled);
+                assert_eq!(
+                    payload["logging"]["quality_stats"]["sample_interval_ms"],
+                    500
+                );
+                assert_eq!(payload["logging"]["volume_stats"]["enabled"], enabled);
+                assert_eq!(payload["logging"]["sipflow_configured"], false);
+                assert_eq!(payload["logging"]["log_level"], "debug");
+                assert_eq!(payload["logging"]["revision"], env!("GIT_COMMIT_HASH"));
+            }
+        }
+    }
 
     #[test]
     fn test_deserialize_ping_payload_single_addon() {

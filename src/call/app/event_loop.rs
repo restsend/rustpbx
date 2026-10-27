@@ -1,7 +1,9 @@
 use super::app_context::ApplicationContext;
 use super::controller::ControllerEvent;
 use super::{AppAction, AppEvent, CallApp, CallController, ExitReason};
+use parking_lot::Mutex;
 use std::future::Future;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -13,6 +15,8 @@ pub struct AppEventLoop {
     controller: CallController,
     context: ApplicationContext,
     cancel_token: CancellationToken,
+    /// Cause supplied by the runtime before cancelling this invocation.
+    cancel_reason: Arc<Mutex<ExitReason>>,
     /// Receives timer IDs fired by `CallController::set_timeout`.
     fired_timer_rx: mpsc::UnboundedReceiver<String>,
     exit_reason: Option<ExitReason>,
@@ -44,9 +48,15 @@ impl AppEventLoop {
             controller,
             context,
             cancel_token,
+            cancel_reason: Arc::new(Mutex::new(ExitReason::Cancelled)),
             fired_timer_rx,
             exit_reason: None,
         }
+    }
+
+    pub(crate) fn with_cancel_reason(mut self, reason: Arc<Mutex<ExitReason>>) -> Self {
+        self.cancel_reason = reason;
+        self
     }
 
     /// Run the application until it exits or the call ends.
@@ -60,7 +70,7 @@ impl AppEventLoop {
         {
             WaitResult::Completed(res) => res?,
             WaitResult::Cancelled => {
-                self.app.on_exit(ExitReason::Cancelled).await?;
+                self.exit_cancelled().await?;
                 return Ok(());
             }
         };
@@ -68,7 +78,7 @@ impl AppEventLoop {
         loop {
             // Check cancellation token first
             if self.cancel_token.is_cancelled() {
-                self.app.on_exit(ExitReason::Cancelled).await?;
+                self.exit_cancelled().await?;
                 return Ok(());
             }
 
@@ -119,6 +129,11 @@ impl AppEventLoop {
         }
 
         Ok(())
+    }
+
+    async fn exit_cancelled(&mut self) -> anyhow::Result<()> {
+        let reason = self.cancel_reason.lock().clone();
+        self.app.on_exit(reason).await
     }
 
     async fn handle_next_event(&mut self) -> anyhow::Result<AppAction> {
@@ -182,6 +197,20 @@ impl AppEventLoop {
                             }
                         }
                     }
+                    Some(ControllerEvent::QueueDiagnostic(request)) => {
+                        match Self::await_or_cancel(&self.cancel_token,
+                            self.app.on_queue_diagnostic(&request, &mut self.controller)).await {
+                            WaitResult::Completed(result) => result,
+                            WaitResult::Cancelled => {
+                                tracing::info!(session_id = %self.context.call_info.session_id,
+                                    request_id = %request.request_id,
+                                    "Queue: live diagnostic canceled with call lifecycle");
+                                request.respond(Err("call_ended_or_canceled".into()));
+                                self.exit_reason = Some(ExitReason::Cancelled);
+                                Ok(AppAction::Exit)
+                            }
+                        }
+                    }
                     Some(ControllerEvent::Custom(name, data)) => {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_external_event(
                             AppEvent::Custom { name, data },
@@ -202,6 +231,7 @@ impl AppEventLoop {
                 }
             }
             Some(timer_id) = self.fired_timer_rx.recv() => {
+                self.controller.record_timer_consumed(&timer_id);
                 match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(timer_id, &mut self.controller, &self.context)).await {
                     WaitResult::Completed(res) => res,
                     WaitResult::Cancelled => {

@@ -188,6 +188,42 @@ impl From<crate::config::RouteTarget> for DialAttempt {
     }
 }
 
+impl Location {
+    /// Whether a dial to this resolved location must be delivered through the
+    /// registration's REMOTE home node (`true`) or locally (`false`).
+    ///
+    /// Single source of truth for "the endpoint is not registered on this
+    /// machine": `home_proxy` is stamped at REGISTER time with the owning
+    /// node's cluster-internal address, so a mismatch against this node's
+    /// identity means the INVITE (and the dialog) leave for another node —
+    /// which then owns the leg-role attribution for that leg
+    /// (`SipSession::route_via_home_proxy`, queue agent dialing).
+    ///
+    /// The self check compares the registration's home address against this
+    /// node's deterministic identity: the cluster-internal address resolved
+    /// from `[cluster].peers` when available, otherwise the default contact
+    /// URI. Live endpoint addresses must NOT be consulted here
+    /// (see `SipSession::route_via_home_proxy` for the full rationale).
+    pub fn routes_via_remote_home_proxy(
+        &self,
+        cluster_enabled: bool,
+        self_ident: Option<&SipAddr>,
+    ) -> bool {
+        if !cluster_enabled {
+            return false;
+        }
+        let Some(home_proxy) = self.home_proxy.as_ref() else {
+            return false;
+        };
+        match self_ident {
+            Some(self_addr) => self_addr.addr.to_string() != home_proxy.addr.to_string(),
+            // Unknown self identity: deliver through the home node, which is
+            // authoritative for its own registrations.
+            None => true,
+        }
+    }
+}
+
 impl std::fmt::Debug for DialAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DialAttempt")
@@ -542,9 +578,7 @@ pub fn apply_queue_hold_music_default(plan: &mut QueuePlan, global: Option<Strin
         None => true,
         Some(hold) => hold.audio_file.is_none(),
     };
-    if needs_file
-        && let Some(file) = global
-    {
+    if needs_file && let Some(file) = global {
         let base = plan.hold.take().unwrap_or_default();
         plan.hold = Some(base.with_audio_file(file));
     }
@@ -593,6 +627,10 @@ pub struct QueuePlan {
     pub label: Option<String>,
     pub voice_prompts: Option<VoicePrompts>,
     pub queue_name: String,
+    /// Per-call ACD queue priority (higher preempts earlier waiters, 0 =
+    /// default). Carried from app params (`StartApp("queue", …)` / outbound
+    /// `on_answer: enqueue`) through `queue_joined` and the shared-queue row.
+    pub priority: u32,
 }
 
 impl Default for QueuePlan {
@@ -616,11 +654,22 @@ impl Default for QueuePlan {
             label: None,
             voice_prompts: None,
             queue_name: String::new(),
+            priority: 0,
         }
     }
 }
 
 impl QueuePlan {
+    /// Replace the built-in wait audio only for synthesized plans without
+    /// explicit queue settings. Configured queues use missing-audio filling.
+    pub(crate) fn with_default_hold_music(mut self, global: Option<String>) -> Self {
+        if let Some(file) = global {
+            let hold = self.hold.take().unwrap_or_default();
+            self.hold = Some(hold.with_audio_file(file));
+        }
+        self
+    }
+
     /// Display id for queue lifecycle events (`queue_joined`, `queue_left`,
     /// ...) — the label when present, otherwise the queue name. MUST stay in
     /// sync with the `QueueConfig::name` the queue app factory builds from
@@ -677,10 +726,18 @@ impl QueuePlan {
                 ..Default::default()
             }].into_iter().map(Into::into).collect())),
             queue_name: queue.to_string(),
+            priority: priority.unwrap_or(0),
             ..Default::default()
         };
         Ok((plan, priority))
     }
+}
+
+/// Clamp a wire-level `u32` priority into the engine/DB `i32` domain without
+/// sign wrap-around: values above `i32::MAX` saturate at `i32::MAX` (a plain
+/// `as i32` cast would negate them and invert the ordering).
+pub fn clamp_priority_u32_to_i32(priority: u32) -> i32 {
+    i32::try_from(priority).unwrap_or(i32::MAX)
 }
 
 #[derive(Debug, Clone)]
@@ -782,9 +839,17 @@ pub struct CallRecordingConfig {
     /// Where media is captured: `local`/`http`/`s3` → WAV file; `sipflow` →
     /// SipflowRecorder. SIP signalling always goes to `[sipflow]` when configured.
     pub recording_type: RecordingType,
-    /// Swap stereo channels: callee→left, caller→right.
+    /// Legacy direct stereo channel swap: callee→left when true.
+    /// Deprecated in favour of [`Self::stereo_mode`]; honoured only when no
+    /// layer configures a stereo mode.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
+    /// Channel assignment policy (`caller_left`/`callee_left`/`external_left`/
+    /// `external_right`).
+    /// Supersedes the legacy `stereo_swap` when configured. `None` inherits
+    /// the per-call policy / global policy; the `external_*` policies are
+    /// resolved per call by the session (see `SipSession::external_party_on_left`).
+    pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
 }
 
 impl Default for CallRecordingConfig {
@@ -802,6 +867,7 @@ impl CallRecordingConfig {
             auto_start_at: RecordingAutoStartAt::default(),
             recording_type: RecordingType::Local,
             stereo_swap: false,
+            stereo_mode: None,
         }
     }
 
@@ -906,6 +972,9 @@ pub struct MediaConfig {
     /// Unset = 30s; 0 disables periodic snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 impl Default for MediaConfig {
@@ -936,6 +1005,8 @@ impl MediaConfig {
             relay_ready_timeout_secs: None,
             stall_detect_secs: None,
             media_trace_interval_secs: None,
+            quality_stats: Default::default(),
+            volume_stats: Default::default(),
         }
     }
 
@@ -994,6 +1065,22 @@ impl MediaConfig {
         self
     }
 
+    pub fn with_volume_stats(
+        mut self,
+        config: crate::media::volume_stats::VolumeStatsConfig,
+    ) -> Self {
+        self.volume_stats = config;
+        self
+    }
+
+    pub fn with_quality_stats(
+        mut self,
+        config: crate::media::quality_stats::QualityStatsConfig,
+    ) -> Self {
+        self.quality_stats = config;
+        self
+    }
+
     pub fn with_comfort_noise(mut self, enabled: bool, level_db: f32) -> Self {
         self.comfort_noise = enabled;
         self.comfort_noise_level_db = level_db;
@@ -1034,6 +1121,10 @@ impl std::fmt::Display for DialDirection {
         }
     }
 }
+
+/// Adapter-provided context to store before the first call event.
+#[derive(Clone, Debug)]
+pub(crate) struct InitialUserData(pub serde_json::Map<String, serde_json::Value>);
 
 pub struct Dialplan {
     pub direction: DialDirection,
@@ -1182,6 +1273,158 @@ impl Dialplan {
 
     pub fn all_webrtc_target(&self) -> bool {
         self.flow.all_webrtc_target()
+    }
+
+    /// Short flow description for trace messages: `dial 2 targets`,
+    /// `dial 3 targets (parallel)`, `queue`, `app:ivr`.
+    fn flow_summary(&self) -> String {
+        match &self.flow {
+            DialplanFlow::Targets(DialStrategy::Sequential(targets)) => {
+                format!("dial {} target(s)", targets.len())
+            }
+            DialplanFlow::Targets(DialStrategy::Parallel(targets)) => {
+                format!("dial {} target(s) (parallel)", targets.len())
+            }
+            DialplanFlow::Queue { .. } => "queue".to_string(),
+            DialplanFlow::Application { app_name, .. } => format!("app:{app_name}"),
+        }
+    }
+
+    /// One-line summary of the resolved dialplan, used as the `dialplan`
+    /// trace-event message.
+    pub fn summary_line(&self) -> String {
+        format!(
+            "Dialplan resolved: {} → {}, media proxy={:?}, recording={}",
+            self.direction,
+            self.flow_summary(),
+            format!("{:?}", self.media.proxy_mode).to_lowercase(),
+            if self.recording.enabled {
+                format!("{:?}", self.recording.recording_type).to_lowercase()
+            } else {
+                "off".to_string()
+            },
+        )
+    }
+
+    /// Structured snapshot of the effective dialplan parameters, persisted as
+    /// `metadata["dialplan"]` so CDRs explain which RTP/WebRTC/recording
+    /// configuration governed the call. `None` fields are omitted; secrets
+    /// (ICE credentials) are never included.
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        let media = &self.media;
+        let recording = &self.recording;
+        let mut snapshot = serde_json::json!({
+            "direction": self.direction.to_string(),
+            "flow": self.flow_summary(),
+            "enable_sipflow": self.enable_sipflow,
+            "session_id_enabled": self.session_id_enabled,
+            "media": {
+                "proxy_mode": media.proxy_mode,
+                "enable_latching": media.enable_latching,
+                "comfort_noise": media.comfort_noise,
+                "comfort_noise_level_db": media.comfort_noise_level_db,
+                "relay_only": media.relay_only,
+                "ice_lite": media.ice_lite,
+            },
+            "recording": {
+                "enabled": recording.enabled,
+                "auto_start": recording.auto_start,
+                "auto_start_at": recording.auto_start_at,
+                "recording_type": recording.recording_type,
+                "stereo_swap": recording.stereo_swap,
+            },
+        });
+        let obj = snapshot.as_object_mut().expect("snapshot is an object");
+        // Optional scalars — omitted when unset.
+        if let Some(secs) = self.max_ring_time {
+            obj.insert(
+                "max_ring_time_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
+        }
+        if let Some(secs) = self.max_call_duration {
+            obj.insert(
+                "max_call_duration_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
+        }
+        if let Some(secs) = self.rtp_timeout {
+            obj.insert(
+                "rtp_timeout_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
+        }
+        if !self.allow_codecs.is_empty() {
+            obj.insert(
+                "allow_codecs".to_string(),
+                serde_json::json!(
+                    self.allow_codecs
+                        .iter()
+                        .map(|c| format!("{c:?}").to_lowercase())
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        // Media optional fields.
+        if let Some(media_obj) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
+            if let Some(ip) = media.external_ip.as_ref() {
+                media_obj.insert("external_ip".to_string(), serde_json::json!(ip));
+            }
+            if let Some(ip) = media.bind_ip.as_ref() {
+                media_obj.insert("bind_ip".to_string(), serde_json::json!(ip));
+            }
+            if let Some(port) = media.rtp_start_port {
+                media_obj.insert("rtp_start_port".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.rtp_end_port {
+                media_obj.insert("rtp_end_port".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.webrtc_port_start {
+                media_obj.insert("webrtc_port_start".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.webrtc_port_end {
+                media_obj.insert("webrtc_port_end".to_string(), serde_json::json!(port));
+            }
+            if let Some(packets) = media.probation_max_packets {
+                media_obj.insert(
+                    "probation_max_packets".to_string(),
+                    serde_json::json!(packets),
+                );
+            }
+            if let Some(policy) = media.video_policy.as_ref() {
+                media_obj.insert("video_policy".to_string(), serde_json::json!(policy));
+            }
+            if let Some(secs) = media.relay_ready_timeout_secs {
+                media_obj.insert(
+                    "relay_ready_timeout_secs".to_string(),
+                    serde_json::json!(secs),
+                );
+            }
+            if let Some(secs) = media.stall_detect_secs {
+                media_obj.insert("stall_detect_secs".to_string(), serde_json::json!(secs));
+            }
+            if let Some(servers) = media.ice_servers.as_ref().filter(|s| !s.is_empty()) {
+                media_obj.insert(
+                    "ice_servers".to_string(),
+                    serde_json::json!(
+                        servers
+                            .iter()
+                            .flat_map(|s| s.urls.iter())
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+        }
+        // Recording optional fields.
+        if let Some(rec_obj) = obj.get_mut("recording").and_then(|r| r.as_object_mut()) {
+            if let Some(mode) = recording.stereo_mode.as_ref() {
+                rec_obj.insert(
+                    "stereo_mode".to_string(),
+                    serde_json::json!(format!("{mode:?}")),
+                );
+            }
+        }
+        snapshot
     }
     /// Create a new dialplan with basic configuration
     pub fn new(
@@ -1461,6 +1704,40 @@ mod tests {
     }
 
     #[test]
+    fn location_routes_via_remote_home_proxy_matches_routing_rule() {
+        fn sip_addr(addr: &str) -> SipAddr {
+            SipAddr {
+                r#type: None,
+                addr: rsipstack::sip::HostWithPort::try_from(addr).unwrap(),
+            }
+        }
+        let local = sip_addr("10.0.0.1:5060");
+        let remote = sip_addr("10.0.0.2:5060");
+
+        // Cluster disabled: never remote (single-node keeps roles).
+        let mut loc = Location {
+            home_proxy: Some(remote.clone()),
+            ..Default::default()
+        };
+        assert!(!loc.routes_via_remote_home_proxy(false, Some(&local)));
+
+        // Remote home_proxy ≠ self → remote.
+        assert!(loc.routes_via_remote_home_proxy(true, Some(&local)));
+        // Home_proxy == self → local.
+        loc.home_proxy = Some(local.clone());
+        assert!(!loc.routes_via_remote_home_proxy(true, Some(&local)));
+
+        // No registration home (external trunk) → not remote.
+        loc.home_proxy = None;
+        assert!(!loc.routes_via_remote_home_proxy(true, Some(&local)));
+
+        // Unknown self identity: conservative — treat as remote (deliver via
+        // the home node, which owns the role attribution).
+        loc.home_proxy = Some(remote);
+        assert!(loc.routes_via_remote_home_proxy(true, None));
+    }
+
+    #[test]
     fn route_point_transfer_endpoint_preserves_distinct_prefix() {
         let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
 
@@ -1501,6 +1778,11 @@ mod tests {
         .expect("skill-group target must parse");
 
         assert_eq!(priority, Some(5));
+        // Regression guard: the parsed priority MUST land on the plan itself —
+        // the factory copies `plan.priority` into `QueueConfig`, and every
+        // FIFO-gate / shared-queue write derives from it. A revert to
+        // "return it separately but drop it" silently re-hardcodes 0.
+        assert_eq!(plan.priority, 5, "plan must carry the parsed priority");
         assert_eq!(plan.queue_name, "skill-group:42");
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
@@ -1518,6 +1800,10 @@ mod tests {
         .expect("sip target must parse");
 
         assert_eq!(priority, None);
+        assert_eq!(
+            plan.priority, 0,
+            "absent priority must default the plan to 0"
+        );
         assert_eq!(plan.queue_name, "sip:1001@pbx.local");
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
@@ -1586,6 +1872,21 @@ mod tests {
             garbage, None,
             "non-numeric priority must be dropped, not fatal"
         );
+    }
+
+    #[test]
+    fn clamp_priority_u32_to_i32_saturates_without_sign_flip() {
+        assert_eq!(super::clamp_priority_u32_to_i32(0), 0);
+        assert_eq!(super::clamp_priority_u32_to_i32(5), 5);
+        assert_eq!(super::clamp_priority_u32_to_i32(i32::MAX as u32), i32::MAX);
+        // A plain `as i32` cast would wrap this to a NEGATIVE priority and
+        // invert the ordering — saturation is the contract.
+        assert_eq!(
+            super::clamp_priority_u32_to_i32(u32::MAX),
+            i32::MAX,
+            "u32::MAX must saturate at i32::MAX, never wrap negative"
+        );
+        assert!(super::clamp_priority_u32_to_i32(u32::MAX) > 0);
     }
 
     #[test]
@@ -2036,15 +2337,26 @@ mod tests {
         assert!(rule.allows("X-Aid"));
         assert!(rule.allows("x-callright"));
         assert!(!rule.allows("P-Asserted-Identity"));
-        assert!(!rule.allows("XToken"), "bare X without dash is not x- prefixed");
+        assert!(
+            !rule.allows("XToken"),
+            "bare X without dash is not x- prefixed"
+        );
 
         let sel = Dialplan::select_passthrough_headers(&original, &[], &rule);
         let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
-        assert_eq!(names.len(), 3, "exactly the three x- headers ride: {names:?}");
+        assert_eq!(
+            names.len(),
+            3,
+            "exactly the three x- headers ride: {names:?}"
+        );
         assert!(names.contains(&"X-Aid".to_string()));
         assert!(names.contains(&"x-callright".to_string()));
         assert!(names.contains(&"X-taskid".to_string()));
-        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("p-asserted-identity")));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case("p-asserted-identity"))
+        );
         assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("xtoken")));
     }
 
@@ -2153,7 +2465,10 @@ mod tests {
     fn queue_hold_default_no_global_leaves_plan_unchanged() {
         let mut empty = queue_plan_with_hold(None);
         apply_queue_hold_music_default(&mut empty, None);
-        assert!(empty.hold.is_none(), "no global -> stays unset (route queues stay silent)");
+        assert!(
+            empty.hold.is_none(),
+            "no global -> stays unset (route queues stay silent)"
+        );
 
         let mut builtin = queue_plan_with_hold(Some(
             QueueHoldConfig::default().with_audio_file("sounds/phone-calling.wav".into()),

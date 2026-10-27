@@ -187,12 +187,12 @@ mod recorder_advanced_tests {
 
         // Write samples from both legs
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame_a), None, None, None, None, 0)
             .await
             .expect("Should write Leg A sample");
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample_with_profile(Leg::B, &MediaSample::Audio(frame_b), None, None, None, None, 0)
             .await
             .expect("Should write Leg B sample");
 
@@ -230,7 +230,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
             .await
             .expect("Should write sample");
 
@@ -261,7 +261,7 @@ mod recorder_advanced_tests {
         ];
 
         recorder
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &dtmf_payload, 0, 8000, None)
             .await
             .expect("Should write DTMF payload");
 
@@ -286,7 +286,7 @@ mod recorder_advanced_tests {
                 .await
                 .unwrap();
         recorder_single
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+            .write_dtmf_payload_at(Leg::A, &dtmf_payload, 12_345, 8000, None)
             .await
             .expect("single terminal DTMF should be written");
         recorder_single
@@ -299,7 +299,7 @@ mod recorder_advanced_tests {
             .unwrap();
         for _ in 0..3 {
             recorder_dup
-                .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+                .write_dtmf_payload_at(Leg::A, &dtmf_payload, 12_345, 8000, None)
                 .await
                 .expect("duplicate terminal DTMF packets should be accepted");
         }
@@ -336,7 +336,7 @@ mod recorder_advanced_tests {
                 duration as u8,
             ];
             recorder
-                .write_dtmf_payload(Leg::A, &payload, rtp_timestamp, 8000)
+                .write_dtmf_payload_at(Leg::A, &payload, rtp_timestamp, 8000, None)
                 .await
                 .expect("progressive DTMF packet should be accepted");
         }
@@ -344,7 +344,7 @@ mod recorder_advanced_tests {
         let terminal_payload = [5, 0x80, 0x03, 0x20];
         for _ in 0..2 {
             recorder
-                .write_dtmf_payload(Leg::A, &terminal_payload, rtp_timestamp, 8000)
+                .write_dtmf_payload_at(Leg::A, &terminal_payload, rtp_timestamp, 8000, None)
                 .await
                 .expect("repeated terminal DTMF packet should be accepted");
         }
@@ -374,11 +374,11 @@ mod recorder_advanced_tests {
             .unwrap();
 
         recorder_a
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 0, 48000)
+            .write_dtmf_payload_at(Leg::A, &[5, 0x80, 0x12, 0xC0], 0, 48000, None)
             .await
             .expect("48k DTMF should be written");
         recorder_b
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &[5, 0x80, 0x03, 0x20], 0, 8000, None)
             .await
             .expect("8k DTMF should be written");
 
@@ -430,20 +430,20 @@ mod recorder_advanced_tests {
         };
 
         recorder_a
-            .write_sample(Leg::A, &MediaSample::Audio(frame.clone()), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame.clone()), None, None, None, None, 0)
             .await
             .expect("Should write anchor sample");
         recorder_b
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
             .await
             .expect("Should write anchor sample");
 
         recorder_a
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 4800, 48000)
+            .write_dtmf_payload_at(Leg::A, &[5, 0x80, 0x12, 0xC0], 4800, 48000, None)
             .await
             .expect("48k DTMF should be written");
         recorder_b
-            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 800, 8000)
+            .write_dtmf_payload_at(Leg::A, &[5, 0x80, 0x03, 0x20], 800, 8000, None)
             .await
             .expect("8k DTMF should be written");
 
@@ -481,7 +481,7 @@ mod recorder_advanced_tests {
         for digit in 0u8..=9u8 {
             let payload = vec![digit, 0x80, 0x03, 0x20];
             recorder
-                .write_dtmf_payload(Leg::A, &payload, 0, 8000)
+                .write_dtmf_payload_at(Leg::A, &payload, 0, 8000, None)
                 .await
                 .unwrap_or_else(|_| panic!("Should write DTMF {}", digit));
         }
@@ -489,14 +489,14 @@ mod recorder_advanced_tests {
         // Test * (code 10)
         let payload_star = vec![10, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_star, 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &payload_star, 0, 8000, None)
             .await
             .unwrap();
 
         // Test # (code 11)
         let payload_hash = vec![11, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_hash, 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &payload_hash, 0, 8000, None)
             .await
             .unwrap();
 
@@ -516,14 +516,14 @@ mod recorder_advanced_tests {
         // Too short payload (should be ignored)
         let short_payload = vec![5, 0x80];
         let result = recorder
-            .write_dtmf_payload(Leg::A, &short_payload, 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &short_payload, 0, 8000, None)
             .await;
         assert!(result.is_ok(), "Short payload should be ignored gracefully");
 
         // Invalid digit code (>15)
         let invalid_payload = vec![99, 0x80, 0x03, 0x20];
         let result = recorder
-            .write_dtmf_payload(Leg::A, &invalid_payload, 0, 8000)
+            .write_dtmf_payload_at(Leg::A, &invalid_payload, 0, 8000, None)
             .await;
         assert!(result.is_ok(), "Invalid digit should be ignored gracefully");
 
@@ -613,7 +613,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
             .await
             .expect("Should write PCMA sample to PCMU recorder");
 
@@ -659,12 +659,12 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame_a), None, None, None, None, 0)
             .await
             .unwrap();
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample_with_profile(Leg::B, &MediaSample::Audio(frame_b), None, None, None, None, 0)
             .await
             .unwrap();
 
@@ -698,7 +698,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -737,7 +737,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -781,7 +781,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -841,7 +841,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -884,7 +884,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -908,7 +908,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -953,7 +953,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -979,7 +979,7 @@ mod recorder_advanced_tests {
             };
 
             recorder
-                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame), None, None, None, None, 0)
                 .await
                 .unwrap();
         }
@@ -1033,11 +1033,11 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame_a), None, None, None, None, 0)
             .await
             .unwrap();
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample_with_profile(Leg::B, &MediaSample::Audio(frame_b), None, None, None, None, 0)
             .await
             .unwrap();
 
@@ -1100,7 +1100,7 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, None, None, Some(CodecType::Opus))
+            .write_sample_with_profile(Leg::A, &frame, None, None, Some(CodecType::Opus), None, 0)
             .await
             .expect("Should write Opus sample with dynamic payload type");
         recorder.finalize().await.expect("Should finalize recorder");
@@ -1154,7 +1154,7 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, None, None, None)
+            .write_sample_with_profile(Leg::A, &frame, None, None, None, None, 0)
             .await
             .expect("Should write Opus sample using stored leg payload mapping");
         recorder.finalize().await.expect("Should finalize recorder");
@@ -1211,7 +1211,7 @@ mod recorder_advanced_tests {
                 header_extension: None,
             });
             recorder
-                .write_sample(Leg::A, &frame, None, None, None)
+                .write_sample_with_profile(Leg::A, &frame, None, None, None, None, 0)
                 .await
                 .ok();
         }
@@ -1231,7 +1231,7 @@ mod recorder_advanced_tests {
                 header_extension: None,
             });
             recorder
-                .write_sample(Leg::B, &frame, None, None, None)
+                .write_sample_with_profile(Leg::B, &frame, None, None, None, None, 0)
                 .await
                 .ok();
         }
@@ -1278,7 +1278,7 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, Some(101), Some(8000), None)
+            .write_sample_with_profile(Leg::A, &frame, Some(101), Some(8000), None, None, 0)
             .await
             .ok();
         recorder.finalize().await.ok();
@@ -1393,7 +1393,7 @@ mod recorder_advanced_tests {
                 header_extension: None,
             });
             recorder
-                .write_sample(leg, &frame, None, None, None)
+                .write_sample_with_profile(leg, &frame, None, None, None, None, 0)
                 .await
                 .expect("write_sample for telephone-event should succeed");
         }
@@ -1485,7 +1485,7 @@ mod recorder_advanced_tests {
             header_extension: None,
         });
         recorder
-            .write_sample(Leg::A, &anchor, None, None, None)
+            .write_sample_with_profile(Leg::A, &anchor, None, None, None, None, 0)
             .await
             .expect("anchor write");
 
@@ -1592,7 +1592,7 @@ mod recorder_advanced_tests {
             header_extension: None,
         };
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
+            .write_sample_with_profile(Leg::A, &MediaSample::Audio(frame_a), None, None, None, None, 0)
             .await
             .expect("write leg A");
 
@@ -1612,7 +1612,7 @@ mod recorder_advanced_tests {
             header_extension: None,
         };
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
+            .write_sample_with_profile(Leg::B, &MediaSample::Audio(frame_b), None, None, None, None, 0)
             .await
             .expect("write leg B");
 

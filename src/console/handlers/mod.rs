@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub mod addons;
 pub mod call_control;
 pub mod call_record;
+pub mod client_report;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod error_codes;
@@ -18,6 +19,7 @@ pub mod mfa;
 pub mod metrics;
 pub mod notifications;
 pub mod presence;
+pub mod release;
 pub mod reports;
 pub mod routing;
 pub mod setting;
@@ -73,7 +75,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(notifications::urls())
         .merge(security::urls())
         .merge(metrics::urls())
-        .merge(reports::urls());
+        .merge(reports::urls())
+        .merge(release::urls());
 
     // Addon page routes (collected at runtime via Addon trait hooks).
     if let Some(app_state) = state.app_state() {

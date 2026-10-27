@@ -120,6 +120,83 @@ impl PresenceState {
 // Agent Record
 // ===================================================================
 
+/// The policy for one offered ring; later configuration changes affect new offers.
+#[derive(Debug, Clone)]
+pub struct AgentRingPolicy {
+    pub timeout: Duration,
+    pub server_owned: bool,
+    pub no_answer_state: PresenceState,
+}
+
+/// What the registry did to reconcile an agent who actively REJECTED an
+/// assignment (486 Busy Here). Consumed by the queue app for the CDR trace
+/// and the assigned-not-answered alert.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AgentRejectOutcome {
+    /// Base status the ring binding was released to (`away`/`dnd`/`wrapup`/
+    /// `idle`), when the binding was still live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub released_to: Option<String>,
+    /// The client-declared break restored (memory capture or durable
+    /// history reconstruction) — server/client presence mismatch healed.
+    /// Serialized as `away:<detail>` / `dnd`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_break: Option<String>,
+    /// The configured automatic no-answer break was forced after
+    /// consecutive rejects (hard loop stop).
+    #[serde(default)]
+    pub forced_break: bool,
+    /// Cooldown staged via wrapup, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<u64>,
+    /// Consecutive reject/no-answer streak after this event.
+    #[serde(default)]
+    pub streak: u32,
+}
+
+impl AgentRejectOutcome {
+    /// Server thought the agent was schedulable while the client refused —
+    /// the state-drift signature.
+    pub fn state_mismatch(&self) -> bool {
+        self.restored_break.is_some() || self.forced_break
+    }
+}
+
+/// Why an assignment failed to be picked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignFailReason {
+    /// The agent's UA answered 486 (Busy Here) — typically a client-side
+    /// auto-reject while the agent is on a break.
+    Rejected,
+    /// The ring timed out without an answer.
+    NoAnswer,
+}
+
+impl AssignFailReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssignFailReason::Rejected => "rejected_486",
+            AssignFailReason::NoAnswer => "no_answer",
+        }
+    }
+}
+
+/// Instant "assigned but not answered" alert payload (486 reject or ring
+/// timeout). Fired per event by the queue app through the addon alerting
+/// plane; see `emit_assign_failed_alert`.
+#[derive(Debug, Clone)]
+pub struct AssignFailedAlert {
+    pub call_id: String,
+    pub queue_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub reason: AssignFailReason,
+    /// Canonical SIP status of the failure (486 for rejects).
+    pub sip_status: Option<u16>,
+    /// Reject reconciliation details (absent for ring timeouts).
+    pub outcome: Option<AgentRejectOutcome>,
+}
+
 /// Complete agent information stored in registry
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
@@ -201,6 +278,15 @@ impl RoutingStrategy {
 /// allowing the Queue and other components to work with any implementation.
 #[async_trait]
 pub trait AgentRegistry: Send + Sync {
+    /// Backend-owned ringing limit; generic registries retain the route setting.
+    fn agent_ring_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn agent_ring_policy(&self) -> Option<AgentRingPolicy> {
+        None
+    }
+
     /// Register a new agent
     async fn register(
         &self,
@@ -237,22 +323,63 @@ pub trait AgentRegistry: Send + Sync {
     async fn update_presence(&self, agent_id: &str, new_state: PresenceState)
     -> anyhow::Result<()>;
 
-    /// Called when a dialled agent fails to answer within the ring timeout:
-    /// the agent must end up NON-idle instead of silently returning to Idle,
-    /// so operators see the missed call and the ACD does not immediately
-    /// re-offer. Default wraps the agent into a `Wrapup` presence bound to
-    /// the call; implementations may add recovery (auto-idle timer, stats,
-    /// webhooks).
-    async fn note_agent_no_answer(&self, agent_id: &str, call_id: &str) {
-        let _ = self
-            .update_presence(
-                agent_id,
-                PresenceState::Wrapup {
-                    call_id: Some(call_id.to_string()),
-                },
-            )
-            .await;
+    /// Called when a dialled agent fails to answer within the ring timeout.
+    /// Default policy releases the agent back to `Idle` — immediately
+    /// schedulable again — so a call returning to the queue (wait retention)
+    /// can re-offer to the same agent right away. Implementations may
+    /// override to add a cooldown window (e.g. `no_answer_cooldown_secs`)
+    /// or stats/webhooks.
+    async fn note_agent_no_answer(&self, agent_id: &str, _call_id: &str) {
+        let _ = self.update_presence(agent_id, PresenceState::Idle).await;
     }
+
+    async fn note_agent_no_answer_with_policy(
+        &self,
+        agent_id: &str,
+        call_id: &str,
+        _policy: Option<&AgentRingPolicy>,
+    ) {
+        self.note_agent_no_answer(agent_id, call_id).await;
+    }
+
+    /// Called when an assigned agent actively REJECTED the offer (486 Busy
+    /// Here) — a client-side readiness signal, unlike a mere ring timeout.
+    ///
+    /// Implementations treat the reject like a no-answer for scheduling
+    /// (round exclusion + cooldown/streak) and additionally reconcile the
+    /// server's presence view with what the client just declared by
+    /// refusing: restore the pre-ring break the ring overwrote (memory
+    /// capture or durable history reconstruction — heals the
+    /// server-`idle`-vs-client-小休 drift that keeps re-dispatching into a
+    /// 486 auto-reject loop), and force the automatic no-answer break after
+    /// consecutive rejects. Returns the reconciliation outcome for the CDR
+    /// trace and the assigned-not-answered alert.
+    async fn note_agent_rejected(
+        &self,
+        agent_id: &str,
+        call_id: &str,
+        policy: Option<&AgentRingPolicy>,
+    ) -> AgentRejectOutcome {
+        self.note_agent_no_answer_with_policy(agent_id, call_id, policy)
+            .await;
+        AgentRejectOutcome::default()
+    }
+
+    /// Fire an instant "assigned but not answered" alert (486 reject or
+    /// ring timeout) through the addon's alerting plane (webhook / RWI /
+    /// metrics / alert history). Default: no alerting configured.
+    async fn emit_assign_failed_alert(&self, _info: &AssignFailedAlert) {}
+
+    async fn prepare_client_ring_offer(
+        &self,
+        _uri: &str,
+        _call_id: &str,
+        _policy: &AgentRingPolicy,
+    ) -> Option<String> {
+        None
+    }
+
+    async fn expire_client_ring_offer(&self, _uri: &str, _call_id: &str) {}
 
     /// Find available agents matching criteria
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord>;
@@ -296,11 +423,26 @@ pub trait AgentRegistry: Send + Sync {
     /// Returns empty Vec if the URI is not recognized or cannot be resolved.
     async fn resolve_target(&self, target_uri: &str) -> Vec<String>;
 
+    /// Whether this backend implements full skill-group dispatch semantics
+    /// for `skill-group:{id}` targets: the cross-node strict-FIFO gate, ACD
+    /// policy evaluation AND the `skill_group_*` scheduling announcements
+    /// (candidates / assigned / queued). The CC adapter overrides this to
+    /// `true`; plain registries (memory / test doubles) keep `false`, so the
+    /// queue app falls back to the legacy `find_available_agents` listing —
+    /// which understands no skill-group URIs and emits nothing.
+    fn supports_skill_group_dispatch(&self) -> bool {
+        false
+    }
+
     /// Resolve target URI with an optional ACD policy hint.
     ///
     /// `call_id` identifies the call being routed; addon implementations use it
     /// to emit scheduling webhook events. Default implementation ignores policy
     /// and calls `resolve_target`.
+    ///
+    /// NOTE: this variant carries NO per-call priority — resolution behaves as
+    /// priority 0. Queue callers must use [`Self::resolve_target_with_priority`]
+    /// so inline-ACD queues and the cross-node FIFO gate see the real priority.
     async fn resolve_target_with_policy(
         &self,
         target_uri: &str,
@@ -308,6 +450,59 @@ pub trait AgentRegistry: Send + Sync {
         _call_id: &str,
     ) -> Vec<String> {
         self.resolve_target(target_uri).await
+    }
+
+    /// Like [`Self::resolve_target_with_policy`] but also carries the caller's
+    /// ACD queue priority (higher preempts earlier waiters; 0 = default).
+    /// Default implementation ignores the priority and delegates, so
+    /// registries without ACD support keep today's behavior unchanged.
+    async fn resolve_target_with_priority(
+        &self,
+        target_uri: &str,
+        policy: Option<&str>,
+        call_id: &str,
+        _priority: i32,
+    ) -> Vec<String> {
+        self.resolve_target_with_policy(target_uri, policy, call_id)
+            .await
+    }
+
+    /// Resolve a retry round while excluding agents that already rang.
+    /// Backends that reserve candidates or publish assignments must override
+    /// this hook and exclude them before either side effect. The default
+    /// preserves filtering for resolvers without reservation side effects.
+    async fn resolve_target_with_exclusions(
+        &self,
+        target_uri: &str,
+        policy: Option<&str>,
+        call_id: &str,
+        priority: i32,
+        excluded_agent_ids: &[String],
+    ) -> Vec<String> {
+        let mut targets = self
+            .resolve_target_with_priority(target_uri, policy, call_id, priority)
+            .await;
+        targets.retain(|uri| {
+            let id = crate::models::call_record::extract_sip_username(uri)
+                .unwrap_or_else(|| uri.to_string());
+            !excluded_agent_ids.contains(&id)
+        });
+        targets
+    }
+
+    /// Like [`Self::select_agent_with_policy`] but also carries the caller's
+    /// ACD queue priority (see [`Self::resolve_target_with_priority`]).
+    /// Default implementation ignores the priority and delegates.
+    async fn select_agent_with_priority(
+        &self,
+        required_skills: &[String],
+        strategy: RoutingStrategy,
+        policy: Option<&str>,
+        call_id: &str,
+        _priority: i32,
+    ) -> Option<AgentRecord> {
+        self.select_agent_with_policy(required_skills, strategy, policy, call_id)
+            .await
     }
 
     /// Resolve the escalation plan for a queue target URI (e.g.
@@ -347,6 +542,12 @@ pub trait AgentRegistry: Send + Sync {
     /// group id). MUST be idempotent (upsert). Called when the call enters
     /// wait retention so the gate is visible to every node before the first
     /// poll — the async event tap alone is lossy under backpressure.
+    ///
+    /// This is a VISIBILITY write, not an ordering hook: implementations must
+    /// not gate it on dispatch-ordering knobs (`strict_fifo`), because the
+    /// monitor's queued list, longest-wait alerts and 30s snapshots all read
+    /// the row. Gating it left wait-retention calls invisible ("Talking" with
+    /// 0 queued everywhere).
     async fn fifo_register_wait(
         &self,
         _queue_id: &str,
@@ -358,11 +559,22 @@ pub trait AgentRegistry: Send + Sync {
 
     /// FIFO gate. Auto-detects the caller's mode from the shared queue:
     /// the call's OWN waiting row present → peer mode (yield only to
-    /// strictly-earlier waiters); absent → newcomer mode (yield to ANY
-    /// unclaimed waiter, i.e. a brand-new call never jumps the queue).
-    /// Fails OPEN on DB errors / unregistered calls — ordering is
-    /// best-effort fairness, never a dispatch blocker.
-    async fn fifo_allows_dispatch(&self, _queue_id: &str, _call_id: &str) -> bool {
+    /// strictly-earlier waiters); absent → newcomer mode (yield only to
+    /// waiters ranking strictly before the caller in dispatch order —
+    /// same-tier joiners keep strict FIFO, higher-priority callers preempt).
+    /// `priority` is the caller's ACD queue priority (newcomers have no row
+    /// yet, so it must be supplied); ignored in peer mode (the row's own
+    /// priority wins). Fails OPEN on DB errors / unregistered calls —
+    /// ordering is best-effort fairness, never a dispatch blocker.
+    /// `available_agents` counts only candidates eligible for this dispatch,
+    /// so unrelated idle agents cannot bypass the waiting order.
+    async fn fifo_allows_dispatch(
+        &self,
+        _queue_id: &str,
+        _call_id: &str,
+        _priority: i32,
+        _available_agents: usize,
+    ) -> bool {
         true
     }
 
@@ -438,6 +650,49 @@ pub trait AgentRegistry: Send + Sync {
     /// Addon implementations use it to emit `skill_group_service_unavailable`.
     async fn notify_call_timeout(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}
 
+    /// Notify the dispatcher that a dialled agent leg did not answer within
+    /// the ring timeout (the queue will retry / re-queue). Addon
+    /// implementations use it to emit `skill_group_agent_no_answer`
+    /// (per-round retry analytics). `attempt` is the queue app's dial-round
+    /// counter.
+    async fn notify_agent_no_answer(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _attempt: u32,
+        _leg_id: &str,
+    ) {
+    }
+
+    /// Notify the dispatcher that a dialled agent leg REJECTED the call
+    /// (486 busy; the queue re-dials the next candidate). Addon
+    /// implementations use it to emit `skill_group_agent_rejected`
+    /// (per-round retry analytics). `attempt` is the queue app's dial-round
+    /// counter.
+    async fn notify_agent_rejected(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _attempt: u32,
+        _leg_id: &str,
+    ) {
+    }
+
+    /// Notify the dispatcher that a queued call CONNECTED to an agent — the
+    /// queue's success terminal. Addon implementations use it to emit
+    /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.
+    async fn notify_call_connected(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _leg_id: &str,
+        _wait_secs: u64,
+    ) {
+    }
+
     /// Notify the dispatcher that a queued call could not be serviced and a
     /// fallback action was executed. Addon implementations use it to emit
     /// `skill_group_service_unavailable`.
@@ -455,9 +710,11 @@ pub trait AgentRegistry: Send + Sync {
     ///
     /// Semantics (only when the agent's current state carries exactly this
     /// `call_id`):
-    /// - `Ringing{call_id}` (unanswered reservation, e.g. originate failure or
-    ///   a parallel leg cancelled by another agent's answer) → back to Idle —
-    ///   the agent never answered and is immediately schedulable again.
+    /// - `Ringing{call_id}` (unanswered reservation, e.g. caller abandoned
+    ///   while the phone rang, originate failure, or a parallel leg cancelled
+    ///   by another agent's answer) → Idle — the agent never answered and
+    ///   never talked, so there is no after-call work: they become
+    ///   schedulable again immediately (no wrapup, no cooldown).
     /// - `Busy{call_id}` (phantom busy, e.g. the agent rejected with 486 while
     ///   the call was served by another agent) → Wrapup — short unschedulable
     ///   (the backend starts its own wrapup timer when available), guaranteeing
@@ -466,6 +723,12 @@ pub trait AgentRegistry: Send + Sync {
     /// Any other state is untouched (the agent's real call or manual state
     /// owns it). Returns `true` when a state change was applied.
     async fn release_call(&self, _agent_id: &str, _call_id: &str) -> bool {
+        false
+    }
+
+    /// Atomically release only an unanswered Ringing reservation for this call.
+    /// Unsupported backends leave state untouched; Busy must never be released here.
+    async fn release_unanswered_reservation(&self, _agent_id: &str, _call_id: &str) -> bool {
         false
     }
 

@@ -654,6 +654,24 @@ impl ProxyModule for RegistrarModule {
             }
 
             let _event_guard = self.server.locator_event_lock.lock().await;
+            // An existing identity keeps its business presence when renewing
+            // or adding a Contact; only a new registration starts a login.
+            let is_refresh = if location.expires == 0 {
+                false
+            } else {
+                match self.server.locator
+                    .has_active_bindings(user.username.as_str(), user.realm.as_deref())
+                    .await
+                {
+                    Ok(active) => active,
+                    Err(e) => {
+                        info!("failed to verify registration bindings: {:?}", e);
+                        metrics::sip::registration_failed(&realm, "storage_error");
+                        tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
+                        return Ok(ProxyAction::Abort);
+                    }
+                }
+            };
             match self
                 .server
                 .locator
@@ -679,7 +697,12 @@ impl ProxyModule for RegistrarModule {
                                     .ok();
                             }
                         } else {
-                            locator_events.send(LocatorEvent::Registered(location)).ok();
+                            let event = if is_refresh {
+                                LocatorEvent::Refreshed(location)
+                            } else {
+                                LocatorEvent::Registered(location)
+                            };
+                            locator_events.send(event).ok();
                         }
                     }
                 }

@@ -17,7 +17,10 @@ rustpbx config (in config.toml):
 Test with the built-in test endpoint:
     curl -X POST http://localhost:8080/rwi/event \
          -H "Content-Type: application/json" \
-         -d '{"rwi":"1.0","sequence":1,"timestamp":1700000000,"call_id":"test","event_type":"call_ringing","event":{"call_ringing":{"call_id":"test","context":{}}}}'
+         -d '{"rwi":"1.0","sequence":1,"timestamp":"2026-06-04T16:00:00.000000+08:00","call_id":"test","event_type":"call_ringing","event":{"call_ringing":{"call_id":"test","context":{}}}}'
+
+The envelope `timestamp` is an RFC 3339 string in the server's local timezone
+(e.g. `+08:00`; `+00:00` when the host has no `TZ`) — not a Unix epoch number.
 """
 
 import json
@@ -102,7 +105,7 @@ def main():
     print(f"  Test:")
     print(f"    curl -X POST http://localhost:{PORT}/rwi/event \\")
     print(f"      -H 'Content-Type: application/json' \\")
-    print(f"      -d '{{\"rwi\":\"1.0\",\"sequence\":1,\"timestamp\":1700000000,\"call_id\":\"test\",\"event_type\":\"call_ringing\",\"event\":{{\"call_ringing\":{{\"call_id\":\"test\",\"context\":{{}}}}}}}}'")
+    print(f"      -d '{{\"rwi\":\"1.0\",\"sequence\":1,\"timestamp\":\"2026-06-04T16:00:00.000000+08:00\",\"call_id\":\"test\",\"event_type\":\"call_ringing\",\"event\":{{\"call_ringing\":{{\"call_id\":\"test\",\"context\":{{}}}}}}}}'")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

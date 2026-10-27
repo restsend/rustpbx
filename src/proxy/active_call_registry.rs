@@ -50,6 +50,12 @@ pub struct ActiveCallContextMeta {
     /// how long the call has been sitting in the IVR.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ivr_entered_at: Option<DateTime<Utc>>,
+    /// Wall-clock time the call entered the queue — stamped when the queue
+    /// app starts (`start_queue_app`). The monitor uses it as the wait-time
+    /// source for the meta-fallback queued rows (shared `cc_acd_queue` row
+    /// missing) so their wait clock starts at queue entry, not dialog start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_entered_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,6 +306,19 @@ impl ActiveProxyCallRegistry {
     /// Get all active session IDs
     pub fn session_ids(&self) -> Vec<String> {
         self.entries.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Session and dialog identities whose owner records must remain live.
+    pub fn live_call_ids(&self) -> Vec<String> {
+        let mut ids = self.session_ids();
+        ids.extend(
+            self.handles_by_dialog
+                .iter()
+                .map(|entry| entry.key().clone()),
+        );
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Alias for count() for SessionRegistry compatibility

@@ -109,15 +109,20 @@ mod ivr_test;
 #[cfg(test)]
 mod queue_test;
 
+#[cfg(test)]
+mod queue_recovery_test;
+
 pub use app_context::{
     AppInvocationContext, AppRouteContext, ApplicationContext, CallInfo, PendingQueuePlan,
-    QueueOverflowOverrides, extract_sip_headers, merge_sip_headers,
+    QueueOverflowOverrides, extract_sip_headers, is_sip_transport_header, merge_sip_headers,
+    sip_headers_from,
 };
 pub use controller::{
     CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackToken,
     RecordingInfo,
 };
 pub use event_loop::AppEventLoop;
+pub use queue::{QueueDiagnosticRequest, QueueDispatchDiagnostic};
 
 // ─── CallApp Trait ──────────────────────────────────────────────────────────
 
@@ -263,6 +268,15 @@ pub enum AppEvent {
 /// | `on_exit` | App is exiting (cleanup) |
 #[async_trait]
 pub trait CallApp: Send + Sync {
+    async fn on_queue_diagnostic(
+        &mut self,
+        request: &QueueDiagnosticRequest,
+        _controller: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        request.respond(Err("not_queue".into()));
+        Ok(AppAction::Continue)
+    }
+
     /// Returns the application type identifier.
     fn app_type(&self) -> CallAppType;
 

@@ -20,9 +20,9 @@
             </div>
         </header>
         <nav
-            class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
+            class="inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
             <template x-for="tab in tabs" :key="tab.id">
-                <button type="button" @click="selectTab(tab.id)" class="rounded-md px-3 py-1.5 transition"
+                <button type="button" @click="selectTab(tab.id)" class="whitespace-nowrap rounded-md px-3 py-1.5 transition"
                     :class="activeTab === tab.id ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
                     <span x-text="tab.label"></span>
                 </button>

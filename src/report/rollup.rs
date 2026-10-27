@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, ExprTrait, FromQueryResult, QueryFilter,
-    QuerySelect, Set,
+    QuerySelect, Set, TransactionSession,
 };
 use sea_orm::sea_query::Expr;
 
@@ -28,11 +28,113 @@ struct DailyAggRow {
 /// idempotent semantics; the row count per day is bounded by the
 /// direction × department × trunk combinations actually seen).
 ///
-/// Returns the number of rollup rows written.
+/// Concurrency: every cluster node runs this on a 5-min tick against one
+/// shared database. The delete-then-insert refresh is only safe under a
+/// SINGLE writer — concurrent refreshes erase each other's rows (surfacing
+/// as sea-orm `RecordNotFound: Failed to find inserted item` when the
+/// post-insert read-after-write misses) and pile up duplicate dimension
+/// rows (the `(day, direction, department_id, sip_trunk_id)` index is not
+/// UNIQUE because MySQL unique indexes treat NULLs as distinct). The whole
+/// refresh therefore runs inside a transaction holding a cluster-wide
+/// advisory lock (MySQL `GET_LOCK` / Postgres `pg_try_advisory_lock`);
+/// a node that cannot take the lock skips the tick — the winner computes
+/// from the same shared CDRs anyway.
+///
+/// Returns the number of rollup rows written (0 when skipped for the lock).
 pub async fn rollup_cdr_daily<C>(conn: &C, day_start: DateTime<Utc>) -> anyhow::Result<usize>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + sea_orm::TransactionTrait,
 {
+    let txn = conn.begin().await?;
+    match refresh_window_locked(&txn, day_start).await {
+        Ok(n) => {
+            txn.commit().await?;
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = txn.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+const ROLLUP_LOCK_NAME: &str = "rustpbx_cdr_daily_rollup";
+
+/// Acquire the cross-node rollup advisory lock on the transaction's own
+/// connection (session-scoped, so all statements must go through `txn`).
+/// SQLite has no cluster peers sharing the file — always proceed.
+async fn acquire_rollup_lock<C: ConnectionTrait>(txn: &C) -> anyhow::Result<bool> {
+    let backend = txn.get_database_backend();
+    let stmt = match backend {
+        sea_orm::DbBackend::MySql => sea_orm::Statement::from_string(
+            backend,
+            format!("SELECT GET_LOCK('{ROLLUP_LOCK_NAME}', 0) AS lock_ok"),
+        ),
+        sea_orm::DbBackend::Postgres => sea_orm::Statement::from_string(
+            backend,
+            format!("SELECT pg_try_advisory_lock(hashtext('{ROLLUP_LOCK_NAME}')) AS lock_ok"),
+        ),
+        _ => return Ok(true),
+    };
+    let Some(row) = txn
+        .query_one_raw(stmt)
+        .await
+        .map_err(|e| anyhow::anyhow!("rollup lock query failed: {e}"))?
+    else {
+        return Ok(false);
+    };
+    // MySQL GET_LOCK yields 1/0/NULL (integer); Postgres yields bool.
+    let acquired = row
+        .try_get::<Option<bool>>("", "lock_ok")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            row.try_get::<Option<i64>>("", "lock_ok")
+                .ok()
+                .flatten()
+                .map(|v| v == 1)
+        })
+        .unwrap_or(false);
+    Ok(acquired)
+}
+
+/// Release the advisory lock on the same connection that acquired it. Must
+/// run on EVERY exit path: MySQL session locks survive commit/rollback and
+/// would stay held by the pooled connection.
+async fn release_rollup_lock<C: ConnectionTrait>(txn: &C) {
+    let backend = txn.get_database_backend();
+    let sql = match backend {
+        sea_orm::DbBackend::MySql => format!("DO RELEASE_LOCK('{ROLLUP_LOCK_NAME}')"),
+        sea_orm::DbBackend::Postgres => {
+            format!("SELECT pg_advisory_unlock(hashtext('{ROLLUP_LOCK_NAME}'))")
+        }
+        _ => return,
+    };
+    if let Err(e) = txn.execute_unprepared(&sql).await {
+        tracing::warn!(error = %e, "failed to release cdr daily rollup lock");
+    }
+}
+
+async fn refresh_window_locked<C: ConnectionTrait>(
+    txn: &C,
+    day_start: DateTime<Utc>,
+) -> anyhow::Result<usize> {
+    if !acquire_rollup_lock(txn).await? {
+        tracing::info!(
+            day = %day_start,
+            "cdr daily rollup skipped: another node holds the rollup lock"
+        );
+        return Ok(0);
+    }
+    let result = recompute_window(txn, day_start).await;
+    release_rollup_lock(txn).await;
+    result
+}
+
+async fn recompute_window<C: ConnectionTrait>(
+    conn: &C,
+    day_start: DateTime<Utc>,
+) -> anyhow::Result<usize> {
     let day_end = day_start + chrono::Duration::days(1);
     let answered_status: Vec<&str> = vec!["answered", "completed"];
 
@@ -128,7 +230,7 @@ where
 /// still change. Cheap enough to run every few minutes.
 pub async fn rollup_recent_days<C>(conn: &C) -> anyhow::Result<usize>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + sea_orm::TransactionTrait,
 {
     let now = Utc::now();
     let today = day_start(now);
