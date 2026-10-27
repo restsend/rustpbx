@@ -1415,14 +1415,20 @@ def build_route_points_table(cfg: dict) -> list:
 
 def _find_in_table(table: list, caller: str, callee: str,
                    group_hits: dict, trail=None):
-    """从指定路由表中找最优三元组（caller 命中 + callee 前缀）。
-
-    只有 callee 前缀匹配的条目才能参与竞争，rank 按 (前缀长度, priority,
-    caller 强度) 排序，最长前缀优先。"""
-    candidates = [t for t in table if t["enabled"] and not t.get("default_for")]
+    """逐规则一行概要：命中则 ✅ [source] cg=... prefix=... → Lx，跳过则 ❌ [source] 原因。"""
+    if trail is None:
+        trail = []
     best = None
 
-    for t in candidates:
+    for idx, t in enumerate(table):
+        tag = f"[{t['source']}]"
+        if not t["enabled"]:
+            trail.append(f"❌ {tag} disabled")
+            continue
+        if t.get("default_for"):
+            trail.append(f"❌ {tag} default_for（兜底组仅 L4）")
+            continue
+
         caller_len = 0
         if t["caller_group"]:
             caller_len = group_hits.get(t["caller_group"], 0)
@@ -1431,26 +1437,31 @@ def _find_in_table(table: list, caller: str, callee: str,
         else:
             caller_len = None
 
-        callee_hit = bool(t["prefix"]) and callee.startswith(t["prefix"])
-        if not callee_hit:
+        has_prefix = bool(t["prefix"])
+        callee_hit = has_prefix and callee.startswith(t["prefix"])
+
+        if has_prefix and not callee_hit:
+            trail.append(f"❌ {tag} prefix={t['prefix']!r} 不匹配 callee={callee!r}")
             continue
 
-        if caller_len:
+        if caller_len and callee_hit:
             layer = "L1"
-        elif caller_len is None:
+        elif caller_len is None and callee_hit:
             layer = "L2"
+        elif caller_len and not has_prefix:
+            layer = "L3"
         else:
+            trail.append(f"❌ {tag} cg={t['caller_group']!r} 未命中")
             continue
 
-        rank = (len(t["prefix"]), t["priority"], caller_len or 0)
+        layer_rank = {"L1": 2, "L2": 1, "L3": 0}[layer]
+        rank = (layer_rank, len(t["prefix"]), t["priority"], caller_len or 0)
+        prev = best[2] if best else None
         if best is None or rank > best[0]:
             best = (rank, t, layer)
-
-        if trail is not None:
-            trail.append(f"  [{t['source']}#{t['rule_index']}] "
-                         f"cg={t['caller_group']!r} callee_prefix={t['prefix']!r} "
-                         f"caller_hit={'Y' if caller_len else 'N'} "
-                         f"callee_hit=Y -> {layer}")
+            trail.append(f"✅ {tag} cg={t['caller_group']!r} prefix={t['prefix']!r} → {layer}（新最优，取代 {prev}）")
+        else:
+            trail.append(f"➖ {tag} cg={t['caller_group']!r} prefix={t['prefix']!r} → {layer}（被 {prev} 压过）")
 
     if best:
         return best[1], best[2]
@@ -1957,7 +1968,7 @@ class RouteDecisionHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def do_POST(self):
-        global CONFIG  # config/reload 及 /token/webrtc 读取/赋值，须先声明再引用
+        global CONFIG, CONFIG_FILE  # config/reload 读取/赋值，须先声明再引用
         path = self.path.split("?")[0].rstrip("/")
         if path.endswith("/token/webrtc"):
             # WebRTC 会话：向 (预) 客户端签发一次性短期 JWT 作为密码。

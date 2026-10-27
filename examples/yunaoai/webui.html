@@ -75,6 +75,10 @@
   .dl-l3 { background:#e0e7ff; color:#4338ca; }
   .dl-l4 { background:#fef3c7; color:#b45309; }
   .dl-reject { background:#fee2e2; color:#b91c1c; }
+  .decision-path { display:flex; flex-wrap:wrap; align-items:center; gap:3px; margin:6px 0 0 0; padding-left:2px; font-size:12px; line-height:1.8; }
+  .decision-path .dp-step { background:#eff6ff; color:#1e40af; padding:1px 8px; border-radius:10px; white-space:nowrap; border:1px solid #dbeafe; font-family:"SF Mono",Menlo,monospace; font-size:11px; }
+  .decision-path .dp-arrow { color:#9ca3af; font-size:11px; }
+  .decision-path .dp-final { background:#1e3c72; color:#fff; border-color:#1e3c72; }
   /* JSON 格式化浮窗：点击行内 JSON 打开，展示缩进+高亮的完整记录 */
   .event-json.clickable { cursor:pointer; }
   .event-json.clickable:hover { background:#eef2fb; }
@@ -92,6 +96,23 @@
   .json-panel-head .json-close:hover { background:rgba(255,255,255,.3); }
   .json-panel pre { margin:0; padding:16px; overflow:auto; font-family:"SF Mono",Menlo,monospace;
                     font-size:12px; line-height:1.6; color:#374151; }
+  .json-trace { padding:12px 16px; border-bottom:1px solid #e1e4ea; background:#f8faff;
+                flex-shrink:0; max-height:55vh; overflow:auto; }
+  .json-trace-title { font-size:12px; font-weight:600; color:#1e3c72; margin-bottom:8px;
+                      display:flex; align-items:center; gap:6px; }
+  .json-trace-title .layer-pill { font-size:11px; padding:1px 8px; border-radius:10px;
+                                   background:#1e3c72; color:#fff; font-weight:500; }
+  .trace-row { font-size:12px; font-family:"SF Mono",Menlo,monospace; padding:3px 0;
+               color:#374151; white-space:pre-wrap; word-break:break-all; }
+  .trace-row.win { color:#16a34a; font-weight:600; }
+  .trace-row.skip { color:#9ca3af; }
+  .trace-row.l4 { color:#d97706; font-weight:500; }
+  .trace-row.info { color:#6b7280; font-size:11px; }
+  .trace-summary { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; padding-top:8px;
+                   border-top:1px solid #e1e4ea; font-size:12px; }
+  .trace-summary .ts-item { background:#fff; border:1px solid #e1e4ea; border-radius:6px;
+                            padding:3px 9px; color:#4b5563; font-family:"SF Mono",Menlo,monospace; font-size:11px; }
+  .trace-summary .ts-item b { color:#1e3c72; margin-right:3px; }
   .jk { color:#1d4ed8; }   /* JSON key */
   .js { color:#15803d; }   /* string 值 */
   .jn { color:#b45309; }   /* number 值 */
@@ -111,6 +132,7 @@
 <toolbar>
   <input id="q" type="text" placeholder="搜索 callId / xcid / ani / dnis..." />
   <button id="btn-refresh" class="primary">🔄 立即刷新</button>
+  <button id="btn-config-reload" title="热重载 route_decision_service 的配置文件">🔁 重载配置</button>
   <button id="btn-toggle">⏸ 暂停自动刷新</button>
   <button id="btn-clear">🗑 清空记录</button>
   <div class="refresh-indicator"><span class="dot"></span><span id="auto-label">自动刷新 3s</span></div>
@@ -125,6 +147,7 @@
         onclick="copyJson()">📋 复制 JSON</button>
       <button class="json-close" onclick="document.getElementById('json-modal').classList.remove('open')">✕ 关闭</button>
     </div>
+    <div id="json-modal-trace" class="json-trace" style="display:none"></div>
     <pre id="json-modal-pre"></pre>
   </div>
 </div>
@@ -220,21 +243,46 @@ function render(d) {
 
     const startTime = fmtTime(first.ts);
 
+    // 决策路径：所有决策的 layer 按顺序串起来（L1 → L2 → ... → 最终）
+    const allLayers = decisions.map(d => d.layer).filter(Boolean);
+    const pathHtml = allLayers.length > 1
+      ? '<div class="decision-path">' + allLayers.map((l, idx) => {
+          const isLast = idx === allLayers.length - 1;
+          return `<span class="dp-step ${isLast ? 'dp-final' : ''}" title="${layerLabel(l)}">${l}</span>`
+            + (isLast ? '' : '<span class="dp-arrow">›</span>');
+        }).join('') + '</div>'
+      : '';
+
+    // 完整推理链：所有 decision 的 steps 合并
+    const allSteps = decisions.flatMap(d => d.steps || []);
+    const fullPathHtml = allSteps.length
+      ? '<div class="decision-path" title="完整决策推理链">'
+          + allSteps.map((s, idx) => {
+              const isLast = idx === allSteps.length - 1;
+              const short = s.length > 40 ? s.slice(0, 38) + '…' : s;
+              return `<span class="dp-step ${isLast ? 'dp-final' : ''}" title="${s}">${short}</span>`
+                + (isLast ? '' : '<span class="dp-arrow">›</span>');
+            }).join('')
+          + '</div>'
+      : '';
+
     let bodyHtml = '';
     if (isOpen) {
-      bodyHtml = '<div class="card-body">' + recs.map((e,i) => {
-        const j = {...e}; delete j.source; delete j.ts; delete j.kind;
-        const isDec = e.kind === 'decision';
-        return `<div class="event-row">
-          <div class="event-ts">${fmtTime(e.ts, false)}</div>
-          <div class="event-badge">${isDec
-            ? `<span class="dl-pill ${layerClass(e.layer)}">Decision</span>`
-            : `<span class="state-pill ${stateClass(e.status)}">${e.status}</span>`}</div>
-          <div class="event-json clickable" title="点击查看格式化 JSON"
-               data-cid="${cid}" data-idx="${i}"
-               onclick="openJson(event, '${cid}', ${i})">${isDec ? decBrief(e) : JSON.stringify(j)}</div>
-        </div>`;
-      }).join('') + '</div>';
+      bodyHtml = '<div class="card-body">'
+        + (fullPathHtml ? '<div style="margin-bottom:10px">' + fullPathHtml + '</div>' : '')
+        + recs.map((e,i) => {
+          const j = {...e}; delete j.source; delete j.ts; delete j.kind;
+          const isDec = e.kind === 'decision';
+          return `<div class="event-row">
+            <div class="event-ts">${fmtTime(e.ts, false)}</div>
+            <div class="event-badge">${isDec
+              ? `<span class="dl-pill ${layerClass(e.layer)}">Decision</span>`
+              : `<span class="state-pill ${stateClass(e.status)}">${e.status}</span>`}</div>
+            <div class="event-json clickable" title="点击查看格式化 JSON"
+                 data-cid="${cid}" data-idx="${i}"
+                 onclick="openJson(event, '${cid}', ${i})">${isDec ? decBrief(e) : JSON.stringify(j)}</div>
+          </div>`;
+        }).join('') + '</div>';
     }
 
     items.push(`
@@ -248,6 +296,7 @@ function render(d) {
           <span class="call-xcid" title="${xcid}">${xcid}</span>
           <div class="call-states">${rgHtml} ${layerHtml} ${statesHtml}</div>
         </div>
+        ${pathHtml}
         ${bodyHtml}
       </div>`);
   }
@@ -317,6 +366,36 @@ document.getElementById('btn-clear').onclick = async () => {
   const r = await fetch('/events/clear', {method:'POST'});
   if (r.ok) { expanded.clear(); load(); }
 };
+document.getElementById('btn-config-reload').onclick = async function () {
+  const btn = this;
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ 重载中...';
+  try {
+    const r = await fetch('/config/reload', {method:'POST'});
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.ok) {
+      btn.textContent = '✅ 已重载 · ' + (d.sitecode || '');
+      btn.style.borderColor = '#059669';
+      btn.style.color = '#059669';
+      load();
+    } else {
+      btn.textContent = '❌ ' + (d.reason || '重载失败');
+      btn.style.borderColor = '#dc2626';
+      btn.style.color = '#dc2626';
+    }
+  } catch (e) {
+    btn.textContent = '❌ 网络错误';
+    btn.style.borderColor = '#dc2626';
+    btn.style.color = '#dc2626';
+  }
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = prev;
+    btn.style.borderColor = '';
+    btn.style.color = '';
+  }, 2500);
+};
 let searchTimer;
 document.getElementById('q').oninput = () => {
   clearTimeout(searchTimer);
@@ -379,18 +458,58 @@ async function copyJson() {
   }
   setTimeout(() => { btn.textContent = '📋 复制 JSON'; }, 1200);
 }
+function renderTrace(r) {
+  const trace = document.getElementById('json-modal-trace');
+  if (r.kind !== 'decision' || !r.steps || r.steps.length === 0) {
+    trace.style.display = 'none';
+    trace.innerHTML = '';
+    return;
+  }
+
+  const rows = r.steps.map(line => {
+    const l = line.trim();
+    let cls = 'info';
+    if (l.startsWith('✅')) cls = 'win';
+    else if (l.startsWith('❌') || l.startsWith('➖')) cls = 'skip';
+    else if (l.startsWith('兜底') || l.startsWith('L4') || l.startsWith('主叫组解析')) cls = 'l4';
+    return `<div class="trace-row ${cls}">${l}</div>`;
+  }).join('');
+
+  const summaryItems = [];
+  if (r.layer) summaryItems.push(`<div class="ts-item"><b>层级</b>${r.layer}</div>`);
+  if (r.source) summaryItems.push(`<div class="ts-item"><b>路由点</b>${r.source}</div>`);
+  if (r.caller !== undefined) summaryItems.push(`<div class="ts-item"><b>主叫</b>${r.caller}</div>`);
+  if (r.callee !== undefined) summaryItems.push(`<div class="ts-item"><b>被叫</b>${r.callee}</div>`);
+  if (r.matched_prefix) summaryItems.push(`<div class="ts-item"><b>匹配前缀</b>${r.matched_prefix}</div>`);
+  if (typeof r.strip === 'number') summaryItems.push(`<div class="ts-item"><b>strip</b>${r.strip}</div>`);
+  if (r.group_hits && Object.keys(r.group_hits).length) {
+    const gh = Object.entries(r.group_hits).map(([k,v]) => `${k}(长度${v})`).join(', ');
+    summaryItems.push(`<div class="ts-item"><b>主叫组命中</b>${gh}</div>`);
+  }
+  if (r.targets && r.targets.length) {
+    const tg = r.targets.map(t => `${t.trunk || '-'} → ${t.callee || '-'}`).join(' | ');
+    summaryItems.push(`<div class="ts-item"><b>出口</b>${tg}</div>`);
+  }
+  const summaryHtml = summaryItems.length ? `<div class="trace-summary">${summaryItems.join('')}</div>` : '';
+
+  trace.innerHTML = `
+    <div class="json-trace-title">🧭 路由判定过程 ${r.layer ? `<span class="layer-pill">${layerLabel(r.layer)}</span>` : ''}</div>
+    ${rows}
+    ${summaryHtml}`;
+  trace.style.display = 'block';
+}
+
 function openJson(ev, cid, idx) {
-  ev.stopPropagation();   // 不触发外层卡片折叠
+  ev.stopPropagation();
   const rec = (window._events || {})[cid];
   if (!rec || !rec[idx]) return;
   const r = rec[idx];
-  // 层值带中文语义显示（L3 → "L3:主叫匹配"），非专业读者也能看懂；
-  // 其余字段保持 /events 返回的原始值
   const show = (r.kind === 'decision' && r.layer) ? {...r, layer: layerLabel(r.layer)} : r;
-  _currentJson = show;   // 供"复制 JSON"复制当前记录（含 layer 中文换算结果）
+  _currentJson = show;
   document.getElementById('json-modal-title').textContent =
     (r.kind === 'decision' ? '决策记录' : '事件记录') + ' · ' + fmtTime(r.ts);
   document.getElementById('json-modal-pre').innerHTML = highlightJson(show);
+  renderTrace(r);
   document.getElementById('json-modal').classList.add('open');
 }
 document.addEventListener('keydown', e => {
