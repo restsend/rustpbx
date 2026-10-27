@@ -12,7 +12,7 @@ members = [
 
 [package]
 name = "rustpbx"
-version = "0.5.1"
+version = "0.5.2-rc"
 edition = "2024"
 # Integration tests are explicit targets (see [[test]] below): the suites are
 # aggregated into e2e_core / e2e_addons; the remaining tests/*.rs files are
@@ -218,11 +218,11 @@ totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 tempfile = "3.27.0"
 arc-swap = "1.9.2"
 # Workspace crates
-rustpbx-models = { path = "crates/rustpbx-models", version = "0.5.1" }
-rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.1" }
-rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.1" }
-rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.1" }
-rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.1" }
+rustpbx-models = { path = "crates/rustpbx-models", version = "0.5.2-rc" }
+rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.2-rc" }
+rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.2-rc" }
+rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.2-rc" }
+rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.2-rc" }
 # Required by the `e2e-testing` feature (proxy::tests helpers pick free ports).
 portpicker = { version = "0.1.1", optional = true }
 

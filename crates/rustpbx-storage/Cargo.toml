@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx-storage"
-version = "0.5.1"
+version = "0.5.2-rc"
 edition = "2024"
 description = "RustPBX component: storage"
 license = "MIT"
@@ -20,7 +20,7 @@ object_store = { version = "0.14.0", default-features = false, features = [
     "ring",
 ] }
 serde = { version = "1", features = ["derive"] }
-rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.1" }
+rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.2-rc" }
 tokio = { version = "1.53", features = ["fs"] }
 
 [dev-dependencies]

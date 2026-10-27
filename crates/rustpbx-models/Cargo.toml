@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx-models"
-version = "0.5.1"
+version = "0.5.2-rc"
 edition = "2024"
 description = "RustPBX component: models"
 license = "MIT"
