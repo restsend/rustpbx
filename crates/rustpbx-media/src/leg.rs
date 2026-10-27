@@ -1934,6 +1934,11 @@ mod tests {
         let captured = logs.volume.clone();
         let relay_logs = logs.relay.clone();
         let sdp_logs = logs.sdp.clone();
+        // With a single live dispatcher, tracing-core caches a new callsite's
+        // interest from whichever thread hits it first; a parallel test with
+        // no subscriber then disables these debug! callsites for us too. A
+        // second live dispatcher forces interest to consider every dispatcher.
+        let _keep_interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _subscriber = tracing::subscriber::set_default(logs);
         // Two RTP legs bound to ephemeral ports must construct and stop
         // without panicking. Uses the loopback PC (no real network needed for
