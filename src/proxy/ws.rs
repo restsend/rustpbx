@@ -409,10 +409,10 @@ mod channel_cleanup_tests {
     /// guard's `Drop` must reclaim the transport-table entry on that path.
     #[tokio::test]
     async fn cleanup_guard_reclaims_entry_when_handler_future_is_dropped() {
-        let tl = TransportLayer::new(CancellationToken::new());
         let endpoint = EndpointBuilder::new()
-            .with_transport_layer(tl.clone())
+            .with_transport_layer(TransportLayer::new(CancellationToken::new()))
             .build();
+        let tl = &endpoint.inner.transport_layer;
         let peer_addr = SipAddr {
             r#type: Some(transport_type_for_test()),
             addr: "203.0.113.7:54322"
@@ -468,10 +468,10 @@ mod channel_cleanup_tests {
     #[tokio::test]
     async fn cleanup_guard_does_not_cancel_shared_transport_token() {
         let token = CancellationToken::new();
-        let tl = TransportLayer::new(token.clone());
         let endpoint = EndpointBuilder::new()
-            .with_transport_layer(tl.clone())
+            .with_transport_layer(TransportLayer::new(token.clone()))
             .build();
+        let tl = &endpoint.inner.transport_layer;
 
         let peer_addr = SipAddr {
             r#type: Some(transport_type_for_test()),
