@@ -4457,11 +4457,23 @@ mod tests {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.log");
-        std::fs::write(dir.path().join("runtime.log.2026-10-04-18"),
+        // Rotation suffixes are interpreted in LOCAL time (tracing-appender
+        // rolls by the local clock), so derive them from the query window
+        // instead of hardcoding UTC hours — the suite must not depend on TZ.
+        let local_suffix = |utc_hour: u32| -> String {
+            use chrono::TimeZone;
+            chrono::Utc
+                .with_ymd_and_hms(2026, 10, 4, utc_hour, 0, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d-%H")
+                .to_string()
+        };
+        std::fs::write(dir.path().join(format!("runtime.log.{}", local_suffix(10u32))),
             "2026-10-04T10:00:01+00:00 INFO call_id=call-abcdef first\n2026-10-04T10:00:03+00:00 INFO call_id=call-other unrelated\n2026-10-04T10:00:02+00:00 INFO call_id=call-abcdef second\n").unwrap();
-        std::fs::write(dir.path().join("runtime.log.2026-10-04-19"),
+        std::fs::write(dir.path().join(format!("runtime.log.{}", local_suffix(11u32))),
             "2026-10-04T11:00:00+00:00 INFO call_id=call-other unrelated\n").unwrap();
-        std::fs::write(dir.path().join("runtime.log.2026-10-04-20"),
+        std::fs::write(dir.path().join(format!("runtime.log.{}", local_suffix(12u32))),
             "2026-10-04T12:00:00+00:00 INFO call_id=call-abcdef third\n").unwrap();
         std::fs::write(&path,
             "2026-10-04T13:00:04+00:00 INFO call_id=call-abcdef fourth\n2026-10-04T13:00:05+00:00 INFO call_id=xcall-abcdef prefix\n").unwrap();
@@ -4562,8 +4574,9 @@ mod tests {
         assert!(body["nextCursor"].is_string());
         assert!(body["scannedBytes"].as_u64().unwrap() <= 4 * 1024 * 1024);
         // The same continuation contract applies when no rotation has ever happened.
-        for hour in [18, 19, 20] {
-            std::fs::remove_file(dir.path().join(format!("runtime.log.2026-10-04-{hour}"))).unwrap();
+        for hour in [10u32, 11, 12] {
+            std::fs::remove_file(dir.path().join(format!("runtime.log.{}", local_suffix(hour))))
+                .unwrap();
         }
         let response = search_with_retry(&router, search_url("")).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();

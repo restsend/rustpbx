@@ -796,11 +796,19 @@ mod tests {
                             };
                             stack.audio_complete(busy_track);
                         }
-                        stack
-                            .assert_cmd(2000, "busy fallback must still hang up", |c| {
-                                matches!(c, CallCommand::Hangup(_))
-                            })
-                            .await;
+                        // Merged semantics: the fallback first cancels any
+                        // still-ringing agent legs (pre-fallback cancel), then
+                        // hangs up.
+                        loop {
+                            let cmd = stack.next_cmd(2000).await.unwrap();
+                            match cmd {
+                                CallCommand::LegRemove { .. } => continue,
+                                CallCommand::Hangup(_) => break,
+                                other => panic!(
+                                    "expected LegRemove/Hangup for busy fallback, got {other:?}"
+                                ),
+                            }
+                        }
                     }
                     if enabled {
                         stack.remote_hangup();

@@ -1,5 +1,11 @@
 use super::*;
 
+/// Serializes tests that touch the process-global session-id settings:
+/// cargo runs `#[tokio::test]`s on parallel worker threads, so the
+/// seed/restore pattern alone is racy (a Native-mode assertion can observe
+/// the Rfc7989 seed another test installed).
+static SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {
     inherited_session_id_session_with_enabled(header_id, uui_id, true).await
 }
@@ -104,6 +110,21 @@ async fn session_id_rfc_padding_preserves_original_root_without_truncating_other
 
 #[tokio::test]
 async fn session_id_native_inherited_length_survives_outgoing_boundary() {
+    use crate::call::session_id::{SessionIdHeaderMode, init_settings, settings};
+    let _guard = SETTINGS_LOCK.lock();
+    // Deterministic Native mode regardless of test scheduling order.
+    struct RestoreSettings(crate::call::session_id::SessionIdSettings);
+    impl Drop for RestoreSettings {
+        fn drop(&mut self) {
+            crate::call::session_id::init_settings(
+                self.0.length,
+                self.0.header_mode,
+                self.0.inherit_callid,
+            );
+        }
+    }
+    let _restore = RestoreSettings(settings());
+    init_settings(16, SessionIdHeaderMode::Native, true);
     let short = "0b9e6c1e1b404e8f";
     let session = inherited_session_id_session(short, Some(short)).await;
     assert_eq!(session.session_hook_ctx().logical_session_id(), short);
@@ -132,8 +153,10 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
             init_settings(self.0.length, self.0.header_mode, self.0.inherit_callid);
         }
     }
-    // The production wire builder reads process settings. This module is run
-    // serially with other settings-dependent tests, and restores even on panic.
+    // The production wire builder reads process settings. Held under
+    // SETTINGS_LOCK together with the other settings-dependent tests, and
+    // restored even on panic.
+    let _guard = SETTINGS_LOCK.lock();
     let _restore = RestoreSettings(settings());
     init_settings(16, SessionIdHeaderMode::Rfc7989, true);
     let short = "0b9e6c1e1b404e8f";
