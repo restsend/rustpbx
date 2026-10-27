@@ -1225,6 +1225,19 @@ impl TriggerInfo {
 pub struct IvrStepTrace {
     pub call_id: String,
     pub session_id: String,
+    /// Runtime execution generation owning this trace (the invocation's
+    /// `app_execution_id`). Omitted when unknown — NEVER derived from
+    /// `extra`, and never replaced by a successor execution's identity.
+    ///
+    /// Composite action-instance identity is
+    /// `(session_id, app_execution_id, step_index)`: `step_index` is unique
+    /// within one execution but resets when the flow re-enters or resumes in
+    /// the same session, so consumers must pair the two fields. A
+    /// compensating trace for a flow that died while suspended (bridge /
+    /// queue / jump hand-off) carries the SUSPENDED execution's identity,
+    /// even if a successor has since started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_execution_id: Option<u64>,
     pub caller: String,
     pub callee: String,
     pub step_index: u32,
@@ -1237,6 +1250,9 @@ pub struct IvrStepTrace {
     pub step_name: Option<String>,
     pub step_start_time: Option<String>,
     pub step_end_time: Option<String>,
+    /// Opaque per-node JSON from the provider, passed through verbatim.
+    /// Never inherited from a previous node, never interpreted or completed
+    /// by the PBX.
     pub extra: Option<serde_json::Value>,
     pub sip_headers: Option<std::collections::HashMap<String, String>>,
     /// Filled only on the session-end trace entry that records how the whole
@@ -1256,7 +1272,9 @@ pub struct IvrStepTrace {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step_id: Option<String>,
     /// Terminal marker: `true` on the flow's final observable step
-    /// (terminal node, session end, or caller hangup mid-flow).
+    /// (terminal node, session end, or caller hangup mid-flow). A terminal
+    /// step trace carries `end=true` WITHOUT `end_reason` — the `session_end`
+    /// entry is the sole end-reason carrier (segmented-record contract).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<bool>,
 }
@@ -1283,14 +1301,12 @@ impl IvrStepTrace {
 mod tests {
     use super::*;
 
-    /// Completion contract on the RWI event type itself: an entry built
-    /// without stamps is repaired (end = now, start = end) and an entry that
-    /// already carries stamps passes through untouched (idempotent).
-    #[test]
-    fn ivr_step_trace_completion_stamps_backfilled_and_idempotent() {
-        let mk = |start: Option<String>, end: Option<String>| IvrStepTrace {
+    /// Minimal fixture shared by the `IvrStepTrace` contract tests.
+    fn mk_trace(start: Option<String>, end: Option<String>) -> IvrStepTrace {
+        IvrStepTrace {
             call_id: "call-1".into(),
             session_id: "sess-1".into(),
+            app_execution_id: None,
             caller: "1001".into(),
             callee: "2000".into(),
             step_index: 1,
@@ -1310,10 +1326,36 @@ mod tests {
             next_node_id: None,
             next_step_id: None,
             end: None,
-        };
+        }
+    }
 
+    /// Execution-identity contract on the wire: `app_execution_id` is omitted
+    /// when unknown (old consumers never see the key) and carried verbatim
+    /// when known. It lives OUTSIDE `extra` and is never derived from it.
+    #[test]
+    fn ivr_step_trace_app_execution_id_omitted_when_absent() {
+        let mut ev = mk_trace(None, None);
+        let none_payload = serde_json::to_value(&ev).unwrap();
+        assert!(
+            none_payload.get("app_execution_id").is_none(),
+            "absent identity must be omitted from the payload entirely, got: {none_payload}"
+        );
+
+        ev.app_execution_id = Some(7);
+        let some_payload = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            some_payload["app_execution_id"], 7,
+            "known identity must round-trip as an outer integer field"
+        );
+    }
+
+    /// Completion contract on the RWI event type itself: an entry built
+    /// without stamps is repaired (end = now, start = end) and an entry that
+    /// already carries stamps passes through untouched (idempotent).
+    #[test]
+    fn ivr_step_trace_completion_stamps_backfilled_and_idempotent() {
         // Both missing → both backfilled, end >= start.
-        let repaired = mk(None, None).with_completion_stamps();
+        let repaired = mk_trace(None, None).with_completion_stamps();
         let start = repaired
             .step_start_time
             .as_deref()
@@ -1326,7 +1368,8 @@ mod tests {
         );
 
         // Start missing with an explicit end → start falls back to end.
-        let end_only = mk(None, Some("2026-01-01T00:00:05+00:00".into())).with_completion_stamps();
+        let end_only =
+            mk_trace(None, Some("2026-01-01T00:00:05+00:00".into())).with_completion_stamps();
         assert_eq!(
             end_only.step_start_time.as_deref(),
             Some("2026-01-01T00:00:05+00:00"),
@@ -1334,7 +1377,7 @@ mod tests {
         );
 
         // Already complete → untouched.
-        let untouched = mk(
+        let untouched = mk_trace(
             Some("2026-01-01T00:00:00+00:00".into()),
             Some("2026-01-01T00:00:01+00:00".into()),
         )

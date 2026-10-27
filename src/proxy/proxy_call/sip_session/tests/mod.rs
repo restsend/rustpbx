@@ -949,6 +949,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         extra: Some(serde_json::json!({"nodetype": "menu_tts", "businessnodeid": "42"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
         step_index: Some(2),
+        app_execution_id: Some(5),
         resumable: false,
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -995,6 +996,10 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert_eq!(
         ev.event.payload["step_index"], 2,
         "bridge DTMF trace must carry the executor-stashed step index, not a hard-coded 0"
+    );
+    assert_eq!(
+        ev.event.payload["app_execution_id"], 5,
+        "bridge DTMF trace must carry the suspended execution's identity"
     );
     assert_eq!(
         ev.event.payload["step_start_time"], "2026-01-01T00:00:00+00:00",
@@ -1062,6 +1067,7 @@ fn forward_dtmf_resumable_bridge_defers_trace_to_resumed_ivr() {
         extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
         step_index: Some(2),
+        app_execution_id: Some(5),
         resumable: true,
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1117,6 +1123,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
         step_index: Some(3),
+        app_execution_id: Some(7),
         resumable: false,
     })));
 
@@ -1134,6 +1141,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
             reason: SessionEndTag::UserHangup,
             detail: None,
         },
+        Some(7),
     );
 
     let ev = events
@@ -1145,6 +1153,10 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
     assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["session_id"], "test-session");
+    assert_eq!(
+        ev.event.payload["app_execution_id"], 7,
+        "compensating session_end must carry the SUSPENDED execution's identity"
+    );
     assert_eq!(
         ev.event.payload["sip_headers"]["X-Business-Type"], "34",
         "synthetic trace must carry the call's SIP headers"
@@ -1183,6 +1195,64 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
     assert_eq!(
         ev.event.payload["step_index"], 3,
         "synthetic session_end must carry the executor-stashed step index, not a hard-coded 0"
+    );
+}
+
+/// Two executions reusing one session: when the compensating session_end
+/// resolves no identity (no bridge context, no executor stash) the field must
+/// be OMITTED — never guessed, never taken from the successor or `extra`.
+/// A no-RWI-gateway attachment must drop the trace with a visible warning
+/// instead of failing silently.
+#[test]
+fn suspended_flow_end_without_identity_omits_field_and_warns_without_gateway() {
+    use crate::call::app::ivr::provider::{SessionEndReason, SessionEndTag};
+    use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
+    use crate::proxy::proxy_call::sip_session::util::emit_suspended_flow_session_end;
+    use crate::rwi::gateway::RwiGateway;
+
+    // 1. No identity anywhere → key absent from the payload entirely.
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let gw_ref = Arc::new(parking_lot::RwLock::new(gateway));
+    let trace_ctx = Arc::new(parking_lot::Mutex::new(None::<BridgeTraceContext>));
+
+    emit_suspended_flow_session_end(
+        "test-session",
+        "sip:1001@x",
+        "sip:2000@x",
+        &Some(gw_ref),
+        &trace_ctx,
+        None,
+        SessionEndReason {
+            reason: SessionEndTag::Hangup,
+            detail: None,
+        },
+        None,
+    );
+
+    let ev = events
+        .try_recv()
+        .expect("queue/jump suspension without node context still emits the trace");
+    assert_eq!(ev.event.payload["action_type"], "Transfer");
+    assert!(
+        ev.event.payload.get("app_execution_id").is_none(),
+        "unknown identity must be omitted from the payload entirely, got: {}",
+        ev.event.payload
+    );
+
+    // 2. Gateway missing → no emission, no panic (warning is logged).
+    emit_suspended_flow_session_end(
+        "test-session",
+        "sip:1001@x",
+        "sip:2000@x",
+        &None,
+        &trace_ctx,
+        None,
+        SessionEndReason {
+            reason: SessionEndTag::UserHangup,
+            detail: None,
+        },
+        Some(9),
     );
 }
 

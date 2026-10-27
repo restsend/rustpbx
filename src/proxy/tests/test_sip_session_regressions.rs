@@ -4021,6 +4021,59 @@ async fn suspended_ivr_exec_hangup_emits_failed_completion_and_cleans_up() {
     assert!(extensions.get::<IvrExecRouteHints>().is_none());
 }
 
+/// End-to-end acceptance for the suspended-flow execution identity: a flow
+/// dies while suspended (caller hangup) and the compensating `session_end`
+/// trace must key to the SUSPENDED execution's generation, read by the
+/// session wrapper from the executor's stash — never a successor's identity,
+/// never derived from `extra`. Unknown identity must omit the field entirely.
+#[tokio::test]
+async fn suspended_flow_hangup_compensating_trace_carries_suspended_execution_id() {
+    use crate::call::app::ivr::executor::IVR_SUSPENDED_EXECUTION_ID_KEY;
+    use crate::call::domain::HangupCommand;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        ProxyConfig::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let (mut session, _handle, _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+
+    // The executor froze the suspended execution's identity at hand-off.
+    session
+        .app_runtime
+        .app_context()
+        .expect("session must expose an app context")
+        .session_vars
+        .insert(IVR_SUSPENDED_EXECUTION_ID_KEY.to_string(), "1".to_string());
+    session.meta.ivr_flow_suspended = true;
+
+    let result = session
+        .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
+        .await;
+    assert!(result.success, "session hangup must complete");
+
+    // The compensating session_end is the only ivr_step_trace this session
+    // can produce (no app ever ran) — drain defensively anyway.
+    let mut compensating = None;
+    while let Ok(ev) = events.try_recv() {
+        if ev.event.event_type == "ivr_step_trace" {
+            compensating = Some(ev);
+            break;
+        }
+    }
+    let ev = compensating.expect("compensating session_end must fan out to the RWI gateway");
+    assert_eq!(ev.event.payload["trigger"]["type"], "session_end");
+    assert_eq!(ev.event.payload["end"], true);
+    assert_eq!(
+        ev.event.payload["app_execution_id"], 1,
+        "compensating session_end must key to the SUSPENDED execution's identity"
+    );
+}
+
 // ─── queue agent connect activates the caller↔agent media bridge ─────────────
 //
 // Regression: when a queue agent answers (dynamic leg), the MediaBridge B leg

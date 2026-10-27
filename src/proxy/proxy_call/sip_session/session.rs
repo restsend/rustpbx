@@ -14858,6 +14858,18 @@ impl SipSession {
         &self,
         end_reason: crate::call::app::ivr::provider::SessionEndReason,
     ) {
+        // Resolve the SUSPENDED execution's identity from the executor's
+        // stash (written at hand-off, cleared by the successor's on_enter) so
+        // the compensating trace keys to the ORIGINAL execution even if a
+        // successor has since started. Unknown → the field is omitted; it is
+        // never taken from the active invocation or from `extra`.
+        let suspended_execution_id = self
+            .app_runtime
+            .app_context()
+            .and_then(|ctx| {
+                ctx.get_var(crate::call::app::ivr::executor::IVR_SUSPENDED_EXECUTION_ID_KEY)
+            })
+            .and_then(|v| v.parse::<u64>().ok());
         super::util::emit_suspended_flow_session_end(
             &self.context.session_id,
             &self.context.original_caller,
@@ -14866,6 +14878,7 @@ impl SipSession {
             &self.bridge_trace_context,
             super::util::trace_sip_headers(&self.app_runtime).await,
             end_reason,
+            suspended_execution_id,
         );
     }
 
