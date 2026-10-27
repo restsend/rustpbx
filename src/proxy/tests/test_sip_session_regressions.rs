@@ -598,7 +598,7 @@ fn recording_test_offer() -> String {
     "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string()
 }
 
-pub(crate) async fn setup_recording_test_media(session: &mut SipSession) {
+pub async fn setup_recording_test_media(session: &mut SipSession) {
     session.media.caller_offer = Some(recording_test_offer());
     session
         .create_callee_track(false)
@@ -3334,7 +3334,7 @@ async fn handle_play_returns_immediately_when_not_awaited() {
 
 /// Same as [`build_session_on_server`] but also returns the command receiver
 /// so tests can observe CallCommands the session loop would consume.
-pub(crate) async fn build_session_with_cmd_rx(
+pub async fn build_session_with_cmd_rx(
     dialplan: Dialplan,
 ) -> (
     SipSession,
@@ -3347,7 +3347,7 @@ pub(crate) async fn build_session_with_cmd_rx(
 
 /// [`build_session_with_cmd_rx`] on a caller-provided server (e.g. one with
 /// session hooks pre-installed).
-pub(crate) async fn build_session_with_cmd_rx_on(
+pub async fn build_session_with_cmd_rx_on(
     server: Arc<crate::proxy::server::SipServerInner>,
     dialplan: Dialplan,
 ) -> (

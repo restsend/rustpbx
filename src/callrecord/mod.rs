@@ -35,7 +35,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-pub(crate) mod database;
+pub mod database;
 pub mod recording_artifacts;
 pub mod recording_upload;
 pub mod sipflow;

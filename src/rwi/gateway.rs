@@ -913,7 +913,7 @@ impl RwiGateway {
     }
 
     /// Preserve only business data before asynchronous delivery; other fields stay dispatch-time values.
-    pub(crate) fn snapshot_user_data(&self, mut event: RwiEvent) -> RwiEvent {
+    pub fn snapshot_user_data(&self, mut event: RwiEvent) -> RwiEvent {
         let root = event
             .call_id
             .as_ref()

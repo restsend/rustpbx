@@ -182,7 +182,7 @@ async fn build_active_model(
     Ok(active)
 }
 
-pub(crate) async fn persist_call_records(
+pub async fn persist_call_records(
     db: &DatabaseConnection,
     records: &[CallRecord],
 ) -> anyhow::Result<()> {

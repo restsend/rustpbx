@@ -11,17 +11,17 @@ pub(crate) const ADMIN_CMD_CT: &str = "application/restsend-cmd+json";
 pub(crate) const ADMIN_CMD_RELAY_CT: &str = "application/restsend-admin-relay+json";
 pub(crate) const ADMIN_CMD_ANSWER_CT: &str = "application/restsend-cmd-answer+json";
 
-pub(crate) const ADMIN_CMD_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+pub const ADMIN_CMD_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 pub(crate) const ADMIN_CMD_AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
-pub(crate) struct AdminCmdAnswer {
+pub struct AdminCmdAnswer {
     pub content_type: Option<String>,
     pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum AdminCmdOutcome {
+pub enum AdminCmdOutcome {
     NotRegistered,
     NoAnswer,
     Answered(AdminCmdAnswer),
@@ -155,7 +155,7 @@ pub(crate) async fn resolve_agent_registration(
     None
 }
 
-pub(crate) async fn deliver_admin_cmd(
+pub async fn deliver_admin_cmd(
     server: &crate::proxy::server::SipServerInner,
     agent: &str,
     body: &[u8],
@@ -163,7 +163,7 @@ pub(crate) async fn deliver_admin_cmd(
     deliver_admin_cmd_with_wait(server, agent, body, ADMIN_CMD_ANSWER_WAIT).await
 }
 
-pub(crate) async fn deliver_admin_cmd_with_wait(
+pub async fn deliver_admin_cmd_with_wait(
     server: &crate::proxy::server::SipServerInner,
     agent: &str,
     body: &[u8],
@@ -190,7 +190,7 @@ pub(crate) async fn deliver_admin_cmd_with_wait(
     }
 }
 
-pub(crate) async fn deliver_admin_cmd_relayed(
+pub async fn deliver_admin_cmd_relayed(
     server: &crate::proxy::server::SipServerInner,
     agent: &str,
     body: &[u8],

@@ -3561,7 +3561,7 @@ impl SipSession {
     /// `early_media` is set) reaches addons — the CC addon resolves and
     /// publishes the agent attribution and transitions the agent Idle →
     /// Ringing.
-    pub(crate) async fn fire_on_call_ringing_hooks(&self, early_media: bool) {
+    pub async fn fire_on_call_ringing_hooks(&self, early_media: bool) {
         if self.server.session_hooks.is_empty() {
             return;
         }
@@ -3682,7 +3682,7 @@ impl SipSession {
     /// FAILS (rejected / no-answer / timeout / media setup failure) — the
     /// UAC session loop never starts on those paths, so without this the
     /// CC addon would never learn the call ended (agent stuck in Ringing).
-    pub(crate) async fn fire_on_call_ended_hooks(
+    pub async fn fire_on_call_ended_hooks(
         &self,
         reason: Option<&crate::callrecord::CallRecordHangupReason>,
         duration_secs: u64,

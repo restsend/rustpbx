@@ -268,8 +268,9 @@ impl DbLocator {
     }
 
     /// Test-only handle to the locator's own connection so tests can plant
-    /// crafted binding rows (e.g. pre-expired registrations).
-    #[cfg(test)]
+    /// crafted binding rows (e.g. pre-expired registrations). Gated on the
+    /// `test-support` surface so downstream addon suites can use it too.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_connection(&self) -> &DatabaseConnection {
         &self.db
     }

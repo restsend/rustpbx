@@ -37,7 +37,9 @@ pub mod e2e_test_server;
 #[cfg(test)]
 mod rtp_packet_tests;
 pub mod rtp_utils;
-#[cfg(test)]
-pub(crate) mod test_sip_session_regressions;
+// Downstream addon crates' tests drive real sessions through these helpers
+// (test-support / e2e-testing consumers; see src/prelude.rs contract).
+#[cfg(any(test, feature = "test-support", feature = "e2e-testing"))]
+pub mod test_sip_session_regressions;
 #[cfg(test)]
 mod test_trunk_config_tests;

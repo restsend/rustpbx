@@ -129,19 +129,21 @@ pub fn report_db_write_failure_with_detail(
     true
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+// Downstream addon crates' tests import the error-capture helper via the
+// `test-support` feature (see src/prelude.rs compatibility contract).
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
 
     /// Capture one entity's write failures without installing a global subscriber.
     #[derive(Clone)]
-    pub(crate) struct DbErrors {
+    pub struct DbErrors {
         entity: &'static str,
-        pub(crate) errors: std::sync::Arc<Mutex<Vec<String>>>,
+        pub errors: std::sync::Arc<Mutex<Vec<String>>>,
     }
 
     impl DbErrors {
-        pub(crate) fn new(entity: &'static str) -> Self {
+        pub fn new(entity: &'static str) -> Self {
             Self {
                 entity,
                 errors: Default::default(),

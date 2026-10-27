@@ -490,7 +490,7 @@ impl PresenceManager {
     }
 
     /// Rearm an accepted publication without replacing its authoritative status.
-    pub(crate) fn update_publication_expiry(&self, identity: &str, expires_at: Option<i64>) {
+    pub fn update_publication_expiry(&self, identity: &str, expires_at: Option<i64>) {
         if let Some(state) = self.states.write().get_mut(identity) {
             state.expires_at = expires_at;
         }
@@ -527,7 +527,7 @@ impl PresenceManager {
     }
 
     /// Business-state projections must retain the latest publication lease atomically.
-    pub(crate) async fn update_projected_state(
+    pub async fn update_projected_state(
         &self,
         identity: &str,
         state: PresenceState,
@@ -724,7 +724,7 @@ impl PresenceManager {
     /// Only a truly gone client (no binding) flips offline with
     /// `offline_reason = "expired"`. A failed lookup skips the identity for
     /// this round (fail-open — the CC offline watchdog reconciles later).
-    pub(crate) async fn expire_stale_publishes_via_hub(
+    pub async fn expire_stale_publishes_via_hub(
         &self,
         hub: Option<&crate::proxy::cluster_event::ClusterEventHub>,
         locator: Option<&dyn Locator>,
