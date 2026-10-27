@@ -10761,8 +10761,26 @@ async fn dynamic_hold_before_connected_command_keeps_answered_dialog_owned() {
     }
 }
 
-#[tokio::test]
-async fn rwi_manual_parallel_retry_and_leg_cleanup() {
+#[test]
+fn rwi_manual_parallel_retry_and_leg_cleanup() {
+    // Same DEBUG-build frame depth as
+    // consult_media_preserves_peers_across_bridge_and_explicit_mixer: the
+    // LegAdd/bridge poll chain overflows the default libtest thread stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rwi-manual runtime")
+                .block_on(rwi_manual_parallel_retry_and_leg_cleanup_body())
+        })
+        .expect("spawn rwi-manual test thread")
+        .join()
+        .expect("rwi-manual test body panicked");
+}
+
+async fn rwi_manual_parallel_retry_and_leg_cleanup_body() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::media::leg::{LegConfig, LegInner};

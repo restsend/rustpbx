@@ -1213,7 +1213,6 @@ impl MediaBridge {
         for (_, cancel) in self.leg_wire_cancels.drain() {
             cancel.cancel();
         }
-        *self.legs_shared.lock() = (None, None);
         if let Some(la) = self.leg_a.take() {
             la.stop();
         }
@@ -1462,6 +1461,21 @@ fn spawn_bridge_stats_task(
             };
             let mut sa = if let Some(leg) = &la { Some(sample_leg(leg, config.enabled).await) } else { None };
             let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg, config.enabled).await) } else { None };
+            // A closed leg has no inbound transport reading, not a counter
+            // reset: keep the last cumulative rx (teardown stops legs before
+            // the sampler's final pass). Sender-side tx survives close.
+            for (side, leg, current, previous) in [
+                (0, la.as_ref(), sa.as_mut(), sample_a.as_ref()),
+                (1, lb.as_ref(), sb.as_mut(), sample_b.as_ref()),
+            ] {
+                if let (Some(leg), Some(current), Some(previous)) = (leg, current, previous) {
+                    if sampled_ids[side].as_deref() == Some(leg.id().as_str())
+                        && *leg.pc().subscribe_peer_state().borrow() == rustrtc::PeerConnectionState::Closed
+                    {
+                        current.transport_rx = previous.transport_rx;
+                    }
+                }
+            }
 
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(previous_sample);
