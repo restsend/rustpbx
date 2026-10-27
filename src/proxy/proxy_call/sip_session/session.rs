@@ -12,8 +12,10 @@ use crate::call::{DialDirection, OutboundTrunkContext, TrunkContext};
 use crate::proxy::call::parse_allowed_codecs;
 use rsipstack::sip::{HeadersExt, ToTypedHeader};
 
-const CMD_CHANNEL_CAPACITY: usize = 256;
-const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
+pub const CMD_CHANNEL_CAPACITY: usize = 256;
+/// Command body content type for RWI `cmd` delivery — part of the addon
+/// test surface (re-exported via the sip_session module).
+pub const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
 const RECORDING_STOP_ATTEMPTS: usize = 3;
 const RECORDING_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RECORDING_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -77,7 +79,7 @@ pub(super) enum UpdateRefreshOutcome {
     Failed(anyhow::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DialogSide {
+pub enum DialogSide {
     Caller,
     Callee,
 }
@@ -670,7 +672,7 @@ impl SipSession {
         }
     }
 
-    pub(super) fn bridge(&self) -> Option<&MediaBridge> {
+    pub fn bridge(&self) -> Option<&MediaBridge> {
         self.media.bridge.as_ref()
     }
     pub(super) fn bridge_mut(&mut self) -> Option<&mut MediaBridge> {
@@ -769,7 +771,7 @@ impl SipSession {
     }
 
     /// Media endpoints outlive bridge membership and are owned by the session.
-    pub(super) fn media_leg(&self, id: &LegId) -> Option<crate::media::leg::Leg> {
+    pub fn media_leg(&self, id: &LegId) -> Option<crate::media::leg::Leg> {
         self.legs.media_leg(id)
     }
 
@@ -3512,7 +3514,7 @@ impl SipSession {
         gw.meta_store.insert(session_id, meta);
     }
 
-    pub(super) fn session_hook_ctx(
+    pub fn session_hook_ctx(
         &self,
     ) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
         // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
@@ -3574,7 +3576,7 @@ impl SipSession {
         self.sync_agent_context_to_rwi_meta();
     }
 
-    fn transferred_agent_context(
+    pub fn transferred_agent_context(
         &self,
         leg_id: &LegId,
     ) -> Option<crate::proxy::proxy_call::session_hooks::CallSessionContext> {
@@ -5152,7 +5154,7 @@ impl SipSession {
         }
     }
 
-    async fn handle_dialog_info(
+    pub async fn handle_dialog_info(
         &mut self,
         side: DialogSide,
         dialog_id: &rsipstack::dialog::DialogId,
@@ -11749,7 +11751,7 @@ impl SipSession {
         self.schedule_timer(dialog_id);
     }
 
-    pub(crate) fn caller_dialog_id(&self) -> DialogId {
+    pub fn caller_dialog_id(&self) -> DialogId {
         // In UAC mode there is no inbound caller dialog; the callee (B leg)
         // dialog is the only real dialog, so treat it as the primary.
         if let Some(d) = self.caller_dialog.as_ref() {
@@ -15560,7 +15562,7 @@ impl SipSession {
         });
     }
 
-    pub(crate) fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
+    pub fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
             let was_hold = leg.state == LegState::Hold;
             let changed = leg.state != new_state;
@@ -16295,7 +16297,7 @@ impl SipSession {
     }
 
     /// Negotiate a leg independently of the currently selected bridge pair.
-    async fn create_leg_peer(
+    pub async fn create_leg_peer(
         &self,
         leg_id: &LegId,
         mode: rustrtc::TransportMode,
@@ -16860,7 +16862,7 @@ impl SipSession {
         }
     }
 
-    pub(crate) async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
+    pub async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
         if leg_a == leg_b || !self.legs.contains_key(&leg_a) || !self.legs.contains_key(&leg_b) {
             return false;
         }
