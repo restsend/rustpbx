@@ -1856,6 +1856,191 @@ async fn test_persist_call_records_writes_session_id_column() {
 }
 
 #[tokio::test]
+async fn test_cluster_sipflow_fragments_survive_cdr_upsert() {
+    use rustpbx_models::call_record::{Column, Entity};
+    use sea_orm::EntityTrait;
+
+    let url = std::env::var("RUSTPBX_CDR_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let db = rustpbx_models::create_db(&url, None).await.unwrap();
+    for order in ["owner-first", "peer-first", "concurrent"] {
+        let mut owner = make_record();
+        owner.call_id = format!("fragment-merge-{order}");
+        owner.details.recording_url = Some("https://example.com/recording.wav".into());
+        owner.details.metadata = Some(HashMap::from([
+            ("hostname".into(), serde_json::json!("owner")),
+            (
+                "sipflow_fragments".into(),
+                serde_json::json!({"owner": "https://example.com/owner.jsonl"}),
+            ),
+        ]));
+        let mut peer = make_record();
+        peer.call_id = owner.call_id.clone();
+        peer.details.metadata = Some(HashMap::from([(
+            "sipflow_fragments".into(),
+            serde_json::json!({"peer": "https://example.com/peer.jsonl"}),
+        )]));
+        if order == "concurrent" {
+            let (owner_result, peer_result) = tokio::join!(
+                database::persist_call_records(&db, std::slice::from_ref(&owner)),
+                database::persist_call_records(&db, std::slice::from_ref(&peer)),
+            );
+            owner_result.unwrap();
+            peer_result.unwrap();
+        } else {
+            let records = if order == "owner-first" {
+                [&owner, &peer]
+            } else {
+                [&peer, &owner]
+            };
+            for record in records {
+                database::persist_call_records(&db, std::slice::from_ref(record))
+                    .await
+                    .unwrap();
+            }
+        }
+        let row = Entity::find()
+            .filter(Column::CallId.eq(&owner.call_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.recording_url.as_deref(),
+            Some("https://example.com/recording.wav")
+        );
+        let metadata = row.metadata.unwrap();
+        assert_eq!(metadata["hostname"], "owner");
+        assert_eq!(
+            metadata["sipflow_fragments"]["owner"],
+            "https://example.com/owner.jsonl"
+        );
+        assert_eq!(
+            metadata["sipflow_fragments"]["peer"],
+            "https://example.com/peer.jsonl"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_cluster_postcall_metadata_updates_are_atomic() {
+    use rustpbx_models::call_record::{
+        Column, Entity, append_call_trace, update_sipflow_fragment, update_sipflow_jsonl,
+    };
+    use sea_orm::EntityTrait;
+
+    let url = std::env::var("RUSTPBX_CDR_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let db = rustpbx_models::create_db(&url, None).await.unwrap();
+    let mut record = make_record();
+    record.call_id = "cluster-postcall-metadata".into();
+    record.details.metadata = Some(HashMap::from([(
+        "sipflow_fragments".into(),
+        serde_json::json!({"owner": "https://example.com/owner.jsonl"}),
+    )]));
+    database::persist_call_records(&db, std::slice::from_ref(&record))
+        .await
+        .unwrap();
+    let (trace_a, trace_b, upload) = tokio::join!(
+        append_call_trace(
+            &db,
+            &record.call_id,
+            vec![serde_json::json!({"event": "upload-a"})]
+        ),
+        append_call_trace(
+            &db,
+            &record.call_id,
+            vec![serde_json::json!({"event": "upload-b"})]
+        ),
+        update_sipflow_jsonl(&db, &record.call_id, "https://example.com/latest.jsonl"),
+    );
+    trace_a.unwrap();
+    trace_b.unwrap();
+    upload.unwrap();
+    let row = Entity::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata = row.metadata.unwrap();
+    assert_eq!(
+        metadata["sipflow_fragments"]["owner"],
+        "https://example.com/owner.jsonl"
+    );
+    assert_eq!(
+        metadata["sipflow_jsonl"],
+        "https://example.com/latest.jsonl"
+    );
+    let trace = metadata["trace"].as_array().unwrap();
+    assert!(trace.contains(&serde_json::json!({"event": "upload-a"})));
+    assert!(trace.contains(&serde_json::json!({"event": "upload-b"})));
+
+    let (upload_a, upload_b, late_trace) = tokio::join!(
+        update_sipflow_fragment(
+            &db,
+            &record.call_id,
+            "peer-a",
+            "https://example.com/a.jsonl"
+        ),
+        update_sipflow_fragment(
+            &db,
+            &record.call_id,
+            "peer-b",
+            "https://example.com/b.jsonl"
+        ),
+        append_call_trace(
+            &db,
+            &record.call_id,
+            vec![serde_json::json!({"event": "late-upload"})]
+        ),
+    );
+    upload_a.unwrap();
+    upload_b.unwrap();
+    late_trace.unwrap();
+    let row = Entity::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata = row.metadata.unwrap();
+    assert_eq!(
+        metadata["sipflow_fragments"],
+        serde_json::json!({
+            "owner": "https://example.com/owner.jsonl",
+            "peer-a": "https://example.com/a.jsonl",
+            "peer-b": "https://example.com/b.jsonl",
+        })
+    );
+    assert!(
+        ["https://example.com/a.jsonl", "https://example.com/b.jsonl"]
+            .contains(&metadata["sipflow_jsonl"].as_str().unwrap())
+    );
+    let trace = metadata["trace"].as_array().unwrap();
+    assert!(trace.contains(&serde_json::json!({"event": "upload-a"})));
+    assert!(trace.contains(&serde_json::json!({"event": "upload-b"})));
+    assert!(trace.contains(&serde_json::json!({"event": "late-upload"})));
+
+    update_sipflow_fragment(
+        &db,
+        "missing-fragment-row",
+        "missing",
+        "https://example.com/missing.jsonl",
+    )
+    .await
+    .unwrap();
+    assert!(
+        Entity::find()
+            .filter(Column::CallId.eq("missing-fragment-row"))
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn test_persist_call_records_preserves_recorded_snapshot() {
     use rustpbx_models::call_record::{Column, Entity};
     use sea_orm::EntityTrait;
@@ -1959,10 +2144,35 @@ async fn test_persist_call_records_preserves_recorded_snapshot() {
         assert_eq!(row.ended_at, Some(records[0].end_time), "{case}");
         let metadata = row.metadata.unwrap();
         assert_eq!(metadata["hostname"], "origin.example.com", "{case}");
+        assert!(metadata.get("sipflow_fragments").is_none(), "{case}");
         assert_eq!(
             metadata["recording_segments"][0]["unique_id"], "agent-segment",
             "{case}"
         );
+        if case == "delivery_then_owner" {
+            Entity::update_many()
+                .col_expr(
+                    Column::Metadata,
+                    sea_orm::sea_query::Expr::val(None::<serde_json::Value>),
+                )
+                .filter(Column::CallId.eq(&records[0].call_id))
+                .exec(&db)
+                .await
+                .unwrap();
+            database::persist_call_records(&db, std::slice::from_ref(&records[1]))
+                .await
+                .unwrap();
+            let row = Entity::find()
+                .filter(Column::CallId.eq(&records[0].call_id))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                row.metadata.is_none(),
+                "an owner without metadata must keep SQL NULL"
+            );
+        }
     }
 }
 

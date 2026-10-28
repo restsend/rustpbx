@@ -251,12 +251,22 @@ pub async fn persist_call_records(
                     let keep_recorded = Expr::col((Entity, Column::RecordingUrl))
                         .is_not_null()
                         .and(incoming(Column::RecordingUrl).is_null());
-                    (
-                        column,
-                        Expr::case(keep_recorded, Expr::col((Entity, column)))
-                            .finally(incoming(column))
-                            .into(),
-                    )
+                    let selected = Expr::case(keep_recorded, Expr::col((Entity, column)))
+                        .finally(incoming(column))
+                        .into();
+                    let selected = if matches!(column, Column::Metadata) {
+                        // Every node owns its signaling fragment, regardless of
+                        // which node owns the recording and the remaining snapshot.
+                        rustpbx_models::call_record::merge_sipflow_fragments(
+                            db.get_database_backend(),
+                            selected,
+                            Expr::col((Entity, Column::Metadata)),
+                            incoming(Column::Metadata),
+                        )
+                    } else {
+                        selected
+                    };
+                    (column, selected)
                 }))
                 .to_owned(),
         )

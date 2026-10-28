@@ -10,8 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     callrecord::{
-        CallRecord, CallRecordHook, format_sipflow_media_key, format_sipflow_signaling_file_name,
-        format_sipflow_signaling_key, sipflow::SipFlowSlot,
+        CallRecord, CallRecordHook, format_sipflow_media_key, sipflow::SipFlowSlot,
     },
     config::SipFlowUploadConfig,
     sipflow::SipFlowBackend,
@@ -106,6 +105,17 @@ impl SipFlowUploadRuntime {
     }
 }
 
+#[derive(Clone)]
+struct SignalingFragmentId(String);
+
+/// Keep each writer's archive distinct even when nodes share a logical call ID.
+pub(crate) fn signaling_fragment_keys(record: &mut CallRecord) -> (String, String) {
+    let fragment = record.extensions.get_or_insert_with(||
+        SignalingFragmentId(uuid::Uuid::new_v4().simple().to_string())).0.clone();
+    let file_name = format!("{}-{fragment}.jsonl", record.call_id);
+    (format!("{}/{file_name}", record.start_time.format("%Y%m%d")), file_name)
+}
+
 pub struct SipFlowUploadHook {
     backend: Arc<dyn SipFlowBackend>,
     /// Late-bound handle to the SipFlow wrapper (writer batch + backend);
@@ -151,7 +161,9 @@ impl CallRecordHook for SipFlowUploadHook {
             return Ok(());
         };
         let signaling_storage = self.runtime.signaling_storage()?;
+        let mut failure = None;
         for record in records {
+            let (signaling_key, signaling_file_name) = signaling_fragment_keys(record);
             let call_id = record.call_id.as_str();
             let signaling_call_ids = record.sip_leg_roles.keys().cloned().collect::<Vec<_>>();
             let start = Local.from_utc_datetime(&record.start_time.naive_utc());
@@ -159,8 +171,6 @@ impl CallRecordHook for SipFlowUploadHook {
             let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
 
             let media_key = format_sipflow_media_key(record);
-            let signaling_key = format_sipflow_signaling_key(record);
-            let signaling_file_name = format_sipflow_signaling_file_name(record);
 
             // When the call used file media (local/http/s3), WAV artifacts are in
             // `record.recorder` and RecordingUploadHook owns media upload. Skip
@@ -200,11 +210,19 @@ impl CallRecordHook for SipFlowUploadHook {
                     .insert(crate::callrecord::RecordingFileSize(outcome.media_size));
             }
             if let Some(jsonl_url) = outcome.signaling_url {
-                stash_sipflow_jsonl(record, &jsonl_url, self.db.as_ref()).await;
+                if let Err(error) = stash_sipflow_jsonl(record, &jsonl_url, self.db.as_ref()).await {
+                    warn!(call_id = %record.call_id, error = %error, "Signaling fragment index update failed");
+                    if failure.is_none() {
+                        failure = Some(error.context(format!("Signaling index update failed for {}", record.call_id)));
+                    }
+                }
             }
         }
 
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -217,36 +235,23 @@ pub async fn stash_sipflow_jsonl(
     record: &mut CallRecord,
     url: &str,
     db: Option<&DatabaseConnection>,
-) {
-    let already_stored = record
-        .details
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("sipflow_jsonl"))
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|existing| existing == url);
-    record
-        .details
-        .metadata
-        .get_or_insert_with(Default::default)
-        .insert(
-            "sipflow_jsonl".to_string(),
-            serde_json::Value::String(url.to_string()),
-        );
-    if already_stored {
-        return;
+) -> Result<()> {
+    signaling_fragment_keys(record);
+    let fragment = record.extensions.get::<SignalingFragmentId>()
+        .expect("signaling fragment was initialized").0.clone();
+    let metadata = record.details.metadata.get_or_insert_with(Default::default);
+    let already_stored = metadata.get("sipflow_jsonl").and_then(serde_json::Value::as_str) == Some(url)
+        && metadata.get("sipflow_fragments").and_then(|map| map.get(&fragment))
+            .and_then(serde_json::Value::as_str) == Some(url);
+    metadata.insert("sipflow_jsonl".into(), serde_json::Value::String(url.into()));
+    let fragments = metadata.entry("sipflow_fragments".into())
+        .or_insert_with(|| serde_json::json!({})).as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Invalid signaling fragment index"))?;
+    fragments.insert(fragment.clone(), serde_json::Value::String(url.into()));
+    if !already_stored && let Some(db) = db {
+        crate::models::call_record::update_sipflow_fragment(db, &record.call_id, &fragment, url).await?;
     }
-    let Some(db) = db else {
-        return;
-    };
-    if let Err(e) =
-        crate::models::call_record::update_sipflow_jsonl(db, &record.call_id, url).await
-    {
-        warn!(
-            call_id = %record.call_id,
-            "SipFlowUploadHook: failed to persist sipflow_jsonl metadata: {e}"
-        );
-    }
+    Ok(())
 }
 
 /// Result of one call's sipflow upload pass.
@@ -769,7 +774,8 @@ pub(crate) fn preconstruct_signaling_url(
         return;
     };
 
-    let key = join_root(root, &format_sipflow_signaling_key(record));
+    let (fragment_key, _) = signaling_fragment_keys(record);
+    let key = join_root(root, &fragment_key);
     let url = sipflow_s3_url(vendor, endpoint, bucket, &key);
     record
         .details
@@ -1097,14 +1103,10 @@ url = "{url}"
         let raw = record.details.metadata.as_ref().unwrap()["sipflow_jsonl"]
             .as_str()
             .unwrap();
-        let key = format!(
-            "sipflow/{}/test-call-id.jsonl",
-            record.start_time.format("%Y%m%d")
-        );
-        assert_eq!(
-            raw,
-            format!("https://test-bucket.oss-cn-beijing.aliyuncs.com/{key}")
-        );
+        let prefix = format!("https://test-bucket.oss-cn-beijing.aliyuncs.com/sipflow/{}/test-call-id-",
+            record.start_time.format("%Y%m%d"));
+        assert!(raw.starts_with(&prefix));
+        assert!(uuid::Uuid::parse_str(raw.strip_prefix(&prefix).unwrap().strip_suffix(".jsonl").unwrap()).is_ok());
         assert!(build_storage(&config).unwrap().is_some());
     }
 
@@ -1129,19 +1131,17 @@ url = "{url}"
 
         preconstruct_signaling_url(&mut record, &upload_config, false);
 
-        let expected = format!(
-            "http://127.0.0.1:9000/recordings/sipflow-root/{}/test-call-id.jsonl",
-            record.start_time.format("%Y%m%d")
-        );
-        assert_eq!(
-            record
-                .details
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("sipflow_jsonl"))
-                .and_then(serde_json::Value::as_str),
-            Some(expected.as_str())
-        );
+        let prefix = format!("http://127.0.0.1:9000/recordings/sipflow-root/{}/test-call-id-",
+            record.start_time.format("%Y%m%d"));
+        let url = record.details.metadata.as_ref().unwrap()["sipflow_jsonl"].as_str().unwrap();
+        assert!(url.starts_with(&prefix));
+        assert!(uuid::Uuid::parse_str(url.strip_prefix(&prefix).unwrap().strip_suffix(".jsonl").unwrap()).is_ok());
+        let mut peer = make_record();
+        peer.start_time = record.start_time;
+        preconstruct_signaling_url(&mut peer, &upload_config, false);
+        assert_ne!(record.details.metadata.as_ref().unwrap()["sipflow_jsonl"],
+            peer.details.metadata.as_ref().unwrap()["sipflow_jsonl"],
+            "independent writers for one logical call must not overwrite each other's archive");
     }
 
     #[tokio::test]
@@ -1250,6 +1250,59 @@ response_success = {{ path = "code", equals = 0 }}
         );
         let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
         assert!(body.contains("name=\"signaling\""), "wire shape: {body}");
+    }
+
+    async fn archive_index_failure_batch(remote: bool) {
+        use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
+        use crate::models::call_record::{Column, Entity};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let db = crate::models::create_db("sqlite::memory:", None).await.unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let captured = requests.clone();
+        let app = axum::Router::new().route("/upload", axum::routing::post(move || {
+            captured.fetch_add(1, Ordering::SeqCst);
+            async { axum::Json(serde_json::json!({
+                "code": 0, "data": {"url": "https://archive.example.com/flow.jsonl"},
+                "media_url": null, "media_size": 0, "signaling_uploaded": true,
+                "signaling_url": "https://archive.example.com/flow.jsonl",
+            })) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let upload: SipFlowUploadConfig = toml::from_str(&format!(
+            "type = \"http\"\nurl = \"http://{address}/upload\"\nsignaling = true\nmedia = false\nresponse_url_path = \"data.url\"\n"
+        )).unwrap();
+        let runtime = Arc::new(SipFlowUploadRuntime::for_config(Some(local_sipflow_config(Some(upload)))));
+        let hook: Box<dyn CallRecordHook> = if remote {
+            Box::new(crate::callrecord::sipflow_remote_upload::SipFlowRemoteUploadHook::new(
+                vec![crate::config::SipFlowClusterNode { udp: "127.0.0.1:0".into(), http: format!("http://{address}") }],
+                runtime, Some(db.clone()), Arc::new(std::sync::OnceLock::new()),
+            ).unwrap())
+        } else {
+            Box::new(SipFlowUploadHook::new(Arc::new(SingleFlowBackend),
+                Arc::new(std::sync::OnceLock::new()), runtime, Some(db.clone())).unwrap())
+        };
+        let mut records = [make_record(), make_record()];
+        records[0].call_id = "archive-first".into();
+        records[1].call_id = "archive-second".into();
+        crate::callrecord::database::persist_call_records(&db, &records).await.unwrap();
+        db.execute_unprepared("CREATE TRIGGER reject_first_archive BEFORE UPDATE OF metadata ON rustpbx_call_records             WHEN OLD.call_id = 'archive-first' BEGIN SELECT RAISE(FAIL, 'index write rejected'); END").await.unwrap();
+        assert!(hook.on_record_completed(&mut records).await.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "one index failure must not skip the next upload");
+        let second = Entity::find().filter(Column::CallId.eq("archive-second")).one(&db).await.unwrap().unwrap();
+        assert_eq!(second.metadata.unwrap()["sipflow_fragments"].as_object().unwrap().len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_archive_index_failure_preserves_later_records() {
+        archive_index_failure_batch(false).await;
+    }
+
+    #[tokio::test]
+    async fn remote_archive_index_failure_preserves_later_records() {
+        archive_index_failure_batch(true).await;
     }
 
     /// The upload config is late-bound: swapping the slot between calls (the
