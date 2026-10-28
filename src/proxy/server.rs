@@ -82,6 +82,7 @@ pub struct SipServerInner {
     pub database: Option<DatabaseConnection>,
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
+    pub registration_response_hook: Option<Arc<dyn super::registrar::RegistrationResponseHook>>,
     pub call_router: Option<Box<dyn CallRouter>>,
     pub dialplan_inspectors: Arc<
         parking_lot::RwLock<
@@ -181,6 +182,7 @@ pub struct SipServerBuilder {
     http_client: Option<reqwest::Client>,
     user_backend: Option<Box<dyn UserBackend>>,
     auth_backend: Vec<Box<dyn AuthBackend>>,
+    registration_response_hook: Option<Arc<dyn super::registrar::RegistrationResponseHook>>,
     call_router: Option<Box<dyn CallRouter>>,
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
@@ -240,6 +242,7 @@ impl SipServerBuilder {
             http_client: None,
             user_backend: None,
             auth_backend: Vec::new(),
+            registration_response_hook: None,
             call_router: None,
             module_fns: HashMap::new(),
             locator: None,
@@ -338,6 +341,14 @@ impl SipServerBuilder {
 
     pub fn with_auth_backend(mut self, auth_backend: Box<dyn AuthBackend>) -> Self {
         self.auth_backend.push(auth_backend);
+        self
+    }
+
+    pub fn with_registration_response_hook(
+        mut self,
+        hook: Arc<dyn super::registrar::RegistrationResponseHook>,
+    ) -> Self {
+        self.registration_response_hook = Some(hook);
         self
     }
 
@@ -1248,6 +1259,7 @@ impl SipServerBuilder {
             database: database.clone(),
             user_backend,
             auth_backend,
+            registration_response_hook: self.registration_response_hook,
             call_router,
             locator: locator.clone(),
             callrecord_sender: self.callrecord_sender,

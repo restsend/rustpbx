@@ -47,6 +47,9 @@ impl std::fmt::Display for LegState {
 pub struct Leg {
     /// Unique identifier for this leg
     pub id: LegId,
+    /// Identity of this leg lifetime, preserved when moved to another slot.
+    #[serde(skip, default = "uuid::Uuid::new_v4")]
+    pub lifecycle_id: uuid::Uuid,
     /// Current state of the leg
     pub state: LegState,
     /// SIP URI or endpoint identifier
@@ -77,6 +80,7 @@ impl Leg {
     pub fn new(id: LegId) -> Self {
         Self {
             id,
+            lifecycle_id: uuid::Uuid::new_v4(),
             state: LegState::default(),
             endpoint: None,
             agent_id: None,

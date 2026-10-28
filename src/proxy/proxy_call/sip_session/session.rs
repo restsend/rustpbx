@@ -1826,13 +1826,12 @@ impl SipSession {
     /// queue session). A2A dials seed `CallMeta` but skip the session
     /// attribution pin, leaving callee-side hook attribution intact at
     /// connect (mirrors the originate path guard in `rwi/processor.rs`).
-    /// Returns `true` when the call was attributed (meta seeded) — the
-    /// `agent_outbound_seeded` gate for the caller-leg early stamp and the
-    /// `call_created` role: both newly role-attributed surfaces must be
-    /// guaranteed a seeded `meta.agent_id` (client_ip derives from it).
+    /// Seed the caller leg from the same resolved identity as CallMeta, so
+    /// authenticated callers with an overridden From keep consistent roles.
+    /// Returns `true` when the originating agent was resolved and attributed.
     async fn seed_originating_agent_attribution(
         server: &SipServerRef,
-        session: &SipSession,
+        session: &mut SipSession,
         auth_user: &Option<String>,
         initial_request: rsipstack::sip::Request,
         original_callee: &str,
@@ -1895,6 +1894,9 @@ impl SipSession {
                 !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
             if !dest_is_agent {
                 session.extensions.set_agent_attribution(&cand);
+            }
+            if let Some(caller) = session.legs.get_mut(&LegId::from("caller")) {
+                caller.agent_id = Some(cand.clone());
             }
             debug!(
                 session_id = %session.context.session_id,
@@ -1996,24 +1998,12 @@ impl SipSession {
         // `call_created`).
         let agent_outbound_seeded = Self::seed_originating_agent_attribution(
             &server,
-            &session,
+            &mut session,
             &auth_user,
             server_dialog.initial_request(),
             &original_callee,
         )
         .await;
-        // Agent-initiated outbound: stamp the CALLER leg's agent identity
-        // before any RWI event fans out. A failed dial (404/486/no-answer /
-        // CANCEL teardown) never reaches `accept_call`, so without this the
-        // failure teardown carries no `leg_role: "agent"` — the prd contract
-        // requires the agent dialog's full call_* stream to be attributed.
-        // Gated on the seed: every newly role-attributed event is then
-        // guaranteed a seeded `meta.agent_id` (client_ip derives from it);
-        // app flows (queue/IVR) keep their hook-time attribution. Idempotent
-        // with the `accept_call` stamp (success-path behavior unchanged).
-        if agent_outbound_seeded {
-            session.stamp_caller_agent_identity().await;
-        }
 
         server
             .active_call_registry
@@ -3515,6 +3505,7 @@ impl SipSession {
         }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
+            leg_generation: None,
             root_session_id: self.meta.root_session_id.clone(),
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
@@ -3531,7 +3522,18 @@ impl SipSession {
         }
     }
 
-    /// Fire the `on_call_ringing` session hooks for this session.
+    fn session_hook_ctx_for_leg(
+        &self,
+        leg_id: &LegId,
+    ) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
+        let ctx = self.session_hook_ctx();
+        match self.legs.get(leg_id) {
+            Some(leg) => ctx.with_leg(leg),
+            None => ctx,
+        }
+    }
+
+    /// Fire `on_call_ringing` for the leg that produced the provisional response.
     ///
     /// Used by paths that dial a leg outside the regular `dial_sequential`
     /// flow (notably the RWI originate setup loop in `rwi/processor.rs`),
@@ -3539,11 +3541,14 @@ impl SipSession {
     /// `early_media` is set) reaches addons — the CC addon resolves and
     /// publishes the agent attribution and transitions the agent Idle →
     /// Ringing.
-    pub(crate) async fn fire_on_call_ringing_hooks(&self, early_media: bool) {
+    pub(crate) async fn fire_on_call_ringing_hooks(&self, leg_id: &LegId, early_media: bool) {
         if self.server.session_hooks.is_empty() {
             return;
         }
-        let ctx = self.session_hook_ctx();
+        let Some(leg) = self.legs.get(leg_id) else {
+            return;
+        };
+        let ctx = self.session_hook_ctx().with_leg(leg);
         for hook in self.server.session_hooks.iter() {
             hook.on_call_ringing(&ctx, early_media).await;
         }
@@ -3573,7 +3578,7 @@ impl SipSession {
                     .and_then(|source| source.agent_id)
                     .filter(|id| !id.is_empty())
             })?;
-        let mut ctx = self.session_hook_ctx();
+        let mut ctx = self.session_hook_ctx_for_leg(leg_id);
         // Attribute this callback to the departing leg, without overwriting the
         // live session's current agent or retaining old contexts per dialog.
         let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
@@ -3637,17 +3642,20 @@ impl SipSession {
         }
     }
 
-    /// Fire the `on_call_connected` session hooks for this session.
+    /// Fire `on_call_connected` for the leg whose answer was accepted.
     ///
     /// Used by the RWI originate setup loop after the first outbound INVITE
     /// is confirmed (200 OK) and attached as the caller dialog, so addons
     /// learn the call connected — the CC addon transitions the agent
     /// Ringing/Idle → Busy.
-    pub(crate) async fn fire_on_call_connected_hooks(&self) {
+    pub(crate) async fn fire_on_call_connected_hooks(&self, leg_id: &LegId) {
         if self.server.session_hooks.is_empty() {
             return;
         }
-        let ctx = self.session_hook_ctx();
+        let Some(leg) = self.legs.get(leg_id) else {
+            return;
+        };
+        let ctx = self.session_hook_ctx().with_leg(leg);
         for hook in self.server.session_hooks.iter() {
             hook.on_call_connected(&ctx).await;
         }
@@ -8732,7 +8740,7 @@ impl SipSession {
                                 // Pin the home-node agent and publish addon identity
                                 // before emitting the first leg-scoped ringing event.
                                 self.ensure_child_agent_pinned().await;
-                                self.fire_on_call_ringing_hooks(true).await;
+                                self.fire_on_call_ringing_hooks(&LegId::from("callee"), true).await;
                                 self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
                                 self.emit_call_ringing(None, true, None);
 
@@ -8784,7 +8792,7 @@ impl SipSession {
                                 }
                             }
                         } else {
-                            self.fire_on_call_ringing_hooks(false).await;
+                            self.fire_on_call_ringing_hooks(&LegId::from("callee"), false).await;
                             if !self.media.early_media_sent {
                                 // Child-leg session: pin the dialed agent
                                 // BEFORE the leg-scoped ringing (see the
@@ -9690,11 +9698,7 @@ impl SipSession {
         // Check the connected callee rather than app runtime state, which
         // can race with app startup and says nothing about agent answer.
         if self.meta.connected_callee.is_some() && !self.server.session_hooks.is_empty() {
-            let ctx = self.session_hook_ctx();
-            for hook in self.server.session_hooks.iter() {
-                hook.on_call_connected(&ctx).await;
-            }
-            self.sync_agent_context_to_rwi_meta();
+            self.fire_on_call_connected_hooks(&LegId::from("callee")).await;
         }
         if !self.app_runtime.is_running() {
             self.emit_session_call_answered_once();
@@ -10896,6 +10900,13 @@ impl SipSession {
         self.update_refresh_disabled.clear();
         self.timer_queue.clear();
         self.timer_keys.clear();
+
+        // Setup failures bypass the caller state receiver in run_main_loop.
+        // Terminal cleanup must finish the unanswered UAS caller leg before
+        // CDR publication and the existing CC-role teardown cascade.
+        if self.caller_dialog.is_some() && self.meta.answer_time.is_none() {
+            self.update_leg_state(&LegId::from("caller"), LegState::Ended);
+        }
 
         // Resolve the final hangup reason BEFORE the CDR snapshot is reported:
         // enrich with IVR end reason and queue abandon detection so the call
@@ -13914,7 +13925,11 @@ impl SipSession {
                     && dial_source.is_none()
                     && leg_id.as_str() != "consult"
                 {
-                    self.fire_on_call_ringing_hooks(false).await;
+                    let ctx = self.session_hook_ctx_for_leg(&leg_id);
+                    for hook in self.server.session_hooks.iter() {
+                        hook.on_call_ringing(&ctx, false).await;
+                    }
+                    self.sync_agent_context_to_rwi_meta();
                 }
                 self.update_leg_state(
                     &leg_id,
@@ -14221,7 +14236,7 @@ impl SipSession {
                     // agent leg emits from `update_leg_state` with
                     // `leg_role: "agent"`), enriched with the agent context.
                     if !self.server.session_hooks.is_empty() {
-                        let ctx = self.session_hook_ctx();
+                        let ctx = self.session_hook_ctx_for_leg(&leg_id);
                         for hook in self.server.session_hooks.iter() {
                             hook.on_call_connected(&ctx).await;
                         }

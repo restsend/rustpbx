@@ -1630,7 +1630,7 @@ impl RwiCommandProcessor {
                                         if !ringing_hooks_fired {
                                             ringing_hooks_fired = true;
                                             session
-                                                .fire_on_call_ringing_hooks(early_media)
+                                                .fire_on_call_ringing_hooks(&LegId::from("caller"), early_media)
                                                 .await;
                                         }
 
@@ -1893,7 +1893,7 @@ impl RwiCommandProcessor {
                         // outbound leg is confirmed and its media attached —
                         // the CC addon publishes the agent attribution
                         // (agent Ringing/Idle → Busy) for agent originates.
-                        session.fire_on_call_connected_hooks().await;
+                        session.fire_on_call_connected_hooks(&LegId::from("caller")).await;
 
                         // Answered: without `[recording].record_ringing` the
                         // pre-answer ringback segment is discarded (its file

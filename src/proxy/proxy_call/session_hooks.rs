@@ -84,6 +84,8 @@ impl std::ops::Deref for SessionExtensions {
 pub struct CallSessionContext {
     /// Unique session identifier (UUID string).
     pub session_id: String,
+    /// Immutable lifetime of the leg that produced this callback, when known.
+    pub leg_generation: Option<uuid::Uuid>,
     /// Root session id of the whole logical call (first INVITE Call-ID,
     /// inherited across transfers). `None` means this session is the root —
     /// resolve with `session_id`. See `call::uui` / RFC 7433 UUI.
@@ -126,6 +128,12 @@ pub struct CallSessionContext {
 }
 
 impl CallSessionContext {
+    /// Bind a callback to its producing leg without changing shared metadata.
+    pub fn with_leg(mut self, leg: &crate::call::domain::Leg) -> Self {
+        self.leg_generation = Some(leg.lifecycle_id);
+        self
+    }
+
     /// Logical-call correlation id: root session id when this leg is a child,
     /// otherwise this leg's own `session_id`.
     pub fn logical_session_id(&self) -> &str {
@@ -139,6 +147,7 @@ impl Clone for CallSessionContext {
     fn clone(&self) -> Self {
         Self {
             session_id: self.session_id.clone(),
+            leg_generation: self.leg_generation,
             root_session_id: self.root_session_id.clone(),
             caller: self.caller.clone(),
             callee: self.callee.clone(),
@@ -158,6 +167,7 @@ impl fmt::Debug for CallSessionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CallSessionContext")
             .field("session_id", &self.session_id)
+            .field("leg_generation", &self.leg_generation)
             .field("root_session_id", &self.root_session_id)
             .field("caller", &self.caller)
             .field("callee", &self.callee)

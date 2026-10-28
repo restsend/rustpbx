@@ -5214,6 +5214,7 @@ struct RingingRecordingHook {
     ringing: Arc<AtomicUsize>,
     early_media: Arc<AtomicUsize>,
     connected: Arc<AtomicUsize>,
+    leg_generations: Arc<std::sync::Mutex<Vec<(bool, Option<uuid::Uuid>)>>>,
 }
 
 impl RingingRecordingHook {
@@ -5226,6 +5227,7 @@ impl RingingRecordingHook {
                 ringing: ringing.clone(),
                 early_media: early_media.clone(),
                 connected: connected.clone(),
+                leg_generations: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
             ringing,
             early_media,
@@ -5236,16 +5238,51 @@ impl RingingRecordingHook {
 
 #[async_trait]
 impl crate::proxy::proxy_call::session_hooks::CallSessionHook for RingingRecordingHook {
-    async fn on_call_ringing(&self, _ctx: &CallSessionContext, early_media: bool) {
+    async fn on_call_ringing(&self, ctx: &CallSessionContext, early_media: bool) {
+        self.leg_generations.lock().unwrap().push((false, ctx.leg_generation));
         self.ringing.fetch_add(1, Ordering::SeqCst);
         if early_media {
             self.early_media.fetch_add(1, Ordering::SeqCst);
         }
     }
 
-    async fn on_call_connected(&self, _ctx: &CallSessionContext) {
+    async fn on_call_connected(&self, ctx: &CallSessionContext) {
+        self.leg_generations.lock().unwrap().push((true, ctx.leg_generation));
         self.connected.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+#[tokio::test]
+async fn test_leg_hooks_distinguish_new_offers_in_a_reused_slot() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".into(),
+        ..Default::default()
+    });
+    let (mut server, _) = create_test_server().await;
+    let (hook, _, _, _) = RingingRecordingHook::new();
+    let captured = hook.leg_generations.clone();
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
+    let id = LegId::from("callee");
+    for attempt in 0..2 {
+        if attempt > 0 {
+            session.legs.remove(&id);
+            session.legs.insert(id.clone(), Leg::new(id.clone()));
+        }
+        setup_recording_test_media(&mut session).await;
+        session.execute_command(CallCommand::LegRinging { leg_id: id.clone() }, None).await;
+        session.execute_command(CallCommand::LegConnected {
+            leg_id: id.clone(), answer_sdp: None, dialog_id: None,
+        }, None).await;
+    }
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 4, "each offer must produce ringing and connect");
+    assert_eq!(captured[0].0, false);
+    assert_eq!(captured[1].0, true);
+    assert!(captured[0].1.is_some(), "callbacks must identify the producing leg lifetime");
+    assert_eq!(captured[0].1, captured[1].1);
+    assert_eq!(captured[2].1, captured[3].1);
+    assert_ne!(captured[0].1, captured[2].1, "a reused slot is a new offer");
 }
 
 /// Regression: a dynamic leg (queue-dialed agent) that receives 180 Ringing
@@ -5610,34 +5647,44 @@ async fn test_originate_fire_helpers_reach_session_hooks() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
     let (mut server, _config) = create_test_server().await;
     let (hook, ringing, early_media, connected) = RingingRecordingHook::new();
+    let captured = hook.leg_generations.clone();
     Arc::get_mut(&mut server)
         .expect("server must be uniquely owned for hook registration")
         .session_hooks = Arc::new(vec![Arc::new(hook)]);
-    let session = build_session_on_server(server, dialplan).await;
+    let mut session = build_session_on_server(server, dialplan).await;
+    let mut generations = Vec::new();
 
-    session.fire_on_call_ringing_hooks(false).await;
-    assert_eq!(ringing.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        early_media.load(Ordering::SeqCst),
-        0,
-        "plain 180 provisional must not set early_media"
-    );
+    // RWI originates on caller; single-target dialing rings callee. Both
+    // paths must keep the producing lifetime through provisional and answer.
+    for name in ["caller", "callee"] {
+        let leg_id = LegId::from(name);
+        for _ in 0..2 {
+            session.legs.remove(&leg_id);
+            let leg = Leg::new(leg_id.clone());
+            let expected = leg.lifecycle_id;
+            session.legs.insert(leg_id.clone(), leg);
+            let offset = captured.lock().unwrap().len();
 
-    session.fire_on_call_ringing_hooks(true).await;
-    assert_eq!(ringing.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        early_media.load(Ordering::SeqCst),
-        1,
-        "183/SDP provisional must set early_media"
-    );
+            session.fire_on_call_ringing_hooks(&leg_id, false).await;
+            session.fire_on_call_ringing_hooks(&leg_id, true).await;
+            session.fire_on_call_connected_hooks(&leg_id).await;
 
-    assert_eq!(connected.load(Ordering::SeqCst), 0);
-    session.fire_on_call_connected_hooks().await;
-    assert_eq!(
-        connected.load(Ordering::SeqCst),
-        1,
-        "fire_on_call_connected_hooks must fire on_call_connected"
-    );
+            assert_eq!(
+                &captured.lock().unwrap()[offset..],
+                &[(false, Some(expected)), (false, Some(expected)), (true, Some(expected))],
+                "{name}: provisional and answer callbacks must carry the producing leg lifetime"
+            );
+            assert!(!generations.contains(&expected), "a new leg lifetime must have a distinct identity");
+            generations.push(expected);
+        }
+    }
+    assert_eq!(ringing.load(Ordering::SeqCst), 8);
+    assert_eq!(early_media.load(Ordering::SeqCst), 4);
+    assert_eq!(connected.load(Ordering::SeqCst), 4);
+    let removed = LegId::from("removed");
+    session.fire_on_call_ringing_hooks(&removed, false).await;
+    session.fire_on_call_connected_hooks(&removed).await;
+    assert_eq!(captured.lock().unwrap().len(), 12, "a missing leg must not emit an unidentified callback");
 }
 
 // ── hold-music resolution chain ──────────────────────────────────────────

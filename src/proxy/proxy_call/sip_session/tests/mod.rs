@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod recording_stop_tests;
 
 mod child_event_tests;
+mod outbound_failure_tests;
 mod session_id_tests;
 
 #[tokio::test]
