@@ -1713,15 +1713,9 @@ fn spawn_bridge_stats_task(
                 let audio = leg
                     .negotiated()
                     .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
-                let remote_addr = leg
-                    .pc()
-                    .ice_transport()
-                    .get_selected_pair()
-                    .map(|pair| pair.remote.address.to_string());
+                let remote_addr = leg.remote_media_addr();
                 let peer_advertised = leg.peer_advertised_addr();
-                let latched = if leg.pc().config().transport_mode
-                    == rustrtc::TransportMode::Rtp
-                {
+                let latched = if leg.is_direct_rtp() {
                     peer_advertised
                         .as_deref()
                         .map(|adv| remote_addr.as_deref() != Some(adv))

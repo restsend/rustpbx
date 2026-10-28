@@ -548,6 +548,35 @@ impl LegInner {
         self.peer_advertised_addr.lock().clone()
     }
 
+    /// Audio address egress is actually sent to. Direct RTP/SDES legs read
+    /// the transport's live destination, which latching moves off the SDP
+    /// address; WebRTC legs use the ICE selected pair.
+    pub fn remote_media_addr(&self) -> Option<String> {
+        match self.direct_audio_transport() {
+            Some(transport) => Some(transport.ice_conn().remote_addr.read().to_string()),
+            None => self
+                .pc
+                .ice_transport()
+                .get_selected_pair()
+                .map(|pair| pair.remote.address.to_string()),
+        }
+    }
+
+    /// Plain RTP or SDES: direct UDP, where egress follows the latch.
+    pub fn is_direct_rtp(&self) -> bool {
+        matches!(
+            self.pc.config().transport_mode,
+            rustrtc::TransportMode::Rtp | rustrtc::TransportMode::Srtp
+        )
+    }
+
+    fn direct_audio_transport(&self) -> Option<Arc<rustrtc::transports::rtp::RtpTransport>> {
+        if !self.is_direct_rtp() {
+            return None;
+        }
+        rtp_transport_for_kind(&self.pc, rustrtc::MediaKind::Audio)
+    }
+
     pub(crate) fn stats(&self) -> TapStats {
         self.tap.stats()
     }
@@ -944,11 +973,7 @@ impl LegInner {
     pub fn quality_report(&self, side: &'static str) -> crate::leg_stats::LegQualityReport {
         let tap = self.stats();
         let rtcp = self.rtcp_stats().snapshot();
-        let remote_addr = self
-            .pc()
-            .ice_transport()
-            .get_selected_pair()
-            .map(|pair| pair.remote.address.to_string());
+        let remote_addr = self.remote_media_addr();
         crate::leg_stats::LegQualityReport {
             side,
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
@@ -1730,6 +1755,18 @@ mod tests {
             .filter_map(|value| value.strip_prefix(&prefix))
             .map(str::to_string)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn remote_media_addr_follows_rtp_latch() {
+        let leg = LegInner::new("latch", &LegConfig::rtp_pcmu(), None).expect("leg");
+        let audio = test_rtp_transport().await;
+        set_test_sender_transport(leg.pc(), rustrtc::MediaKind::Audio, audio.clone());
+        assert_eq!(leg.remote_media_addr().as_deref(), Some("127.0.0.1:9"));
+
+        // What rustrtc's commit_latch does once the NAT'd source wins.
+        *audio.ice_conn().remote_addr.write() = "203.0.113.7:40000".parse().unwrap();
+        assert_eq!(leg.remote_media_addr().as_deref(), Some("203.0.113.7:40000"));
     }
 
     #[tokio::test]
