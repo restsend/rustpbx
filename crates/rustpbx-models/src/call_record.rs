@@ -1,4 +1,4 @@
-use sea_orm::Set;
+use sea_orm::{DbBackend, Set};
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
@@ -41,39 +41,60 @@ pub async fn update_recording_url(
 /// database. No-op when the row does not exist (`[callrecord]` s3/http/local
 /// storages keep no database row).
 ///
-/// Concurrency note: like `update_sipflow_jsonl` this is a whole-document
-/// read-modify-write; callers are the sequential hook pipeline, the
-/// single-consumer upload manager and the retry ticker, so the lost-update
-/// window is negligible in practice.
+/// The database appends atomically so concurrent uploads cannot replace each
+/// other's trace events or signaling fragments.
 pub async fn append_call_trace(
     db: &DatabaseConnection,
     call_id: &str,
     events: Vec<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    use sea_orm::EntityTrait;
     if events.is_empty() {
         return Ok(());
     }
-    let record = Entity::find()
-        .filter(Column::CallId.eq(call_id))
-        .one(db)
-        .await?;
-    if let Some(record) = record {
-        let mut metadata = match record.metadata {
-            Some(Json::Object(ref map)) => map.clone(),
-            _ => serde_json::Map::new(),
-        };
-        let trace = metadata
-            .entry("trace".to_string())
-            .or_insert_with(|| Json::Array(Vec::new()));
-        if let Json::Array(items) = trace {
-            items.extend(events);
+    let backend = db.get_database_backend();
+    let metadata = metadata_object(backend, Expr::col(Column::Metadata));
+    let metadata = match backend {
+        DbBackend::Sqlite => {
+            let mut sql = String::from(
+                "CASE WHEN json_type(?, '$.trace') IS NULL OR json_type(?, '$.trace') = 'array' \
+                 THEN json_set(?, '$.trace', json_insert(COALESCE(json_extract(?, '$.trace'), '[]')",
+            );
+            let mut args = vec![metadata.clone(); 4];
+            for event in events {
+                args.push(Expr::val(event));
+                sql.push_str(", '$[#]', json(?)");
+            }
+            sql.push_str(")) ELSE ? END");
+            args.push(metadata);
+            Expr::cust_with_exprs(sql, args)
         }
-        let mut active: ActiveModel = record.into();
-        active.metadata = Set(Some(Json::Object(metadata)));
-        active.updated_at = Set(chrono::Utc::now());
-        Entity::update(active).exec(db).await?;
-    }
+        DbBackend::MySql => Expr::cust_with_exprs(
+            "CASE WHEN JSON_EXTRACT(?, '$.trace') IS NULL OR JSON_TYPE(JSON_EXTRACT(?, '$.trace')) = 'ARRAY' \
+             THEN JSON_SET(?, '$.trace', JSON_MERGE_PRESERVE(COALESCE(JSON_EXTRACT(?, '$.trace'), JSON_ARRAY()), CAST(? AS JSON))) \
+             ELSE ? END",
+            [
+                metadata.clone(),
+                metadata.clone(),
+                metadata.clone(),
+                metadata.clone(),
+                Expr::val(Json::Array(events)),
+                metadata,
+            ],
+        ),
+        DbBackend::Postgres => Expr::cust_with_exprs(
+            "CASE WHEN ($1)->'trace' IS NULL OR jsonb_typeof(($1)->'trace') = 'array' \
+             THEN jsonb_set($1, '{trace}', COALESCE(($1)->'trace', '[]'::jsonb) || CAST($2 AS jsonb)) \
+             ELSE $1 END",
+            [metadata, Expr::val(Json::Array(events))],
+        ),
+        _ => unreachable!("unsupported call-record database backend"),
+    };
+    Entity::update_many()
+        .col_expr(Column::Metadata, metadata)
+        .col_expr(Column::UpdatedAt, Expr::val(chrono::Utc::now()))
+        .filter(Column::CallId.eq(call_id))
+        .exec(db)
+        .await?;
     Ok(())
 }
 
@@ -109,26 +130,128 @@ pub async fn update_sipflow_jsonl(
     call_id: &str,
     jsonl_url: &str,
 ) -> anyhow::Result<()> {
-    use sea_orm::EntityTrait;
-    let record = Entity::find()
+    let backend = db.get_database_backend();
+    Entity::update_many()
+        .col_expr(
+            Column::Metadata,
+            sipflow_jsonl_metadata(
+                backend,
+                metadata_object(backend, Expr::col(Column::Metadata)),
+                jsonl_url,
+            ),
+        )
+        .col_expr(Column::UpdatedAt, Expr::val(chrono::Utc::now()))
         .filter(Column::CallId.eq(call_id))
-        .one(db)
+        .exec(db)
         .await?;
-    if let Some(record) = record {
-        let mut metadata = match record.metadata {
-            Some(Json::Object(ref map)) => map.clone(),
-            _ => serde_json::Map::new(),
-        };
-        metadata.insert(
-            "sipflow_jsonl".to_string(),
-            serde_json::Value::String(jsonl_url.to_string()),
-        );
-        let mut active: ActiveModel = record.into();
-        active.metadata = Set(Some(Json::Object(metadata)));
-        active.updated_at = Set(chrono::Utc::now());
-        Entity::update(active).exec(db).await?;
-    }
     Ok(())
+}
+
+/// Publish one independently uploaded signaling fragment without replacing
+/// other nodes' fragments. Keep the legacy single URL for existing consumers.
+/// Like the other post-call updates, a missing CDR row is a no-op.
+pub async fn update_sipflow_fragment(
+    db: &DatabaseConnection,
+    call_id: &str,
+    fragment_id: &str,
+    jsonl_url: &str,
+) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let metadata = Expr::col(Column::Metadata);
+    let merged = merge_sipflow_fragments(
+        backend,
+        metadata.clone(),
+        metadata,
+        Expr::val(serde_json::json!({"sipflow_fragments": {(fragment_id): jsonl_url}})),
+    );
+    Entity::update_many()
+        .col_expr(
+            Column::Metadata,
+            sipflow_jsonl_metadata(backend, merged, jsonl_url),
+        )
+        .col_expr(Column::UpdatedAt, Expr::val(chrono::Utc::now()))
+        .filter(Column::CallId.eq(call_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+fn metadata_object(backend: DbBackend, value: Expr) -> Expr {
+    match backend {
+        DbBackend::Sqlite => Expr::cust_with_exprs(
+            "CASE WHEN json_type(?) = 'object' THEN ? ELSE '{}' END",
+            [value.clone(), value],
+        ),
+        DbBackend::MySql => Expr::cust_with_exprs(
+            "CASE WHEN JSON_TYPE(?) = 'OBJECT' THEN ? ELSE JSON_OBJECT() END",
+            [value.clone(), value],
+        ),
+        DbBackend::Postgres => Expr::cust_with_expr(
+            "CASE WHEN jsonb_typeof(CAST($1 AS jsonb)) = 'object' THEN CAST($1 AS jsonb) ELSE '{}'::jsonb END",
+            value,
+        ),
+        _ => unreachable!("unsupported call-record database backend"),
+    }
+}
+
+fn sipflow_jsonl_metadata(backend: DbBackend, metadata: Expr, url: &str) -> Expr {
+    let sql = match backend {
+        DbBackend::Sqlite | DbBackend::MySql => "JSON_SET(?, '$.sipflow_jsonl', ?)",
+        DbBackend::Postgres => "jsonb_set($1, '{sipflow_jsonl}', to_jsonb(CAST($2 AS text)))",
+        _ => unreachable!("unsupported call-record database backend"),
+    };
+    Expr::cust_with_exprs(sql, [metadata, Expr::val(url)])
+}
+
+/// Merge only the signaling fragment maps from both snapshots. All other
+/// metadata follows the caller's selected snapshot (the recording owner on
+/// cluster CDR upserts). Both that upsert and late uploads must use this merge.
+pub fn merge_sipflow_fragments(
+    backend: DbBackend,
+    selected: Expr,
+    stored: Expr,
+    incoming: Expr,
+) -> Expr {
+    let has_fragments = Expr::cust_with_exprs(
+        match backend {
+            DbBackend::Sqlite => {
+                "json_type(?, '$.sipflow_fragments') IS NOT NULL OR json_type(?, '$.sipflow_fragments') IS NOT NULL"
+            }
+            DbBackend::MySql => {
+                "JSON_CONTAINS_PATH(?, 'one', '$.sipflow_fragments') OR JSON_CONTAINS_PATH(?, 'one', '$.sipflow_fragments')"
+            }
+            DbBackend::Postgres => {
+                "jsonb_exists(CAST($1 AS jsonb), 'sipflow_fragments') OR jsonb_exists(CAST($2 AS jsonb), 'sipflow_fragments')"
+            }
+            _ => unreachable!("unsupported call-record database backend"),
+        },
+        [stored.clone(), incoming.clone()],
+    );
+    let extract = |metadata| {
+        let sql = match backend {
+            DbBackend::Sqlite | DbBackend::MySql => "JSON_EXTRACT(?, '$.sipflow_fragments')",
+            DbBackend::Postgres => "CAST($1 AS jsonb)->'sipflow_fragments'",
+            _ => unreachable!("unsupported call-record database backend"),
+        };
+        metadata_object(backend, Expr::cust_with_expr(sql, metadata))
+    };
+    let sql = match backend {
+        DbBackend::Sqlite => "json_set(?, '$.sipflow_fragments', json_patch(?, ?))",
+        DbBackend::MySql => "JSON_SET(?, '$.sipflow_fragments', JSON_MERGE_PATCH(?, ?))",
+        DbBackend::Postgres => "jsonb_set($1, '{sipflow_fragments}', ($2) || ($3))",
+        _ => unreachable!("unsupported call-record database backend"),
+    };
+    let merged = Expr::cust_with_exprs(
+        sql,
+        [
+            metadata_object(backend, selected.clone()),
+            extract(stored),
+            extract(incoming),
+        ],
+    );
+    // Calls without a signaling archive keep their original metadata verbatim,
+    // including SQL NULL; this index must not alter unrelated CDR snapshots.
+    Expr::case(has_fragments, merged).finally(selected).into()
 }
 
 pub fn extract_sip_username(input: &str) -> Option<String> {

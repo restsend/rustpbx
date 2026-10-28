@@ -7,12 +7,9 @@ use tracing::{info, warn};
 
 use crate::{
     callrecord::sipflow_upload::{
-        SipFlowUploadRequest, SipFlowUploadResponse, SipFlowUploadRuntime,
+        SipFlowUploadRequest, SipFlowUploadResponse, SipFlowUploadRuntime, signaling_fragment_keys,
     },
-    callrecord::{
-        CallRecord, CallRecordHook, format_sipflow_media_key, format_sipflow_signaling_file_name,
-        format_sipflow_signaling_key, sipflow::SipFlowSlot,
-    },
+    callrecord::{CallRecord, CallRecordHook, sipflow::SipFlowSlot},
     config::{SipFlowClusterNode, SipFlowUploadConfig},
     sipflow::backend::remote::jump_consistent_hash,
 };
@@ -83,7 +80,9 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             warn!("SipFlowRemoteUploadHook: no SipFlow handle, skipping pre-upload flush");
         }
 
+        let mut failure = None;
         for record in records {
+            let (signaling_key, signaling_file_name) = signaling_fragment_keys(record);
             let call_id = record.call_id.as_str();
             let start = Local.from_utc_datetime(&record.start_time.naive_utc());
             let end = Local.from_utc_datetime(&record.end_time.naive_utc());
@@ -105,12 +104,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                 }
             }
 
-            // Compute default keys.  Client-specified keys are not sent by the
-            // hook (the bin will compute them via the fallback).
-            let _default_media = format_sipflow_media_key(record);
-            let _default_signaling = format_sipflow_signaling_key(record);
-            let _default_sig_file = format_sipflow_signaling_file_name(record);
-
+            // Explicit writer keys prevent different proxy nodes from overwriting one archive.
             let req = SipFlowUploadRequest {
                 call_id: call_id.to_string(),
                 signaling_call_ids: record.sip_leg_roles.keys().cloned().collect(),
@@ -118,8 +112,8 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                 end: end.timestamp(),
                 upload: upload_config,
                 media_key: None,
-                signaling_key: None,
-                signaling_file_name: None,
+                signaling_key: Some(signaling_key),
+                signaling_file_name: Some(signaling_file_name),
             };
 
             info!(
@@ -181,16 +175,21 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             }
 
             if let Some(ref jsonl_url) = resp.signaling_url {
-                crate::callrecord::sipflow_upload::stash_sipflow_jsonl(
-                    record,
-                    jsonl_url,
-                    self.db.as_ref(),
-                )
-                .await;
+                if let Err(error) = crate::callrecord::sipflow_upload::stash_sipflow_jsonl(
+                    record, jsonl_url, self.db.as_ref(),
+                ).await {
+                    warn!(call_id = %record.call_id, error = %error, "Signaling fragment index update failed");
+                    if failure.is_none() {
+                        failure = Some(error.context(format!("Signaling index update failed for {}", record.call_id)));
+                    }
+                }
             }
         }
 
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 

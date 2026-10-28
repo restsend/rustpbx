@@ -537,15 +537,58 @@ async fn read_record_archived_flow(
     record: &CallRecordModel,
     detail: bool,
 ) -> Option<Result<Value, Response>> {
-    let location = record.metadata.as_ref()?.get("sipflow_jsonl")?.as_str()?;
-    let resolved = if location.starts_with("http://")
-        || location.starts_with("https://") || location.starts_with("s3://")
-    {
-        presign_artifact_url(state, location).await.unwrap_or_else(|| location.to_string())
-    } else {
-        resolve_archived_artifact_path(location, record.started_at)
-    };
-    Some(read_archived_jsonl_flow(record, &resolved, detail, state.http_client()).await)
+    let metadata = record.metadata.as_ref()?;
+    let invalid_index = || (StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"message": "Invalid signaling fragment index"}))).into_response();
+    let mut locations = Vec::new();
+    if let Some(index) = metadata.get("sipflow_fragments") {
+        let Some(index) = index.as_object() else {
+            return Some(Err(invalid_index()));
+        };
+        for location in index.values() {
+            let Some(location) = location.as_str().filter(|value| !value.is_empty()) else {
+                return Some(Err(invalid_index()));
+            };
+            locations.push(location);
+        }
+    }
+    // Older records and rolling upgrades retain the existing single-archive location.
+    if let Some(location) = metadata.get("sipflow_jsonl").and_then(Value::as_str)
+        .filter(|value| !value.is_empty()) {
+        locations.push(location);
+    }
+    let mut seen = HashSet::new();
+    locations.retain(|location| seen.insert(*location));
+    let mut merged: Option<Value> = None;
+    for location in locations {
+        let resolved = if location.starts_with("http://")
+            || location.starts_with("https://") || location.starts_with("s3://")
+        {
+            presign_artifact_url(state, location).await.unwrap_or_else(|| location.to_string())
+        } else {
+            resolve_archived_artifact_path(location, record.started_at)
+        };
+        let mut part = match read_archived_jsonl_flow(record, &resolved, detail, state.http_client()).await {
+            Ok(part) => part,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Some(merged) = &mut merged {
+            let malformed = merged["diagnostics"]["malformed_lines"].as_u64().unwrap_or(0)
+                + part["diagnostics"]["malformed_lines"].as_u64().unwrap_or(0);
+            merged["diagnostics"]["malformed_lines"] = json!(malformed);
+            merged["flow"].as_array_mut().unwrap().append(part["flow"].as_array_mut().unwrap());
+        } else {
+            merged = Some(part);
+        }
+    }
+    merged.map(|mut value| {
+        let flow = value["flow"].as_array_mut().unwrap();
+        flow.sort_by(|a, b| a["timestamp"].as_f64().unwrap_or(0.0)
+            .partial_cmp(&b["timestamp"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal));
+        value["diagnostics"]["total_sip_msgs"] = json!(flow.len());
+        Ok(value)
+    })
 }
 
 async fn read_archived_jsonl_flow(
@@ -3714,10 +3757,19 @@ mod tests {
             }).to_string());
             jsonl.push('\n');
         }
-        let app = Router::new().route("/flow.jsonl", get(move || {
-            let body = jsonl.clone();
-            async move { body }
-        }));
+        let caller: String = jsonl.lines().filter(|line| line.contains("caller-dialog"))
+            .map(|line| format!("{line}\n")).collect();
+        let callee: String = jsonl.lines().filter(|line| line.contains("callee-dialog"))
+            .map(|line| format!("{line}\n")).collect();
+        let app = Router::new()
+            .route("/flow.jsonl", get(move || {
+                let body = caller.clone();
+                async move { body }
+            }))
+            .route("/peer.jsonl", get(move || {
+                let body = callee.clone();
+                async move { body }
+            }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -3732,6 +3784,10 @@ mod tests {
             transcript_status: Set("pending".into()),
             metadata: Set(Some(json!({
                 "sipflow_jsonl": format!("http://{address}/flow.jsonl"),
+                "sipflow_fragments": {
+                    "caller": format!("http://{address}/flow.jsonl"),
+                    "peer": format!("http://{address}/peer.jsonl"),
+                },
                 "sip_leg_roles": "{\"caller-dialog\":\"caller\",\"callee-dialog\":\"callee\"}",
             }))),
             created_at: Set(Utc::now()),
@@ -3756,6 +3812,17 @@ mod tests {
                 assert!(messages.iter().any(|item| item["raw_message"].as_str().unwrap().starts_with("SIP/2.0 200")));
             }
         }
+        let mut broken = model.metadata.clone().unwrap();
+        broken["sipflow_fragments"]["missing"] = json!(format!("http://{address}/missing.jsonl"));
+        let mut updated: call_record::ActiveModel = model.into();
+        updated.metadata = Set(Some(broken));
+        let updated = updated.update(&db).await.unwrap();
+        let response = download_call_record_sip_flow(
+            AxumPath(updated.id.to_string()),
+            Query(SipFlowRequestQuery { detail: true, scope: Some("session".into()), ..Default::default() }),
+            State(state), AuthRequired(superuser()),
+        ).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         task.abort();
     }
 
