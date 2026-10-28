@@ -27,6 +27,7 @@ pub mod app;
 pub mod concurrent_call_limiter;
 pub mod cookie;
 pub mod cps_limiter;
+pub mod diversion;
 pub mod domain;
 pub mod policy;
 pub mod realtime;
@@ -1162,6 +1163,11 @@ pub struct Dialplan {
     pub enable_sipflow: bool,
 
     pub call_forwarding: Option<CallForwardingConfig>,
+    /// Diversion chain (RFC 5806 `Diversion` / RFC 7044 `History-Info`):
+    /// seeded from the inbound INVITE's diversion headers and grown by one
+    /// entry per forwarding hop this server performs. Rendered onto outgoing
+    /// legs when diversion headers are enabled (globally or per trunk).
+    pub diversion_chain: Vec<crate::call::diversion::DiversionEntry>,
     /// Whether the dialed user has voicemail enabled (`voicemail_disabled ==
     /// false`). Decides voicemail for an offline callee, which has no phones to
     /// ring; a failed dial instead uses the owner of the targets it rang (see
@@ -1197,6 +1203,11 @@ pub struct Dialplan {
     /// and re-dials the targets until free or the wait budget expires.
     pub busy_wait: Option<BusyWaitPlan>,
 
+    /// Resolved diversion-header rendering policy for the active target
+    /// (per-trunk overrides over the global `[proxy]` flags), stamped when
+    /// routing hints are applied. `None` → the session falls back to globals.
+    pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
+
     /// Headers modified/added by routing (rewrite rules, trunk config, HTTP router).
     /// When present, these take priority over the original SIP request headers
     /// when building CallInfo for application flows (IVR, voicemail, etc.).
@@ -1225,6 +1236,7 @@ impl std::fmt::Debug for Dialplan {
             .field("rtp_timeout", &self.rtp_timeout)
             .field("enable_sipflow", &self.enable_sipflow)
             .field("header_passthrough", &self.header_passthrough)
+            .field("diversion_hops", &self.diversion_chain.len())
             .finish()
     }
 }
@@ -1252,6 +1264,7 @@ impl Dialplan {
             failure_action: self.failure_action.clone(),
             enable_sipflow: self.enable_sipflow,
             call_forwarding: self.call_forwarding.clone(),
+            diversion_chain: self.diversion_chain.clone(),
             voicemail_enabled: self.voicemail_enabled,
             route_invite: None,
             header_passthrough: self.header_passthrough.clone(),
@@ -1261,6 +1274,7 @@ impl Dialplan {
             route_originated_calls: self.route_originated_calls,
             audio_profile: self.audio_profile.clone(),
             busy_wait: self.busy_wait.clone(),
+            diversion_policy: self.diversion_policy,
             routed_headers: self.routed_headers.clone(),
             concurrency_holds: self.concurrency_holds.clone(),
             concurrent_call_lease: Default::default(),
@@ -1450,6 +1464,7 @@ impl Dialplan {
             failure_action: FailureAction::default(),
             enable_sipflow: true, // Enable SIP flow recording by default
             call_forwarding: None,
+            diversion_chain: Vec::new(),
             voicemail_enabled: false,
             route_invite: None,
             header_passthrough: None,
@@ -1459,6 +1474,7 @@ impl Dialplan {
             route_originated_calls: None,
             audio_profile: None,
             busy_wait: None,
+            diversion_policy: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
             concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease::default(),
@@ -1523,6 +1539,27 @@ impl Dialplan {
     pub fn with_call_forwarding(mut self, config: Option<CallForwardingConfig>) -> Self {
         self.call_forwarding = config;
         self
+    }
+
+    /// Seed the diversion chain from the inbound INVITE's diversion headers
+    /// (no-op when the request carries none).
+    pub fn with_diversion_chain_from_request(
+        mut self,
+        request: &rsipstack::sip::Request,
+    ) -> Self {
+        self.diversion_chain = crate::call::diversion::parse_diversion_chain(request);
+        self
+    }
+
+    /// Append a diversion hop; the counter continues from the chain length.
+    pub fn push_diversion(
+        &mut self,
+        uri: impl Into<String>,
+        reason: Option<crate::call::diversion::DiversionReason>,
+    ) {
+        let mut entry = crate::call::diversion::DiversionEntry::new(uri, reason);
+        entry.counter = self.diversion_chain.len() as u32 + 1;
+        self.diversion_chain.push(entry);
     }
 
     pub fn with_passthrough_failure(mut self, enabled: bool) -> Self {
@@ -2228,6 +2265,37 @@ mod tests {
         );
         assert!(dp.header_passthrough.is_none());
     }
+
+    #[test]
+    fn diversion_chain_seeds_from_request_and_appends() {
+        use crate::call::diversion::DiversionReason;
+
+        let mut request = minimal_request();
+        request.headers.push(rsipstack::sip::headers::make_header(
+            "Diversion",
+            "<sip:origin@example.com>;reason=user-busy;counter=1".to_string(),
+        ));
+        let dp = Dialplan::new("sess-002".into(), request.clone(), DialDirection::Inbound)
+            .with_diversion_chain_from_request(&request);
+        assert_eq!(dp.diversion_chain.len(), 1);
+        assert_eq!(
+            dp.diversion_chain[0].reason,
+            Some(DiversionReason::UserBusy)
+        );
+
+        // Forwarding appends hops with a continuing counter; renders as a
+        // single Diversion header.
+        let mut dp = dp;
+        dp.push_diversion("sip:1002@pbx.local", Some(DiversionReason::Unconditional));
+        assert_eq!(dp.diversion_chain.len(), 2);
+        assert_eq!(dp.diversion_chain[1].counter, 2);
+
+        let header = crate::call::diversion::diversion_header(&dp.diversion_chain).unwrap();
+        let value = header.value();
+        assert!(value.contains("<sip:origin@example.com>;reason=user-busy;counter=1"));
+        assert!(value.contains("<sip:1002@pbx.local>;reason=unconditional;counter=2"));
+    }
+
 
     #[test]
     fn is_custom_header_means_unparsed_x_or_p_header() {

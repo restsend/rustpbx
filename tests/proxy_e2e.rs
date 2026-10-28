@@ -22,6 +22,9 @@ mod test_p_early_media_e2e;
 #[path = "proxy_e2e/test_header_passthrough_e2e.rs"]
 mod test_header_passthrough_e2e;
 
+#[path = "proxy_e2e/test_diversion_e2e.rs"]
+mod test_diversion_e2e;
+
 #[path = "proxy_e2e/test_inbound_refer.rs"]
 mod test_inbound_refer;
 

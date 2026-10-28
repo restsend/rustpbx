@@ -1314,6 +1314,8 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
             .and_then(|s| s.get("retry_policy"))
             .and_then(|v| serde_json::from_value::<super::routing::RetryPolicy>(v.clone()).ok())
             .filter(|policy| policy.validate().is_ok()),
+        diversion_headers: from_bool(sbc.and_then(|s| s.get("diversion_headers"))),
+        history_info: from_bool(sbc.and_then(|s| s.get("history_info"))),
         max_ring_time: from_u64(sbc.and_then(|s| s.get("max_ring_time"))),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },

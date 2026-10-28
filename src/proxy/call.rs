@@ -1209,6 +1209,7 @@ impl CallModule {
             .with_media(media_config)
             .with_recording(recording)
             .with_route_invite(route_invite)
+            .with_diversion_chain_from_request(original)
             .with_passthrough_failure(self.inner.server.proxy_config.load().passthrough_failure);
 
         // Resolve the original-header passthrough rule for the (direct) callee
@@ -1361,6 +1362,7 @@ impl CallModule {
             if let Some(busy_wait) = hints.busy_wait.take() {
                 dialplan.busy_wait = Some(busy_wait.to_plan());
             }
+            dialplan.diversion_policy = hints.diversion_policy;
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             dialplan.concurrent_call_lease = hints.concurrent_call_lease;
@@ -1927,6 +1929,24 @@ impl CallModule {
             && let Some(config) = callee.forwarding_config()
         {
             dialplan = dialplan.with_call_forwarding(Some(config));
+        }
+        // An unconditional (always) forward is a diversion hop: record it so
+        // the outgoing legs carry the Diversion / History-Info chain (RFC
+        // 5806 / RFC 7044) when enabled. The diverting party is the originally
+        // dialed target.
+        if dialplan
+            .call_forwarding
+            .as_ref()
+            .is_some_and(|config| matches!(config.mode, crate::call::CallForwardingMode::Always))
+            && !dialplan
+                .diversion_chain
+                .iter()
+                .any(|e| e.reason == Some(crate::call::diversion::DiversionReason::Unconditional))
+        {
+            dialplan.push_diversion(
+                dialplan.original.uri.to_string(),
+                Some(crate::call::diversion::DiversionReason::Unconditional),
+            );
         }
         dialplan.voicemail_enabled = callee.as_ref().is_some_and(|callee| !callee.voicemail_disabled);
 

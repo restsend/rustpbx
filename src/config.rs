@@ -1817,6 +1817,18 @@ pub struct ProxyConfig {
     /// in-session hand-off; failures roll back atomically. Default: enabled.
     #[serde(default = "default_true")]
     pub inbound_refer_in_session: bool,
+    /// Generate the RFC 5806 `Diversion` header on forwarded calls (unconditional
+    /// user forwarding and call-forward-on-busy / no-answer), re-rendering any
+    /// diversion chain inherited from the inbound INVITE. Off by default —
+    /// interconnect peers only expect it when they support call forwarding
+    /// notification. Per-trunk `diversion_headers` overrides this.
+    #[serde(default)]
+    pub diversion_headers: bool,
+    /// Generate the RFC 7044 `History-Info` header on forwarded calls (and
+    /// advertise `Supported: histinfo`). Off by default. Per-trunk
+    /// `history_info` overrides this.
+    #[serde(default)]
+    pub history_info: bool,
     /// SIP conference factory URI. Disabled when unset.
     #[serde(default)]
     pub conference_factory_uri: Option<String>,
@@ -2082,6 +2094,10 @@ pub struct DialplanHints {
     /// Busy-wait (camp-on) policy from a forward route's `[busy_wait]` table.
     /// Applied by the call session when the callee rejects with 486 Busy.
     pub busy_wait: Option<crate::proxy::routing::RouteBusyWaitConfig>,
+    /// Resolved diversion-header policy (per-trunk overrides over globals),
+    /// stamped during routing. `None` when no trunk/route policy applies —
+    /// the session then falls back to the global proxy config.
+    pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
@@ -2106,6 +2122,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("bind_ip", &self.bind_ip)
             .field("ice_lite", &self.ice_lite)
             .field("busy_wait", &self.busy_wait)
+            .field("diversion_policy", &self.diversion_policy)
             .finish()
     }
 }
@@ -2536,6 +2553,8 @@ impl Default for ProxyConfig {
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             inbound_refer_in_session: true,
+            diversion_headers: false,
+            history_info: false,
             conference_factory_uri: None,
             conference_empty_timeout_secs: default_conference_empty_timeout_secs(),
             route_originated_calls: false,

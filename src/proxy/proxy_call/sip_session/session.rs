@@ -2855,6 +2855,52 @@ impl SipSession {
             }
         }
 
+        // Call-forward-on-failure (user-level `when_busy` /
+        // `when_not_answered`): chain to the forwarding target on a busy
+        // (486/600/603) or no-answer (408/480) final status, recording the
+        // diversion hop (RFC 5806) before the re-dial. Runs after busy-wait
+        // camp-on (an explicit route policy wins) and before the voicemail
+        // fallback.
+        if let Some((status_code, _, _)) = setup_error.as_ref()
+            && let Some(forward_timeout) = self.call_forwarding_on_failure(*status_code).await
+        {
+            self.reset_callee_for_retry().await;
+            let forwarded = tokio::time::timeout(
+                forward_timeout,
+                self.execute_dialplan(&mut callee_state_rx),
+            )
+            .await;
+            match forwarded {
+                Ok(Ok(())) => {
+                    info!(session_id = %self.id,
+                        session_id = %self.context.session_id,
+                        "call forwarding on failure connected the caller"
+                    );
+                    self.meta.error_code = None;
+                    setup_error = None;
+                }
+                Ok(Err(err)) => {
+                    warn!(session_id = %self.id,
+                        session_id = %self.context.session_id,
+                        error = ?err,
+                        "call forwarding target failed; falling back to voicemail/reject"
+                    );
+                    setup_error = Some(err);
+                }
+                Err(_) => {
+                    warn!(session_id = %self.id,
+                        session_id = %self.context.session_id,
+                        timeout = ?forward_timeout,
+                        "call forwarding target timed out"
+                    );
+                    setup_error = Some(into_callee_err(
+                        &StatusCode::RequestTimeout,
+                        Some("Forwarded target timeout".to_string()),
+                    ));
+                }
+            }
+        }
+
         // If the dial rang a user's own phones and that user has voicemail
         // enabled, chain to voicemail instead of passing the dial failure
         // (busy, decline, unreachable, ring timeout) to the caller. The owner
@@ -4296,6 +4342,44 @@ impl SipSession {
             .is_some_and(|peer| server.cluster_peer_ips.contains(&peer.ip()))
     }
 
+    /// Append the Diversion / History-Info headers for forwarded calls when
+    /// the resolved policy enables them. The whole chain is re-rendered (not
+    /// appended-to) so chained forwards never duplicate headers; the outgoing
+    /// target closes the History-Info branch with the next index.
+    fn append_diversion_headers(
+        &self,
+        headers: &mut Vec<rsipstack::sip::Header>,
+        callee_uri: &rsipstack::sip::Uri,
+    ) {
+        if self.context.dialplan.diversion_chain.is_empty() {
+            return;
+        }
+        let (global_diversion, global_history) = {
+            let proxy_config = self.server.proxy_config.load();
+            (proxy_config.diversion_headers, proxy_config.history_info)
+        };
+        let policy = crate::proxy::routing::DiversionPolicy::resolve(
+            global_diversion,
+            global_history,
+            self.context.dialplan.diversion_policy,
+        );
+        if !policy.diversion_headers && !policy.history_info {
+            return;
+        }
+        let chain = &self.context.dialplan.diversion_chain;
+        if policy.diversion_headers && let Some(header) = crate::call::diversion::diversion_header(chain)
+        {
+            headers.retain(|h| !h.name().eq_ignore_ascii_case("Diversion"));
+            headers.push(header);
+        }
+        if policy.history_info
+            && let Some(header) = crate::call::diversion::history_info_header(chain, Some(callee_uri))
+        {
+            headers.retain(|h| !h.name().eq_ignore_ascii_case("History-Info"));
+            headers.push(header);
+        }
+    }
+
     async fn build_target_invite_option(
         &mut self,
         target: &crate::call::Location,
@@ -4481,6 +4565,11 @@ impl SipSession {
                 headers.push(rsipstack::sip::Header::Other(name, value));
             }
         }
+        // Diversion / History-Info headers for forwarded calls (RFC 5806 /
+        // RFC 7044): re-rendered from the dialplan's diversion chain when the
+        // resolved policy enables them. Applied after transfer headers so
+        // caller-supplied values cannot override the system-generated ones.
+        self.append_diversion_headers(&mut headers, &callee_uri);
 
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
         let leg_id = leg_id_override.unwrap_or("callee");
@@ -7587,6 +7676,7 @@ impl SipSession {
         if let Some(busy_wait) = hints.busy_wait.as_ref() {
             plan.busy_wait = Some(busy_wait.to_plan());
         }
+        plan.diversion_policy = hints.diversion_policy;
         plan
     }
 
@@ -8366,6 +8456,79 @@ impl SipSession {
     /// `retry_interval` until one answers, the caller hangs up, or the wait
     /// budget expires. `Ok(())` once a target connected (bridge/answer already
     /// handled); otherwise the final `CalleeError`.
+    /// User-level call-forward-on-failure: when the final dial failure
+    /// matches the configured mode — `when_busy` for 486/600/603,
+    /// `when_not_answered` for 408/480 — retarget the dialplan to the
+    /// forwarding destination and record the diversion hop (the diverting
+    /// party is the originally dialed target). Returns the forwarding timeout
+    /// when the dialplan was retargeted (the caller then re-dials once);
+    /// `None` leaves the failure untouched. Only `TransferEndpoint::Uri`
+    /// targets are forwarded here; queue/app targets keep the voicemail /
+    /// reject fallback.
+    async fn call_forwarding_on_failure(&mut self, status_code: u16) -> Option<std::time::Duration> {
+        use crate::call::diversion::DiversionReason;
+
+        let reason = DiversionReason::from_failure_status(status_code)?;
+        let config = self.context.dialplan.call_forwarding.clone()?;
+        let mode_matches = match config.mode {
+            crate::call::CallForwardingMode::WhenBusy => reason == DiversionReason::UserBusy,
+            crate::call::CallForwardingMode::WhenNoAnswer => reason == DiversionReason::NoAnswer,
+            crate::call::CallForwardingMode::Always => false,
+        };
+        if !mode_matches || self.caller_gone() {
+            return None;
+        }
+        let crate::call::TransferEndpoint::Uri(uri) = &config.endpoint else {
+            warn!(session_id = %self.context.session_id,
+                endpoint = %config.endpoint,
+                "failure forwarding target is not a SIP URI; skipping (only URI targets supported)"
+            );
+            return None;
+        };
+        let realm = self.server.proxy_config.load().select_realm("");
+        let normalized = crate::call::build_sip_uri(uri, &realm);
+        let target_uri = rsipstack::sip::Uri::try_from(normalized.as_str()).ok()?;
+        let mut location = crate::call::Location {
+            aor: target_uri,
+            ..Default::default()
+        };
+        // Resolve the forwarding destination like the inbound path does for
+        // internal callees: a registered target dials its contact directly;
+        // an offline target fails the re-dial into the voicemail/reject
+        // fallback.
+        if let Ok(regs) = self.server.locator.lookup(&location.aor).await
+            && let Some(reg) = regs.into_iter().next()
+        {
+            if reg.destination.is_some() {
+                location.destination = reg.destination;
+                location.supports_webrtc = reg.supports_webrtc;
+                location.transport = reg.transport;
+                location.registered_aor = reg.registered_aor;
+                location.registered_username = reg.registered_username;
+                location.registered_realm = reg.registered_realm;
+                location.home_proxy = reg.home_proxy;
+            }
+        }
+        // fork_for_target drops the (already-consumed) RouteInvite and keeps
+        // the flow/media/diversion state; the session swaps the whole plan
+        // (it lives behind an Arc).
+        let mut plan = self.context.dialplan.fork_for_target();
+        plan.push_diversion(plan.original.uri.to_string(), Some(reason));
+        plan.flow =
+            crate::call::DialplanFlow::Targets(crate::call::DialStrategy::Sequential(vec![
+                location.into(),
+            ]));
+        self.context.dialplan = Arc::new(plan);
+        info!(session_id = %self.id,
+            session_id = %self.context.session_id,
+            mode = ?config.mode,
+            status = %status_code,
+            target = %uri,
+            "Executing call forwarding on failure"
+        );
+        Some(config.timeout)
+    }
+
     async fn busy_wait_and_redial(
         &mut self,
         plan: crate::call::BusyWaitPlan,
@@ -16478,6 +16641,9 @@ impl SipSession {
                 | Some(crate::call::domain::LegPurpose::Consult)
         );
         let mut headers = location.headers.clone().unwrap_or_default();
+        // Diversion / History-Info for forwarded calls reaching dynamic legs
+        // (queue agents, consult legs) through the enricher-supplied headers.
+        self.append_diversion_headers(&mut headers, &callee_uri);
         // Wire form of the session id for the INVITE below: native short ids
         // are appended here as a raw Session-ID header (rsipstack's
         // InviteOption.session_id validation only accepts 32 hex chars).

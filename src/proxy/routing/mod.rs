@@ -62,6 +62,31 @@ impl RetryPolicy {
     }
 }
 
+/// Resolved diversion-header rendering policy for an outgoing target:
+/// per-trunk overrides merged over the global defaults. Carried on
+/// [`DialplanHints`] so the session applies it when building the outgoing
+/// INVITE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DiversionPolicy {
+    /// Render the RFC 5806 `Diversion` header.
+    pub diversion_headers: bool,
+    /// Render the RFC 7044 `History-Info` header.
+    pub history_info: bool,
+}
+
+impl DiversionPolicy {
+    /// Globals with per-trunk overrides applied on top.
+    pub fn resolve(global_diversion: bool, global_history: bool, override_: Option<Self>) -> Self {
+        match override_ {
+            Some(policy) => policy,
+            None => Self {
+                diversion_headers: global_diversion,
+                history_info: global_history,
+            },
+        }
+    }
+}
+
 /// Single trunk configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TrunkConfig {
@@ -212,6 +237,16 @@ pub struct TrunkConfig {
     /// Opt-in failure conditions used when a route permits sequential failover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RetryPolicy>,
+
+    /// Per-trunk override of the global `proxy.diversion_headers`: render the
+    /// RFC 5806 `Diversion` header on calls forwarded out through this trunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diversion_headers: Option<bool>,
+    /// Per-trunk override of the global `proxy.history_info`: render the
+    /// RFC 7044 `History-Info` header on calls forwarded out through this
+    /// trunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_info: Option<bool>,
 }
 
 /// Controls which custom headers are copied between call legs: original
@@ -560,6 +595,8 @@ impl Default for TrunkConfig {
             ringback: None,
             max_ring_time: None,
             retry_policy: None,
+            diversion_headers: None,
+            history_info: None,
             origin: ConfigOrigin::embedded(),
         }
     }

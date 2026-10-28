@@ -735,6 +735,18 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         ringback: None,
         max_ring_time: None,
         retry_policy: None,
+        diversion_headers: model
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("sbc"))
+            .and_then(|sbc| sbc.get("diversion_headers"))
+            .and_then(|v| v.as_bool()),
+        history_info: model
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("sbc"))
+            .and_then(|sbc| sbc.get("history_info"))
+            .and_then(|v| v.as_bool()),
     })
 }
 

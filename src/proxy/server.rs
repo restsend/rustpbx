@@ -922,6 +922,9 @@ impl SipServerBuilder {
 
         let mut endpoint_option = EndpointOption {
             callid_suffix: config.callid_suffix.clone(),
+            // RFC 7044: advertise `Supported: histinfo` when History-Info
+            // rendering is enabled so peers include their hi-entries.
+            history_info_enabled: config.history_info,
             ..Default::default()
         };
 

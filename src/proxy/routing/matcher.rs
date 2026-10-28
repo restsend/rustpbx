@@ -1550,6 +1550,8 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
         && trunk.bind_ip.is_none()
         && trunk.ice_lite.is_none()
         && trunk.profile.is_none()
+        && trunk.diversion_headers.is_none()
+        && trunk.history_info.is_none()
     {
         return;
     }
@@ -1557,6 +1559,17 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
     let hints = hints.get_or_insert_with(DialplanHints::default);
     if trunk.profile.is_some() {
         hints.network_profile_id = trunk.profile.clone();
+    }
+    if trunk.diversion_headers.is_some() || trunk.history_info.is_some() {
+        let policy = hints
+            .diversion_policy
+            .get_or_insert_with(crate::proxy::routing::DiversionPolicy::default);
+        if let Some(v) = trunk.diversion_headers {
+            policy.diversion_headers = v;
+        }
+        if let Some(v) = trunk.history_info {
+            policy.history_info = v;
+        }
     }
     if !trunk.codec.is_empty() {
         hints.allow_codecs = Some(trunk.codec.clone());
@@ -1635,6 +1648,67 @@ mod ice_lite_hint_tests {
             hints.is_none(),
             "no other media fields set: hints stay None"
         );
+    }
+
+    fn trunk_with_diversion(diversion: Option<bool>, history: Option<bool>) -> TrunkConfig {
+        TrunkConfig {
+            dest: "sip:carrier.example.com".to_string(),
+            diversion_headers: diversion,
+            history_info: history,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trunk_diversion_flags_propagate_to_hints() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with_diversion(Some(true), Some(true)));
+        let policy = hints
+            .as_ref()
+            .and_then(|h| h.diversion_policy)
+            .expect("policy");
+        assert!(policy.diversion_headers);
+        assert!(policy.history_info);
+    }
+
+    #[test]
+    fn trunk_history_info_only_propagates() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with_diversion(None, Some(true)));
+        let policy = hints
+            .as_ref()
+            .and_then(|h| h.diversion_policy)
+            .expect("policy");
+        assert!(!policy.diversion_headers);
+        assert!(policy.history_info);
+    }
+
+    #[test]
+    fn trunk_without_diversion_flags_leaves_hints_untouched() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with_diversion(None, None));
+        assert!(
+            hints.is_none(),
+            "no other media fields set: hints stay None"
+        );
+    }
+
+    #[test]
+    fn diversion_policy_resolve_prefers_trunk_override() {
+        let policy = crate::proxy::routing::DiversionPolicy::resolve(
+            true,
+            false,
+            Some(crate::proxy::routing::DiversionPolicy {
+                diversion_headers: false,
+                history_info: true,
+            }),
+        );
+        assert!(!policy.diversion_headers);
+        assert!(policy.history_info);
+
+        let fallback = crate::proxy::routing::DiversionPolicy::resolve(true, false, None);
+        assert!(fallback.diversion_headers);
+        assert!(!fallback.history_info);
     }
 
     /// Destination trunk merges after the source trunk, so an explicit
