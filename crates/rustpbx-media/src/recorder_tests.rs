@@ -758,7 +758,6 @@ mod recorder_advanced_tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses RTP-timestamp positioning, replaced by wall-clock"]
     async fn test_recorder_uses_frame_clock_rate_for_timestamp_alignment() {
         let temp_path = std::env::temp_dir().join("test_recorder_mostly_silence.wav");
         let path_str = temp_path.to_str().unwrap();

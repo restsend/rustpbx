@@ -432,7 +432,14 @@ impl Recorder {
             .into();
         }
 
-        let absolute_ts = self.rtp_anchored_position(leg, frame.rtp_timestamp, capture_ts);
+        // Live RTP capture leaves `clock_rate` unset; fall back to the
+        // payload codec's RTP clock (48 kHz for Opus).
+        let rtp_clock_rate = match frame.clock_rate {
+            0 => decoder_type.clock_rate(),
+            rate => rate,
+        };
+        let absolute_ts =
+            self.rtp_anchored_position(leg, frame.rtp_timestamp, rtp_clock_rate, capture_ts);
         self.insert_audio_block(leg, absolute_ts, encoded);
         if self.last_flush.elapsed() >= self.ptime {
             self.flush().await?;
@@ -483,12 +490,17 @@ impl Recorder {
     /// contiguously — the proxy's wall clock alone would interleave silence
     /// into every such gap. [`Self::leg_end_ts`] guards backward writes (e.g.
     /// an SSRC switch resetting a timeline mid-call).
+    ///
+    /// RTP deltas tick at the payload's RTP clock (48 kHz for Opus), so they
+    /// are rescaled to the recording sample rate before being applied.
     fn rtp_anchored_position(
         &mut self,
         leg: Leg,
         rtp_timestamp: u32,
+        rtp_clock_rate: u32,
         capture_ts: Option<u32>,
     ) -> u32 {
+        let rtp_clock_rate = rtp_clock_rate.max(1);
         let anchor = match leg {
             Leg::A => self.rtp_anchor_a,
             Leg::B => self.rtp_anchor_b,
@@ -499,7 +511,7 @@ impl Recorder {
             return pos;
         };
         let delta = rtp_timestamp.wrapping_sub(anchor_ts);
-        if delta > self.sample_rate * 600 {
+        if delta > rtp_clock_rate.saturating_mul(600) {
             // Timestamps jumped backwards (the fastpath bridge rewrites RTP
             // timelines onto a continuous output clock; unbridging on hold or
             // an SSRC switch resets to the sender's own small timestamps, and
@@ -511,6 +523,7 @@ impl Recorder {
             self.set_rtp_anchor(leg, rtp_timestamp, pos);
             return pos;
         }
+        let delta = (delta as u64 * self.sample_rate as u64 / rtp_clock_rate as u64) as u32;
         let rtp_pos = anchor_pos.wrapping_add(delta);
         self.leg_end_ts(leg).max(rtp_pos)
     }

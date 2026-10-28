@@ -1099,6 +1099,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_output_scales_opus_rtp_clock_to_recording_rate() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        // None keeps the default PCMU WAV (the field case: 6x stretch).
+        for rate in [None, Some(16000), Some(48000)] {
+            let path = dir.path().join(format!("opus-{rate:?}.wav"));
+            let mut source_profile = profile();
+            source_profile.audio.as_mut().unwrap().codec = CodecType::Opus;
+            source_profile.audio.as_mut().unwrap().payload_type = 96;
+            source_profile.audio.as_mut().unwrap().clock_rate = 48000;
+            let mut recorder = FileRecorder::new(
+                RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    samplerate: rate,
+                    ..Default::default()
+                },
+                source_profile, 2, false,
+            );
+            recorder.initialize().await.unwrap();
+            let mut encoder = create_encoder(CodecType::Opus);
+            let frame_samples = encoder.sample_rate() as usize / 50;
+            for seq in 0..50u16 {
+                let pcm: Vec<i16> = (0..frame_samples * encoder.channels() as usize)
+                    .map(|i| (8000.0 * (i as f64 * 0.06).sin()) as i16)
+                    .collect();
+                let packet = RtpPacket::new(
+                    RtpHeader::new(96, seq, seq as u32 * 960, 1234),
+                    encoder.encode(&pcm).to_vec(),
+                );
+                recorder
+                    .write_rtp(CaptureChannel::Caller, &packet, 0, None)
+                    .await
+                    .unwrap();
+            }
+            let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+            assert!(
+                (result.duration_secs - 1.0).abs() < 0.05,
+                "50 Opus frames must record ~1s, got {}s at {rate:?}",
+                result.duration_secs
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn file_output_sample_rate_resamples_audio_and_preserves_duration() {
         use audio_codec::{CodecType, create_encoder};
         let dir = tempfile::tempdir().unwrap();
