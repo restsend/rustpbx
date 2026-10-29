@@ -4707,6 +4707,40 @@ impl SipSession {
         *self.snapshot_cache.write() = Some(snapshot);
     }
 
+    /// restsend private marker: `User-to-User: consult-state=merged|talk`.
+    /// A local 3-way merge is a pure client-side conference (the server does
+    /// not know about it) — the transferor UA announces merge edges to the
+    /// consulted party via a body-less in-dialog UPDATE carrying this header.
+    fn consult_state_marker_from_headers(
+        headers: &rsipstack::sip::Headers,
+    ) -> Option<String> {
+        for header in headers.iter() {
+            let value = match header {
+                rsipstack::sip::Header::UserToUser(value) => {
+                    // A typed header's to_string() renders the full header
+                    // line (name included) — take the bare value via value(),
+                    // otherwise the marker parse never matches.
+                    value.value().to_string()
+                }
+                rsipstack::sip::Header::Other(name, value)
+                    if name.eq_ignore_ascii_case("User-to-User") =>
+                {
+                    value.clone()
+                }
+                _ => continue,
+            };
+            for part in value.split(';') {
+                let part = part.trim();
+                if let Some(state) = part.strip_prefix("consult-state=") {
+                    if matches!(state, "merged" | "talk") {
+                        return Some(state.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     async fn handle_updated_dialog(
         &mut self,
         side: DialogSide,
@@ -4730,6 +4764,38 @@ impl SipSession {
         };
         let affects_pair = self.bridged_peer_leg_id(&leg_id).is_some()
             || (self.conference.is_none() && side == DialogSide::Caller);
+
+        // restsend private convention: the consulted leg's consult_state
+        // signal (a local 3-way merge is a pure client-side conference the
+        // server does not know about) — the client announces merge edges via
+        // a body-less in-dialog UPDATE carrying a `User-to-User:
+        // consult-state=…` marker header. Marked updates are relayed to the
+        // opposite side of the dialog; unmarked ones fall through untouched.
+        if let Some(phase) = Self::consult_state_marker_from_headers(&request.headers) {
+            let target_side = match side {
+                DialogSide::Caller => DialogSide::Callee,
+                _ => DialogSide::Caller,
+            };
+            info!(session_id = %self.id, %phase, side = ?side, ?target_side, %leg_id,
+                "consult_state UPDATE — relaying marker to opposite side");
+            let response = self
+                .send_mid_dialog_request_to_side(
+                    target_side,
+                    rsipstack::sip::Method::Update,
+                    vec![rsipstack::sip::Header::Other(
+                        "User-to-User".into(),
+                        format!("consult-state={phase}").into(),
+                    )],
+                    None,
+                )
+                .await?
+                .ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
+            tx_handle
+                .respond(response.status_code.clone(), None, None)
+                .await
+                .ok();
+            return Ok(());
+        }
 
         let update_result = self.update_dialog_timer_from_headers(&dialog_id, &request.headers);
         if let Err(e) = &update_result {
@@ -17847,3 +17913,30 @@ mod route_via_home_proxy_tests {
 #[cfg(test)]
 #[path = "tests/queue_diagnostics_tests.rs"]
 mod queue_diagnostics_tests;
+
+#[cfg(test)]
+mod consult_state_marker_tests {
+    use super::*;
+
+    #[test]
+    fn consult_state_marker_from_headers_matches_marker_value() {
+        let headers: rsipstack::sip::Headers = vec![
+            rsipstack::sip::Header::UserToUser("consult-state=merged".into()),
+        ]
+        .into();
+        let phase = SipSession::consult_state_marker_from_headers(&headers);
+        assert_eq!(
+            phase.as_deref(),
+            Some("merged"),
+            "typed UserToUser header must yield the marker phase"
+        );
+
+        let headers: rsipstack::sip::Headers = vec![rsipstack::sip::Header::Other(
+            "User-to-User".into(),
+            "consult-state=talk".into(),
+        )]
+        .into();
+        let phase = SipSession::consult_state_marker_from_headers(&headers);
+        assert_eq!(phase.as_deref(), Some("talk"), "Other-form header also matches");
+    }
+}

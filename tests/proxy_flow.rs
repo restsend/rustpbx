@@ -19,6 +19,9 @@ mod test_busy_wait_e2e;
 #[path = "proxy_flow/test_recording_e2e.rs"]
 mod test_recording_e2e;
 
+#[path = "proxy_flow/test_consult_state_relay.rs"]
+mod test_consult_state_relay;
+
 #[path = "proxy_flow/test_video_e2e.rs"]
 mod test_video_e2e;
 

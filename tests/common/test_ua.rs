@@ -168,6 +168,9 @@ pub enum TestUaEvent {
     CallTerminated(DialogId),
     CallFailed(String),
     CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
+    /// restend consult_state marker relayed on an in-dialog UPDATE
+    /// (`User-to-User: consult-state=<phase>`)
+    ConsultStateUpdated(DialogId, String),
     /// Refer received with target URI
     Referred(DialogId, String),
     /// REFER progress: dialog, sipfrag body, Subscription-State.
@@ -972,6 +975,29 @@ impl TestUa {
             .await
     }
 
+    /// Send a header-only UPDATE (no SDP) — e.g. the restend consult_state
+    /// marker (`User-to-User: consult-state=…`). Replies OK when the relay
+    /// path handles it.
+    pub async fn send_update_with_headers(
+        &self,
+        dialog_id: &DialogId,
+        headers: Vec<rsipstack::sip::Header>,
+    ) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+        if let Some(mut dialog) = dialog_layer.get_dialog(dialog_id) {
+            if let Dialog::Invite(d) = &mut dialog {
+                d.update(Some(headers), None)
+                    .await
+                    .map_err(|e| e.into_anyhow())?;
+                return Ok(());
+            }
+        }
+        Err(anyhow!("dialog not found"))
+    }
+
     /// Send re-INVITE request within a dialog and return the answer SDP if any
     pub async fn send_reinvite(
         &self,
@@ -1226,6 +1252,35 @@ impl TestUa {
                         } else {
                             None
                         };
+                        // restend consult_state marker (User-to-User:
+                        // consult-state=…) — for the relay end-to-end assertion.
+                        let mut consult_phase = None;
+                        for header in request.headers.iter() {
+                            let raw = match header {
+                                // A typed header's to_string() renders the full
+                                // header line (name included) — take the bare
+                                // value via value(), otherwise the marker parse
+                                // never matches.
+                                rsipstack::sip::Header::UserToUser(v) => v.value().to_string(),
+                                rsipstack::sip::Header::Other(name, v)
+                                    if name.eq_ignore_ascii_case("User-to-User") =>
+                                {
+                                    v.clone()
+                                }
+                                _ => continue,
+                            };
+                            for part in raw.split(';') {
+                                if let Some(p) = part.trim().strip_prefix("consult-state=") {
+                                    consult_phase = Some(p.trim().to_string());
+                                }
+                            }
+                        }
+                        if let Some(phase) = consult_phase {
+                            events.push(TestUaEvent::ConsultStateUpdated(
+                                id.clone(),
+                                phase,
+                            ));
+                        }
                         events.push(TestUaEvent::CallUpdated(id.clone(), request.method, sdp));
                         // Reply with saved answer SDP if available (for re-INVITE responses)
                         let sdps = self.answer_sdps.lock().await;
