@@ -601,11 +601,11 @@ impl MediaBridge {
             rules_b_to_a.extend(video_b_to_a);
 
             let options_a_to_b = RtpRewriteBridgeOptions {
-                strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
+                strip_extensions: strip_extensions_toward(&b_transport),
                 ..Default::default()
             };
             let options_b_to_a = RtpRewriteBridgeOptions {
-                strip_extensions: a_transport == rustrtc::TransportMode::Rtp,
+                strip_extensions: strip_extensions_toward(&a_transport),
                 ..Default::default()
             };
 
@@ -1821,6 +1821,15 @@ fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sy
         .and_then(|s| s.sdes_mid())
 }
 
+/// Whether the relay strips RTP header extensions before forwarding to a leg
+/// of this transport. The extensions a WebRTC source sends (abs-send-time,
+/// audio-level, transport-cc, mid) use the ids it negotiated with us, which a
+/// SIP peer never agreed to, plain RTP or SDES-SRTP alike: only a WebRTC
+/// destination keeps them (and gets its own sdes:mid stamped).
+fn strip_extensions_toward(destination: &rustrtc::TransportMode) -> bool {
+    *destination != rustrtc::TransportMode::WebRtc
+}
+
 /// Rewrite rules for one direction of audio relay: the audio catch-all rule
 /// (rewrites every packet to the destination leg's outbound audio SSRC, remapping the
 /// payload type when the legs differ) plus, when the two legs negotiated
@@ -2131,6 +2140,16 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
+
+    /// Forwarded header extensions survive only toward WebRTC legs: SIP
+    /// peers (plain RTP and SDES-SRTP) never negotiated the source's ids.
+    #[test]
+    fn relay_strips_extensions_toward_non_webrtc_legs() {
+        use rustrtc::TransportMode;
+        assert!(strip_extensions_toward(&TransportMode::Rtp));
+        assert!(strip_extensions_toward(&TransportMode::Srtp));
+        assert!(!strip_extensions_toward(&TransportMode::WebRtc));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_quality_disabled_restores_health_sampling_cadence() {
@@ -2868,7 +2887,7 @@ mod tests {
     }
 
     /// WebRTC Opus ↔ plain-RTP Opus uses the same-codec fast-path rewrite relay
-    /// (with `strip_extensions` toward the RTP leg).
+    /// (with `strip_extensions` toward the RTP leg, see `strip_extensions_toward`).
     ///
     /// Dual Opus PeerConnections need a larger stack than the default test thread.
     #[test]
