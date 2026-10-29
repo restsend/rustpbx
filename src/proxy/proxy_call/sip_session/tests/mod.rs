@@ -12833,6 +12833,130 @@ async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
     }
 }
 
+/// A DEVICE-dialed transfer leg (restsend-call consult / Replaces
+/// transfer-target INVITE declaring RFC 7433 UUI `leg=consult|transfer`,
+/// NOT from a cluster peer) synthesizes the transfer-flow origin from the
+/// dialing party: its own CallMetaStore entry AND the root session's entry
+/// (same node) both gain `transfer_source`, so every event of the leg and
+/// of the root call during the consult window reports the origin. Without
+/// the marker nothing is synthesized (ordinary call, default none).
+#[tokio::test]
+async fn device_dial_leg_marker_synthesizes_transfer_source() {
+    use crate::call::uui::{UUI_HEADER_NAME, build_uui_value};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+
+    const ROOT: &str = "1c9d7a2e3f504e8f9c212f5a8d3e7b61";
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let gw = Arc::new(parking_lot::RwLock::new(gateway));
+    let (server, _) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gw.clone()).await;
+
+    for (i, leg) in [Some("consult"), Some("transfer"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        if let Some(leg) = leg {
+            request.headers.push(rsipstack::sip::Header::Other(
+                UUI_HEADER_NAME.into(),
+                build_uui_value(ROOT, None, None, None, Some(leg)),
+            ));
+        }
+        let (tx, _) = create_transaction(request.clone()).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("server dialog");
+        let cookie = TransactionCookie::default();
+        let context = CallContext {
+            session_id: format!("device-dial-{i}"),
+            dialplan: Arc::new(Dialplan::new(
+                format!("device-dial-{i}"),
+                request,
+                DialDirection::Inbound,
+            )),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".into(),
+            original_callee: "sip:expert@rustpbx.com".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        // Seed the ROOT session's meta the way the live root call would have
+        // it, so the merge-into-root branch is observable.
+        gw.read()
+            .meta_store
+            .insert(
+                ROOT.into(),
+                crate::rwi::proto::CallMeta {
+                    session_id: Some(ROOT.into()),
+                    ..Default::default()
+                },
+            );
+        let (session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+        );
+        let own = gw
+            .read()
+            .meta_store
+            .get_sync(&format!("device-dial-{i}"))
+            .expect("own meta entry");
+        let root = gw.read().meta_store.get_sync(ROOT).expect("root meta entry");
+        match leg {
+            Some("consult" | "transfer") => {
+                assert_eq!(
+                    own.transfer_source.as_ref().map(|s| s.source_type.as_str()),
+                    Some("agent"),
+                    "case {i} leg={leg:?}: own meta must carry the origin"
+                );
+                assert_eq!(
+                    own.transfer_source.as_ref().and_then(|s| s.agent_id.as_deref()),
+                    Some("alice"),
+                    "case {i} leg={leg:?}: the dialing party is the transferor"
+                );
+                assert_eq!(
+                    root.transfer_source.as_ref().and_then(|s| s.agent_id.as_deref()),
+                    Some("alice"),
+                    "case {i} leg={leg:?}: root meta must gain the same origin"
+                );
+                assert_eq!(
+                    session.meta.dial_leg_role.as_deref(),
+                    leg,
+                    "case {i}: stats marker unchanged"
+                );
+            }
+            None => {
+                assert!(
+                    own.transfer_source.is_none(),
+                    "no marker → no origin on own meta"
+                );
+                assert!(
+                    root.transfer_source.is_none(),
+                    "no marker → root meta untouched"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// A rejected replacement must leave the original dialog's locality intact.
 #[tokio::test]
 async fn failed_blind_transfer_restores_agent_leg_locality() {

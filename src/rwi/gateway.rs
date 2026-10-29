@@ -869,6 +869,31 @@ impl RwiGateway {
             flat.payload.clone()
         };
 
+        // Root-session fallback for the transfer-flow marker: a child leg
+        // (consult / transfer target session, device-dialed leg) dispatches
+        // under its own call_id whose meta carries no `transfer_source` —
+        // the stash landed on the ROOT session's meta. Borrow the root's
+        // marker so every leg of the logical call reports the same transfer
+        // origin. Existing keys win (the event's own attribution, or the
+        // own-meta enrichment above, is never overwritten).
+        if let (Some(call_id), Some(root)) = (flat.call_id.as_deref(), ctx_root.as_deref()) {
+            if root != call_id
+                && payload
+                    .as_object()
+                    .map_or(true, |obj| !obj.contains_key("transfer_source"))
+                && let Some(source) = self
+                    .meta_store
+                    .get_sync(root)
+                    .and_then(|m| m.transfer_source)
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(
+                    "transfer_source".to_string(),
+                    serde_json::to_value(&source).unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+
         // Canonical `transfer_target` form for `call_transferred`: several
         // emitters report the raw Refer-To / consult target, which for a
         // bare extension is `"1003"`. Normalize scheme-less, host-less
@@ -1338,6 +1363,138 @@ mod tests {
         assert_eq!(v["transfer_source"]["source_type"], "agent");
         assert_eq!(v["transfer_source"]["agent_id"], "2002");
         assert_eq!(v["transfer_source"]["agent_name"], "Bob");
+    }
+
+    /// Every call-scoped event — not just `call_transferred` — carries the
+    /// transfer-flow origin once the call meta holds it, and omits the key
+    /// entirely for calls without a transfer context (default none).
+    #[tokio::test]
+    async fn plain_call_events_carry_transfer_source_from_call_meta() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "transferred".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.claim_call_ownership(&sid, "plain".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.meta_store.insert(
+            "transferred".into(),
+            crate::rwi::proto::CallMeta {
+                transfer_source: Some(crate::rwi::TransferSource {
+                    source_type: "queue".into(),
+                    name: Some("support".into()),
+                    ivr_node_id: None,
+                    agent_id: Some("1001".into()),
+                    agent_name: None,
+                }),
+                ..Default::default()
+            },
+        );
+        gw.meta_store.insert("plain".into(), Default::default());
+
+        for call_id in ["transferred", "plain"] {
+            gw.send_to_owner(&crate::rwi::CallHangup {
+                scope: crate::rwi::CallHangupScope::Call,
+                leg_id: None,
+                call_id: call_id.into(),
+                reason: Some("normal".into()),
+                hangup_by: Some("callee".into()),
+                sip_status: None,
+                duration_secs: None,
+                leg_role: None,
+            });
+        }
+
+        let transferred = rx.recv().await.unwrap();
+        assert_eq!(transferred["event_type"], "call_hangup");
+        assert_eq!(transferred["call_id"], "transferred");
+        assert_eq!(transferred["transfer_source"]["source_type"], "queue");
+        assert_eq!(transferred["transfer_source"]["name"], "support");
+        assert_eq!(transferred["transfer_source"]["agent_id"], "1001");
+
+        let plain = rx.recv().await.unwrap();
+        assert_eq!(plain["event_type"], "call_hangup");
+        assert_eq!(plain["call_id"], "plain");
+        assert!(
+            plain.get("transfer_source").is_none(),
+            "no transfer context → key absent, got {plain}"
+        );
+    }
+
+    /// A child leg dispatches under its own call_id whose meta carries no
+    /// origin (the stash landed on the ROOT session) — enrichment borrows
+    /// the root's marker so every leg of the logical call reports the same
+    /// transfer origin. An origin already on the child's own meta wins.
+    #[tokio::test]
+    async fn child_events_inherit_transfer_source_from_root_meta() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        for call_id in ["root-call", "consult-leg", "own-origin-leg"] {
+            gw.claim_call_ownership(&sid, call_id.into(), OwnershipMode::Control)
+                .unwrap();
+        }
+        let root_source = crate::rwi::TransferSource {
+            source_type: "agent".into(),
+            name: None,
+            ivr_node_id: None,
+            agent_id: Some("1001".into()),
+            agent_name: None,
+        };
+        gw.meta_store.insert(
+            "root-call".into(),
+            crate::rwi::proto::CallMeta {
+                session_id: Some("root-call".into()),
+                transfer_source: Some(root_source.clone()),
+                ..Default::default()
+            },
+        );
+        gw.meta_store.insert(
+            "consult-leg".into(),
+            crate::rwi::proto::CallMeta {
+                session_id: Some("root-call".into()),
+                ..Default::default()
+            },
+        );
+        gw.meta_store.insert(
+            "own-origin-leg".into(),
+            crate::rwi::proto::CallMeta {
+                session_id: Some("root-call".into()),
+                transfer_source: Some(crate::rwi::TransferSource {
+                    source_type: "ivr".into(),
+                    name: Some("sales".into()),
+                    ivr_node_id: None,
+                    agent_id: None,
+                    agent_name: None,
+                }),
+                ..Default::default()
+            },
+        );
+
+        for call_id in ["consult-leg", "own-origin-leg"] {
+            gw.send_to_owner(&crate::rwi::CallAnswered {
+                leg_id: Some("leg-1".into()),
+                leg_role: Some("consult".into()),
+                call_id: call_id.into(),
+            });
+        }
+
+        let inherited = rx.recv().await.unwrap();
+        assert_eq!(inherited["call_id"], "consult-leg");
+        assert_eq!(
+            inherited["transfer_source"]["source_type"], "agent",
+            "child without own origin borrows the root's: {inherited}"
+        );
+        assert_eq!(inherited["transfer_source"]["agent_id"], "1001");
+
+        let own = rx.recv().await.unwrap();
+        assert_eq!(own["call_id"], "own-origin-leg");
+        assert_eq!(
+            own["transfer_source"]["source_type"], "ivr",
+            "the child's own origin must not be overwritten by the root's: {own}"
+        );
     }
 
     #[tokio::test]

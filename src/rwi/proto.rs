@@ -56,6 +56,15 @@ pub struct EventCallContext {
     /// Queue (or skill-group queue label) the call is being served by, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_id: Option<String>,
+    /// Transfer-flow origin — present only from the moment a transfer
+    /// intent stashed it on the call meta (blind/REFER transfer start,
+    /// consult leg dial, conference merge). Lets consumers tell transfer
+    /// legs apart from ordinary call flow on ANY call-scoped event, not
+    /// just `call_transferred`. Absent when the call has no transfer
+    /// context (default none). An explicit `transfer_source` on the event
+    /// itself (e.g. `call_transferred`) always wins over this enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_source: Option<crate::rwi::event::TransferSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootCallInfo>,
 }
@@ -96,8 +105,10 @@ pub struct CallMeta {
     pub root: Option<RootCallInfo>,
     /// Flow-origin snapshot captured when a transfer starts on the session
     /// (which IVR/node or queue the call was in, or the transferring agent).
-    /// Consumed by transfer events only — deliberately NOT mapped into
-    /// [`EventCallContext`] so ordinary call events stay unchanged.
+    /// Mapped into [`EventCallContext`] so EVERY call-scoped event dispatched
+    /// after the stash carries it — consumers distinguish transfer-flow legs
+    /// (blind target, consult, conference merge) from ordinary call flow on
+    /// any event, not just the transfer events.
     pub transfer_source: Option<crate::rwi::event::TransferSource>,
     /// Departing stage identity captured before target attribution or stage cleanup.
     pub transfer_recording_id: Option<String>,
@@ -118,6 +129,7 @@ impl From<CallMeta> for EventCallContext {
             agent_id: m.agent_id,
             agent_name: m.agent_name,
             queue_id: m.queue_id,
+            transfer_source: m.transfer_source,
             root: m.root,
         }
     }

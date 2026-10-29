@@ -156,6 +156,7 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 | `agent_id` | Option\<String\> | CC agent identifier — present **only** when the call actually involves a registered CC agent |
 | `agent_name` | Option\<String\> | CC agent display name (same condition as `agent_id`) |
 | `queue_id` | Option\<String\> | Queue the call is being served by, when any |
+| `transfer_source` | Option\<Object\> | **Transfer-flow origin marker** — present only once the call entered a transfer flow (blind / consult / three-way), see the section below |
 | `root` | Option\<Object\> | Root call identity (see below) |
 
 **Root call (`root`)** — nested object identifying the root call of this call
@@ -187,6 +188,44 @@ lifecycle events enriched with agent context.
 - `ani` vs `caller`: `ani` is a plain number (for business logic), `caller` is the full SIP URI
 - `dnis` vs `callee`: same distinction
 - Context is injected by `CallMetaStore` at gateway dispatch time — event producers never fill it manually
+
+### transfer_source (transfer-flow origin marker, injected on every event)
+
+`transfer_source` is a nested object (same fields as on `call_transferred`, see that
+section's table). **From the moment a transfer intent stashes it, every event of the
+call carrying that `call_id` includes it automatically** — not just
+`call_transferred`: the transfer/consult target leg's `call_ringing` /
+`call_answered` / `call_held` / `call_hangup`, the three-way `conference_*` events,
+even `queue_*`. Calls that never entered a transfer flow omit the field entirely
+(default none, never an explicit null).
+
+Injection timing per flow:
+
+| Flow | First carried | Content |
+|------|---------------|---------|
+| Blind (device REFER / CTI / Replaces takeover) | REFER/command acceptance | Snapshot taken BEFORE the session mutates: IVR node / serving queue / transferring agent |
+| Consult (CTI `/consult`) | before the consult leg dials | The transferring agent (keep-first: never overwrites an earlier snapshot) |
+| Consult (device-dialed INVITE, UUI `leg=consult/transfer`) | at the consult session's creation | `agent` + the dialing party (From user, i.e. the transferring agent); the root session's meta is back-filled on the same node |
+| Three-way merge (CTI consultmerge / REFER into a room) | when the transfer flow started | Same as consult |
+
+**Child-leg inheritance**: when a child call_id's own meta carries no origin, the
+enrichment falls back to the root session's `transfer_source` — every leg of the
+logical call reports the same transfer origin. An explicit `transfer_source` on the
+event itself (`call_transferred`) always wins and is never overwritten.
+
+**Consumers distinguish flows** (restsend-call single-step / multi-step / conference):
+
+- Blind single-step: the original `call_id`'s event stream carries `transfer_source`
+  from acceptance onwards;
+- Consult / multi-step: the consult leg's events carry `transfer_source` (the marker
+  correlates an independent call_id back to the logical call); leg-level events also
+  carry `leg_role=consult`;
+- Three-way / conference: the `conference_*` event family and the related `call_*`
+  events carry `transfer_source`.
+
+Known cluster limitation: `transfer_source` does not propagate across nodes (each
+node keeps its own CallMetaStore); the agent node's child-leg events correlate via
+`leg_role` + the root `call_id`.
 
 ### user_data (session user data injection)
 
@@ -546,7 +585,7 @@ Dispatch: call_owner
 | `call_id` | String | Call identifier |
 | `transfer_target` | Option\<String\> | Original transfer target string (e.g. `queue:queue-name?target=skillgroup:tech-support_G`, or the bare number of a route-table hand-off). `None` when the target is unavailable (e.g. SIP REFER Replaces takeover). |
 | `transfer_target_type` | Option\<String\> | Resolved target kind: `queue` \| `ivr` \| `route_point` \| `voicemail` \| `conference` \| `bridge` \| `sip`. Omitted when unknown. |
-| `transfer_source` | Option\<Object\> | Flow origin captured at transfer time (`call_transferred` only). Nested object, see below. |
+| `transfer_source` | Option\<Object\> | Transfer-flow origin. Carried explicitly on `call_transferred` (the origin at completion time); **all other call_* events receive it via the flat context** (present throughout once the flow started) — see §4 transfer_source. |
 | *+ctx* | | Flat context fields |
 
 `transfer_source` nested fields (all optional):

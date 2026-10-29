@@ -262,3 +262,136 @@ async fn child_added_legs_keep_their_own_role_and_registration_owner() {
     }
     session.cleanup().await;
 }
+
+/// CTI consult (`CallCommand::LegAdd` with consult purpose — the
+/// owner-anchored `/consult` flow) stashes the transferring agent as the
+/// call's `transfer_source` before the dial mutates the session: the
+/// consult leg's events carry BOTH their own `leg_role=consult` AND the
+/// transfer origin, so consumers tell a consult leg apart from a blind
+/// transfer target / ordinary dial on any event.
+#[tokio::test]
+async fn consult_leg_add_stashes_transfer_source_on_call_events() {
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let gw = Arc::new(parking_lot::RwLock::new(gateway));
+    let (server, _) =
+        create_test_server_with_rwi_gateway(Default::default(), gw.clone()).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "customer",
+        None,
+        "example.test",
+        None,
+    );
+    let dialplan = Dialplan::new("consult-stash".into(), request, DialDirection::Inbound);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+    session.extensions.set_agent_attribution("agent-9");
+
+    let consult = LegId::from("consult-tx");
+    let added = session
+        .execute_command(
+            CallCommand::LegAdd {
+                source_leg: Some(LegId::from("callee")),
+                target: "sip:expert@127.0.0.1:5099".into(),
+                leg_id: Some(consult.clone()),
+                headers: vec![],
+                purpose: Some(crate::call::domain::LegPurpose::Consult),
+            },
+            None,
+        )
+        .await;
+    assert!(added.success, "{added:?}");
+    while events.try_recv().is_ok() {}
+    session
+        .execute_command(
+            CallCommand::LegRinging { leg_id: consult.clone() },
+            None,
+        )
+        .await;
+    session.update_leg_state(&consult, LegState::Connected);
+    session.emit_rwi_leg_hangup(&consult, Some("UasBye".into()));
+    session.cleanup().await;
+
+    let mut delivered = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.payload["leg_id"] == "consult-tx" {
+            delivered.push(entry.event);
+        }
+    }
+    for kind in ["call_ringing", "call_answered", "call_hangup"] {
+        let event = delivered
+            .iter()
+            .find(|event| event.event_type == kind)
+            .unwrap_or_else(|| panic!("missing {kind} for consult-tx: {delivered:?}"));
+        assert_eq!(
+            event.payload.get("leg_role").and_then(|role| role.as_str()),
+            Some("consult"),
+            "leg_role contract unchanged: {event:?}"
+        );
+        assert_eq!(
+            event.payload["transfer_source"]["source_type"], "agent",
+            "{kind} must carry the transfer origin: {event:?}"
+        );
+        assert_eq!(
+            event.payload["transfer_source"]["agent_id"], "agent-9",
+            "{kind}: the transferring agent is the origin: {event:?}"
+        );
+    }
+}
+
+/// Keep-first: a consult `LegAdd` must NOT degrade an origin an earlier
+/// transfer step captured before the session mutated (the blind-transfer
+/// path deliberately snapshots pre-mutation).
+#[tokio::test]
+async fn consult_leg_add_keeps_existing_transfer_source() {
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let gw = Arc::new(parking_lot::RwLock::new(gateway));
+    let (server, _) =
+        create_test_server_with_rwi_gateway(Default::default(), gw.clone()).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "customer",
+        None,
+        "example.test",
+        None,
+    );
+    let dialplan = Dialplan::new("consult-keepfirst".into(), request, DialDirection::Inbound);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+    session.extensions.set_agent_attribution("agent-9");
+    let call_id = session.context.session_id.to_string();
+    gw.read().meta_store.insert(
+        call_id.clone(),
+        crate::rwi::proto::CallMeta {
+            transfer_source: Some(crate::rwi::TransferSource {
+                source_type: "queue".into(),
+                name: Some("support".into()),
+                ivr_node_id: None,
+                agent_id: Some("agent-7".into()),
+                agent_name: None,
+            }),
+            ..Default::default()
+        },
+    );
+
+    let added = session
+        .execute_command(
+            CallCommand::LegAdd {
+                source_leg: Some(LegId::from("callee")),
+                target: "sip:expert@127.0.0.1:5099".into(),
+                leg_id: Some(LegId::from("consult-tx2")),
+                headers: vec![],
+                purpose: Some(crate::call::domain::LegPurpose::Consult),
+            },
+            None,
+        )
+        .await;
+    assert!(added.success, "{added:?}");
+    let stashed = gw
+        .read()
+        .meta_store
+        .get_sync(&call_id)
+        .and_then(|m| m.transfer_source);
+    let stashed = stashed.expect("origin must survive the consult dial");
+    assert_eq!(stashed.source_type, "queue", "pre-mutation origin wins");
+    assert_eq!(stashed.agent_id.as_deref(), Some("agent-7"));
+}

@@ -1588,6 +1588,24 @@ impl SipSession {
         // Populate RWI CallMetaStore so events emitted from this session
         // (call_hangup, call_no_answer, etc.) are enriched with call context.
         if let Some(ref gw) = server.rwi_gateway {
+            // Device-dialed transfer leg (RFC 7433 UUI `leg=consult` /
+            // `leg=transfer` — restsend-call consult & Replaces
+            // transfer-target INVITEs): synthesize the transfer-flow origin
+            // from the dialing party so every event of this leg reports
+            // `transfer_source`. The cluster child-leg role
+            // (`child_leg_role`) is deliberately excluded — the dispatching
+            // node owns the origin; this node cannot know the transferor.
+            let device_transfer_source = dial_leg_role.as_deref().and_then(|_| {
+                crate::models::call_record::extract_sip_username(&original_caller).map(
+                    |agent_id| crate::rwi::TransferSource {
+                        source_type: "agent".to_string(),
+                        name: None,
+                        ivr_node_id: None,
+                        agent_id: Some(agent_id),
+                        agent_name: None,
+                    },
+                )
+            });
             let meta = crate::rwi::proto::CallMeta {
                 session_id: Some(
                     root_session_id
@@ -1618,6 +1636,25 @@ impl SipSession {
                 },
                 ..Default::default()
             };
+            // A device-dialed transfer leg also marks the ROOT session's
+            // meta (same node): the root's later events (customer hold,
+            // completing REFER, teardown) then carry the same origin. Keep
+            // the root's existing stash if a transfer was already in flight.
+            let mut meta = meta;
+            if let Some(source) = device_transfer_source.clone() {
+                meta.transfer_source = Some(source.clone());
+                if let Some(ref root) = root_session_id
+                    && root != &session_id_str
+                {
+                    let g = gw.read();
+                    if let Some(mut root_meta) = g.meta_store.get_sync(root)
+                        && root_meta.transfer_source.is_none()
+                    {
+                        root_meta.transfer_source = Some(source);
+                        g.meta_store.insert(root.clone(), root_meta);
+                    }
+                }
+            }
             gw.read().meta_store.insert(session_id_str.clone(), meta);
         }
 
@@ -6202,6 +6239,15 @@ impl SipSession {
             .into_iter()
             .find(|room| room.focus_uri.as_deref() == Some(target.as_str()))
         {
+            // Conference join via REFER is a transfer flow (three-way /
+            // merge): stash the origin before the join mutates the session
+            // so the conference_* and later call_* events of this call
+            // carry `transfer_source`. Keep-first — an origin captured by
+            // an earlier transfer step must not be degraded.
+            if let Some(ref transferor) = self.leg_id_for_dialog(&dialog_id.to_string()) {
+                let source = self.transfer_source_snapshot(transferor).await;
+                self.stash_transfer_source_if_unset(source);
+            }
             let result = self
                 .handle_join_conference_peer(room.id.0.clone(), dialog_id)
                 .await;
@@ -13895,6 +13941,17 @@ impl SipSession {
                         id
                     }
                 });
+                // A consult-purpose leg dial IS a transfer flow start (CTI
+                // consult: hold customer + LegAdd expert). Stash the origin
+                // before the dial mutates the session so the consult leg's
+                // ringing/answered events carry `transfer_source`. Keep-first:
+                // paths that already captured an origin pre-mutation win.
+                if purpose == Some(crate::call::domain::LegPurpose::Consult)
+                    && let Some(ref transferor) = source_leg
+                {
+                    let source = self.transfer_source_snapshot(transferor).await;
+                    self.stash_transfer_source_if_unset(source);
+                }
                 match self
                     .handle_add_leg(target, leg_id, headers, source_leg, purpose)
                     .await
