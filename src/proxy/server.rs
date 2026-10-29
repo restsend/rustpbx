@@ -1087,6 +1087,7 @@ impl SipServerBuilder {
                 ArcSwap::new(Arc::new(self.config.media_proxy)),
                 self.config.enable_latching,
                 self.config.latching_probation_max_packets,
+                data_context.clone(),
             )));
         }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));

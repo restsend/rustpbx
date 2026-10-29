@@ -4,9 +4,11 @@ use crate::call::{
     TrunkContext, build_sip_uri,
 };
 use crate::config::{
-    HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
+    DialplanHints, HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
 };
 use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
+use crate::proxy::data::ProxyDataContext;
+use crate::proxy::routing::TrunkConfig;
 use super::RetryPolicy;
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
@@ -16,6 +18,7 @@ use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
@@ -26,6 +29,8 @@ pub struct HttpCallRouter {
     pub enable_latching: bool,
     pub probation_max_packets: Option<u8>,
     pub client: reqwest::Client,
+    /// Trunk registry, so a target can name a trunk to dial through.
+    pub data_context: Arc<ProxyDataContext>,
 }
 
 impl HttpCallRouter {
@@ -35,6 +40,7 @@ impl HttpCallRouter {
         default_media_proxy_mode: ArcSwap<MediaProxyMode>,
         enable_latching: bool,
         probation_max_packets: Option<u8>,
+        data_context: Arc<ProxyDataContext>,
     ) -> Self {
         let mut builder = reqwest::Client::builder();
         builder = builder
@@ -53,8 +59,90 @@ impl HttpCallRouter {
             enable_latching,
             probation_max_packets,
             client: builder.build().unwrap_or_default(),
+            data_context,
         }
     }
+
+    /// Dial attempt for a target that names a trunk. The trunk is stamped
+    /// exactly as a statically routed one (`matcher::stamp_trunk`), so its
+    /// destination, credentials, rewrites, media hints, ring time and CDR
+    /// attribution all come from the trunk config. The target's retry policy
+    /// falls back to the trunk's; with neither, the attempt never advances,
+    /// like any other routed trunk target. A bare-user callee (default: the
+    /// dialed user) is qualified with the trunk's destination host. Unknown or
+    /// disabled trunks fail the call. `hints` (the arrival trunk's) are the
+    /// base the trunk is stamped over, so the target trunk's settings win.
+    #[allow(clippy::too_many_arguments)]
+    fn trunk_attempt(
+        &self,
+        hints: Option<DialplanHints>,
+        trunk_name: &str,
+        callee: Option<&str>,
+        retry_policy: Option<RetryPolicy>,
+        original: &rsipstack::sip::Request,
+        caller: rsipstack::sip::Uri,
+        headers: Option<Vec<rsipstack::sip::Header>>,
+    ) -> Result<DialAttempt> {
+        let trunk = self
+            .data_context
+            .get_trunk(trunk_name)
+            .ok_or_else(|| anyhow!("unknown trunk '{trunk_name}'"))?;
+        if trunk.disabled.unwrap_or(false) {
+            return Err(anyhow!("trunk '{trunk_name}' is disabled"));
+        }
+        let dest: rsipstack::sip::Uri = trunk
+            .dest
+            .as_str()
+            .try_into()
+            .map_err(|e| anyhow!("trunk '{trunk_name}' has invalid destination: {e:?}"))?;
+        let callee = match callee.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(callee) => callee.to_string(),
+            None => original
+                .uri
+                .user()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("request URI has no user to dial through trunk '{trunk_name}'"))?,
+        };
+        let callee = rsipstack::sip::Uri::try_from(build_sip_uri(&callee, &dest.host_with_port.to_string()))
+            .map_err(|e| anyhow!("invalid callee {callee:?}: {e}"))?;
+
+        let mut option = rsipstack::dialog::invitation::InviteOption {
+            callee,
+            caller,
+            headers,
+            ..Default::default()
+        };
+        let mut hints = hints;
+        crate::proxy::routing::matcher::stamp_trunk(&mut option, &mut hints, trunk_name, &trunk)?;
+        Ok(crate::config::RouteTarget {
+            option,
+            hints,
+            retry_policy: retry_policy.or(trunk.retry_policy),
+        }
+        .into())
+    }
+}
+
+/// Network path of the trunk the call arrived on (profile, media IPs,
+/// ICE-lite), as each attempt's base hints. The static matcher applies the
+/// arrival trunk the same way, under the destination trunk's settings.
+fn arrival_hints(trunk: Option<&TrunkConfig>) -> Option<DialplanHints> {
+    let trunk = trunk?;
+    let mut hints = None;
+    crate::proxy::routing::matcher::merge_trunk_media_hints(&mut hints, trunk);
+    let all = hints?;
+    let hints = DialplanHints {
+        network_profile_id: all.network_profile_id,
+        external_ip: all.external_ip,
+        bind_ip: all.bind_ip,
+        ice_lite: all.ice_lite,
+        ..Default::default()
+    };
+    (hints.network_profile_id.is_some()
+        || hints.external_ip.is_some()
+        || hints.bind_ip.is_some()
+        || hints.ice_lite.is_some())
+    .then_some(hints)
 }
 
 #[derive(Serialize)]
@@ -68,6 +156,8 @@ struct HttpRequestPayload {
     pub from: String,
     pub to: String,
     pub source_addr: Option<String>,
+    /// Trunk the call arrived on (inbound calls only).
+    pub source_trunk: Option<String>,
     pub direction: String,
     pub method: String,
     pub uri: String,
@@ -97,10 +187,22 @@ enum HttpRouteStrategy {
 #[serde(untagged)]
 enum HttpRouteTarget {
     Uri(String),
+    Trunk(HttpTrunkTarget),
     Config {
         uri: String,
         retry_policy: Option<RetryPolicy>,
+        /// Only here to reject a target that names both a URI and a trunk.
+        trunk: Option<serde::de::IgnoredAny>,
     },
+}
+
+/// Dial through a configured trunk, which supplies everything else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpTrunkTarget {
+    trunk: String,
+    callee: Option<String>,
+    retry_policy: Option<RetryPolicy>,
 }
 
 /// Partial call-level overrides; omitted values inherit the server configuration.
@@ -162,7 +264,8 @@ impl CallRouter for HttpCallRouter {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let direction = if cookie.get_extension::<TrunkContext>().is_some() {
+        let source_trunk = cookie.get_extension::<TrunkContext>().map(|ctx| ctx.name.clone());
+        let direction = if source_trunk.is_some() {
             DialDirection::Inbound
         } else {
             DialDirection::Internal
@@ -172,6 +275,13 @@ impl CallRouter for HttpCallRouter {
             .call_id_header()
             .map(|h| h.value().to_string())
             .unwrap_or_default();
+        // Global session id: HTTP-routed calls always participate — an
+        // upstream Session-ID, else the id-shaped Call-ID (honouring
+        // `session_id_inherit_callid`), else a fresh id. Resolved once so the
+        // decision request and the dialplan carry the same id; resolving twice
+        // would generate two for a Call-ID that is not id-shaped.
+        let session_id = crate::call::session_id::extract_inherited(original)
+            .unwrap_or_else(|| crate::call::session_id::derive_from_call_id(&call_id));
         let from = original
             .from_header()
             .map(|h| h.value().to_string())
@@ -202,10 +312,11 @@ impl CallRouter for HttpCallRouter {
 
         let payload = HttpRequestPayload {
             call_id: call_id.clone(),
-            session_id: crate::call::session_id::normalize_or_generate(&call_id),
+            session_id: session_id.clone(),
             from,
             to,
             source_addr,
+            source_trunk: source_trunk.clone(),
             direction: direction.to_string(),
             method: original.method.to_string(),
             uri: original.uri.to_string(),
@@ -306,26 +417,86 @@ impl CallRouter for HttpCallRouter {
                 .with_code(&crate::proxy::routing::http_error_catalog::NOT_HANDLED));
             }
             HttpRouteAction::Forward => {
-                let mut attempts = Vec::new();
+                let parse_error = |error: anyhow::Error| {
+                    RouteError {
+                        error,
+                        status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        extensions: None,
+                    }
+                    .with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED)
+                };
                 let custom_headers = result.headers.map(|h| {
                     h.iter()
                         .map(|(k, v)| rsipstack::sip::Header::Other(k.clone(), v.clone()))
                         .collect::<Vec<_>>()
                 });
 
+                // Resolved before the targets: a trunk target starts its own
+                // caller from it, as the static matcher does.
+                let mut dialplan_caller = caller.from.clone();
+                if let Some(caller_override) = result
+                    .caller
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    let realm = caller.realm.clone().unwrap_or_else(|| {
+                        caller
+                            .from
+                            .as_ref()
+                            .map(|from| from.host().to_string())
+                            .unwrap_or_default()
+                    });
+                    let uri = rsipstack::sip::Uri::try_from(build_sip_uri(caller_override, &realm))
+                        .map_err(|e| {
+                            parse_error(anyhow!(
+                                "HTTP router returned invalid caller override {:?}: {}",
+                                caller_override,
+                                e
+                            ))
+                        })?;
+                    dialplan_caller = Some(uri);
+                }
+
+                let arrival_trunk = source_trunk
+                    .as_deref()
+                    .and_then(|name| self.data_context.get_trunk(name));
+                let rtp_bind_ip = result.rtp_config.as_ref().and_then(|c| c.bind_ip).map(|ip| ip.to_string());
+                let rtp_external_ip =
+                    result.rtp_config.as_ref().and_then(|c| c.external_ip).map(|ip| ip.to_string());
+                let mut attempts = Vec::new();
                 if let Some(targets) = result.targets {
                     for target in targets {
                         let (uri, retry_policy) = match target {
                             HttpRouteTarget::Uri(uri) => (uri, None),
-                            HttpRouteTarget::Config { uri, retry_policy } =>
+                            HttpRouteTarget::Config { trunk: Some(_), .. } => {
+                                return Err(parse_error(anyhow!(
+                                    "HTTP router target names both a uri and a trunk"
+                                )));
+                            }
+                            HttpRouteTarget::Config { uri, retry_policy, .. } =>
                                 (uri, retry_policy),
+                            HttpRouteTarget::Trunk(HttpTrunkTarget { trunk, callee, retry_policy }) => {
+                                if let Some(policy) = &retry_policy {
+                                    policy.validate().map_err(parse_error)?;
+                                }
+                                let attempt = self
+                                    .trunk_attempt(
+                                        arrival_hints(arrival_trunk.as_ref()),
+                                        &trunk,
+                                        callee.as_deref(),
+                                        retry_policy,
+                                        original,
+                                        dialplan_caller.clone().unwrap_or_default(),
+                                        custom_headers.clone(),
+                                    )
+                                    .map_err(|e| parse_error(e.context("HTTP router trunk target")))?;
+                                attempts.push(attempt);
+                                continue;
+                            }
                         };
                         if let Some(policy) = &retry_policy {
-                            policy.validate().map_err(|error| RouteError {
-                                error,
-                                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
-                                extensions: None,
-                            }.with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED))?;
+                            policy.validate().map_err(parse_error)?;
                         }
                         // Preserve legacy HTTP routing: skip malformed target URIs.
                         let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
@@ -333,6 +504,7 @@ impl CallRouter for HttpCallRouter {
                         };
                         attempts.push(DialAttempt {
                             retry_policy,
+                            hints: arrival_hints(arrival_trunk.as_ref()).map(Arc::new),
                             ..Location {
                                 aor: uri,
                                 headers: custom_headers.clone(),
@@ -342,6 +514,30 @@ impl CallRouter for HttpCallRouter {
                     }
                 }
 
+                // Each attempt's hints layer the arrival trunk, then the target
+                // trunk, then the response's RTP addresses: explicit hint IPs
+                // apply after a hint's network profile, so `rtp_config` wins.
+                if rtp_bind_ip.is_some() || rtp_external_ip.is_some() {
+                    for attempt in &mut attempts {
+                        let hints = attempt.hints.get_or_insert_with(Default::default);
+                        // Freshly built here, so never shared yet.
+                        if let Some(hints) = Arc::get_mut(hints) {
+                            if rtp_bind_ip.is_some() {
+                                hints.bind_ip = rtp_bind_ip.clone();
+                            }
+                            if rtp_external_ip.is_some() {
+                                hints.external_ip = rtp_external_ip.clone();
+                            }
+                        }
+                    }
+                }
+
+                // The sequential dialer times a trunk's attempt only within a
+                // sequence; a lone trunk target's ring time is the call's.
+                let single_ring_time = match attempts.as_slice() {
+                    [only] => only.hints.as_ref().and_then(|hints| hints.max_ring_time),
+                    _ => None,
+                };
                 let strategy = match result.strategy {
                     Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(
                         attempts.into_iter().map(|attempt| attempt.location).collect(),
@@ -349,13 +545,6 @@ impl CallRouter for HttpCallRouter {
                     _ => DialStrategy::Sequential(attempts),
                 };
 
-                // Global session id: HTTP-routed calls always participate
-                // (id-shaped Call-ID > fresh id, honouring
-                // `session_id_inherit_callid`) — the HTTP router is an
-                // explicit routing deployment, never a plain P2P dial. Root
-                // inheritance rides the Session-ID header in the session
-                // constructor.
-                let session_id = crate::call::session_id::derive_from_call_id(&call_id);
                 let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
                     .with_session_id_enabled(true);
 
@@ -372,47 +561,16 @@ impl CallRouter for HttpCallRouter {
                 dialplan.media.enable_latching = self.enable_latching;
                 dialplan.media.probation_max_packets = self.probation_max_packets;
                 dialplan.media.ice_lite = rtp_cfg.ice_lite;
-                if let Some(config) = result.rtp_config {
-                    if let Some(ip) = config.bind_ip {
-                        dialplan.media.bind_ip = Some(ip.to_string());
-                    }
-                    if let Some(ip) = config.external_ip {
-                        dialplan.media.external_ip = Some(ip.to_string());
-                    }
+                // Call-wide too: parallel dialing carries no per-attempt hints.
+                if rtp_bind_ip.is_some() {
+                    dialplan.media.bind_ip = rtp_bind_ip;
+                }
+                if rtp_external_ip.is_some() {
+                    dialplan.media.external_ip = rtp_external_ip;
                 }
 
-                if let Some(from) = caller.from.as_ref() {
-                    dialplan = dialplan.with_caller(from.clone());
-                }
-
-                if let Some(caller_override) = result
-                    .caller
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    let realm = caller.realm.clone().unwrap_or_else(|| {
-                        caller
-                            .from
-                            .as_ref()
-                            .map(|from| from.host().to_string())
-                            .unwrap_or_default()
-                    });
-                    match rsipstack::sip::Uri::try_from(build_sip_uri(caller_override, &realm)) {
-                        Ok(uri) => dialplan = dialplan.with_caller(uri),
-                        Err(e) => {
-                            return Err(RouteError {
-                                error: anyhow!(
-                                    "HTTP router returned invalid caller override {:?}: {}",
-                                    caller_override,
-                                    e
-                                ),
-                                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
-                                extensions: None,
-                            }
-                            .with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED));
-                        }
-                    }
+                if let Some(uri) = dialplan_caller {
+                    dialplan = dialplan.with_caller(uri);
                 }
 
                 dialplan = dialplan.with_targets(strategy);
@@ -451,6 +609,9 @@ impl CallRouter for HttpCallRouter {
                     dialplan.max_call_duration = Some(Duration::from_secs(timeout as u64));
                 }
 
+                if single_ring_time.is_some() {
+                    dialplan.max_ring_time = single_ring_time;
+                }
                 if let Some(max_ring_time) = result.max_ring_time {
                     dialplan.max_ring_time =
                         (max_ring_time > 0).then(|| Duration::from_secs(max_ring_time as u64));

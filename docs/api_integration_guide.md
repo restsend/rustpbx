@@ -46,6 +46,7 @@ RustPBX interacts with external systems in two ways:
   "from": "<sip:1001@pbx.com>",
   "to": "<sip:200@pbx.com>",
   "source_addr": "1.2.3.4:5060",
+  "source_trunk": "carrier-a",  // Trunk the call arrived on; null unless inbound from a trunk
   "direction": "inbound",  // inbound | outbound | internal
   "method": "INVITE",
   "uri": "sip:200@pbx.com",
@@ -123,6 +124,43 @@ candidates across interfaces and does not use this fixed bind IP. Other RTC
 settings retain their existing server defaults; this object does not expose the
 full RTC configuration. Invalid IPs, unknown `rtp_config` fields or invalid retry codes cause a SIP 500 routing error.
 Malformed target URIs are skipped, preserving existing HTTP routing behavior.
+
+**Trunk targets**: a target can name a configured trunk instead of a URI, and
+the trunk supplies the rest of its configuration:
+
+```json
+{
+  "action": "forward",
+  "strategy": "sequential",
+  "targets": [
+    {"trunk": "carrier-a"},
+    {"trunk": "carrier-b", "callee": "8613800000000"},
+    {"trunk": "carrier-c", "retry_policy": {"status_codes": [503]}}
+  ]
+}
+```
+
+- `trunk` (required) names the trunk. An unknown or disabled trunk fails the
+  call with SIP 500.
+- `callee` (optional) is the number to dial; it defaults to the dialed user. A
+  bare user is qualified with the trunk's destination host.
+- `retry_policy` (optional) overrides the trunk's own
+  [retry policy](trunk-retry.md). Without either, the target never advances,
+  as with any other routed trunk target.
+
+The trunk is applied as the static routing rules apply it: destination and
+transport, credentials, host rewrite, codecs, network profile and media IPs,
+`max_ring_time` and the call record's trunk attribution. In a sequence each
+trunk's `max_ring_time` limits its own attempt; a single trunk target's limits
+the call unless the response sets `max_ring_time`. The response's `caller` and
+`headers` apply to trunk targets too. A target cannot name both `uri` and
+`trunk`. Parallel dialing uses the trunk's destination and credentials only.
+
+For a call that arrived on a trunk (`source_trunk`), that trunk's network path
+(network profile, media IPs, ICE-lite) applies to every sequential target, as
+with static routing; a trunk target's own settings take precedence, and the
+response's `rtp_config` addresses take precedence over both. A profile still
+supplies what `rtp_config` does not set (RTP port range, SIP Contact address).
 
 ### 1.2 User Backend (SIP Authentication)
 Delegate SIP registration password checking to your external DB or API.

@@ -51,6 +51,7 @@ RustPBX 通过两种方式与外部系统交互：
   "from": "<sip:1001@pbx.com>",
   "to": "<sip:200@pbx.com>",
   "source_addr": "1.2.3.4:5060",
+  "source_trunk": "carrier-a",  // 呼入所经的中继；非中继呼入时为 null
   "direction": "inbound",  // inbound | outbound | internal
   "method": "INVITE",
   "uri": "sip:200@pbx.com",
@@ -114,6 +115,35 @@ WebRTC 仍然通过 ICE 跨网卡收集候选地址，不受此固定绑定地�
 此对象仅开放上述两个字段，其余 RTC 设置仍采用现有服务器默认值。
 无效 IP、未知 `rtp_config` 字段或无效重试状态码会导致 SIP 500 路由错误。
 无效目标 URI 继续按原有行为跳过。
+
+**中继目标**：目标可以直接指定已配置的中继名称，其余配置均取自该中继：
+
+```json
+{
+  "action": "forward",
+  "strategy": "sequential",
+  "targets": [
+    {"trunk": "carrier-a"},
+    {"trunk": "carrier-b", "callee": "8613800000000"},
+    {"trunk": "carrier-c", "retry_policy": {"status_codes": [503]}}
+  ]
+}
+```
+
+- `trunk`（必填）：中继名称。中继不存在或已禁用时，呼叫以 SIP 500 失败。
+- `callee`（可选）：被叫号码，默认为原被叫用户；纯用户名会补全为中继目的地址的主机。
+- `retry_policy`（可选）：覆盖中继自身的[重试策略](trunk-retry.md)。两者都没有时，
+  该目标失败后不再继续，与其他路由到中继的目标一致。
+
+中继按静态路由规则的方式生效：目的地址与传输协议、认证信息、主机改写、编解码、
+网络配置与媒体 IP、`max_ring_time` 以及话单中的中继归属。顺序呼叫中每个中继的
+`max_ring_time` 只限制自己的这次尝试；只有一个中继目标且响应未设置 `max_ring_time`
+时，它限制整个呼叫。响应中的 `caller` 和 `headers` 同样作用于中继目标。
+同一目标不能同时包含 `uri` 和 `trunk`。并行呼叫只使用中继的目的地址和认证信息。
+
+对于经中继呼入的呼叫（`source_trunk`），该中继的网络路径（网络配置、媒体 IP、ICE-lite）
+与静态路由一样作用于每个顺序目标；中继目标自身的设置优先，响应中的 `rtp_config`
+地址又优先于两者。`rtp_config` 未设置的部分（RTP 端口范围、SIP Contact 地址）仍由网络配置提供。
 
 ### 1.2 用户后端（SIP 认证）
 

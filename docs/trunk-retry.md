@@ -40,7 +40,7 @@ targets.
 Locally generated failures keep their mapped SIP code and are matched like any
 other status; for example, a setup error is matched by listing 500. A target
 with no policy object at all (queue agents, registered contacts, HTTP router
-targets) keeps the legacy behaviour and advances after any failure;
+URI targets) keeps the legacy behaviour and advances after any failure;
 routed trunk targets such as wholesale always carry a policy. Exhausted
 targets, caller cancellation and an answered call also stop retries.
 
@@ -88,7 +88,10 @@ Single-leg routing (originate, transfer, RWI) uses the first target.
 After a failure, the dialer tries the next target only when the failed target's
 policy lists the final status. The HTTP router also accepts
 per-target `retry_policy` objects; see the [HTTP routing API](api_integration_guide.md#11-http-router-dynamic-call-routing).
-HTTP targets without a policy retain their legacy advance-on-failure behaviour.
+HTTP URI targets without a policy retain their legacy advance-on-failure
+behaviour. An HTTP target that names a trunk (`{"trunk": "carrier-a"}`) is
+built like any routed trunk target and uses the trunk's policy unless it
+carries its own.
 
 ## Attempt results
 

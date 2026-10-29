@@ -539,9 +539,7 @@ async fn match_invite_impl(
                             }
                         }
 
-                        apply_trunk_config(&mut option, trunk_config)?;
-                        merge_trunk_media_hints(&mut hints, trunk_config);
-                        attach_outbound_trunk_metadata(&mut hints, &selected_trunk, trunk_config);
+                        stamp_trunk(&mut option, &mut hints, &selected_trunk, trunk_config)?;
                         info!(
                             "Selected trunk: {} for destination: {}",
                             selected_trunk, trunk_config.dest
@@ -716,13 +714,7 @@ async fn match_invite_impl(
                                     ));
                                 }
                             }
-                            apply_trunk_config(&mut option, trunk_config)?;
-                            merge_trunk_media_hints(&mut hints, trunk_config);
-                            attach_outbound_trunk_metadata(
-                                &mut hints,
-                                &selected_trunk,
-                                trunk_config,
-                            );
+                            stamp_trunk(&mut option, &mut hints, &selected_trunk, trunk_config)?;
                         }
                     }
                 }
@@ -1455,6 +1447,22 @@ fn select_trunk_weighted(
 
     // Fallback to last trunk (shouldn't reach here)
     Ok(trunks[trunks.len() - 1].clone())
+}
+
+/// Dial through `trunk`: its next hop, credentials and rewrites on the
+/// INVITE, plus its media hints, ring time and CDR attribution. Every path
+/// that routes a call to a trunk (static rules, HTTP router targets) stamps
+/// it here so they treat the trunk the same way.
+pub fn stamp_trunk(
+    option: &mut InviteOption,
+    hints: &mut Option<DialplanHints>,
+    trunk_name: &str,
+    trunk: &TrunkConfig,
+) -> Result<()> {
+    apply_trunk_config(option, trunk)?;
+    merge_trunk_media_hints(hints, trunk);
+    attach_outbound_trunk_metadata(hints, trunk_name, trunk);
+    Ok(())
 }
 
 fn attach_outbound_trunk_metadata(
