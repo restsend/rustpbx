@@ -21,6 +21,15 @@ const IVR_NAME_KEY: &str = "ivr_name";
 const IVR_END_REASON_KEY: &str = "ivr_end_reason";
 const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
 
+/// Shared session var written by `on_exit` when a resumable hand-off
+/// (bridge / queue / jump) suspends the flow: the SUSPENDED execution's
+/// runtime generation. The proxy's compensating `session_end` trace reads it
+/// (via `app_context`) so a real hangup while suspended carries the ORIGINAL
+/// execution's identity — never a successor's, never derived from `extra`.
+/// Cleared by the next `on_enter` (any new instance owns the lifecycle from
+/// there); internal key, never forwarded to the provider as an ivr param.
+pub(crate) const IVR_SUSPENDED_EXECUTION_ID_KEY: &str = "_ivr_suspended_execution_id";
+
 /// Default number of consecutive no-input prompt cycles before the step IVR
 /// asks the provider to resolve (DtmfMenuTimeout). 0 disables the runaway guard.
 const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
@@ -399,6 +408,9 @@ impl StepIvrApp {
             let ev = crate::rwi::IvrStepTrace {
                 call_id: call_id.clone(),
                 session_id: entry.session_id.clone(),
+                // Identity comes straight from THIS runtime instance — the
+                // single source of truth for every executor-emitted trace.
+                app_execution_id: self.app_execution_id,
                 caller: entry.caller.clone(),
                 callee: entry.callee.clone(),
                 step_index: entry.step_index,
@@ -559,6 +571,17 @@ impl StepIvrApp {
             if let Some(name) = &self.ivr_name {
                 vars.insert(IVR_NAME_KEY.to_string(), name.clone());
             }
+        }
+    }
+
+    /// Freeze the SUSPENDED execution's identity in shared session vars so
+    /// the proxy's compensating `session_end` (real hangup while suspended on
+    /// a bridge / queue / jump hand-off) keys to THIS execution, not the
+    /// successor that may start later. No identity → no stash (the field is
+    /// then omitted downstream; it is never guessed).
+    fn stash_suspended_execution_id(&self) {
+        if let (Some(vars), Some(id)) = (&self.runtime_vars, self.app_execution_id) {
+            vars.insert(IVR_SUSPENDED_EXECUTION_ID_KEY.to_string(), id.to_string());
         }
     }
 
@@ -1810,6 +1833,14 @@ impl StepIvrApp {
                 "_bridge_step_index".into(),
                 (self.step_index + 1).to_string(),
             );
+            // Execution identity rides along (`_rst_app_execution_id`) so
+            // proxy-emitted traces for THIS node (bridge DTMF, compensating
+            // session_end) key to the suspended execution.
+            if let Some(id) = self.app_execution_id {
+                self.sess
+                    .variables
+                    .insert("_bridge_app_execution_id".into(), id.to_string());
+            }
         }
         let result = common::execute_action(
             &node.action,
@@ -1968,6 +1999,11 @@ impl CallApp for StepIvrApp {
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         self.runtime_vars = Some(context.session_vars.clone());
+        // Any new instance owns the lifecycle from here: drop the identity a
+        // previous execution stashed for its compensating session_end trace,
+        // so a later compensation can never attribute the successor's end to
+        // the predecessor.
+        context.session_vars.remove(IVR_SUSPENDED_EXECUTION_ID_KEY);
         self.session_extensions = Some(context.session_extensions.clone());
         self.app_execution_id = context
             .invocation
@@ -2749,6 +2785,12 @@ impl CallApp for StepIvrApp {
                 next_step_id: None,
                 end: Some(true),
             });
+        } else {
+            // Suspended-flow lifecycle: freeze the SUSPENDED execution's
+            // identity for the proxy's compensating session_end (real hangup
+            // while suspended on this hand-off). Cleared by the next
+            // on_enter — never read once a successor owns the flow.
+            self.stash_suspended_execution_id();
         }
 
         let status = serde_json::to_string(&end_sr.reason)
@@ -5482,13 +5524,24 @@ mod tests {
         })]);
         let trace = IvrTraceCollector::new();
         app.trace = Some(trace.clone());
-        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        // Real identity wiring: on_enter picks the generation up from the
+        // invocation, so the suspension stash and the `_rst_*` param both
+        // carry it — the same way production wires a resumed generation.
+        let mut ctx = make_test_context();
+        ctx.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 3,
+            ..Default::default()
+        });
+        let shared_vars = ctx.session_vars.clone();
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
         stack
             .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(2000, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("bridge:"))
+                matches!(c, CallCommand::Transfer { target, .. }
+                    if target.starts_with("bridge:")
+                        && target.contains("_rst_app_execution_id=3"))
             })
             .await;
 
@@ -5503,6 +5556,16 @@ mod tests {
                 .iter()
                 .map(|e| e.trigger.r#type.clone())
                 .collect::<Vec<_>>()
+        );
+        // Suspended-flow identity stash: the compensating session_end the
+        // proxy emits on a real hangup while suspended must key to THIS
+        // execution (3), never the successor's.
+        assert_eq!(
+            shared_vars
+                .get(super::IVR_SUSPENDED_EXECUTION_ID_KEY)
+                .map(|v| v.value().clone()),
+            Some("3".to_string()),
+            "resumable hand-off must stash the suspended execution's identity"
         );
         // The node's own execution trace is still recorded — and because the
         // session_end is suppressed, the hand-off reason lives on it.
@@ -5527,6 +5590,34 @@ mod tests {
         assert_eq!(
             sess.status, "active",
             "suspended flow must not close the collector session row"
+        );
+    }
+
+    /// Ownership handover: as soon as ANY new instance enters (the successor
+    /// return app / jump target), the predecessor's suspended-identity stash
+    /// must be dropped — a later compensation must never attribute the
+    /// successor's end to the predecessor's execution.
+    #[tokio::test]
+    async fn test_on_enter_clears_suspended_execution_id_stash() {
+        let ctx = make_test_context();
+        let shared_vars = ctx.session_vars.clone();
+        shared_vars.insert(
+            super::IVR_SUSPENDED_EXECUTION_ID_KEY.to_string(),
+            "3".to_string(),
+        );
+
+        // Empty flow: on_enter runs the ownership handover immediately.
+        let mut stack = MockCallStack::run_with_context(Box::new(mock_app(vec![])), ctx);
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            shared_vars
+                .get(super::IVR_SUSPENDED_EXECUTION_ID_KEY)
+                .is_none(),
+            "successor on_enter must clear the predecessor's identity stash"
         );
     }
 
@@ -8019,6 +8110,100 @@ mod tests {
         assert!(
             payload["duration_ms"].is_u64(),
             "duration_ms must be present: {payload}"
+        );
+    }
+
+    /// Execution-identity contract at the wire choke point: every
+    /// executor-emitted trace carries THIS runtime instance's
+    /// `app_execution_id`; without one the key is omitted from the payload
+    /// entirely (never guessed, never taken from `extra`).
+    #[tokio::test]
+    async fn test_record_trace_stamps_app_execution_id() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mk_entry = || IvrTraceEntry {
+            session_id: "test-session".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger: crate::rwi::TriggerInfo::new("ivr_fallback"),
+            provider_url: None,
+            action_type: "ivr_fallback".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: None,
+            step_name: None,
+            step_start_time: None,
+            step_end_time: None,
+            extra: None,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        };
+
+        // With an identity → carried verbatim on the wire event.
+        let mut app = mock_app(vec![]);
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        app.app_execution_id = Some(4);
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+        app.record_trace(mk_entry());
+        let ev = events.try_recv().expect("trace must be enqueued");
+        assert_eq!(
+            ev.event.payload["app_execution_id"], 4,
+            "executor-emitted trace must carry the owning execution's identity"
+        );
+
+        // Without an identity → the key is omitted entirely.
+        let mut app = mock_app(vec![]);
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+        app.record_trace(mk_entry());
+        let ev = events.try_recv().expect("trace must be enqueued");
+        assert!(
+            ev.event.payload.get("app_execution_id").is_none(),
+            "unknown identity must be omitted from the payload entirely, got: {}",
+            ev.event.payload
+        );
+    }
+
+    /// Stash helper contract: the SUSPENDED execution's identity is frozen
+    /// into shared session vars at resumable hand-off; no identity → no
+    /// stash (downstream omits the field).
+    #[test]
+    fn test_stash_suspended_execution_id() {
+        let ctx = make_test_context();
+
+        // With an identity → stashed as a string.
+        let mut app = mock_app(vec![]);
+        app.runtime_vars = Some(ctx.session_vars.clone());
+        app.app_execution_id = Some(3);
+        app.stash_suspended_execution_id();
+        assert_eq!(
+            ctx.get_var(super::IVR_SUSPENDED_EXECUTION_ID_KEY)
+                .as_deref(),
+            Some("3"),
+            "resumable hand-off must freeze the suspended execution's identity"
+        );
+
+        // Without an identity → untouched (never guessed).
+        let ctx = make_test_context();
+        let mut app = mock_app(vec![]);
+        app.runtime_vars = Some(ctx.session_vars.clone());
+        app.stash_suspended_execution_id();
+        assert!(
+            ctx.get_var(super::IVR_SUSPENDED_EXECUTION_ID_KEY).is_none(),
+            "no identity must leave no stash"
         );
     }
 

@@ -308,6 +308,11 @@ pub(crate) struct BridgeTraceContext {
     /// (bridge DTMF, suspended session_end) correlate with it instead of the
     /// historical hard-coded 0.
     pub step_index: Option<u32>,
+    /// Runtime execution generation of the originating step-IVR executor
+    /// (carried via `_rst_app_execution_id`). Reported on proxy-emitted
+    /// traces so consumers key them to the SUSPENDED execution, never a
+    /// successor that started later.
+    pub app_execution_id: Option<u64>,
     /// True when the bridge is a resumable IVR hand-off
     /// (`return_ivr_resume=1`): the proxy then suppresses its eager
     /// per-digit trace, and the resumed step executor reports the bridge
@@ -324,6 +329,7 @@ impl BridgeTraceContext {
             && self.extra.is_none()
             && self.step_start_time.is_none()
             && self.step_index.is_none()
+            && self.app_execution_id.is_none()
     }
 }
 
@@ -474,6 +480,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             }
                             "_rst_step_index" => {
                                 trace_context.step_index = decoded_val.parse().ok()
+                            }
+                            "_rst_app_execution_id" => {
+                                trace_context.app_execution_id = decoded_val.parse().ok()
                             }
                             "_rst_extra" => {
                                 trace_context.extra = serde_json::from_str(&decoded_val).ok()
@@ -4096,12 +4105,13 @@ mod tests {
             "nodename": "测试啊，按1转人工，按2挂机",
         });
         let target = format!(
-            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&return_ivr_resume=1&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}&_rst_step_index={}",
+            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&return_ivr_resume=1&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}&_rst_step_index={}&_rst_app_execution_id={}",
             encode("step-1"),
             encode("菜单"),
             encode(&extra.to_string()),
             encode("2026-01-01T00:00:00.123456789+00:00"),
             encode("2"),
+            encode("7"),
         );
         let parsed = super::parse_transfer_target(&target);
         match parsed {
@@ -4128,6 +4138,11 @@ mod tests {
                     Some(2),
                     "step index must round-trip so proxy traces correlate with the executor hand-off trace"
                 );
+                assert_eq!(
+                    ctx.app_execution_id,
+                    Some(7),
+                    "execution identity must round-trip so proxy traces key to the suspended execution"
+                );
                 assert!(
                     ctx.resumable,
                     "return_ivr_resume=1 marks a resumable hand-off — gates the eager DTMF trace"
@@ -4146,6 +4161,21 @@ mod tests {
             TransferTarget::Bridge { trace_context, .. } => {
                 let ctx = trace_context.expect("step_id alone must create a context");
                 assert_eq!(ctx.step_index, None);
+                assert_eq!(ctx.step_id.as_deref(), Some("s1"));
+            }
+            other => panic!("expected Bridge, got {other:?}"),
+        }
+    }
+
+    /// A malformed `_rst_app_execution_id` is dropped rather than failing the
+    /// parse — the identity is additive observability, never load-bearing.
+    #[test]
+    fn test_parse_voip_bridge_ignores_malformed_app_execution_id() {
+        let target = "bridge:wss://room.example.com/ws?_rst_app_execution_id=nope&_rst_step_id=s1";
+        match super::parse_transfer_target(target) {
+            TransferTarget::Bridge { trace_context, .. } => {
+                let ctx = trace_context.expect("step_id alone must create a context");
+                assert_eq!(ctx.app_execution_id, None);
                 assert_eq!(ctx.step_id.as_deref(), Some("s1"));
             }
             other => panic!("expected Bridge, got {other:?}"),

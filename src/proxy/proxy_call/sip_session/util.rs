@@ -372,6 +372,10 @@ pub(super) fn forward_dtmf_event(
             let ev = crate::rwi::IvrStepTrace {
                 call_id: session_id.to_string(),
                 session_id: session_id.to_string(),
+                // Originating execution's identity (stashed at hand-off via
+                // `_rst_app_execution_id`) — digits pressed during the bridge
+                // key to the suspended execution, not a successor.
+                app_execution_id: ctx.app_execution_id,
                 caller: caller.to_string(),
                 callee: callee.to_string(),
                 // Real index of the originating node (stashed by the executor
@@ -455,7 +459,9 @@ pub(super) fn map_suspended_flow_end(
 /// guarantees consumers still see exactly one session_end per logical flow —
 /// carrying the REAL end reason instead of a premature `transfer`. Node
 /// context comes from the bridge trace context when the suspension was a
-/// voip_bridge.
+/// voip_bridge. `app_execution_id` is the SUSPENDED execution's identity
+/// (resolved by the caller from the executor's stash); `None` omits the
+/// field — never guessed, never taken from `extra`.
 pub(super) fn emit_suspended_flow_session_end(
     session_id: &str,
     caller: &str,
@@ -464,8 +470,17 @@ pub(super) fn emit_suspended_flow_session_end(
     bridge_trace_context: &parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>,
     sip_headers: Option<std::collections::HashMap<String, String>>,
     end_reason: crate::call::app::ivr::provider::SessionEndReason,
+    app_execution_id: Option<u64>,
 ) {
     let Some(gw) = rwi_gateway.as_ref() else {
+        // The end fact itself is not lost (the CDR still records the hangup),
+        // but the trace consumer never sees the compensating session_end.
+        // Make the drop visible instead of failing silently.
+        tracing::warn!(
+            session_id = %session_id,
+            end_reason = ?end_reason.reason,
+            "suspended flow session_end dropped: no RWI gateway attached"
+        );
         return;
     };
     let ctx = bridge_trace_context.lock().clone();
@@ -481,6 +496,13 @@ pub(super) fn emit_suspended_flow_session_end(
     let ev = crate::rwi::IvrStepTrace {
         call_id: session_id.to_string(),
         session_id: session_id.to_string(),
+        // Bridge-suspended flows take the identity stashed in the bridge
+        // context (same source as the DTMF traces for this node); other
+        // suspensions fall back to the executor's session-var stash.
+        app_execution_id: ctx
+            .as_ref()
+            .and_then(|c| c.app_execution_id)
+            .or(app_execution_id),
         caller: caller.to_string(),
         callee: callee.to_string(),
         // Bridge-suspended flows carry the executor-stashed step index;

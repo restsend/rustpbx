@@ -291,6 +291,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::IvrStepTrace {
                 call_id: call_id.into(),
                 session_id: "ivr-session-001".into(),
+                app_execution_id: Some(1),
                 caller: "alice".into(),
                 callee: "bob".into(),
                 step_index: 1,

@@ -738,6 +738,9 @@ pub async fn execute_action(
                 // Appended last: executor tests assert the URI prefix up to
                 // `_rst_step_start_time`, so existing expectations stay valid.
                 ("_bridge_step_index", "_rst_step_index"),
+                // Originating execution's runtime generation — proxy-emitted
+                // traces for this node key to the suspended execution.
+                ("_bridge_app_execution_id", "_rst_app_execution_id"),
             ] {
                 if let Some(v) = sess.variables.remove(var) {
                     if !v.is_empty() {
