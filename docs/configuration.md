@@ -21,6 +21,7 @@ RustPBX configuration is split into several logical sections. The application lo
 
 6. [Trunks & Queues](config/05-trunks-queues.md)  
    *SIP Gateways, Load Balancing, Queue Strategies, Agent Management.*
+   Includes [DIDWW static inbound and outbound voice](config/05-trunks-queues.md#didww-static-inbound-and-outbound-voice).
 
 7. [Media, Recording & CDR](config/06-media-recording.md)  
    *Media Proxy, Recording Policies, Storage Backends (Local/S3).*

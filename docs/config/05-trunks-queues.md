@@ -190,6 +190,141 @@ incoming_from_user_prefix = ""    # Strip prefix from inbound caller
 incoming_to_user_prefix = ""      # Strip prefix from inbound callee
 ```
 
+## DIDWW static inbound and outbound voice
+
+Use the standalone [DIDWW example](../../config/trunks/didww.toml.example)
+to route one DID to a registered extension and let that authenticated extension
+call one approved destination through a DIDWW outbound trunk. It uses the
+community SIP core, UDP signaling, G.711 PCMU/PCMA and anchored RTP. No carrier
+SDK or Rust source change is required by this configuration.
+
+The example is a complete **main config**, not a `trunks_files` include. Its
+`.example` suffix prevents the normal `config/trunks/*.toml` glob from loading
+it accidentally. Do not rename it to `.toml` in that include directory.
+
+### Prepare the endpoints
+
+You need a RustPBX installation with its runtime assets, a registered SIP
+softphone or other media-capable user agent, and a DIDWW account with an active
+DID and outbound trunk access. Start with a single approved test destination;
+calls can incur provider charges. Keep credentials and completed configuration
+files outside version control.
+
+1. In DIDWW, create an **inbound SIP trunk with Static Endpoint** delivery to
+   your reachable RustPBX SIP address and UDP port. Assign the intended DID to
+   that trunk. This example recognizes the carrier by source IP; leave the
+   optional inbound SIP authorization disabled. It does not register with
+   DIDWW. See [Create a SIP trunk](https://doc.didww.com/voice/inbound-trunks/sip-trunks/how-to-guides/create-sip-trunk.html).
+2. Create/enable a DIDWW outbound trunk using credentials and the appropriate
+   source-IP restrictions. Privately obtain its username/password, choose a
+   current regional SIP endpoint, allow your actual signaling/media addresses,
+   and permit the intended Caller ID and destination. Inbound and outbound
+   trunks have separate purposes and settings. See [Outbound trunks](https://doc.didww.com/voice/outbound-trunks/index.html).
+3. Choose the local numeric extension and a strong extension password. Register
+   the softphone to the configured RustPBX realm and SIP port using that
+   extension. Allow its trusted network separately from the carrier ranges.
+   Never classify the extension's network as `inbound_hosts` for a carrier.
+
+### Fill the standalone configuration
+
+Copy `config/trunks/didww.toml.example` to a private main file such as
+`didww.toml`, replace **every** `<...>` placeholder, then start RustPBX with
+`rustpbx --conf didww.toml` from a directory containing the normal runtime
+assets. Restart after changing the main configuration. The sample does not
+read generated trunk/route include files; do not also create duplicate console
+trunks or routes with the same names.
+
+| Placeholder | Value |
+|---|---|
+| `PBX_BIND_IP` | Local interface address on which RustPBX listens |
+| `PBX_SIP_IP`, `PBX_MEDIA_IP` | Addresses reachable by the SIP peers and RTP peers; configure signaling Contact and media SDP separately |
+| `PBX_REALM` | The realm used by the extension's SIP account; match its registration settings |
+| `CONSOLE_SESSION_SECRET` | A long random private session secret |
+| `DIDWW_SIGNALING_IP`, `DIDWW_SIGNALING_CIDR` | Current carrier source address/range for inbound recognition; repeat `inbound_hosts` and `acl_rules` entries for all required ranges |
+| `EXTENSION_NETWORK_CIDR` | Only the trusted extension network |
+| `LOCAL_EXTENSION`, `EXTENSION_SECRET` | Numeric extension and its private SIP password |
+| `DIDWW_OUTBOUND_HOST` | Selected endpoint hostname, without `sip:` or the port |
+| `DIDWW_USERNAME`, `DIDWW_PASSWORD` | Private outbound trunk credentials |
+| `INBOUND_DID_DIGITS` | Country code and DID digits as delivered in `To`; the route allows an optional leading `+` |
+| `AUTHORIZED_CALLER_ID_DIGITS` | Permitted outbound Caller ID in international digits |
+| `ALLOWED_DESTINATION_DIGITS` | One authorized test destination in international digits |
+
+The outbound number is intentionally an exact match. Expand it only after
+testing and applying an explicit dialing policy. The inbound DID route has
+higher priority than the carrier catch/reject route, which prevents unmatched
+carrier traffic from falling through to outbound service. Other unmatched
+calls receive 403. Route action fields (`action`, `dest`, `select`) belong on
+`[[proxy.routes]]`, before its `[proxy.routes.match]` table.
+
+The `acl`, `auth`, `registrar`, `call` module order is intentional. Source-IP
+recognition admits provider traffic as a trunk; local extensions still use SIP
+digest authentication. Preserve both carrier recognition and extension
+authentication. The sample constrains concurrent calls and outbound CPS to one.
+
+### Signaling and audio reachability
+
+Allow the current DIDWW signaling and RTP networks through the firewall, plus
+the intended extension path. Do not allow all sources to an exposed SIP port.
+The example uses UDP 5060 and a small local RTP range, 20000–20099; forward the
+chosen local ports correctly through NAT and match the SDP/Contact addresses
+to the real deployment. Carrier RTP ports are distinct from the local RustPBX
+RTP range. Containers require reachable advertised addresses and UDP mappings
+or an appropriate shared network; opening only HTTP is insufficient.
+
+Keep PCMU/PCMA enabled on the softphone and carrier trunks. The endpoint must
+actively transmit RTP after answer; do not rely on both sides waiting for
+received audio before transmitting. A successful OPTIONS reply confirms SIP
+reachability only. See [SIP connectivity](https://doc.didww.com/voice/inbound-trunks/sip-trunks/sip-connectivity.html),
+[Outbound SIP information](https://doc.didww.com/voice/outbound-trunks/outbound-sip-information.html)
+and [Platform & Networking](01-platform.md).
+
+An outbound `401 Unauthorized` followed by a credentialed INVITE is a normal
+digest exchange. DIDWW's advertised digest realm is `out.didww.com`, including
+when a regional hostname is selected. A final 401/403 requires checking the
+credentials, observed source IP, permitted Caller ID and destination policy;
+do not keep redialing blindly. See [Authentication and security](https://doc.didww.com/voice/outbound-trunks/authentication-security.html).
+
+### Verify in both directions
+
+First validate TOML parsing and confirm that RustPBX loads exactly the intended
+two trunks and four routes. The local AMI health endpoint is
+`/ami/v1/health` (subject to the AMI allowlist), not `/health`.
+Check registration and matched route/trunk in your console or private logs.
+
+Use an isolated SIP test server to test the configuration before making real
+calls. Substitute only the test server's addresses, synthetic numbers and test
+credentials in a private copy, retain the same route restrictions, and keep
+the test isolated from provider networks. Test inbound delivery to the
+extension and outbound authenticated delivery to the server separately. A
+server-generated tone should reach the softphone, and the softphone should
+transmit known audio back. Check decoded audio and per-call RTP in both
+directions; receiving a SIP answer alone is insufficient. Record these as
+simulated checks, not carrier interoperability results.
+
+For live checks, use the DID assigned to the inbound trunk and the outbound
+source/Caller ID permitted by DIDWW. The person testing supplies a calling
+number for inbound and a receiving number for outbound; these may differ.
+Confirm the requested direction is ready before each call.
+
+| Direction | Procedure | Success |
+|---|---|---|
+| Inbound | Call the assigned DID from the agreed calling number; answer at the intended registered extension | Correct extension rings, caller identity matches, both parties exchange intelligible speech, hangup closes the dialog |
+| Outbound | Dial the one approved receiving number from the authenticated extension; answer on that phone | Correct outbound trunk/authentication, permitted caller identity, intelligible speech both ways, clean hangup |
+
+Collect call-specific SIP answer/ACK/BYE, route selection and RTP evidence,
+with at least 50 RTP packets each way as a basic media-flow check. Packet
+counts complement audible confirmation; they do not prove speech quality.
+Keep real numbers, credentials and raw traces private. Record the exact
+RustPBX revision and configuration tested, and clearly distinguish simulated
+checks from actual provider calls. A configuration that merely parses, starts,
+or registers has **not** passed live interoperability verification.
+
+After testing, stop test calls, revoke temporary credentials/permissions,
+restore the intended dialing restrictions and remove private test copies.
+This minimal setup does not establish emergency calling, registration-based
+inbound delivery, TLS/SRTP, failover or production-capacity behavior; assess
+and test those separately.
+
 ## Queues (`[proxy.queues]`)
 Call distribution logic (ACD).
 

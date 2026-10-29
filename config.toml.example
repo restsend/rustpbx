@@ -255,6 +255,9 @@ media_proxy = "auto"
 generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
+# Standalone DIDWW voice setup: copy config/trunks/didww.toml.example to a
+# separate main config and follow docs/config/05-trunks-queues.md. Do not load
+# that complete configuration as a trunk include file.
 addons = ["acme", "wholesale"]
 
 # Step IVR session recovery when the external provider cannot continue.

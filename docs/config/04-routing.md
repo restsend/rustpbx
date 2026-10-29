@@ -54,7 +54,7 @@ Flattened into the route (not nested under `[proxy.routes.action]`).
 | `dest` | string | none | Target trunk or SIP URI (for `forward`) |
 | `select` | string | `"rr"` | Target selection: `"rr"` (round-robin), `"sequential"`, `"parallel"` |
 | `hash_key` | string | none | Consistent hashing key for destination selection |
-| `reject` | int | `403` | SIP status code for `reject` action |
+| `reject` | table | none | Rejection settings, e.g. `{ code = 403 }`; optional `reason` supplies a SIP reason phrase |
 | `queue` | string | none | Queue name for `queue` action |
 | `app` | string | none | Application name (e.g., `"ivr"`) |
 | `app_params` | table | none | Application-specific parameters (JSON) |

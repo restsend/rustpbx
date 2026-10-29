@@ -1,0 +1,106 @@
+# Standalone DIDWW voice example. Copy to didww.toml, replace every <...>
+# placeholder, then run: rustpbx --conf didww.toml
+# This .example file is deliberately excluded from trunks_files = ["*.toml"].
+# It is a complete main configuration, not a trunk include file.
+# See docs/config/05-trunks-queues.md#didww-static-inbound-and-outbound-voice.
+
+http_addr = "127.0.0.1:8080"
+database_url = "sqlite://didww.sqlite3"
+log_level = "info"
+external_ip = "<PBX_MEDIA_IP>"
+sip_external_ip = "<PBX_SIP_IP>"
+rtp_start_port = 20000
+rtp_end_port = 20099
+
+[console]
+base_path = "/console"
+allow_registration = false
+session_secret = "<CONSOLE_SESSION_SECRET>"
+
+[ami]
+allows = ["127.0.0.1"]
+
+[proxy]
+addr = "<PBX_BIND_IP>"
+udp_port = 5060
+realms = ["<PBX_REALM>"]
+modules = ["acl", "auth", "registrar", "call"]
+media_proxy = "all"
+generated_dir = "./config/didww"
+trunks_files = []
+routes_files = []
+addons = []
+# Repeat allow entries for EVERY current provider signaling range and the
+# trusted extension network. Do not use allow all on an exposed listener.
+acl_rules = [
+  "allow <DIDWW_SIGNALING_CIDR>",
+  "allow <EXTENSION_NETWORK_CIDR>",
+  "deny all",
+]
+
+[[proxy.user_backends]]
+type = "memory"
+users = [{ username = "<LOCAL_EXTENSION>", password = "<EXTENSION_SECRET>" }]
+
+[proxy.trunks.didww_in]
+dest = "sip:<DIDWW_SIGNALING_IP>:5060"
+direction = "inbound"
+inbound_hosts = ["<DIDWW_SIGNALING_CIDR>"]
+codec = ["PCMU", "PCMA"]
+media_mode = "force_transcode"
+register_enabled = false
+max_calls = 1
+
+[proxy.trunks.didww_out]
+dest = "sip:<DIDWW_OUTBOUND_HOST>:5060"
+direction = "outbound"
+transport = "udp"
+username = "<DIDWW_USERNAME>"
+password = "<DIDWW_PASSWORD>"
+codec = ["PCMU", "PCMA"]
+media_mode = "force_transcode"
+register_enabled = false
+max_calls = 1
+max_cps = 1
+
+[[proxy.routes]]
+name = "DIDWW inbound to extension"
+priority = 300
+source_trunks = ["didww_in"]
+action = "forward"
+select = "sequential"
+[proxy.routes.match]
+"to.user" = "^\\+?<INBOUND_DID_DIGITS>$"
+[proxy.routes.rewrite]
+"to.user" = "<LOCAL_EXTENSION>"
+"to.host" = "<PBX_REALM>"
+
+# Keep unmatched provider calls from falling through to the outbound route.
+[[proxy.routes]]
+name = "Reject other DIDWW inbound destinations"
+priority = 200
+source_trunks = ["didww_in"]
+action = "reject"
+reject = { code = 403 }
+[proxy.routes.match]
+"to.user" = ".*"
+
+[[proxy.routes]]
+name = "Extension to DIDWW approved destination"
+priority = 100
+action = "forward"
+dest = "didww_out"
+select = "sequential"
+[proxy.routes.match]
+"from.user" = "^<LOCAL_EXTENSION>$"
+"to.user" = "^\\+?<ALLOWED_DESTINATION_DIGITS>$"
+[proxy.routes.rewrite]
+"from.user" = "<AUTHORIZED_CALLER_ID_DIGITS>"
+
+[[proxy.routes]]
+name = "Reject unmatched calls"
+priority = -100
+action = "reject"
+reject = { code = 403 }
+[proxy.routes.match]
+"to.user" = ".*"
