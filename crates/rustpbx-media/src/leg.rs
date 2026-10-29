@@ -108,10 +108,9 @@ pub struct LegConfig {
     /// Advertise `a=ice-lite` in this leg's offer/answer SDP (rustrtc
     /// `enable_ice_lite`). The leg runs as a Controlled ICE-lite agent:
     /// it starts no connectivity checks and answers the remote full-ICE
-    /// peer's checks. Only applied in `TransportMode::Rtp` — WebRTC legs
-    /// always run full ICE and Srtp legs ignore the flag (rustrtc
-    /// limitation), so `build_rtc_config` forces it off for those modes.
-    /// Defaults to false.
+    /// peer's checks. Applied in `TransportMode::Rtp` and `Srtp` — WebRTC
+    /// legs always run full ICE, so `build_rtc_config` forces it off for
+    /// them. Defaults to false.
     pub enable_ice_lite: bool,
     /// Enable symmetric-RTP latching on plain RTP/SRTP legs: egress follows
     /// the address the remote peer actually sends from, instead of the
@@ -1440,10 +1439,9 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         .unwrap_or((None, None));
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
-        // ICE-lite only applies to plain-RTP legs; WebRTC must keep full ICE
-        // (browsers require connectivity checks + DTLS) and rustrtc only
-        // honors the flag on the Rtp path, so force it off for other modes.
-        enable_ice_lite: cfg.transport == TransportMode::Rtp && cfg.enable_ice_lite,
+        // ICE-lite applies to direct (RTP and SDES-SRTP) legs; WebRTC must
+        // keep full ICE (browsers require connectivity checks + DTLS).
+        enable_ice_lite: cfg.transport != TransportMode::WebRtc && cfg.enable_ice_lite,
         rtp_start_port,
         rtp_end_port,
         external_ip: cfg.external_ip.clone(),
@@ -2644,6 +2642,41 @@ mod ice_lite_tests {
         leg.stop();
     }
 
+    /// SDES-SRTP legs (Linphone over TLS) answer as ICE-lite too, so a
+    /// full-ICE phone can prove a path when its c= is unreachable (an IPv6
+    /// address to an IPv4-only server).
+    #[tokio::test]
+    async fn srtp_leg_answers_with_ice_lite_attributes() {
+        let cfg = LegConfig {
+            call_id: None,
+            transport: TransportMode::Srtp,
+            enable_ice_lite: true,
+            ..LegConfig::rtp_pcmu()
+        };
+        let leg = LegInner::new("ice-lite-srtp", &cfg, None).expect("leg");
+        let remote_offer = "v=0\r\n\
+            o=- 1 2 IN IP6 2001:db8::1\r\n\
+            s=-\r\n\
+            c=IN IP6 2001:db8::1\r\n\
+            t=0 0\r\n\
+            m=audio 4000 RTP/SAVP 0 101\r\n\
+            a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:a976SJLwniPcMiUP27gdcLYYcPm0bHZcghV84DsK\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=ice-ufrag:phon\r\n\
+            a=ice-pwd:phonepasswordphonepassword\r\n\
+            a=candidate:1 1 UDP 2130706431 127.0.0.1 4002 typ host\r\n\
+            a=sendrecv\r\n";
+        let answer = leg
+            .apply_sdp(remote_offer, SdpType::Offer)
+            .await
+            .expect("apply offer");
+        for attr in ["a=ice-lite", "a=ice-ufrag", "a=ice-pwd", "a=candidate", "a=crypto"] {
+            assert!(answer.contains(attr), "answer must have {attr}:\n{answer}");
+        }
+        leg.stop();
+    }
+
     /// The offer path carries the same attributes — outbound trunk legs with
     /// the flag on behave as ICE-lite toward their peer too.
     #[tokio::test]
@@ -2710,10 +2743,7 @@ mod ice_lite_tests {
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
         });
-        assert!(
-            !rtc_srtp.enable_ice_lite,
-            "SDES/Srtp legs are outside the ICE-lite path (rustrtc Rtp-only)"
-        );
+        assert!(rtc_srtp.enable_ice_lite, "SDES/Srtp legs honor the flag");
     }
 
     /// The `RtpTrackBuilder` path (used for callee legs and REFER offers)

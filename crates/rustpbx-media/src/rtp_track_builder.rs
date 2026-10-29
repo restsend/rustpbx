@@ -22,8 +22,8 @@ pub struct RtpTrackBuilder {
     probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
     /// Answer/offer SDP advertises `a=ice-lite` (rustrtc `enable_ice_lite`).
-    /// Only meaningful in Rtp mode — WebRTC legs always run full ICE and the
-    /// flag is ignored there (forced off in `build`).
+    /// Meaningful in Rtp and Srtp mode — WebRTC legs always run full ICE and
+    /// the flag is ignored there (forced off in `build`).
     enable_ice_lite: bool,
     cname: Option<String>,
 }
@@ -175,10 +175,10 @@ impl RtpTrackBuilder {
                 IceTransportPolicy::All
             },
             transport_mode: self.mode.clone(),
-            // ICE-lite is an RTP-mode-only feature in rustrtc; WebRTC legs must
+            // ICE-lite is for direct (RTP and SDES-SRTP) legs; WebRTC legs must
             // keep full ICE (browsers require connectivity checks + DTLS), so
             // the flag is forced off for that mode here.
-            enable_ice_lite: self.mode == TransportMode::Rtp && self.enable_ice_lite,
+            enable_ice_lite: self.mode != TransportMode::WebRtc && self.enable_ice_lite,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip,
