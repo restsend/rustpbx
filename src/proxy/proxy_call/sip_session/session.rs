@@ -3764,6 +3764,24 @@ impl SipSession {
         self.refresh_rwi_meta();
     }
 
+    /// Test seam: fire `on_call_ringing` for the whole session without
+    /// binding a leg. Production emission sites always bind the ringing leg
+    /// (see [`Self::fire_on_call_ringing_hooks`]); external test suites that
+    /// simulate the inbound-ringing stage without driving the SIP state
+    /// machine — notably the cc addon's agent race tests — use this to keep
+    /// their pre-leg-generation session-wide semantics.
+    #[cfg(feature = "test-support")]
+    pub async fn fire_session_ringing_hooks_for_test(&self, early_media: bool) {
+        if self.server.session_hooks.is_empty() {
+            return;
+        }
+        let ctx = self.session_hook_ctx();
+        for hook in self.server.session_hooks.iter() {
+            hook.on_call_ringing(&ctx, early_media).await;
+        }
+        self.refresh_rwi_meta();
+    }
+
     pub fn transferred_agent_context(
         &self,
         leg_id: &LegId,
