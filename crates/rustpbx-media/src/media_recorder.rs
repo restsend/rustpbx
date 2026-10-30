@@ -1146,13 +1146,15 @@ mod tests {
     async fn file_output_sample_rate_resamples_audio_and_preserves_duration() {
         use audio_codec::{CodecType, create_encoder};
         let dir = tempfile::tempdir().unwrap();
-        for source_codec in [CodecType::PCMU, CodecType::G722] {
+        for source_codec in [CodecType::PCMU, CodecType::G722, CodecType::Opus] {
             for rate in [8000, 16000, 48000] {
                 for channels in [1, 2] {
                     let path = dir.path().join(format!("{rate}-{channels}.wav"));
                     let mut source_profile = profile();
                     source_profile.audio.as_mut().unwrap().codec = source_codec;
                     source_profile.audio.as_mut().unwrap().payload_type = source_codec.payload_type();
+                    let rtp_clock_rate = if source_codec == CodecType::Opus { 48000 } else { 8000 };
+                    source_profile.audio.as_mut().unwrap().clock_rate = rtp_clock_rate;
                     let mut recorder = FileRecorder::new(
                         RecorderOption {
                             recorder_file: path.to_string_lossy().into_owned(),
@@ -1171,7 +1173,7 @@ mod tests {
                             (8000.0 * (t * 440.0 * std::f64::consts::TAU).sin()) as i16
                         }).collect();
                         let packet = RtpPacket::new(
-                            RtpHeader::new(source_codec.payload_type(), seq, seq as u32 * 160, 1234),
+                            RtpHeader::new(source_codec.payload_type(), seq, seq as u32 * (rtp_clock_rate / 50), 1234),
                             encoder.encode(&pcm).to_vec(),
                         );
                         recorder
@@ -1211,6 +1213,128 @@ mod tests {
                     if channels == 2 {
                         assert!(samples.chunks_exact(2).all(|s| s[0] == s[1]));
                     }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_mixed_rtp_clocks_keep_default_recording_synchronized() {
+        use audio_codec::{CodecType, create_decoder, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for caller_codec in [CodecType::Opus, CodecType::PCMU] {
+            for switch_codecs in [false, true] {
+                let path = dir
+                    .path()
+                    .join(format!("{caller_codec:?}-{switch_codecs}.wav"));
+                let mut caller_profile = profile();
+                caller_profile.audio.as_mut().unwrap().codec = caller_codec;
+                caller_profile.audio.as_mut().unwrap().payload_type = caller_codec.payload_type();
+                caller_profile.audio.as_mut().unwrap().clock_rate = if caller_codec == CodecType::Opus {
+                    48000
+                } else {
+                    8000
+                };
+                let mut recorder = FileRecorder::new(
+                    RecorderOption::new(path.to_string_lossy().into_owned()),
+                    caller_profile,
+                    2,
+                    false,
+                );
+                recorder.initialize().await.unwrap();
+                let mut encoders = [
+                    create_encoder(CodecType::Opus),
+                    create_encoder(CodecType::PCMU),
+                ];
+                for seq in 0..50u16 {
+                    for (side, channel) in [CaptureChannel::Caller, CaptureChannel::Callee]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let codec_index = side
+                            ^ usize::from(caller_codec == CodecType::PCMU)
+                            ^ usize::from(switch_codecs && seq >= 25);
+                        let codec = [CodecType::Opus, CodecType::PCMU][codec_index];
+                        let clock_rate = if codec == CodecType::Opus {
+                            48000
+                        } else {
+                            8000
+                        };
+                        let mut leg_profile = profile();
+                        let audio = leg_profile.audio.as_mut().unwrap();
+                        audio.codec = codec;
+                        audio.payload_type = codec.payload_type();
+                        audio.clock_rate = clock_rate;
+                        let encoder = &mut encoders[codec_index];
+                        let rate = encoder.sample_rate() as usize;
+                        let pcm: Vec<i16> = (0..rate / 50)
+                            .map(|i| {
+                                if (10..20).contains(&seq) || (35..45).contains(&seq) {
+                                    (8000.0
+                                        * (i as f64 * 440.0 * std::f64::consts::TAU / rate as f64)
+                                            .sin()) as i16
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        // The new codec has its own forward-jumping RTP origin.
+                        let origin = if switch_codecs && seq >= 25 {
+                            200_000
+                        } else {
+                            100_000
+                        };
+                        let packet = RtpPacket::new(
+                            RtpHeader::new(
+                                codec.payload_type(),
+                                seq,
+                                origin + seq as u32 * (clock_rate / 50),
+                                1234 + side as u32,
+                            ),
+                            encoder.encode(&pcm).to_vec(),
+                        );
+                        recorder
+                            .write_rtp_with_profile(
+                                channel,
+                                &packet,
+                                1_000_000 + seq as u64 * 20_000,
+                                None,
+                                Some(&leg_profile),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+                let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+                let wav = std::fs::read(path).unwrap();
+                assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
+                assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 8000);
+                let samples = create_decoder(CodecType::PCMU).decode(&wav[44..]);
+                let duration = samples.len() as f64 / 16000.0;
+                assert!(
+                    (duration - 1.0).abs() < 0.03,
+                    "{caller_codec:?} switch={switch_codecs}: WAV duration={duration}"
+                );
+                assert!((result.duration_secs - 1.0).abs() < 0.03);
+                for start in [1600usize, 5600] {
+                    let mut onsets = Vec::new();
+                    for side in 0..2 {
+                        let onset = (start..start + 240)
+                            .find(|i| samples[i * 2 + side].abs() > 2000)
+                            .expect("both legs must retain their tone markers");
+                        onsets.push(onset);
+                        for frame in 1..9 {
+                            assert!(
+                                (start + frame * 160..start + (frame + 1) * 160)
+                                    .any(|i| samples[i * 2 + side].abs() > 2000),
+                                "recording must not insert silent frames into a tone"
+                            );
+                        }
+                    }
+                    assert!(
+                        onsets[0].abs_diff(onsets[1]) < 240,
+                        "leg markers must stay within 30 ms: {onsets:?}"
+                    );
                 }
             }
         }

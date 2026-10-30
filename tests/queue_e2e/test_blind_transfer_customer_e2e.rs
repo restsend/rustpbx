@@ -450,6 +450,17 @@ async fn e2e_blind_transfer_customer_registered_extension() {
     assert!(transferred["event"]["transfer_target"]
         .as_str()
         .is_some_and(|t| t.contains("alice")));
+    // Queue-served call transferred out: the origin names the serving queue.
+    assert_eq!(
+        transferred["event"]["transfer_source"]["source_type"], "queue",
+        "transfer origin: {}",
+        transferred["event"]
+    );
+    assert_eq!(
+        transferred["event"]["transfer_source"]["name"], SOURCE_QUEUE,
+        "transfer origin queue: {}",
+        transferred["event"]
+    );
 
     target.hangup(&target_dialog).await.unwrap();
     wait_specific_terminated(
@@ -507,6 +518,18 @@ async fn e2e_blind_transfer_customer_routed_queue() {
     assert!(transferred["event"]["transfer_target"]
         .as_str()
         .is_some_and(|t| t.contains(ROUTED_QUEUE_NUMBER)));
+    // Queue-served call handed off in-session: the origin names the serving
+    // (source) queue, not the routed destination.
+    assert_eq!(
+        transferred["event"]["transfer_source"]["source_type"], "queue",
+        "transfer origin: {}",
+        transferred["event"]
+    );
+    assert_eq!(
+        transferred["event"]["transfer_source"]["name"], SOURCE_QUEUE,
+        "transfer origin queue: {}",
+        transferred["event"]
+    );
 
     // The customer remains on the SAME session (QueueApp serves them); the
     // offline member dial fails in the background without ending the call.
@@ -592,6 +615,18 @@ async fn e2e_blind_transfer_customer_trunk_forward() {
     assert!(transferred["event"]["transfer_target"]
         .as_str()
         .is_some_and(|t| t.contains(TRUNK_TARGET)));
+    // Queue-served call forwarded to a trunk: the origin still names the
+    // serving queue.
+    assert_eq!(
+        transferred["event"]["transfer_source"]["source_type"], "queue",
+        "transfer origin: {}",
+        transferred["event"]
+    );
+    assert_eq!(
+        transferred["event"]["transfer_source"]["name"], SOURCE_QUEUE,
+        "transfer origin queue: {}",
+        transferred["event"]
+    );
 
     trunk.hangup(&trunk_dialog).await.unwrap();
     wait_specific_terminated(

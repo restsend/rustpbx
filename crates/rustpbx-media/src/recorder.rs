@@ -130,13 +130,13 @@ pub(crate) struct Recorder {
     capture_clock: Option<CaptureClock>,
 
     /// Per-leg RTP timeline anchor: (first rtp_timestamp, absolute position it
-    /// was written at). Intra-leg continuity is derived from RTP timestamp
-    /// deltas — a sender pacing slightly slower than real time (debug builds,
+    /// was written at, source RTP clock rate). Intra-leg continuity is derived
+    /// from RTP timestamp deltas — a sender pacing slightly slower than real time (debug builds,
     /// loaded hosts) still lands packets contiguously instead of being diluted
     /// with wall-clock silence gaps. The wall capture clock only anchors each
     /// leg's first packet; backward timeline resets re-anchor at the tail.
-    rtp_anchor_a: Option<(u32, u32)>,
-    rtp_anchor_b: Option<(u32, u32)>,
+    rtp_anchor_a: Option<(u32, u32, u32)>,
+    rtp_anchor_b: Option<(u32, u32, u32)>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
@@ -287,11 +287,18 @@ impl Recorder {
             Some(timestamp)
         };
 
-        let (profile_audio_pt, profile_audio_codec, profile_dtmf_pt, profile_dtmf_clock_rate) = {
+        let (
+            profile_audio_pt,
+            profile_audio_codec,
+            profile_audio_clock_rate,
+            profile_dtmf_pt,
+            profile_dtmf_clock_rate,
+        ) = {
             let profile = profile.unwrap_or(&self.profile);
             (
                 profile.audio.as_ref().map(|codec| codec.payload_type),
                 profile.audio.as_ref().map(|codec| codec.codec),
+                profile.audio.as_ref().map(|codec| codec.clock_rate),
                 profile.dtmf.as_ref().map(|codec| codec.payload_type),
                 profile.dtmf.as_ref().map(|codec| codec.clock_rate),
             )
@@ -432,12 +439,17 @@ impl Recorder {
             .into();
         }
 
-        // Live RTP capture leaves `clock_rate` unset; fall back to the
-        // payload codec's RTP clock (48 kHz for Opus).
-        let rtp_clock_rate = match frame.clock_rate {
-            0 => decoder_type.clock_rate(),
-            rate => rate,
-        };
+        let rtp_clock_rate = profile_audio_clock_rate
+            .filter(|rate| *rate > 0 && profile_audio_codec == Some(decoder_type))
+            .or_else(|| (frame.clock_rate > 0).then_some(frame.clock_rate))
+            .unwrap_or_else(|| {
+                // G.722 decodes at 16 kHz but uses an 8 kHz RTP clock.
+                if decoder_type == CodecType::G722 {
+                    8000
+                } else {
+                    decoder_type.samplerate()
+                }
+            });
         let absolute_ts =
             self.rtp_anchored_position(leg, frame.rtp_timestamp, rtp_clock_rate, capture_ts);
         self.insert_audio_block(leg, absolute_ts, encoded);
@@ -490,9 +502,6 @@ impl Recorder {
     /// contiguously — the proxy's wall clock alone would interleave silence
     /// into every such gap. [`Self::leg_end_ts`] guards backward writes (e.g.
     /// an SSRC switch resetting a timeline mid-call).
-    ///
-    /// RTP deltas tick at the payload's RTP clock (48 kHz for Opus), so they
-    /// are rescaled to the recording sample rate before being applied.
     fn rtp_anchored_position(
         &mut self,
         leg: Leg,
@@ -500,18 +509,22 @@ impl Recorder {
         rtp_clock_rate: u32,
         capture_ts: Option<u32>,
     ) -> u32 {
-        let rtp_clock_rate = rtp_clock_rate.max(1);
         let anchor = match leg {
             Leg::A => self.rtp_anchor_a,
             Leg::B => self.rtp_anchor_b,
         };
-        let Some((anchor_ts, anchor_pos)) = anchor else {
+        let Some((anchor_ts, anchor_pos, _)) = anchor.filter(|(_, _, rate)| *rate == rtp_clock_rate)
+        else {
+            // Codec/clock changes start a new RTP timeline at the capture position.
             let pos = self.recording_position(leg, capture_ts);
-            self.set_rtp_anchor(leg, rtp_timestamp, pos);
+            self.set_rtp_anchor(leg, rtp_timestamp, pos, rtp_clock_rate);
             return pos;
         };
-        let delta = rtp_timestamp.wrapping_sub(anchor_ts);
-        if delta > rtp_clock_rate.saturating_mul(600) {
+        // RTP ticks and output samples can have different rates (e.g. Opus -> PCMU).
+        let delta = (rtp_timestamp.wrapping_sub(anchor_ts) as u64 * self.sample_rate as u64
+            / rtp_clock_rate as u64)
+            .min(u32::MAX as u64) as u32;
+        if delta > self.sample_rate * 600 {
             // Timestamps jumped backwards (the fastpath bridge rewrites RTP
             // timelines onto a continuous output clock; unbridging on hold or
             // an SSRC switch resets to the sender's own small timestamps, and
@@ -520,18 +533,17 @@ impl Recorder {
             // the buffer tail instead of misplacing the stream billions of
             // samples ahead.
             let pos = self.leg_end_ts(leg);
-            self.set_rtp_anchor(leg, rtp_timestamp, pos);
+            self.set_rtp_anchor(leg, rtp_timestamp, pos, rtp_clock_rate);
             return pos;
         }
-        let delta = (delta as u64 * self.sample_rate as u64 / rtp_clock_rate as u64) as u32;
         let rtp_pos = anchor_pos.wrapping_add(delta);
         self.leg_end_ts(leg).max(rtp_pos)
     }
 
-    fn set_rtp_anchor(&mut self, leg: Leg, rtp_timestamp: u32, pos: u32) {
+    fn set_rtp_anchor(&mut self, leg: Leg, rtp_timestamp: u32, pos: u32, rtp_clock_rate: u32) {
         match leg {
-            Leg::A => self.rtp_anchor_a = Some((rtp_timestamp, pos)),
-            Leg::B => self.rtp_anchor_b = Some((rtp_timestamp, pos)),
+            Leg::A => self.rtp_anchor_a = Some((rtp_timestamp, pos, rtp_clock_rate)),
+            Leg::B => self.rtp_anchor_b = Some((rtp_timestamp, pos, rtp_clock_rate)),
         }
     }
 

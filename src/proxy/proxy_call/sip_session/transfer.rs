@@ -1103,6 +1103,30 @@ impl SipSession {
         g.meta_store.insert(call_id, meta);
     }
 
+    /// Keep-first variant of [`Self::stash_transfer_source`]: fills the
+    /// CallMetaStore entry only when no transfer source has been captured
+    /// yet. Late entrants (CTI consult `LegAdd`, conference REFER join)
+    /// snapshot AFTER the session has started mutating (customer held,
+    /// transfer-in-progress flags), which can degrade the origin the
+    /// blind-transfer path deliberately captured BEFORE those mutations —
+    /// so they must never overwrite an existing stash.
+    pub(super) fn stash_transfer_source_if_unset(&self, source: Option<crate::rwi::TransferSource>) {
+        let Some(source) = source else { return };
+        let Some(ref gw) = self.server.rwi_gateway else {
+            return;
+        };
+        let already_set = {
+            let g = gw.read();
+            let call_id = self.context.session_id.to_string();
+            g.meta_store
+                .get_sync(&call_id)
+                .is_some_and(|m| m.transfer_source.is_some())
+        };
+        if !already_set {
+            self.stash_transfer_source(Some(source));
+        }
+    }
+
     async fn handle_blind_transfer_inner(
         &mut self,
         leg_id: LegId,

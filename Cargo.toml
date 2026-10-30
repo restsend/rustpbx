@@ -126,7 +126,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.7.11"
 audio-codec = "0.4.13"
-rustrtc = "0.4.13"
+rustrtc = "0.4.17"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -237,6 +237,10 @@ name = "e2e_core"
 
 [[test]]
 name = "step_ivr_trace_e2e"
+
+[[test]]
+name = "queue_e2e"
+path = "src/addons/queue/tests/e2e.rs"
 
 [dev-dependencies]
 portpicker = "0.1.1"

@@ -152,6 +152,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 | `agent_id` | Option\<String\> | CC 坐席 ID —— **仅当呼叫实际涉及已注册 CC 坐席时**出现 |
 | `agent_name` | Option\<String\> | CC 坐席显示名（与 `agent_id` 同条件） |
 | `queue_id` | Option\<String\> | 服务该呼叫的队列（如有） |
+| `transfer_source` | Option\<Object\> | **转接流来源标记** —— 仅当该呼叫已进入转接流（盲转/咨询/三方）时出现，见下节 |
 | `root` | Option\<Object\> | 根呼叫标识（嵌套对象，见下） |
 
 **`root`（根呼叫）** — 标识当前呼叫的根（跨转接保持不变）：
@@ -184,6 +185,37 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 > 配套：queue 派发 / consult 的 agent 腿 INVITE 以根 `session_id` 作为 SIP
 > Call-ID（重拨为 `{session_id}-r{n}`），详见 `docs/session_id_correlation.md`。
 > `media_play_*` 事件暂不携带 `leg_role`。
+
+### transfer_source（转接流来源标记，全事件注入）
+
+`transfer_source` 是嵌套对象（同 `call_transferred` 的字段，见该节表格）。**从转
+接意图发生（stash）那一刻起，该呼叫所有带 `call_id` 的事件都自动携带它**——不只
+`call_transferred`：转接目标腿/咨询腿的 `call_ringing` / `call_answered` /
+`call_held` / `call_hangup`，三方合并的 `conference_*`，乃至 `queue_*` 都带。
+呼叫从未进入转接流时字段**整个缺席**（默认 none，不是 null）。
+
+注入时机与写点：
+
+| 流程 | 首次携带时机 | 内容 |
+|------|--------------|------|
+| 盲转（设备 REFER / CTI / Replaces 接管） | REFER/命令受理时 | 快照于 session 变更前：IVR 节点 / 服务队列 / 转接坐席 |
+| 咨询转（CTI `/consult`） | consult 腿拨出前 | 转接坐席（keep-first，不覆盖更早快照） |
+| 咨询转（设备自拨 INVITE，UUI `leg=consult/transfer`） | 咨询腿 session 建立 | `agent` + 拨叫方（From user，即转接坐席）；同节点同时回填根会话 |
+| 三方合并（CTI consultmerge / REFER 进会场） | 进入转接流的时刻 | 同咨询转 |
+
+**子腿继承**：child call_id 自身 meta 无来源时，enrichment 回退借用根会话的
+`transfer_source`——同一逻辑呼叫的所有腿报告一致的转接来源。事件自身显式携带
+的 `transfer_source`（`call_transferred`）优先，不被 enrichment 覆盖。
+
+**消费者区分流程**（restsend-call 单步 / 多步 / 会议）：
+
+- 单步盲转：原 `call_id` 的事件流从受理时刻起带 `transfer_source`；
+- 多步/咨询：咨询腿事件带 `transfer_source`（独立 call_id 时靠它关联逻辑呼叫），
+  腿级事件另有 `leg_role=consult`；
+- 三方/会议：`conference_*` 族事件与相关 `call_*` 均带 `transfer_source`。
+
+集群已知限制：`transfer_source` 不跨节点传播（各节点 CallMetaStore 独立）；
+agent 节点的 child 腿事件靠 `leg_role` + 根 `call_id` 关联。
 
 ### user_data（会话用户数据自动注入）
 
@@ -525,7 +557,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | `call_id` | String | 呼叫标识 |
 | `transfer_target` | Option\<String\> | 原始转接目标字符串（如 `queue:queue-name?target=skillgroup:tech-support_G`，或路由表兜转的裸号码）。在 SIP REFER Replaces 接管等场景下为 `None`。 |
 | `transfer_target_type` | Option\<String\> | 解析后的目标类型：`queue` \| `ivr` \| `route_point` \| `voicemail` \| `conference` \| `bridge` \| `sip`。未知时省略。 |
-| `transfer_source` | Option\<Object\> | 转接时捕获的 IVR 流转来源（仅 `call_transferred`），嵌套对象，见下。 |
+| `transfer_source` | Option\<Object\> | 转接流来源。`call_transferred` 显式携带（转接完成时刻的来源）；**其余 call_* 事件经扁平化上下文注入**（stash 之后全程携带），字段见 §4 transfer_source 小节。 |
 | *+ctx* | | 扁平化上下文 |
 
 `transfer_source` 嵌套字段（均可选）：

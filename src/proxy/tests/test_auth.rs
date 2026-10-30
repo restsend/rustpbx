@@ -509,6 +509,7 @@ async fn test_guest_call_allowed_extension() {
         database: None,
         user_backend: Box::new(user_backend),
         auth_backend: Vec::new(),
+        registration_response_hook: None,
         call_router: None,
         locator,
         callrecord_sender: None,

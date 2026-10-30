@@ -245,6 +245,18 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
             "only successful attended REFER emits one transfer event");
         if let Some(event) = transfers.first() {
             assert_eq!(event.payload["call_id"], a_owner.session_id());
+            // Attended REFER completion: the stashed origin (the
+            // transferring party) rides the terminal event.
+            assert_eq!(
+                event.payload["transfer_source"]["source_type"], "agent",
+                "transfer origin: {}",
+                event.payload
+            );
+            assert_eq!(
+                event.payload["transfer_source"]["agent_id"], "bob",
+                "transfer origin agent: {}",
+                event.payload
+            );
         }
     }
     let room = server.server_ref.conference_server.list_conferences_detail().await.into_iter()

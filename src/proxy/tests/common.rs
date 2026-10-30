@@ -152,6 +152,7 @@ async fn create_test_server_with_dependencies(
         database: None,
         user_backend,
         auth_backend: Vec::new(),
+        registration_response_hook: None,
         call_router: None,
         locator,
         callrecord_sender: None,

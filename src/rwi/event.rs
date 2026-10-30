@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::rwi::proto::EventCallContext;
 
@@ -792,7 +792,7 @@ rwi_event!(DbWriteFailed, "db_write_failed", option: call_id);
 /// Where a transfer originated from — the flow position of the call at the
 /// moment it was transferred (IVR / queue / agent / SIP REFER), so consumers
 /// can reconstruct the call path from RWI events alone.
-#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TransferSource {
     /// `ivr` | `queue` | `agent` | `refer` | `external`
     pub source_type: String,

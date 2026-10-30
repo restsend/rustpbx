@@ -647,6 +647,18 @@ async fn test_inbound_refer_to_queue_route() {
         "transfer_target must retain the original bare number: {}",
         transferred["event"]["transfer_target"]
     );
+    // The REFER hand-off stashed the flow origin at transfer time: the
+    // transferring party (bob) is attributed on the terminal event.
+    assert_eq!(
+        transferred["event"]["transfer_source"]["source_type"], "agent",
+        "transfer flow origin must ride the event: {}",
+        transferred["event"]
+    );
+    assert_eq!(
+        transferred["event"]["transfer_source"]["agent_id"], "bob",
+        "the transferring party is bob: {}",
+        transferred["event"]
+    );
 
     let joined = wait_webhook_event(&capture, "queue_joined", Duration::from_secs(5))
         .await
