@@ -7,6 +7,7 @@ use tokio::time::sleep;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_helpers::make_sdp;
 use crate::common::test_ua::TestUaEvent;
+use crate::common::wait::wait_until;
 
 /// restend private convention: the local 3-way merge edges (a pure
 /// client-side conference the server does not know about) are announced by
@@ -19,8 +20,8 @@ async fn test_consult_state_marker_update_relays_to_peer_leg() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
     let alice = Arc::new(server.create_ua("alice").await?);
+    // create_ua returns once the UA is registered.
     let bob = server.create_ua("bob").await?;
-    sleep(Duration::from_millis(200)).await;
 
     let sdp = make_sdp(40000);
 
@@ -31,7 +32,7 @@ async fn test_consult_state_marker_update_relays_to_peer_leg() -> Result<()> {
     });
 
     let mut bob_dialog_id = None;
-    for _ in 0..50 {
+    for _ in 0..100 {
         let events = bob.process_dialog_events().await?;
         for event in events {
             if let TestUaEvent::IncomingCall(id, _) = event {
@@ -43,7 +44,7 @@ async fn test_consult_state_marker_update_relays_to_peer_leg() -> Result<()> {
         if bob_dialog_id.is_some() {
             break;
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     assert!(bob_dialog_id.is_some(), "Call should ring bob");
 
@@ -113,7 +114,19 @@ async fn test_consult_state_marker_update_relays_to_peer_leg() -> Result<()> {
 
     // Alice hangs up to end the call.
     alice.hangup(&alice_dialog_id).await?;
-    sleep(Duration::from_millis(300)).await;
+    let bob = &bob;
+    wait_until(Duration::from_secs(5), || async move {
+        bob.process_dialog_events()
+            .await
+            .map(|events| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, TestUaEvent::CallTerminated(_)))
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .expect("hangup must reach bob");
     server.stop();
     Ok(())
 }
