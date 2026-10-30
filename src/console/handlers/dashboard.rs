@@ -49,14 +49,11 @@ pub async fn dashboard(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    // Render with an empty payload; the page loads the real one from
+    // /dashboard/data. The CDR aggregates can be slow on large tables and
+    // must not hold up the page.
     let range = resolve_time_range(None);
-    let payload = match build_dashboard_payload(&state, &range).await {
-        Ok(payload) => payload,
-        Err(err) => {
-            warn!(error = %err, "failed to build dashboard payload");
-            DashboardPayload::empty(range)
-        }
-    };
+    let payload = DashboardPayload::empty(range);
 
     let current_user = state.build_current_user_ctx(&user).await;
 

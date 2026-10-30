@@ -586,19 +586,27 @@
             renderActiveCalls(payload.active_calls);
         }
 
+        // The server renders an empty payload; the real numbers load here so
+        // slow CDR aggregates never hold up the page.
         applyPayload(bootstrap.payload);
 
-        if (rangeSelect && endpoint) {
-            rangeSelect.addEventListener('change', async (event) => {
-                const key = event.target.value;
-                try {
-                    const data = await apiGet(`${endpoint}?range=${encodeURIComponent(key)}`);
-                    applyPayload(data);
-                } catch (err) {
-                    console.error('Failed to refresh dashboard data', err);
-                }
-            });
+        let latestRequest = 0;
+        async function loadPayload(key) {
+            if (!endpoint) return;
+            const requestId = ++latestRequest;
+            try {
+                const data = await apiGet(`${endpoint}?range=${encodeURIComponent(key)}`);
+                // A slow earlier range must not overwrite a newer selection.
+                if (requestId === latestRequest) applyPayload(data);
+            } catch (err) {
+                console.error('Failed to refresh dashboard data', err);
+            }
         }
+
+        if (rangeSelect) {
+            rangeSelect.addEventListener('change', (event) => loadPayload(event.target.value));
+        }
+        loadPayload(rangeSelect ? rangeSelect.value : (bootstrap.payload?.range?.key || ''));
     }
 
     document.addEventListener('alpine:init', () => {
