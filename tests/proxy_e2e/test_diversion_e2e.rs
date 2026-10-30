@@ -264,8 +264,8 @@ async fn call_forward_on_busy_appends_diversion_hop() -> Result<()> {
     );
 
     let alice = Arc::new(server.create_ua("alice").await?);
-    let mut bob = server.create_ua("bob").await?;
-    let mut charlie = server.create_ua("charlie").await?;
+    let bob = server.create_ua("bob").await?;
+    let charlie = server.create_ua("charlie").await?;
 
     let caller_handle = rustpbx::utils::spawn({
         let alice = alice.clone();

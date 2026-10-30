@@ -309,22 +309,6 @@ pub fn generate_wav_from_packets_ex(
     generate_wav_from_packets_with_map_ex(packets, &HashMap::new(), force_pcm)
 }
 
-pub fn generate_wav_to_writer_ex<W: Write + Seek>(
-    packets: &[(i32, u64, Vec<u8>)],
-    force_pcm: bool,
-    writer: &mut W,
-) -> Result<u64> {
-    generate_wav_to_writer(
-        "",
-        packets,
-        &HashMap::new(),
-        &HashMap::new(),
-        force_pcm,
-        false,
-        writer,
-    )
-}
-
 pub(crate) fn generate_wav_from_packets_with_map_ex(
     packets: &[(i32, u64, Vec<u8>)],
     payload_map: &PayloadTypeMap,

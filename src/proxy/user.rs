@@ -100,34 +100,6 @@ impl MemoryUserBackend {
         Ok(())
     }
 
-    pub async fn update_user_password(
-        &self,
-        username: &str,
-        realm: Option<&str>,
-        password: &str,
-    ) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
-        if let Some(mut user) = self.users.get_mut(&identifier) {
-            user.password = Some(password.to_string());
-        }
-        Ok(())
-    }
-
-    pub async fn enable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
-        if let Some(mut user) = self.users.get_mut(&identifier) {
-            user.enabled = true;
-        }
-        Ok(())
-    }
-
-    pub async fn disable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
-        if let Some(mut user) = self.users.get_mut(&identifier) {
-            user.enabled = false;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

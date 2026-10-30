@@ -134,19 +134,6 @@ impl AddonRegistry {
         Ok(())
     }
 
-    pub async fn seed_all_fixtures(&self, state: AppState) -> anyhow::Result<()> {
-        let config = state.config();
-        for addon in &self.addons {
-            if !self.is_enabled(addon.id(), config) {
-                continue;
-            }
-            if let Err(e) = addon.seed_fixtures(state.clone()).await {
-                tracing::error!("Failed to seed fixtures for addon {}: {}", addon.name(), e);
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_routers(&self, state: AppState) -> axum::Router {
         let config = state.config();
         let mut router = axum::Router::new();
@@ -174,21 +161,6 @@ impl AddonRegistry {
             }
         }
         router
-    }
-}
-
-/// Merge every compiled-in addon's error catalog into `reg`.
-///
-/// Prefer [`AddonRegistry::merge_error_catalogs_into`] when a live registry is
-/// available (app startup). This free function remains for tests that cannot
-/// construct a full registry.
-#[cfg(any(feature = "addon-wholesale", test))]
-pub fn merge_compiled_addon_error_catalogs(reg: &mut crate::call_errors::CallErrRegistry) {
-    let _ = &reg;
-    #[cfg(feature = "addon-wholesale")]
-    {
-        use super::Addon;
-        reg.merge_slice(super::wholesale::WholesaleAddon::new().error_catalog());
     }
 }
 
@@ -421,6 +393,27 @@ impl AddonRegistry {
                 reg.merge_slice(cat);
             }
         }
+    }
+
+    /// Apply a shared-queue priority bump through the addon that owns the
+    /// shared-queue table (first addon reporting an update wins). Callers
+    /// gate on the gateway's injected shared-queue DB, so reaching here with
+    /// no addon answering simply means the row was not updated.
+    pub async fn shared_queue_update_priority(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        call_id: &str,
+        priority: i32,
+    ) -> bool {
+        for addon in &self.addons {
+            if addon
+                .shared_queue_update_priority(db, call_id, priority)
+                .await
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Collect update-check phone-home params from all addons.

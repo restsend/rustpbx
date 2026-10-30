@@ -9,7 +9,7 @@
 //! 2. g729-sys 0.2.1: the G.729 decoder must survive truncated / garbage
 //!    bit-streams without panicking.
 
-use audio_codec::{create_decoder, create_encoder, BoxedResampler, CodecType, Decoder, Encoder};
+use audio_codec::{create_decoder, create_encoder, BoxedResampler, CodecType, Encoder};
 
 /// Deterministic 440 Hz sine at `rate`, phase-continuous across chunks via
 /// `start_index`.

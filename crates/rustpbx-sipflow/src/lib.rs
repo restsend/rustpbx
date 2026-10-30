@@ -11,9 +11,7 @@ pub mod sqlite_metrics;
 pub mod storage;
 pub mod wav_utils;
 
-use anyhow::Result;
 use bytes::Bytes;
-use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 pub use backend::{SipFlowBackend, create_backend};
@@ -94,44 +92,12 @@ fn default_msg_type() -> SipFlowMsgType {
 }
 
 impl SipFlowItem {
-    pub fn message_text(&self) -> Option<String> {
-        if self.msg_type == SipFlowMsgType::Sip && !self.payload.is_empty() {
-            Some(String::from_utf8_lossy(&self.payload).to_string())
-        } else {
-            None
-        }
-    }
 }
 
 pub struct SipFlowQuery {
-    backend: Box<dyn SipFlowBackend>,
 }
 
 impl SipFlowQuery {
-    pub fn new(backend: Box<dyn SipFlowBackend>) -> Self {
-        Self { backend }
-    }
-
-    pub async fn get_flow(
-        &self,
-        call_id: &str,
-        start_time: DateTime<Local>,
-        end_time: DateTime<Local>,
-    ) -> Result<Vec<SipFlowItem>> {
-        self.backend.query_flow(call_id, start_time, end_time).await
-    }
-
-    pub async fn get_media(
-        &self,
-        call_id: &str,
-        start_time: DateTime<Local>,
-        end_time: DateTime<Local>,
-    ) -> Result<Vec<u8>> {
-        self.backend
-            .query_media(call_id, start_time, end_time)
-            .await
-    }
-
     pub fn export_jsonl(flow: &[SipFlowItem]) -> String {
         flow.iter()
             .filter_map(|item| {

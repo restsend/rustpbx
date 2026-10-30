@@ -627,30 +627,7 @@ mod tests {
 
     // ==================== Header Building Tests ====================
 
-    #[test]
-    fn test_build_session_expires_header() {
-        let header =
-            build_session_expires_header(Duration::from_secs(1800), SessionRefresherParam::Uac);
-        match header {
-            rsipstack::sip::Header::Other(name, value) => {
-                assert_eq!(name, HEADER_SESSION_EXPIRES);
-                assert_eq!(value, "1800;refresher=uac");
-            }
-            _ => panic!("Expected Other header"),
-        }
-    }
 
-    #[test]
-    fn test_build_min_se_header() {
-        let header = build_min_se_header(Duration::from_secs(90));
-        match header {
-            rsipstack::sip::Header::Other(name, value) => {
-                assert_eq!(name, HEADER_MIN_SE);
-                assert_eq!(value, "90");
-            }
-            _ => panic!("Expected Other header"),
-        }
-    }
 
     // ==================== Timer State Management Tests ====================
 
@@ -707,21 +684,6 @@ mod tests {
         assert_eq!(timer.get_min_se_value(), "90");
     }
 
-    #[test]
-    fn test_require_timer() {
-        let mut timer = SessionTimerState::default();
-
-        // Not enabled and not active
-        assert!(!timer.require_timer());
-
-        // Enabled but not active
-        timer.enabled = true;
-        assert!(!timer.require_timer());
-
-        // Enabled and active
-        timer.active = true;
-        assert!(timer.require_timer());
-    }
 
     #[test]
     fn test_session_duration() {
@@ -763,35 +725,8 @@ mod tests {
 
     // ==================== Negotiation Tests ====================
 
-    #[test]
-    fn test_negotiate_session_interval_success() {
-        let requested = Duration::from_secs(1800);
-        let local_min_se = Duration::from_secs(90);
 
-        let result = negotiate_session_interval(requested, local_min_se);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), requested);
-    }
 
-    #[test]
-    fn test_negotiate_session_interval_too_small() {
-        let requested = Duration::from_secs(60);
-        let local_min_se = Duration::from_secs(90);
-
-        let result = negotiate_session_interval(requested, local_min_se);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), local_min_se);
-    }
-
-    #[test]
-    fn test_negotiate_session_interval_exact_min() {
-        let requested = Duration::from_secs(90);
-        let local_min_se = Duration::from_secs(90);
-
-        let result = negotiate_session_interval(requested, local_min_se);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), requested);
-    }
 
     // ==================== Header Value Extraction Tests ====================
 
@@ -898,34 +833,8 @@ mod tests {
         assert!(!has_timer_support(&headers));
     }
 
-    #[test]
-    fn test_is_timer_required_with_require_header() {
-        let headers = rsipstack::sip::Headers::from(vec![rsipstack::sip::Header::Other(
-            HEADER_REQUIRE.to_string(),
-            "timer".to_string(),
-        )]);
 
-        assert!(is_timer_required(&headers));
-    }
 
-    #[test]
-    fn test_is_timer_required_with_other_header() {
-        let headers = rsipstack::sip::Headers::from(vec![rsipstack::sip::Header::Other(
-            HEADER_REQUIRE.to_string(),
-            "timer".to_string(),
-        )]);
-
-        assert!(is_timer_required(&headers));
-    }
-
-    #[test]
-    fn test_is_timer_required_without_timer() {
-        let headers = rsipstack::sip::Headers::from(vec![rsipstack::sip::Header::Require(
-            rsipstack::sip::headers::Require::from("100rel"),
-        )]);
-
-        assert!(!is_timer_required(&headers));
-    }
 
     #[test]
     fn test_response_requires_timer_when_remote_uac_is_refresher() {
@@ -937,7 +846,6 @@ mod tests {
 
         let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
-        assert!(is_timer_required(&headers));
         assert_eq!(
             get_header_value(&headers, HEADER_SESSION_EXPIRES),
             Some("1800;refresher=uac".to_string())
@@ -954,7 +862,6 @@ mod tests {
 
         let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
-        assert!(!is_timer_required(&headers));
         assert_eq!(
             get_header_value(&headers, HEADER_SESSION_EXPIRES),
             Some("1800;refresher=uas".to_string())

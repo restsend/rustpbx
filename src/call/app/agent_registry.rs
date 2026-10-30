@@ -83,37 +83,6 @@ impl PresenceState {
         }
     }
 
-    /// Parse state from string.
-    /// Accepts `"away"`, `"away:detail"`, and legacy `"custom:detail"`.
-    pub fn parse_state(s: &str) -> Option<Self> {
-        match s {
-            "offline" => Some(PresenceState::Offline),
-            "away" => Some(PresenceState::Away(String::new())),
-            "idle" | "available" => Some(PresenceState::Idle),
-            "ringing" => Some(PresenceState::Ringing { call_id: None }),
-            "busy" => Some(PresenceState::Busy { call_id: None }),
-            "wrapup" => Some(PresenceState::Wrapup { call_id: None }),
-            "dnd" => Some(PresenceState::Dnd),
-            _ => {
-                if let Some(detail) = s.strip_prefix("away:") {
-                    if !detail.is_empty() {
-                        Some(PresenceState::Away(detail.to_string()))
-                    } else {
-                        Some(PresenceState::Away(String::new()))
-                    }
-                } else if let Some(detail) = s.strip_prefix("custom:") {
-                    // Backward compatibility: "custom:lunch" → Away("lunch")
-                    if !detail.is_empty() {
-                        Some(PresenceState::Away(detail.to_string()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
 }
 
 // ===================================================================

@@ -46,7 +46,6 @@ exclude = [
 ]
 
 [features]
-cross = []
 # Expose the in-process E2E testing infrastructure (`proxy::tests`:
 # TestUa / E2eTestServer / rtp_utils / test_helpers) to downstream crates so
 # they can drive real SIP+RTP flows against their own server assembly.
@@ -237,10 +236,6 @@ name = "e2e_core"
 
 [[test]]
 name = "step_ivr_trace_e2e"
-
-[[test]]
-name = "queue_e2e"
-path = "src/addons/queue/tests/e2e.rs"
 
 [dev-dependencies]
 portpicker = "0.1.1"

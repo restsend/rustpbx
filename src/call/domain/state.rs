@@ -136,10 +136,6 @@ impl MediaRuntimeProfile {
         self.supports_supervisor_media
     }
 
-    pub fn can_inject(&self) -> bool {
-        self.supports_media_injection
-    }
-
     /// Create a degraded profile (for bypass mode)
     pub fn degraded() -> Self {
         Self::from_media_path(MediaPathMode::Bypass)
@@ -167,7 +163,6 @@ mod tests {
         let profile = MediaRuntimeProfile::from_media_path(MediaPathMode::Anchored);
         assert!(profile.can_record());
         assert!(profile.can_supervise());
-        assert!(profile.can_inject());
     }
 
     #[test]
@@ -175,6 +170,5 @@ mod tests {
         let profile = MediaRuntimeProfile::from_media_path(MediaPathMode::Bypass);
         assert!(!profile.can_record());
         assert!(!profile.can_supervise());
-        assert!(!profile.can_inject());
     }
 }

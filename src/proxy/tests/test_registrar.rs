@@ -92,7 +92,7 @@ async fn test_registrar_register_success() {
     // Create test server with user backend and locator
     let (server_inner, config) = create_test_server().await;
 
-    let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
+    let _events = server_inner.locator_events.as_ref().unwrap().subscribe();
 
     // Create REGISTER request
     let request = create_register_request("alice", "rustpbx.com", Some(50));

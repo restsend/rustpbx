@@ -130,41 +130,6 @@ pub fn serialize_queue_entry(entry: &QueueExportEntry) -> Result<String> {
         .with_context(|| format!("failed to serialize queue toml for {}", entry.name))
 }
 
-pub fn cleanup_queue_dir(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read queue directory {}", dir.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to walk queue directory {}", dir.display()))?;
-        let path = entry.path();
-        if path.is_file() {
-            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-            if matches!(extension, "yml" | "yaml" | "toml") {
-                fs::remove_file(&path)
-                    .with_context(|| format!("failed to remove queue file {}", path.display()))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Clean up queue entries in the config store for a given set of names.
-pub async fn cleanup_queue_store(
-    store: &GeneratedConfigStore,
-    keep_names: &[String],
-) -> Result<()> {
-    let names = store.list_names("queue").await?;
-    for name in names {
-        if !keep_names.contains(&name) {
-            store.delete("queue", &name).await?;
-        }
-    }
-    Ok(())
-}
-
 /// Write a queue entry to the config store.
 pub async fn write_queue_entry_to_store(
     store: &GeneratedConfigStore,

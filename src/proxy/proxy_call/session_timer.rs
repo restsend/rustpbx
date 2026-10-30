@@ -13,8 +13,6 @@ use std::time::Instant;
 pub const HEADER_SESSION_EXPIRES: &str = "Session-Expires";
 pub const HEADER_MIN_SE: &str = "Min-SE";
 pub const HEADER_SUPPORTED: &str = "Supported";
-#[cfg(test)]
-pub const HEADER_REQUIRE: &str = "Require";
 pub const TIMER_TAG: &str = "timer";
 
 /// Default session expiration interval (30 minutes per RFC 4028 recommendation)
@@ -282,12 +280,6 @@ impl SessionTimerState {
         self.refreshing = false;
     }
 
-    /// Check if we need to include timer in Require header
-    #[cfg(test)]
-    pub fn require_timer(&self) -> bool {
-        self.enabled && self.active
-    }
-
     /// Get session duration
     #[cfg(test)]
     pub fn session_duration(&self) -> Duration {
@@ -521,51 +513,6 @@ pub fn build_session_timer_response_headers(
     }
 
     headers
-}
-
-/// Check if timer is required (Require: timer header)
-#[cfg(test)]
-pub fn is_timer_required(headers: &rsipstack::sip::Headers) -> bool {
-    headers.iter().any(|h| match h {
-        rsipstack::sip::Header::Require(s) => s.value().split(',').any(|v| v.trim() == TIMER_TAG),
-        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_REQUIRE) => {
-            v.split(',').any(|v| v.trim() == TIMER_TAG)
-        }
-        _ => false,
-    })
-}
-
-/// Build Session-Expires header
-#[cfg(test)]
-pub fn build_session_expires_header(
-    interval: Duration,
-    refresher: SessionRefresherParam,
-) -> rsipstack::sip::Header {
-    SessionExpires {
-        interval,
-        refresher: Some(refresher),
-    }
-    .into_header()
-}
-
-/// Build Min-SE header
-#[cfg(test)]
-pub fn build_min_se_header(min_se: Duration) -> rsipstack::sip::Header {
-    rsipstack::sip::Header::Other(HEADER_MIN_SE.to_string(), min_se.as_secs().to_string())
-}
-
-/// Calculate the appropriate session interval based on negotiation
-/// Returns Ok(interval) or Err(min_se) if the requested interval is too small
-#[cfg(test)]
-pub fn negotiate_session_interval(
-    requested: Duration,
-    local_min_se: Duration,
-) -> Result<Duration, Duration> {
-    if requested < local_min_se {
-        Err(local_min_se)
-    } else {
-        Ok(requested)
-    }
 }
 
 #[cfg(test)]

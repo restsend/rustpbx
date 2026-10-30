@@ -83,8 +83,6 @@ impl TransferOutcome {
     }
 }
 
-/// Type alias for CallCommand sender.
-pub type CallCommandTx = mpsc::Sender<CallCommand>;
 /// Type alias for CallCommand receiver.
 pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 

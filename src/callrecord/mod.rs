@@ -47,9 +47,8 @@ mod tests;
 
 pub use recording_artifacts::{
     ActiveRecording, RecordingSegment, RecordingSource, RecordingSubdir, UploadFailedMarker,
-    is_direct_child_of_root, local_archive_path, predicted_archive_path, segment_wav_path,
-    segmented_wav_path, upload_failed_marker_path, write_upload_failed_marker,
-    write_upload_failed_marker_ex,
+    is_direct_child_of_root, local_archive_path, predicted_archive_path, segmented_wav_path,
+    upload_failed_marker_path, write_upload_failed_marker_ex,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,25 +527,6 @@ pub trait CallRecordSaver: Send + Sync {
     async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>>;
 }
 
-pub async fn write_call_record_event<T: Serialize>(
-    r#type: CallRecordEventType,
-    obj: T,
-    file: &mut File,
-) {
-    let content = match serde_json::to_string(&obj) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let event = CallRecordEvent {
-        r#type,
-        timestamp: crate::media::get_timestamp(),
-        content,
-    };
-    if let Ok(line) = serde_json::to_string(&event) {
-        file.write_all(format!("{}\n", line).as_bytes()).await.ok();
-    }
-}
-
 pub fn default_cdr_file_name(record: &CallRecord) -> String {
     format!("{}.json", sanitize_id(&record.call_id))
 }
@@ -574,43 +554,6 @@ pub fn format_file_name(root: &str, record: &CallRecord) -> String {
     }
 }
 
-pub fn format_transcript_path(root: &str, record: &CallRecord) -> String {
-    let trimmed_root = root.trim_end_matches('/');
-    let file_name = default_transcript_file_name(record);
-    if trimmed_root.is_empty() {
-        file_name
-    } else {
-        format!(
-            "{}/{}/{}",
-            trimmed_root,
-            record.start_time.format("%Y%m%d"),
-            file_name
-        )
-    }
-}
-
-pub fn format_media_path(root: &str, record: &CallRecord, media: &CallRecordMedia) -> String {
-    let trimmed_root = root.trim_end_matches('/');
-    let file_name = Path::new(&media.path)
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
-        .to_string_lossy()
-        .to_string();
-
-    let key = format!(
-        "{}/{}_{}_{}",
-        record.start_time.format("%Y%m%d"),
-        record.call_id,
-        media.track_id,
-        file_name
-    );
-    if trimmed_root.is_empty() {
-        key
-    } else {
-        format!("{}/{}", trimmed_root, key)
-    }
-}
-
 pub fn sipflow_media_key_for(call_id: &str, start_utc: DateTimeUtc) -> String {
     format!("{}/{}.wav", start_utc.format("%Y%m%d"), call_id)
 }
@@ -629,10 +572,6 @@ pub fn format_sipflow_media_key(record: &CallRecord) -> String {
 
 pub fn format_sipflow_signaling_key(record: &CallRecord) -> String {
     sipflow_signaling_key_for(&record.call_id, record.start_time)
-}
-
-pub fn format_sipflow_media_file_name(record: &CallRecord) -> String {
-    format!("{}.wav", record.call_id)
 }
 
 pub fn format_sipflow_signaling_file_name(record: &CallRecord) -> String {

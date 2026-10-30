@@ -53,13 +53,6 @@ where
         self.inner.lock().enabled(metadata, ctx)
     }
 
-    fn event_enabled(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        self.inner.lock().enabled(event.metadata(), ctx)
-    }
 }
 
 static LOG_FILTER_HANDLE: OnceLock<FilterHandle> = OnceLock::new();

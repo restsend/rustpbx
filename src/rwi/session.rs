@@ -693,35 +693,6 @@ pub struct ConferenceCreateRequest {
     pub max_duration_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConferenceMemberRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConferenceDestroyRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConferenceMergeRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub call_id: Option<String>,
-    pub consultation_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConferenceSeatReplaceRequest {
-    #[serde(alias = "conference_id")]
-    pub conf_id: Option<String>,
-    pub old_call_id: Option<String>,
-    pub new_call_id: Option<String>,
-}
-
 // ── serde helpers for the wire format ─────────────────────────────────────
 
 fn default_text_plain() -> String {

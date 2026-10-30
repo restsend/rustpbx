@@ -235,13 +235,6 @@ pub fn eval_mode_from_str(value: &str) -> Option<EvalMode> {
     }
 }
 
-pub fn default_eval_mode_for_id(id: &str) -> EvalMode {
-    match id {
-        "voicemail.check" => EvalMode::PostRoute,
-        _ => EvalMode::PreRoute,
-    }
-}
-
 pub fn default_priority_for_id(id: &str) -> i32 {
     match id {
         "core.emergency" => 9999,
@@ -251,57 +244,6 @@ pub fn default_priority_for_id(id: &str) -> i32 {
         "cc.monitor" => 8400,
         _ => 100,
     }
-}
-
-pub fn default_phase_for_id(id: &str) -> RoutingPhase {
-    match id {
-        "core.emergency" | "core.number_pool" | "cc.monitor" => RoutingPhase::PreRoute,
-        "voicemail.check" | "cc.quick_route" => RoutingPhase::PostRoute,
-        _ => RoutingPhase::PreRoute,
-    }
-}
-
-pub fn detect_shortcode_conflicts(
-    shortcode: &str,
-    routes: &[(i64, String, bool, &serde_json::Value)],
-) -> Vec<RoutingStackWarning> {
-    if shortcode.is_empty() {
-        return Vec::new();
-    }
-    let mut warnings = Vec::new();
-    for (id, name, disabled, matchers) in routes {
-        if *disabled {
-            continue;
-        }
-        if route_may_match_shortcode(shortcode, matchers) {
-            warnings.push(RoutingStackWarning {
-                code: "shortcode_route_overlap".to_string(),
-                message: format!(
-                    "User route \"{name}\" may match check-voicemail shortcode \"{shortcode}\" before the check-voicemail inspector runs"
-                ),
-                route_id: Some(*id),
-                route_name: Some(name.clone()),
-            });
-        }
-    }
-    warnings
-}
-
-fn route_may_match_shortcode(shortcode: &str, matchers: &serde_json::Value) -> bool {
-    let serialized = matchers.to_string();
-    if serialized.contains(shortcode) {
-        return true;
-    }
-    if let Some(obj) = matchers.as_object() {
-        for key in ["callee", "callee_user", "request_user", "to_user", "regex"] {
-            if let Some(value) = obj.get(key).and_then(|v| v.as_str())
-                && (value == shortcode || value.contains(shortcode))
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Detect overlap between a feature shortcode and console route patterns.

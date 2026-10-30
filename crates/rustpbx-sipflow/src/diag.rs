@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::path::PathBuf;
 
 use crate::config::SipFlowSubdirs;
@@ -41,25 +41,6 @@ pub fn parse_payload_map(sip_messages: &[SipFlowItem]) -> HashMap<u8, (String, u
         }
     }
     map
-}
-
-pub fn rtp_codec_name(pt: u8, payload_map: &HashMap<u8, (String, u32)>) -> String {
-    if let Some((name, _)) = payload_map.get(&pt) {
-        return name.clone();
-    }
-    match pt {
-        0 => "PCMU",
-        3 => "GSM",
-        4 => "G723",
-        8 => "PCMA",
-        9 => "G722",
-        13 => "CN",
-        18 => "G729",
-        63 => "RED",
-        96..=127 => "Dynamic",
-        _ => "Unknown",
-    }
-    .to_string()
 }
 
 // ── RTP Packet Raw Analysis ───────────────────────────────
@@ -169,14 +150,6 @@ impl DiagReport {
 }
 
 // ── SIP Status Extraction ─────────────────────────────────
-
-pub fn sip_message_first_line(payload: &[u8]) -> String {
-    let text = String::from_utf8_lossy(payload);
-    text.lines()
-        .next()
-        .map(|l| l.trim().to_string())
-        .unwrap_or_default()
-}
 
 pub fn sip_message_status(payload: &[u8]) -> String {
     let text = String::from_utf8_lossy(payload);
@@ -665,15 +638,6 @@ pub fn payload_analysis(payload: &[u8]) -> serde_json::Value {
         "has_sf_marker": sf_offset.is_some(),
         "sf_marker_offset": sf_offset,
     })
-}
-
-/// Read raw bytes from a file at a given offset + size (diagnostic only).
-pub fn raw_read_range_sync(path: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
-    let mut file = std::fs::File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; size];
-    file.read_exact(&mut buf)?;
-    Ok(buf)
 }
 
 /// Read raw bytes from a file at a given offset + size (async version for use inside tokio context).

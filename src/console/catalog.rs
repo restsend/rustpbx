@@ -263,13 +263,6 @@ pub async fn scan_ivr_catalog_opt(
     result
 }
 
-pub async fn scan_queue_catalog(
-    queue_dir: &Path,
-    extra_patterns: &[String],
-) -> Vec<QueueCatalogEntry> {
-    scan_queue_catalog_opt(queue_dir, extra_patterns, None).await
-}
-
 pub async fn scan_queue_catalog_opt(
     queue_dir: &Path,
     extra_patterns: &[String],
@@ -626,7 +619,7 @@ mode = "sequential"
 "#;
         std::fs::write(dir.join("queues.generated.toml"), toml_content).unwrap();
 
-        let result = scan_queue_catalog(&dir, &[]).await;
+        let result = scan_queue_catalog_opt(&dir, &[], None).await;
         assert_eq!(result.len(), 2, "should have 2 queues, got: {:?}", result);
 
         let names: Vec<&str> = result.iter().map(|q| q.name.as_str()).collect();

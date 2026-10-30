@@ -1181,20 +1181,6 @@ impl MediaBridge {
         }
     }
 
-    /// Per-leg media quality, captured at call end for the call record.
-    /// Empty when no legs are present.
-    pub fn quality_summary(&self) -> Vec<crate::leg_stats::LegQualityReport> {
-        let mut out = Vec::new();
-        for (side, leg) in [
-            (LegSide::A, self.leg_a.as_ref()),
-            (LegSide::B, self.leg_b.as_ref()),
-        ] {
-            let Some(leg) = leg else { continue };
-            out.push(leg.quality_report(match side { LegSide::A => "A", LegSide::B => "B" }));
-        }
-        out
-    }
-
     /// Tear down everything (called on session end; also via Drop).
     pub fn close(&mut self) {
         self.route_active = false;

@@ -46,18 +46,6 @@ impl ExportReloadRegistry {
             .collect()
     }
 
-    /// Invoke all registered handlers sequentially.
-    /// Returns a list of `(id, result)` pairs.
-    pub async fn invoke_all(&self, app_state: &AppState) -> Vec<(&str, Result<JsonValue, String>)> {
-        let mut results = Vec::new();
-        for handler in &self.handlers {
-            let id = handler.addon_id();
-            let result = handler.export_and_reload(app_state).await;
-            results.push((id, result));
-        }
-        results
-    }
-
     /// Invoke only the handlers whose ids are in the `selected` set.
     pub async fn invoke_selected(
         &self,

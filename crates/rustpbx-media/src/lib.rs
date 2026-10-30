@@ -15,7 +15,6 @@ pub mod leg_stats;
 pub mod media_bridge;
 pub mod media_health;
 pub mod media_recorder;
-pub mod media_stream;
 pub mod mixer;
 pub mod negotiate;
 pub mod quality_stats;
@@ -39,7 +38,6 @@ pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
 pub use leg_id::LegId;
-pub use media_stream::{MediaStream, MediaStreamBuilder};
 pub use mixer::AudioMixer;
 pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;

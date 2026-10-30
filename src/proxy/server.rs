@@ -287,11 +287,6 @@ impl SipServerBuilder {
         }
     }
 
-    pub fn with_trunk_health(mut self, health: crate::proxy::trunk_health::HealthStateMap) -> Self {
-        self.trunk_health = Some(health);
-        self
-    }
-
     pub fn with_cluster_peers(mut self, peers: Vec<SocketAddr>) -> Self {
         self.cluster_peers = peers;
         self
@@ -345,11 +340,6 @@ impl SipServerBuilder {
         self
     }
 
-    pub fn with_ignore_out_of_dialog_request(mut self, ignore: bool) -> Self {
-        self.ignore_out_of_dialog_request = ignore;
-        self
-    }
-
     pub fn with_auth_backend(mut self, auth_backend: Box<dyn AuthBackend>) -> Self {
         self.auth_backend.push(auth_backend);
         self
@@ -360,11 +350,6 @@ impl SipServerBuilder {
         hook: Arc<dyn super::registrar::RegistrationResponseHook>,
     ) -> Self {
         self.registration_response_hook = Some(hook);
-        self
-    }
-
-    pub fn with_call_router(mut self, call_router: Box<dyn CallRouter>) -> Self {
-        self.call_router = Some(call_router);
         self
     }
 
@@ -453,21 +438,6 @@ impl SipServerBuilder {
 
     pub fn with_database_connection(mut self, db: DatabaseConnection) -> Self {
         self.database = Some(db);
-        self
-    }
-
-    pub fn with_data_context(mut self, context: Arc<ProxyDataContext>) -> Self {
-        self.data_context = Some(context);
-        self
-    }
-
-    pub fn with_locator_events(mut self, locator_events: Option<LocatorEventSender>) -> Self {
-        self.locator_events = locator_events;
-        self
-    }
-
-    pub fn with_frequency_limiter(mut self, limiter: Arc<dyn FrequencyLimiter>) -> Self {
-        self.frequency_limiter = Some(limiter);
         self
     }
 
@@ -1568,14 +1538,6 @@ impl SipServer {
 
     pub fn get_inner(&self) -> SipServerRef {
         self.inner.clone()
-    }
-
-    pub fn get_modules(&self) -> impl Iterator<Item = &Box<dyn ProxyModule>> {
-        self.modules.iter()
-    }
-
-    pub fn get_cancel_token(&self) -> CancellationToken {
-        self.inner.cancel_token.clone()
     }
 
     async fn handle_incoming(&self, mut incoming: TransactionReceiver) -> Result<()> {

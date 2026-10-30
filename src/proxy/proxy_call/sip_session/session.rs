@@ -4616,26 +4616,9 @@ impl SipSession {
                             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"));
 
                         !is_content_header
-                            && ![
-                                "Via",
-                                "From",
-                                "To",
-                                "Call-ID",
-                                "CSeq",
-                                "Contact",
-                                "Route",
-                                "Record-Route",
-                                "Authorization",
-                                "Proxy-Authorization",
-                                "User-Agent",
-                                "Expires",
-                                "Min-Expires",
-                                "Path",
-                                "Service-Route",
-                                "Max-Forwards",
-                            ]
-                            .iter()
-                            .any(|excluded| name.eq_ignore_ascii_case(excluded))
+                            && !Self::REGISTRATION_TARGET_BLOCKED_HEADERS
+                                .iter()
+                                .any(|excluded| name.eq_ignore_ascii_case(excluded))
                     })
                     .cloned(),
             );
@@ -16188,6 +16171,30 @@ impl SipSession {
     /// the full REGISTER header set on the location, so without this filter
     /// those captured headers leak into a new leg's INVITE and duplicate
     /// the stack-generated ones (e.g. Contact ×3, User-Agent ×3).
+    /// Stack-managed headers stripped when replaying headers stored on a
+    /// registration target onto a new outbound INVITE. Deliberately narrower
+    /// than [`Self::LEG_INVITE_BLOCKED_HEADERS`]: registration blobs may
+    /// carry benign well-known headers (Allow/Supported) that user-supplied
+    /// leg-invite headers must not.
+    const REGISTRATION_TARGET_BLOCKED_HEADERS: &[&str] = &[
+        "Via",
+        "From",
+        "To",
+        "Call-ID",
+        "CSeq",
+        "Contact",
+        "Route",
+        "Record-Route",
+        "Authorization",
+        "Proxy-Authorization",
+        "User-Agent",
+        "Expires",
+        "Min-Expires",
+        "Path",
+        "Service-Route",
+        "Max-Forwards",
+    ];
+
     const LEG_INVITE_BLOCKED_HEADERS: &[&str] = &[
         "Via",
         "From",

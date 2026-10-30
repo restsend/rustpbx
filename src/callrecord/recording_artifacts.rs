@@ -150,27 +150,6 @@ pub struct ActiveRecording {
     pub discard: bool,
 }
 
-/// Build `{session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav` under `root`.
-pub fn segment_wav_path(
-    root: &str,
-    session_id: &str,
-    segment_type: &str,
-    segment_id: &str,
-    at: DateTime<Utc>,
-) -> PathBuf {
-    let safe_session = sanitize_id(session_id);
-    let safe_type = sanitize_component(segment_type, "seg");
-    let safe_id = sanitize_component(segment_id, "id");
-    let name = format!(
-        "{}_{}_{}_{}.wav",
-        safe_session,
-        at.format("%Y%m%d%H%M%S"),
-        safe_type,
-        safe_id
-    );
-    PathBuf::from(root).join(name)
-}
-
 /// Build `{session_id}_{seq:02}_{label}.wav` under `root`, bumping `seq`
 /// while the candidate file already exists (segments started in different
 /// sessions of the same logical call — e.g. before/after a transfer — share
@@ -188,19 +167,6 @@ pub fn segmented_wav_path(root: &str, session_id: &str, seq: u32, label: &str) -
         }
         seq = seq.saturating_add(1);
     }
-}
-
-/// Signaling sidecar path for a call: `{root}/{session_id}_{call_id}.jsonl`
-/// when session ≠ call, else `{root}/{session_id}.jsonl`.
-pub fn signaling_jsonl_path(root: &str, session_id: &str, call_id: &str) -> PathBuf {
-    let safe_session = sanitize_id(session_id);
-    let safe_call = sanitize_id(call_id);
-    let name = if safe_session == safe_call || safe_call.is_empty() {
-        format!("{}.jsonl", safe_session)
-    } else {
-        format!("{}_{}.jsonl", safe_session, safe_call)
-    };
-    PathBuf::from(root).join(name)
 }
 
 /// Archive destination for `type=local`: `{root}/{daily|hourly}/{filename}`.
@@ -290,15 +256,6 @@ pub struct UploadFailedMarker {
 
 fn default_attempts() -> u32 {
     1
-}
-
-pub async fn write_upload_failed_marker(
-    source: &Path,
-    address: &str,
-    duration_ms: u64,
-    error: &str,
-) -> std::io::Result<()> {
-    write_upload_failed_marker_ex(source, address, duration_ms, error, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -395,15 +352,6 @@ mod tests {
         assert_eq!(RecordingSource::default(), RecordingSource::External);
     }
 
-    #[test]
-    fn segment_path_uses_session_type_id() {
-        let at = Utc.with_ymd_and_hms(2026, 8, 20, 1, 2, 3).unwrap();
-        let path = segment_wav_path("/rec", "sess-1", "ivr", "a1b2", at);
-        assert_eq!(
-            path,
-            PathBuf::from("/rec/sess-1_20260820010203_ivr_a1b2.wav")
-        );
-    }
 
     #[test]
     fn segmented_path_uses_session_seq_label() {
@@ -437,13 +385,6 @@ mod tests {
         assert_eq!(path, PathBuf::from("/rec/sess_01_agent.wav"));
     }
 
-    #[test]
-    fn signaling_path_collapses_when_ids_match() {
-        let path = signaling_jsonl_path("/rec", "abc", "abc");
-        assert_eq!(path, PathBuf::from("/rec/abc.jsonl"));
-        let path = signaling_jsonl_path("/rec", "root", "leg");
-        assert_eq!(path, PathBuf::from("/rec/root_leg.jsonl"));
-    }
 
     #[test]
     fn local_archive_daily_and_hourly() {
@@ -508,7 +449,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("clip.wav");
         std::fs::write(&src, b"x").unwrap();
-        write_upload_failed_marker(&src, "s3://bucket/key", 42, "timeout")
+        write_upload_failed_marker_ex(&src, "s3://bucket/key", 42, "timeout", None, None)
             .await
             .unwrap();
         let marker = upload_failed_marker_path(&src);

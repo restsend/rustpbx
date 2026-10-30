@@ -210,11 +210,6 @@ pub trait Addon: Send + Sync {
         self.sidebar_items(state).first().map(|s| s.url.clone())
     }
 
-    /// Return Settings page injection items (HTML fragments or config definitions)
-    fn settings_items(&self) -> Option<String> {
-        None
-    }
-
     /// Return scripts to be injected into specific pages
     fn inject_scripts(&self) -> Vec<ScriptInjection> {
         vec![]
@@ -292,6 +287,19 @@ pub trait Addon: Send + Sync {
         &self,
     ) -> Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>> {
         None
+    }
+
+    /// Update the priority of the call's unclaimed shared-queue row in the
+    /// addon-owned table. RWI `queue.set_priority` dispatches here so core
+    /// never names the owning addon; the caller gates on the gateway's
+    /// injected shared-queue DB. Return `true` when a row was updated.
+    async fn shared_queue_update_priority(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _call_id: &str,
+        _priority: i32,
+    ) -> bool {
+        false
     }
 
     /// Shutdown the addon, releasing any resources (background tasks, connections, etc.).

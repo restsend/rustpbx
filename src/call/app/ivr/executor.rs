@@ -5236,7 +5236,7 @@ mod tests {
             "resumed first node must carry the `resume` lifecycle trigger, got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.type_name().clone())
+                .map(|e| e.trigger.type_name())
                 .collect::<Vec<_>>()
         );
         assert!(
@@ -5519,7 +5519,7 @@ mod tests {
             "bridge hand-off with return_app must NOT emit session_end (flow resumes), got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.type_name().clone())
+                .map(|e| e.trigger.type_name())
                 .collect::<Vec<_>>()
         );
         // Suspended-flow identity stash: the compensating session_end the
@@ -5616,7 +5616,7 @@ mod tests {
             "JumpIvr continues the SAME logical flow — no session_end at the jump, got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.type_name().clone())
+                .map(|e| e.trigger.type_name())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -7922,7 +7922,7 @@ mod tests {
             entries.len(),
             3,
             "exactly three trace entries must be recorded, got: {:?}",
-            entries.iter().map(|e| e.trigger.type_name().clone()).collect::<Vec<_>>()
+            entries.iter().map(|e| e.trigger.type_name()).collect::<Vec<_>>()
         );
         for (entry, (trigger, end)) in entries.iter().zip(expected) {
             assert_eq!(entry.trigger.type_name(), trigger, "trace order mismatch");

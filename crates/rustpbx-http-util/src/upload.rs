@@ -108,19 +108,9 @@ impl Default for HttpUploadConfig {
 }
 
 impl HttpUploadConfig {
-    /// Whether this config sends the payload as a binary file part.
-    pub fn uses_file_field(&self) -> bool {
-        self.body_field.as_deref().unwrap_or("").is_empty()
-    }
-
     /// Effective HTTP method (uppercased), defaulting to `POST`.
     pub fn effective_method(&self) -> &str {
         self.method.as_deref().unwrap_or("POST")
-    }
-
-    /// Render the endpoint URL for `key` (replaces `{key}`).
-    pub fn build_url(&self, key: &str) -> String {
-        render(&self.url, &HashMap::from([("key".to_string(), key.to_string())]))
     }
 
     fn effective_file_field(&self) -> String {
@@ -179,30 +169,11 @@ impl UploadRequest {
         }
     }
 
-    pub fn with_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.vars.insert(key.into(), value.into());
-        self
-    }
-
     pub fn with_file_name(mut self, file_name: impl Into<String>) -> Self {
         self.file_name = Some(file_name.into());
         self
     }
 
-    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
-        self.content_type = Some(content_type.into());
-        self
-    }
-
-    pub fn with_file_field(mut self, field: impl Into<String>) -> Self {
-        self.file_field = Some(field.into());
-        self
-    }
-
-    pub fn with_body_field(mut self, field: impl Into<String>) -> Self {
-        self.body_field = Some(field.into());
-        self
-    }
 }
 
 /// Result of a successful upload.
@@ -555,13 +526,10 @@ mod tests {
             ..Default::default()
         };
         let uploader = HttpUploader::new(cfg).unwrap();
-        let result = uploader
-            .upload_bytes(
-                &UploadRequest::new("cdr/1.json", Bytes::from_static(b"{\"a\":1}"))
-                    .with_var("call_id", "abc"),
-            )
-            .await
-            .unwrap();
+        let mut req = UploadRequest::new("cdr/1.json", Bytes::from_static(b"{\"a\":1}"));
+        req.vars
+            .insert("call_id".to_string(), "abc".to_string());
+        let result = uploader.upload_bytes(&req).await.unwrap();
 
         assert_eq!(result.url.as_deref(), Some(url.as_str()));
 

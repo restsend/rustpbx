@@ -32,11 +32,6 @@ pub fn remember_ivr_start_file(ctx: &ApplicationContext, file: &str) {
     }
 }
 
-/// Publish standardized sub-app exit metadata for IVR variable substitution.
-pub fn publish_sub_app_exit(ctx: &ApplicationContext, app_name: &str, status: &str) {
-    publish_sub_app_exit_to_vars(&ctx.session_vars, app_name, status);
-}
-
 /// Publish sub-app exit metadata directly into a session-vars map.
 pub fn publish_sub_app_exit_to_vars(
     vars: &dashmap::DashMap<String, String>,
@@ -300,13 +295,6 @@ mod tests {
         assert!(take_pending_return(&ctx).is_none());
     }
 
-    #[test]
-    fn publish_sub_app_exit_vars() {
-        let ctx = make_ctx();
-        publish_sub_app_exit(&ctx, "csat_survey", "completed");
-        assert_eq!(ctx.get_var(SUB_APP_NAME_KEY), Some("csat_survey".into()));
-        assert_eq!(ctx.get_var(SUB_APP_STATUS_KEY), Some("completed".into()));
-    }
 
     #[test]
     fn resumed_ivr_exec_result_preserves_collected_values_from_previous_segments() {

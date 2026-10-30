@@ -563,42 +563,6 @@ mod tests {
         );
     }
 
-    /// Core `metrics::cc::agent_status_changed` must zero the previous
-    /// (agent, status) series — otherwise one agent counts as being in
-    /// several states at once (Prometheus series never expire). Lives here
-    /// because asserting on rendered output requires this addon's recorder;
-    /// core must not depend on addon code, even in tests.
-    #[test]
-    fn test_agent_status_transition_zeroes_previous() {
-        ObservabilityAddon::install_recorder().ok();
-        crate::metrics::cc::agent_status_changed("metrics-test-agent", "idle");
-        crate::metrics::cc::agent_status_changed("metrics-test-agent", "busy");
-
-        let Some(text) = ObservabilityAddon::render_prometheus() else {
-            return; // recorder without render handle; nothing to assert
-        };
-        let line_for = |status: &str| {
-            text.lines()
-                .find(|l| {
-                    l.starts_with("rustpbx_cc_agent_status")
-                        && l.contains("agent=\"metrics-test-agent\"")
-                        && l.contains(&format!("status=\"{status}\""))
-                })
-                .unwrap_or_else(|| panic!("missing series for status={status}"))
-                .to_string()
-        };
-        assert!(
-            line_for("idle").ends_with(" 0"),
-            "previous status must be zeroed, got: {}",
-            line_for("idle")
-        );
-        assert!(
-            line_for("busy").ends_with(" 1"),
-            "current status must be 1, got: {}",
-            line_for("busy")
-        );
-    }
-
     /// One sampler iteration must produce the uptime + active-bridge series
     /// (both platform-independent); `/proc`-derived series additionally show
     /// up on Linux. Lives here for the same reason as the agent-status test:

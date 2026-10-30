@@ -191,25 +191,6 @@ impl I18n {
         self.reload();
     }
 
-    /// Register multiple addon locale directories and reload once.
-    pub fn register_addon_locales_bulk(&self, locale_dirs: Vec<(String, String)>) {
-        {
-            let mut dirs = self
-                .addon_locales_dirs
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for (addon_id, locales_dir) in locale_dirs {
-                tracing::debug!(
-                    "i18n: registering addon '{}' locales at '{}'",
-                    addon_id,
-                    locales_dir
-                );
-                dirs.push(locales_dir);
-            }
-        }
-        self.reload();
-    }
-
     // ------------------------------------------------------------------
     // Translation lookups
     // ------------------------------------------------------------------

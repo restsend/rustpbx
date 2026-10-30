@@ -450,22 +450,6 @@ fn spawn_health_loop_with_timeout(
     });
 }
 
-/// Remove health state entries for trunks that no longer exist or have HC disabled.
-pub async fn cleanup_stale_health_states(
-    data_context: &super::data::ProxyDataContext,
-    health: &Option<HealthStateMap>,
-) {
-    let trunks = data_context.trunks_snapshot();
-    if let Some(health_map) = health {
-        let mut map = health_map.write().await;
-        map.retain(|name, _| {
-            trunks
-                .get(name)
-                .map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
-        });
-    }
-}
-
 /// Return a snapshot of all health states.
 pub async fn snapshot(states: &HealthStateMap) -> Vec<TrunkHealthState> {
     let map = states.read().await;

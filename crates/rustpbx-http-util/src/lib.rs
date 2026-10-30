@@ -2,7 +2,6 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 pub mod upload;
 
@@ -189,20 +188,6 @@ pub async fn fetch_json(
         .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))
 }
 
-pub async fn post_json(
-    client: &reqwest::Client,
-    url: &str,
-    body: &serde_json::Value,
-    options: &HttpFetchOptions,
-) -> Result<serde_json::Value> {
-    let t = effective_timeout(options.timeout);
-    let req = client.post(url).json(body);
-    let resp = execute_request(req, &options.headers, options.timeout).await?;
-    read_body_with_timeout(t, resp.json())
-        .await
-        .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))
-}
-
 pub async fn fetch_bytes(
     client: &reqwest::Client,
     method: reqwest::Method,
@@ -264,37 +249,6 @@ pub async fn fetch_audio_bytes(
     }
 
     Ok((bytes::Bytes::from(body), headers))
-}
-
-pub async fn fetch_to_writer<W: tokio::io::AsyncWrite + Unpin>(
-    client: &reqwest::Client,
-    method: reqwest::Method,
-    url: &str,
-    options: &HttpFetchOptions,
-    writer: &mut W,
-) -> Result<u64> {
-    let t = effective_timeout(options.timeout);
-    let req = client.request(method, url);
-    let resp = execute_request(req, &options.headers, options.timeout).await?;
-    let mut total = 0u64;
-    let mut stream = resp.bytes_stream();
-    use futures::StreamExt;
-    while let Some(chunk) = tokio::time::timeout(t, stream.next())
-        .await
-        .map_err(|_| anyhow!("HTTP response body timed out after {:?}", t))?
-    {
-        let chunk = chunk.map_err(|e| anyhow!("Failed to read response chunk: {}", e))?;
-        writer
-            .write_all(&chunk)
-            .await
-            .map_err(|e| anyhow!("Failed to write chunk: {}", e))?;
-        total += chunk.len() as u64;
-    }
-    writer
-        .flush()
-        .await
-        .map_err(|e| anyhow!("Failed to flush writer: {}", e))?;
-    Ok(total)
 }
 
 pub async fn fetch_text(

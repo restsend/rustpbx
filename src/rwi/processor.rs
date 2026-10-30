@@ -2725,29 +2725,29 @@ impl RwiCommandProcessor {
                 Ok(CommandResult::Success)
             }
             Some(db) => {
-                #[cfg(feature = "addon-cc")]
+                // Priority write goes through the addon that owns the
+                // shared-queue table (contact center) via the addon registry —
+                // core never names the addon.
+                let clamped = crate::call::clamp_priority_u32_to_i32(priority);
+                let updated = match self
+                    .sip_server
+                    .as_ref()
+                    .and_then(|s| s.addon_registry.clone())
                 {
-                    let clamped = crate::call::clamp_priority_u32_to_i32(priority);
-                    let updated = crate::addons::cc::stats_writer::shared_update_priority(
-                        &db, call_id, clamped,
-                    )
-                    .await;
-                    if updated {
-                        info!(call_id = %call_id, priority = %clamped, "Queue priority updated");
-                        Ok(CommandResult::Success)
-                    } else {
-                        Err(CommandError::CommandFailed(format!(
-                            "No unclaimed shared-queue row for call {call_id}"
-                        )))
+                    Some(registry) => {
+                        registry
+                            .shared_queue_update_priority(&db, call_id, clamped)
+                            .await
                     }
-                }
-                #[cfg(not(feature = "addon-cc"))]
-                {
-                    // Shared-queue table only exists with the CC addon.
-                    let _ = db;
-                    info!(call_id = %call_id, priority = %priority,
-                        "Queue priority updated (shared queue unavailable — in-memory only)");
+                    None => false,
+                };
+                if updated {
+                    info!(call_id = %call_id, priority = %clamped, "Queue priority updated");
                     Ok(CommandResult::Success)
+                } else {
+                    Err(CommandError::CommandFailed(format!(
+                        "No unclaimed shared-queue row for call {call_id}"
+                    )))
                 }
             }
         }

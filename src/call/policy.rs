@@ -531,12 +531,6 @@ impl InMemoryFrequencyLimiter {
         .await;
     }
 
-    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        crate::utils::spawn(async move {
-            self.run_cleanup_loop(cancel_token).await;
-        });
-    }
-
     fn cleanup(&self) {
         let now = Utc::now().timestamp();
         // Only cleanup expired windows. Concurrency (MAX) won't be cleaned up here unless we want to.
@@ -727,12 +721,6 @@ impl DbFrequencyLimiter {
             async move { this.cleanup().await }
         })
         .await;
-    }
-
-    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        crate::utils::spawn(async move {
-            self.run_cleanup_loop(cancel_token).await;
-        });
     }
 
     async fn cleanup(&self) -> Result<()> {

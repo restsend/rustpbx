@@ -171,40 +171,6 @@ impl GeneratedConfigStore {
         }
     }
 
-    pub async fn cleanup_category(&self, category: &str) -> Result<()> {
-        match self {
-            Self::FileSystem { root } => {
-                let dir = root.join(category);
-                if !dir.exists() {
-                    return Ok(());
-                }
-                let mut entries = tokio::fs::read_dir(&dir)
-                    .await
-                    .with_context(|| format!("failed to read directory {}", dir.display()))?;
-                while let Some(entry) = entries.next_entry().await? {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.ends_with(".generated.toml") {
-                                let _ = tokio::fs::remove_file(&path).await;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Self::Database { db } => {
-                config_entry::Entity::delete_many()
-                    .filter(config_entry::Column::Category.eq(category))
-                    .filter(config_entry::Column::EntryName.like("%.generated.toml"))
-                    .exec(db)
-                    .await
-                    .map_err(|e| anyhow!("db config cleanup error: {e}"))?;
-                Ok(())
-            }
-        }
-    }
-
     async fn write_inner(
         &self,
         db: &DatabaseConnection,
@@ -443,24 +409,6 @@ mod tests {
 
         store.delete("ivr", "del_test.toml").await.unwrap();
         assert!(!store.exists("ivr", "del_test.toml").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn db_cleanup_category_preserves_non_generated() {
-        let db = setup_db().await;
-        let store = GeneratedConfigStore::Database { db: db.clone() };
-
-        store.write("ivr", "a.generated.toml", "x").await.unwrap();
-        store.write("ivr", "b.generated.toml", "y").await.unwrap();
-        store.write("ivr", "handwritten.toml", "z").await.unwrap();
-
-        store.cleanup_category("ivr").await.unwrap();
-
-        // generated files should be removed
-        assert!(!store.exists("ivr", "a.generated.toml").await.unwrap());
-        assert!(!store.exists("ivr", "b.generated.toml").await.unwrap());
-        // handwritten should survive
-        assert!(store.exists("ivr", "handwritten.toml").await.unwrap());
     }
 
     #[tokio::test]

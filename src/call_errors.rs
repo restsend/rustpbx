@@ -162,11 +162,9 @@ fn build_registry_inner() -> CallErrRegistry {
     reg.merge_slice(crate::tts::error_catalog::CATALOG);
     reg.merge_slice(crate::outbound::error_catalog::CATALOG);
 
-    // Compiled-in addon catalogs. AppState may still merge a live AddonRegistry
-    // and install_registry() (first-wins); including features here keeps unit
-    // tests and early registry() callers consistent with the binary features.
-    #[cfg(feature = "addon-wholesale")]
-    crate::addons::registry::merge_compiled_addon_error_catalogs(&mut reg);
+    // Compiled-in addon catalogs are merged by AppState at startup via
+    // AddonRegistry::merge_error_catalogs_into() (first-wins), walking every
+    // registered addon's Addon::error_catalog() — core never names addons.
 
     reg
 }

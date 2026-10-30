@@ -423,7 +423,6 @@ mod tests {
     }
 
     struct FakeClock {
-        base: Instant,
         secs: Arc<AtomicU64>,
     }
 
@@ -433,7 +432,7 @@ mod tests {
             let secs = Arc::new(AtomicU64::new(0));
             let secs_move = secs.clone();
             let now: NowFn = Arc::new(move || base + Duration::from_secs(secs_move.load(Ordering::Relaxed)));
-            (Self { base, secs }, now)
+            (Self { secs }, now)
         }
 
         fn advance(&self, secs: u64) {
@@ -471,7 +470,7 @@ mod tests {
 
         let db1 = sea_orm::Database::connect(&url).await.unwrap();
         rustpbx_models::migration::Migrator::up(&db1, None).await.unwrap();
-        let (clock1, now1) = FakeClock::new();
+        let (_clock1, now1) = FakeClock::new();
         let store1 = BanStore::with_clock(db1, cfg(2, vec![60, 120], vec![]), None, now1);
         let target = ip("8.8.8.8");
         store1.record_auth_failure(target, "u", "REGISTER").await;
@@ -480,7 +479,7 @@ mod tests {
         store1.db.close().await.unwrap();
 
         let db2 = sea_orm::Database::connect(&url).await.unwrap();
-        let (clock2, now2) = FakeClock::new();
+        let (_clock2, now2) = FakeClock::new();
         let store2 = BanStore::with_clock(db2.clone(), cfg(2, vec![60, 120], vec![]), None, now2);
         store2.reload().await.unwrap();
         assert!(store2.is_banned(&target), "ban must survive restart");

@@ -527,13 +527,6 @@ impl ReleaseConfig {
             .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
     }
 
-    /// Effective artifact storage, defaulting to the local
-    /// `storage/releases` directory.
-    pub fn effective_storage(&self) -> StorageConfig {
-        self.storage.clone().unwrap_or(StorageConfig::Local {
-            path: "storage/releases".to_string(),
-        })
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -881,13 +874,6 @@ impl LicenseConfig {
         })
     }
 
-    pub fn get_addons_for_key(&self, key_name: &str) -> Vec<&str> {
-        self.addons
-            .iter()
-            .filter(|(_, k)| k == &key_name)
-            .map(|(id, _)| id.as_str())
-            .collect()
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -2867,19 +2853,6 @@ impl Config {
             return Some(self.synthetic_default_network_profile());
         }
         None
-    }
-
-    pub fn resolve_trunk_network_profile(
-        &self,
-        trunk: &crate::proxy::routing::TrunkConfig,
-    ) -> NetworkProfile {
-        if let Some(ref id) = trunk.profile {
-            if let Some(profile) = self.network_profile(id) {
-                return profile;
-            }
-        }
-        self.network_profile(&self.default_network_profile_id())
-            .unwrap_or_else(|| self.synthetic_default_network_profile())
     }
 
     pub fn recorder_path(&self) -> String {
