@@ -228,7 +228,12 @@
     src="{{ chart_js | default((static_path | default('/static')) ~ '/vendor/chart.umd.min.js') | safe }}"></script>
 <script type="application/json" id="__dashboardT">{{ (t.dashboard | default({})) | tojson | safe }}</script>
 <script>
+    let dashboardPageInitialized = false;
     function initDashboardPage() {
+        // Reached from DOMContentLoaded, Alpine's auto init() and x-init;
+        // run once so listeners and the initial fetch are not tripled.
+        if (dashboardPageInitialized) return;
+        dashboardPageInitialized = true;
         const dashboardT = JSON.parse(document.getElementById('__dashboardT').textContent || '{}');
         const bootstrapNode = document.getElementById('dashboard-bootstrap');
         let payload = null;
