@@ -556,6 +556,11 @@ pub struct Config {
     /// Local stats log refresh interval in seconds. Default 5.
     #[serde(default = "default_stats_interval")]
     pub stats_interval: u64,
+    /// Seconds between `rustpbx_cdr_daily` rollup runs (today + yesterday
+    /// re-aggregated from raw CDRs). Only the console's day-bucket trunk
+    /// report reads that table. Default 300; 0 disables the rollup.
+    #[serde(default = "default_cdr_rollup_interval")]
+    pub cdr_rollup_interval: u64,
     #[serde(default)]
     pub log_rotation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -749,6 +754,10 @@ fn default_max_audio_download_bytes() -> u64 {
 
 fn default_stats_interval() -> u64 {
     5
+}
+
+fn default_cdr_rollup_interval() -> u64 {
+    300
 }
 
 fn default_locale() -> String {
@@ -2609,6 +2618,7 @@ impl Default for Config {
             log_file: None,
             stats_log: None,
             stats_interval: default_stats_interval(),
+            cdr_rollup_interval: default_cdr_rollup_interval(),
             log_rotation: String::new(),
             http_access_skip_paths: Vec::new(),
             proxy: ProxyConfig::default(),
@@ -3682,6 +3692,18 @@ bucket = "default-recordings"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_cdr_rollup_interval_parsing() {
+        let config: Config = toml::from_str(r#"proxy={addr="127.0.0.1"}"#).unwrap();
+        assert_eq!(config.cdr_rollup_interval, 300);
+        let config: Config = toml::from_str(
+            r#"cdr_rollup_interval = 0
+            proxy={addr="127.0.0.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.cdr_rollup_interval, 0);
     }
 
     /// Trunk-level override parsing: `ice_lite` is optional per trunk and

@@ -790,13 +790,17 @@ impl AppStateBuilder {
         crate::metrics_sampler::spawn(core.token.child_token());
 
         // ── Daily CDR rollup (rustpbx_cdr_daily) ─────────────────────────
-        // Recomputes today + yesterday aggregates every 5 minutes so the
-        // dashboard / reports drill down without scanning raw CDRs.
-        {
+        // Recomputes today + yesterday aggregates every `cdr_rollup_interval`
+        // seconds (default 300) so the daily trunk report reads aggregates
+        // instead of raw CDRs. 0 turns it off.
+        if config.cdr_rollup_interval == 0 {
+            tracing::info!("cdr daily rollup disabled (cdr_rollup_interval = 0)");
+        } else {
+            let rollup_interval = std::time::Duration::from_secs(config.cdr_rollup_interval);
             let rollup_db = app_state.db().clone();
             let rollup_cancel = core.token.child_token();
             crate::utils::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+                let mut tick = tokio::time::interval(rollup_interval);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // The first interval tick fires immediately, so the loop's
                 // first iteration rolls up right after boot.

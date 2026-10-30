@@ -18,6 +18,9 @@ log_level = "info"
 # for loss/load diagnostics without Prometheus). Empty/unset disables.
 #stats_log = "/var/log/rustpbx.stats.log"
 #stats_interval = 5
+# Seconds between rustpbx_cdr_daily rollups (feeds the console's daily trunk
+# report). 0 disables it.
+#cdr_rollup_interval = 300
 # Paths can include a trailing * to skip whole subtrees
 # http_access_skip_paths = ["/health", "/metrics*"]
 # SQLite database (default)
