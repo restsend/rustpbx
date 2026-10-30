@@ -58,6 +58,13 @@ pub struct EventCallContext {
     pub queue_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootCallInfo>,
+    /// Addon-contributed typed event sections (top-level key → JSON),
+    /// refreshed at the emission choke point from the session/leg
+    /// extensions bags and merged into every call-scoped event payload.
+    /// Never serialized as part of the context itself — [`merge_event_context`]
+    /// folds each section under its reserved key.
+    #[serde(skip)]
+    pub sections: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Type alias for RWI event sender (used by the cc addon's agent event fanout).
@@ -101,6 +108,13 @@ pub struct CallMeta {
     pub transfer_source: Option<crate::rwi::event::TransferSource>,
     /// Departing stage identity captured before target attribution or stage cleanup.
     pub transfer_recording_id: Option<String>,
+    /// Addon typed sections mirrored from the session extensions bag at the
+    /// emission choke point (see [`EventCallContext::sections`]).
+    pub sections: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Per-leg typed sections keyed by leg id — merged only into event
+    /// payloads that carry the matching `leg_id`.
+    pub leg_sections:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 impl From<CallMeta> for EventCallContext {
@@ -119,6 +133,7 @@ impl From<CallMeta> for EventCallContext {
             agent_name: m.agent_name,
             queue_id: m.queue_id,
             root: m.root,
+            sections: m.sections,
         }
     }
 }

@@ -104,6 +104,44 @@ pub(super) struct ConferenceAttachment {
     pub conference_id: crate::call::runtime::ConferenceId,
 }
 
+/// Typed leg reference for RWI event emission — `leg_id` + `leg_role`
+/// resolved once by the single authority ([`SipSession::leg`]). Emission
+/// sites take both from here instead of hand-rolling role strings or
+/// per-scenario conditionals.
+#[derive(Debug, Clone)]
+pub(crate) struct LegRef {
+    leg_id: String,
+    role: Option<String>,
+}
+
+/// What a leg state transition produces, decided by the static table
+/// ([`SipSession::leg_transition_action`]). One variant per lifecycle
+/// event the table may fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegTransitionAction {
+    /// No event — hold resumes, teardowns (reported elsewhere) and
+    /// non-transitions.
+    None,
+    /// Per-leg `call_ringing`; `early_media` distinguishes the SDP-bearing
+    /// upgrade from a plain provisional.
+    CallRinging { early_media: bool },
+    /// Per-leg `call_answered` (never fired for a Hold → Connected resume).
+    CallAnswered,
+}
+
+impl LegRef {
+    /// The `leg_id` payload field value.
+    pub fn leg_id(&self) -> Option<String> {
+        Some(self.leg_id.clone())
+    }
+
+    /// The `leg_role` payload field value (`None` when suppressed —
+    /// home-proxy-routed or undeterminable legs).
+    pub fn leg_role(&self) -> Option<String> {
+        self.role.clone()
+    }
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -604,6 +642,28 @@ impl SipSession {
                 }
                 leg.leg_role().to_string()
             })
+    }
+
+    /// Resolve a typed [`LegRef`] for event emission — the single authority
+    /// for `leg_id` + `leg_role` pairs. Emission sites use this instead of
+    /// hand-rolling role strings/conditionals:
+    ///
+    /// * registered, home-owned leg → [`Leg::leg_role`] semantics (agent /
+    ///   consult / caller / callee, honoring a declared child-leg role);
+    /// * home-proxy-routed leg → role suppressed (`None`) — the registration
+    ///   node reports this leg's events with the role;
+    /// * positional leg with no registry entry (pre-answer caller leg of an
+    ///   originate/outbound) → positional fallback `caller`/`callee`.
+    pub(crate) fn leg(&self, leg_id: &str) -> LegRef {
+        let role = match self.legs.get(&LegId::from(leg_id)) {
+            Some(leg) if leg.remote_registered => None,
+            Some(_) => self.leg_role_of(leg_id),
+            None => matches!(leg_id, "caller" | "callee").then(|| leg_id.to_string()),
+        };
+        LegRef {
+            leg_id: leg_id.to_string(),
+            role,
+        }
     }
 
     /// Established CC-role legs (agent / consult / transfer) still registered
@@ -2071,21 +2131,16 @@ impl SipSession {
             && !matches!(&session.context.dialplan.flow,
                 crate::call::DialplanFlow::Application { app_name, .. } if app_name == "rwi")
         {
+            let caller_leg = session.leg("caller");
             let ev = crate::rwi::CallCreated {
-                leg_id: Some("caller".to_string()),
-                // Agent-initiated outbound: the caller leg IS the agent
-                // dialog — the early stamp resolved its role and
-                // `meta.agent_id` is already seeded (client_ip derives from
-                // it), so created aligns with the answered/teardown
-                // attribution on the same leg. Every other shape keeps the
-                // positional "caller".
-                leg_role: if agent_outbound_seeded {
-                    session
-                        .leg_role_of("caller")
-                        .or_else(|| Some("caller".to_string()))
-                } else {
-                    Some("caller".to_string())
-                },
+                leg_id: caller_leg.leg_id(),
+                // Role resolved once by the LegRef authority: the caller leg
+                // IS the agent dialog when the early stamp planted its
+                // identity (seeded agent-outbound — `meta.agent_id` is
+                // already seeded, client_ip derives from it), so created
+                // aligns with the answered/teardown attribution on the same
+                // leg. Every other shape keeps the positional "caller".
+                leg_role: caller_leg.leg_role(),
                 call_id: session_id.clone(),
                 context: "default".into(),
                 caller: original_caller,
@@ -3509,26 +3564,30 @@ impl SipSession {
         self.is_caller_peer(leg_id).then(|| LegId::from("caller"))
     }
 
-    /// Publish CC agent attribution into the RWI `CallMetaStore` so every
-    /// `call_*` event from this session is enriched with `agent_id` /
-    /// `agent_name` / `queue_id`.
+    /// Refresh the dispatch-time enrichment source (`CallMetaStore`) from
+    /// live session state — the emission timing choke point.
     ///
-    /// `agent_id` / `agent_name` come from session extensions written by the
-    /// CC session hook — call only AFTER hooks have fired. `queue_id` comes
-    /// from the call meta. Existing meta fields are never cleared (a call
-    /// that stops resolving an agent keeps its earlier attribution). If the
-    /// meta entry was already removed (transfer released the gateway state
-    /// before the final `call_hangup`), it is REBUILT from live context.
-    pub(super) fn sync_agent_context_to_rwi_meta(&self) {
+    /// [`Self::emit_typed_rwi_event`] calls this right before dispatch, so
+    /// every event's enrichment (agent attribution, queue, typed addon
+    /// sections, per-leg sections) is coherent with the state that produced
+    /// it — no emission site needs to remember a manual pre-sync.
+    ///
+    /// * `agent_id` / `agent_name` come from session extensions written by
+    ///   the CC session hook (stringly contract, kept for addon compat).
+    /// * Existing meta fields are never cleared (a call that stops resolving
+    ///   an agent keeps its earlier attribution).
+    /// * A missing meta entry (e.g. transfer released the gateway state
+    ///   before the final `call_hangup`) is REBUILT from live context —
+    ///   session-owned events never dispatch against a stale/absent source.
+    /// * Typed sections are replaced wholesale — they are derived state
+    ///   re-snapshotted from the session/leg extensions bags.
+    pub(super) fn refresh_rwi_meta(&self) {
         let Some(ref gw) = self.server.rwi_gateway else {
             return;
         };
         let agent_id = self.session_ext_get("agent_id");
         let agent_name = self.session_ext_get("agent_name");
         let queue_id = crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta);
-        if agent_id.is_none() && agent_name.is_none() && queue_id.is_none() {
-            return;
-        }
         let session_id = self.context.session_id.clone();
         let gw = gw.read();
         let mut meta = gw.meta_store.get_sync(&session_id).unwrap_or_else(|| {
@@ -3586,6 +3645,15 @@ impl SipSession {
         if meta.queue_id.is_none() {
             meta.queue_id = queue_id;
         }
+        // Typed addon sections: session-level under their KEY, leg-level
+        // keyed by leg id (merged only into that leg's events).
+        meta.sections = self
+            .extensions
+            .event_sections()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        meta.leg_sections = self.legs.leg_sections_snapshot();
         gw.meta_store.insert(session_id, meta);
     }
 
@@ -3648,7 +3716,7 @@ impl SipSession {
         }
         // Hooks may have resolved + published the agent attribution — make it
         // visible to event enrichment before the caller emits `call_ringing`.
-        self.sync_agent_context_to_rwi_meta();
+        self.refresh_rwi_meta();
     }
 
     pub fn transferred_agent_context(
@@ -3750,7 +3818,7 @@ impl SipSession {
         for hook in self.server.session_hooks.iter() {
             hook.on_call_connected(&ctx).await;
         }
-        self.sync_agent_context_to_rwi_meta();
+        self.refresh_rwi_meta();
     }
 
     /// Fire the `on_call_ended` session hooks for this session.
@@ -3771,7 +3839,7 @@ impl SipSession {
         for hook in self.server.session_hooks.iter() {
             hook.on_call_ended(&ctx, reason, duration_secs).await;
         }
-        self.sync_agent_context_to_rwi_meta();
+        self.refresh_rwi_meta();
     }
 
     fn ok_or_failure<T>(result: anyhow::Result<T>) -> CommandResult {
@@ -6752,7 +6820,6 @@ impl SipSession {
                 for hook in self.server.session_hooks.iter() {
                     hook.on_call_connected(&ctx).await;
                 }
-                self.sync_agent_context_to_rwi_meta();
             }
             self.mark_transferred_with(Some(
                 serde_json::json!({"target": pending.target, "kind": "sip"}),
@@ -8028,7 +8095,7 @@ impl SipSession {
             // The CC hook resolves + publishes the agent attribution here
             // (parallel-ring targets) — sync it so the per-provisional
             // `call_ringing` emitted below carries it.
-            self.sync_agent_context_to_rwi_meta();
+            self.refresh_rwi_meta();
         }
 
         let mut failures = 0u32;
@@ -10238,7 +10305,6 @@ impl SipSession {
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_connected(&ctx).await;
             }
-            self.sync_agent_context_to_rwi_meta();
         }
         if !self.app_runtime.is_running() {
             self.emit_session_call_answered_once();
@@ -11526,9 +11592,8 @@ impl SipSession {
                 hook.on_call_ended(&ctx, reason.as_ref(), duration_secs)
                     .await;
             }
-            // Hooks may have published the agent attribution — make it
-            // visible to event enrichment before `call_hangup` is emitted.
-            self.sync_agent_context_to_rwi_meta();
+            // Hook-published attribution rides the emission choke point
+            // (`emit_typed_rwi_event` refreshes meta before dispatch).
             duration_secs
         } else {
             self.meta
@@ -13864,7 +13929,7 @@ impl SipSession {
                     if let Some(name) = agent_name.clone() {
                         self.session_ext_set("agent_name", &name);
                     }
-                    self.sync_agent_context_to_rwi_meta();
+                    self.refresh_rwi_meta();
                 }
                 CommandResult::success()
             }
@@ -14786,7 +14851,6 @@ impl SipSession {
                         for hook in self.server.session_hooks.iter() {
                             hook.on_call_connected(&ctx).await;
                         }
-                        self.sync_agent_context_to_rwi_meta();
                     }
                     // One-shot: the queue-app answer path (accept_call) may
                     // have already emitted under an app-startup race — see
@@ -14807,7 +14871,7 @@ impl SipSession {
                     for hook in self.server.session_hooks.iter() {
                         hook.on_call_connected(&ctx).await;
                     }
-                    self.sync_agent_context_to_rwi_meta();
+                    self.refresh_rwi_meta();
                 }
 
                 self.mark_leg_connected_if_not_held(&leg_id);
@@ -15575,7 +15639,7 @@ impl SipSession {
         }
 
         let mut ended_legs: Vec<LegId> = Vec::new();
-        for leg in self.legs.values_mut() {
+        for leg in self.legs.values() {
             let should_hangup = match cascade {
                 HangupCascade::All => true,
                 HangupCascade::None => false,
@@ -15584,11 +15648,16 @@ impl SipSession {
             };
 
             if should_hangup {
-                if leg.state != LegState::Ended {
-                    leg.state = LegState::Ended;
-                }
                 ended_legs.push(leg.id.clone());
             }
+        }
+        // Terminal sweep through the single state writer — policy: no
+        // per-leg event (positional legs' teardown record is the
+        // session-scoped event; established CC-role legs reported in
+        // `cleanup()` were already emitted before this sweep). Idempotent
+        // for legs already marked `Ended`.
+        for leg_id in &ended_legs {
+            self.update_leg_state(leg_id, LegState::Ended);
         }
 
         // Queue the SIP BYE(s) for the main loop's pending_hangup drain;
@@ -15767,54 +15836,69 @@ impl SipSession {
         });
     }
 
+    /// The single writer of leg state. Every transition passes here —
+    /// transition logging, the terminal invariant and the static
+    /// transition→event table ([`Self::leg_transition_action`]) are
+    /// enforced in this one place, so no emission site can drift from the
+    /// state that produced it.
+    ///
+    /// Returns `false` when the leg does not exist (no phantom legs are
+    /// created; callers surface the failure explicitly).
     pub fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
-            let was_hold = leg.state == LegState::Hold;
-            let changed = leg.state != new_state;
+            let prev_state = leg.state;
+            let changed = prev_state != new_state;
             leg.state = new_state;
             if changed {
+                // Terminal invariant: a leg that reached `Ended` never
+                // transitions again — every teardown report depends on a
+                // leg being reported exactly once (see the lifecycle
+                // invariant on the mid-session exit path).
+                debug_assert!(
+                    !matches!(prev_state, LegState::Ended),
+                    "session {}: terminal leg {leg_id} transitioned again to {new_state:?}",
+                    self.id
+                );
+                debug!(
+                    session_id = %self.id,
+                    leg_id = %leg_id,
+                    old = %prev_state,
+                    new = %new_state,
+                    "leg state transition"
+                );
                 if matches!(new_state, LegState::Connected) {
                     self.any_leg_reached_connected = true;
                 }
-                match new_state {
-                    LegState::Ringing | LegState::EarlyMedia => {
-                        // Mutable borrow of `leg` ends here.
+                match Self::leg_transition_action(prev_state, new_state) {
+                    LegTransitionAction::CallRinging { early_media } => {
                         let leg_agent_id = leg.agent_id.clone();
                         self.emit_call_ringing(
                             Some(leg_id.to_string()),
-                            new_state == LegState::EarlyMedia,
+                            early_media,
                             leg_agent_id,
                         );
                     }
-                    // Per-leg `call_answered` — the dual of `call_ringing`
-                    // above: EVERY leg answer carries its own leg identity
-                    // (caller pickup under a queue/IVR app, direct-answer
-                    // callee, queue-dispatched agent, consult / transfer
-                    // target). A Hold → Connected resume is NOT an answer —
-                    // `call_unheld` already describes it. The session-scoped
-                    // duplicate (`leg_id: None`) still fires exactly once
-                    // from the dedicated emit sites — accept_call (direct
-                    // answer), the queue-agent connect branch — and is
-                    // DEPRECATED for removal next version.
-                    LegState::Connected => {
-                        if !was_hold {
-                            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
-                                leg_id: Some(leg_id.to_string()),
-                                // Child-leg session (cluster-dispatched queue
-                                // agent / consult / transfer): the callee slot
-                                // IS the agent dialog — its answer carries the
-                                // declared role (positional "callee" here made
-                                // consumers filtering leg_role="agent" lose
-                                // answered, s17 A1/A10). The dispatcher-hop
-                                // caller leg keeps its positional role — one
-                                // agent answer, not two. Non-child sessions:
-                                // unchanged.
-                                leg_role: self.leg_role_of(leg_id.as_str()),
-                                call_id: self.context.session_id.clone(),
-                            });
-                        }
+                    LegTransitionAction::CallAnswered => {
+                        self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                            leg_id: Some(leg_id.to_string()),
+                            // Child-leg session (cluster-dispatched queue
+                            // agent / consult / transfer): the callee slot
+                            // IS the agent dialog — its answer carries the
+                            // declared role (positional "callee" here made
+                            // consumers filtering leg_role="agent" lose
+                            // answered, s17 A1/A10). The dispatcher-hop
+                            // caller leg keeps its positional role — one
+                            // agent answer, not two. Non-child sessions:
+                            // unchanged.
+                            leg_role: self.leg_role_of(leg_id.as_str()),
+                            call_id: self.context.session_id.clone(),
+                        });
                     }
-                    _ => {}
+                    // Hold↔Connected resumes are `call_unheld`'s story, and
+                    // teardowns report through `emit_rwi_leg_hangup` (the
+                    // session-survives path) or the teardown cascade — not
+                    // through this table.
+                    LegTransitionAction::None => {}
                 }
             }
             if let Some(peer) = self.media_leg(leg_id) {
@@ -15837,6 +15921,42 @@ impl SipSession {
                 "update_leg_state: leg not found, refusing to create phantom leg"
             );
             false
+        }
+    }
+
+    /// Static transition→event table — the ONLY place a leg state
+    /// transition decides which lifecycle event fires.
+    ///
+    /// The `(prev, new)` match is exhaustive over [`LegState`] pairs:
+    /// adding a state variant forces every transition's policy to be
+    /// re-decided at compile time, and [`leg_transition_action_matrix`]
+    /// pins all cells against the expected events.
+    fn leg_transition_action(prev: LegState, new: LegState) -> LegTransitionAction {
+        match (prev, new) {
+            // Any leg reaching a ringing-ish state rings: first provisional
+            // (`Ringing`, plain) and the early-media upgrade
+            // (`EarlyMedia`, SDP-bearing).
+            (_, LegState::Ringing) => LegTransitionAction::CallRinging { early_media: false },
+            (_, LegState::EarlyMedia) => LegTransitionAction::CallRinging { early_media: true },
+            // Per-leg `call_answered` — the dual of `call_ringing` above:
+            // EVERY leg answer carries its own leg identity (caller pickup
+            // under a queue/IVR app, direct-answer callee, queue-dispatched
+            // agent, consult / transfer target). A Hold → Connected resume
+            // is NOT an answer — `call_unheld` already describes it. The
+            // session-scoped duplicate (`leg_id: None`) still fires exactly
+            // once from the dedicated emit sites — accept_call (direct
+            // answer), the queue-agent connect branch — and is DEPRECATED
+            // for removal next version.
+            (LegState::Hold, LegState::Connected) => LegTransitionAction::None,
+            (_, LegState::Connected) => LegTransitionAction::CallAnswered,
+            // Teardowns report through `emit_rwi_leg_hangup` (the
+            // session-survives path) or the teardown cascade — not through
+            // this table. In-setup re-entry is filtered by the `changed`
+            // gate before the table runs.
+            (_, LegState::Hold)
+            | (_, LegState::Ending)
+            | (_, LegState::Ended)
+            | (_, LegState::Initializing) => LegTransitionAction::None,
         }
     }
 
@@ -15911,9 +16031,16 @@ impl SipSession {
         }
     }
 
-    /// Emit a typed call lifecycle event via the new generic gateway API.
+    /// Emit a typed call lifecycle event via the generic gateway API.
+    ///
+    /// Timing choke point: refreshes the dispatch-time enrichment source
+    /// (`CallMetaStore`) from live session state + extensions FIRST, then
+    /// dispatches — so the event's enrichment (agent attribution, queue,
+    /// typed sections) is always coherent with the state that produced it.
+    /// Emission sites never need a manual pre-sync.
     pub(crate) fn emit_typed_rwi_event<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
         if let Some(ref gw) = self.server.rwi_gateway {
+            self.refresh_rwi_meta();
             let g = gw.read();
             g.send_to_owner(event);
         }
@@ -18272,6 +18399,60 @@ impl Drop for SipSession {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+/// The transition→event table is the single lifecycle-event policy — the
+/// full (prev, new) matrix is pinned here so any policy change is a
+/// reviewed, explicit diff.
+#[cfg(test)]
+mod leg_transition_action_tests {
+    use super::*;
+
+    const STATES: &[LegState] = &[
+        LegState::Initializing,
+        LegState::Ringing,
+        LegState::EarlyMedia,
+        LegState::Connected,
+        LegState::Hold,
+        LegState::Ending,
+        LegState::Ended,
+    ];
+
+    #[test]
+    fn transition_table_full_matrix() {
+        for prev in STATES {
+            for new in STATES {
+                let action = SipSession::leg_transition_action(*prev, *new);
+                match new {
+                    LegState::Ringing => assert_eq!(
+                        action,
+                        LegTransitionAction::CallRinging { early_media: false }
+                    ),
+                    LegState::EarlyMedia => assert_eq!(
+                        action,
+                        LegTransitionAction::CallRinging { early_media: true }
+                    ),
+                    LegState::Connected => {
+                        if *prev == LegState::Hold {
+                            // Hold → Connected resume is `call_unheld`'s
+                            // story, never a second answer.
+                            assert_eq!(action, LegTransitionAction::None);
+                        } else {
+                            assert_eq!(action, LegTransitionAction::CallAnswered);
+                        }
+                    }
+                    // Teardowns report through `emit_rwi_leg_hangup` or the
+                    // teardown cascade; hold/in-setup columns are silent.
+                    LegState::Initializing
+                    | LegState::Hold
+                    | LegState::Ending
+                    | LegState::Ended => {
+                        assert_eq!(action, LegTransitionAction::None);
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod route_via_home_proxy_tests {

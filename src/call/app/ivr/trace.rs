@@ -213,7 +213,7 @@ mod tests {
             caller: "1001".to_string(),
             callee: "2000".to_string(),
             step_index: step,
-            trigger: TriggerInfo::new("test"),
+            trigger: TriggerInfo::ActionExecute,
             provider_url: None,
             action_type: "Transfer".to_string(),
             action_json: None,

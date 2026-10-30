@@ -1,5 +1,6 @@
 use crate::call::domain::{Leg, LegId};
 use crate::call::runtime::conference_media_bridge::ConferenceBridgeHandle;
+use crate::proxy::proxy_call::session_hooks::{EventSectionSpec, SessionExtensions};
 use rsipstack::dialog::dialog::Dialog;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,26 @@ struct LegData {
     has_video: bool,
     tasks: Vec<JoinHandle<()>>,
     conference_bridge: Option<ConferenceBridgeHandle>,
+    /// Per-leg typed extensions bag — same shape as the session bag, so
+    /// addon sections registered here ride ONLY this leg's events (merged
+    /// by `leg_id` at enrichment time). Cleaned up with the leg.
+    extensions: SessionExtensions,
+}
+
+impl LegData {
+    fn new(leg: Leg, dialog: Option<Dialog>) -> Self {
+        Self {
+            leg,
+            dialog,
+            media_leg: None,
+            transport: None,
+            answer: None,
+            has_video: false,
+            tasks: Vec::new(),
+            conference_bridge: None,
+            extensions: SessionExtensions::new(),
+        }
+    }
 }
 
 pub struct LegRegistry {
@@ -35,19 +56,7 @@ impl LegRegistry {
         state: Leg,
         dialog: Option<Dialog>,
     ) {
-        self.legs.insert(
-            id,
-            LegData {
-                leg: state,
-                dialog,
-                media_leg: None,
-                transport: None,
-                answer: None,
-                has_video: false,
-                tasks: Vec::new(),
-                conference_bridge: None,
-            },
-        );
+        self.legs.insert(id, LegData::new(state, dialog));
     }
 
     pub fn remove(&mut self, id: &LegId) -> Option<Leg> {
@@ -234,20 +243,37 @@ impl LegRegistry {
         if let Some(data) = self.legs.get_mut(&id) {
             data.leg = state;
         } else {
-            self.legs.insert(
-                id,
-                LegData {
-                    leg: state,
-                    dialog: None,
-                    media_leg: None,
-                    transport: None,
-                    answer: None,
-                    has_video: false,
-                    tasks: Vec::new(),
-                    conference_bridge: None,
-                },
-            );
+            self.legs.insert(id, LegData::new(state, None));
         }
+    }
+
+    /// Insert/replace a typed event section scoped to one leg (addon API).
+    /// The section rides only the events whose payload carries this leg's
+    /// `leg_id`.
+    pub fn set_event_section<S: EventSectionSpec>(&mut self, id: &LegId, section: S) {
+        if let Some(data) = self.legs.get_mut(id) {
+            data.extensions.set_event_section(section);
+        }
+    }
+
+    /// Snapshot every leg's typed sections as `leg_id → (KEY → JSON)`,
+    /// skipping legs without sections. Consumed by the emission choke point
+    /// to refresh `CallMeta::leg_sections`.
+    pub fn leg_sections_snapshot(
+        &self,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>
+    {
+        let mut out = std::collections::BTreeMap::new();
+        for (id, data) in &self.legs {
+            let sections = data.extensions.event_sections();
+            if sections.is_empty() {
+                continue;
+            }
+            out.entry(id.0.clone())
+                .or_insert_with(std::collections::BTreeMap::new)
+                .extend(sections.into_iter().map(|(k, v)| (k.to_string(), v)));
+        }
+        out
     }
 }
 

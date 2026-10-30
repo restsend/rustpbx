@@ -382,10 +382,10 @@ pub(super) fn forward_dtmf_event(
                 // via `_rst_step_index`, matching its hand-off trace); 0 only
                 // when the bridge has no node context at all.
                 step_index: ctx.step_index.unwrap_or(0),
-                trigger: crate::rwi::TriggerInfo::with_detail(
-                    "dtmf",
-                    serde_json::json!({ "digit": digit_str }),
-                ),
+                trigger: crate::rwi::TriggerInfo::Dtmf {
+                    digit: digit_str,
+                    digits: None,
+                },
                 action_type: "Bridge".to_string(),
                 action_json: None,
                 duration_ms,
@@ -509,7 +509,7 @@ pub(super) fn emit_suspended_flow_session_end(
         // non-bridge suspensions (queue / jump without node context) keep 0,
         // consistent with the other absent context fields.
         step_index: ctx.as_ref().and_then(|c| c.step_index).unwrap_or(0),
-        trigger: crate::rwi::TriggerInfo::new("session_end"),
+        trigger: crate::rwi::TriggerInfo::SessionEnd,
         action_type: if ctx.is_some() { "Bridge" } else { "Transfer" }.to_string(),
         action_json: None,
         duration_ms,

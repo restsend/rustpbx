@@ -665,7 +665,7 @@ async fn test_session_resume_returns_events() {
     // Cache some events in the gateway
     {
         let gw = gateway.read();
-        let event1 = rustpbx::rwi::event::to_legacy_event(
+        let event1 = rustpbx::rwi::event::RwiEvent::from_spec(
             &rustpbx::rwi::CallRinging {
                 leg_id: None,
                 call_id: "test-call-1".to_string(),
@@ -676,7 +676,7 @@ async fn test_session_resume_returns_events() {
 },
             None,
         );
-        let event2 = rustpbx::rwi::event::to_legacy_event(
+        let event2 = rustpbx::rwi::event::RwiEvent::from_spec(
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "test-call-1".to_string(),
@@ -719,7 +719,7 @@ async fn test_call_resume_returns_call_specific_events() {
     // Cache events for different calls
     {
         let gw = gateway.read();
-        let event1 = rustpbx::rwi::event::to_legacy_event(
+        let event1 = rustpbx::rwi::event::RwiEvent::from_spec(
             &rustpbx::rwi::CallRinging {
                 leg_id: None,
                 call_id: "call-a".to_string(),
@@ -730,7 +730,7 @@ async fn test_call_resume_returns_call_specific_events() {
 },
             None,
         );
-        let event2 = rustpbx::rwi::event::to_legacy_event(
+        let event2 = rustpbx::rwi::event::RwiEvent::from_spec(
             &rustpbx::rwi::CallRinging {
                 leg_id: None,
                 call_id: "call-b".to_string(),

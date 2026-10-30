@@ -272,6 +272,8 @@ async fn test_transcript_final_webhook_filtering() {
     // path in live_transcription).
     let segment = |partial: bool| RwiEvent {
         event_type: "transcript_segment",
+            kind: Default::default(),
+            meta: Default::default(),
         call_id: Some("call-1".to_string()),
         payload: serde_json::json!({
             "call_id": "call-1",

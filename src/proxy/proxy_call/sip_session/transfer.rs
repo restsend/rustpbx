@@ -1961,7 +1961,7 @@ impl SipSession {
             // dialog's later call_* events carry agent_id (→ client_ip).
             Self::set_pinned_agent_id(&self.extensions, &agent);
             self.session_ext_set("agent_id", agent);
-            self.sync_agent_context_to_rwi_meta();
+            self.refresh_rwi_meta();
         }
         // Canonical event form: a bare extension target ("1003") is reported
         // as `sip:1003` — URI-shaped like the B2BUA dial path.

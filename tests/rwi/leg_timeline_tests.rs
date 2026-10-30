@@ -372,7 +372,7 @@ async fn test_leg_timeline_via_call_resume() {
 
         // Simulate call lifecycle events
         let events = vec![
-            rustpbx::rwi::event::to_legacy_event(
+            rustpbx::rwi::event::RwiEvent::from_spec(
                 &rustpbx::rwi::CallCreated {
                     leg_id: None,
                     leg_role: None,
@@ -392,7 +392,7 @@ async fn test_leg_timeline_via_call_resume() {
                 },
                 None,
             ),
-            rustpbx::rwi::event::to_legacy_event(
+            rustpbx::rwi::event::RwiEvent::from_spec(
                 &rustpbx::rwi::CallAnswered {
                     leg_id: None,
                     call_id: "timeline-call".to_string(),
@@ -400,20 +400,20 @@ async fn test_leg_timeline_via_call_resume() {
 },
                 None,
             ),
-            rustpbx::rwi::event::to_legacy_event(
+            rustpbx::rwi::event::RwiEvent::from_spec(
                 &rustpbx::rwi::CallBridged {
                     leg_a: "timeline-call".to_string(),
                     leg_b: "agent-leg".to_string(),
                 },
                 None,
             ),
-            rustpbx::rwi::event::to_legacy_event(
+            rustpbx::rwi::event::RwiEvent::from_spec(
                 &rustpbx::rwi::CallUnbridged {
                     call_id: "timeline-call".to_string(),
                 },
                 None,
             ),
-            rustpbx::rwi::event::to_legacy_event(
+            rustpbx::rwi::event::RwiEvent::from_spec(
                 &rustpbx::rwi::CallTransferred {
                     call_id: "timeline-call".to_string(),
                     transfer_target: None,

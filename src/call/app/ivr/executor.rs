@@ -751,7 +751,7 @@ impl StepIvrApp {
         let trigger = self
             .current_trigger
             .clone()
-            .unwrap_or_else(|| crate::rwi::TriggerInfo::new("action_execute"));
+            .unwrap_or_else(|| crate::rwi::TriggerInfo::ActionExecute);
 
         self.current_trigger = None;
 
@@ -866,7 +866,7 @@ impl StepIvrApp {
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::ChainedTo(next) => {
-                        self.current_trigger = Some(crate::rwi::TriggerInfo::new("chained"));
+                        self.current_trigger = Some(crate::rwi::TriggerInfo::Chained);
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
@@ -890,15 +890,12 @@ impl StepIvrApp {
                                         ProviderEvent::PhoneCollected {
                                             number: number.clone(),
                                         },
-                                        crate::rwi::TriggerInfo::with_detail(
-                                            "phone_collected",
-                                            serde_json::json!({ "number": number }),
-                                        ),
+                                        crate::rwi::TriggerInfo::PhoneCollected { number },
                                     )
                                 }
                                 WaitEvent::DtmfTimeout => (
                                     ProviderEvent::DtmfTimeout,
-                                    crate::rwi::TriggerInfo::new("dtmf_timeout"),
+                                    crate::rwi::TriggerInfo::DtmfTimeout,
                                 ),
                                 other => {
                                     tracing::warn!(
@@ -907,7 +904,7 @@ impl StepIvrApp {
                                     let _ = other;
                                     (
                                         ProviderEvent::DtmfTimeout,
-                                        crate::rwi::TriggerInfo::new("dtmf_timeout"),
+                                        crate::rwi::TriggerInfo::DtmfTimeout,
                                     )
                                 }
                             };
@@ -981,19 +978,18 @@ impl StepIvrApp {
                                 )
                             });
                             self.current_trigger =
-                                Some(crate::rwi::TriggerInfo::new("record_control"));
+                                Some(crate::rwi::TriggerInfo::RecordControl);
                             self.current_node = next_node;
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
                         }
 
                         let step_trigger = match wait_event {
                             WaitEvent::DtmfCollected { digit } => {
-                                crate::rwi::TriggerInfo::with_detail(
-                                    "dtmf_collected",
-                                    serde_json::json!({ "digit": digit }),
-                                )
+                                crate::rwi::TriggerInfo::DtmfCollected {
+                                    digit: digit.clone(),
+                                }
                             }
-                            WaitEvent::DtmfTimeout => crate::rwi::TriggerInfo::new("dtmf_timeout"),
+                            WaitEvent::DtmfTimeout => crate::rwi::TriggerInfo::DtmfTimeout,
                             _ => trigger.clone(),
                         };
                         self.pending_start_instant = self.step_start_instant;
@@ -1377,13 +1373,10 @@ impl StepIvrApp {
             caller,
             callee,
             step_index: self.step_index,
-            trigger: crate::rwi::TriggerInfo::with_detail(
-                "ivr_fallback",
-                serde_json::json!({
-                    "reason": reason,
-                    "target": target,
-                }),
-            ),
+            trigger: crate::rwi::TriggerInfo::IvrFallback {
+                reason: reason.to_string(),
+                target: target.map(str::to_string),
+            },
             provider_url: None,
             action_type: "ivr_fallback".to_string(),
             action_json: None,
@@ -1656,92 +1649,86 @@ impl StepIvrApp {
             // `StepProvider` may downgrade the `Resume` event to
             // `session_start` for legacy endpoints.)
             Some(ProviderEvent::SessionStart) if self.resumed_flow => {
-                crate::rwi::TriggerInfo::new("resume")
+                crate::rwi::TriggerInfo::Resume
             }
-            Some(ProviderEvent::SessionStart) => crate::rwi::TriggerInfo::new("session_start"),
+            Some(ProviderEvent::SessionStart) => crate::rwi::TriggerInfo::SessionStart,
             Some(ProviderEvent::Resume {
                 resume_from_step_id,
-            }) => crate::rwi::TriggerInfo::with_detail(
-                "resume",
-                serde_json::json!({ "resume_from_step_id": resume_from_step_id }),
-            ),
+            }) => crate::rwi::TriggerInfo::ResumeFromStep {
+                resume_from_step_id: resume_from_step_id.clone(),
+            },
             Some(ProviderEvent::AudioComplete { .. }) => {
-                crate::rwi::TriggerInfo::new("audio_complete")
+                crate::rwi::TriggerInfo::AudioComplete
             }
             Some(ProviderEvent::Dtmf { digit }) => {
-                crate::rwi::TriggerInfo::with_detail("dtmf", serde_json::json!({ "digit": digit }))
+                crate::rwi::TriggerInfo::Dtmf {
+                    digit: digit.clone(),
+                    digits: None,
+                }
             }
-            Some(ProviderEvent::DtmfTimeout) => crate::rwi::TriggerInfo::new("dtmf_timeout"),
+            Some(ProviderEvent::DtmfTimeout) => crate::rwi::TriggerInfo::DtmfTimeout,
             Some(ProviderEvent::ApiResponse { status, .. }) => {
-                crate::rwi::TriggerInfo::with_detail(
-                    "api_response",
-                    serde_json::json!({ "status": status }),
-                )
+                crate::rwi::TriggerInfo::ApiResponse { status: *status }
             }
-            Some(ProviderEvent::PhoneCollected { number }) => crate::rwi::TriggerInfo::with_detail(
-                "phone_collected",
-                serde_json::json!({ "number": number }),
-            ),
+            Some(ProviderEvent::PhoneCollected { number }) => {
+                crate::rwi::TriggerInfo::PhoneCollected {
+                    number: number.clone(),
+                }
+            }
             Some(ProviderEvent::RecordingComplete { url, duration_secs }) => {
-                crate::rwi::TriggerInfo::with_detail(
-                    "recording_complete",
-                    serde_json::json!({ "url": url, "duration_secs": duration_secs }),
-                )
+                crate::rwi::TriggerInfo::RecordingComplete {
+                    url: url.clone(),
+                    duration_secs: *duration_secs,
+                }
             }
             Some(ProviderEvent::RecordingStarted {
                 segment_type,
                 segment_id,
-            }) => crate::rwi::TriggerInfo::with_detail(
-                "recording_started",
-                serde_json::json!({
-                    "segment_type": segment_type,
-                    "segment_id": segment_id,
-                }),
-            ),
+            }) => crate::rwi::TriggerInfo::RecordingStarted {
+                segment_type: segment_type.clone(),
+                segment_id: segment_id.clone(),
+            },
             Some(ProviderEvent::RecordingStopped { reason }) => {
-                crate::rwi::TriggerInfo::with_detail(
-                    "recording_stopped",
-                    serde_json::json!({ "reason": reason }),
-                )
+                crate::rwi::TriggerInfo::RecordingStopped {
+                    reason: reason.clone(),
+                }
             }
             Some(ProviderEvent::InputVoice { text, confidence }) => {
-                crate::rwi::TriggerInfo::with_detail(
-                    "input_voice",
-                    serde_json::json!({ "text": text, "confidence": confidence }),
-                )
+                crate::rwi::TriggerInfo::InputVoice {
+                    text: text.clone(),
+                    confidence: *confidence,
+                }
             }
-            Some(ProviderEvent::Error { reason }) => crate::rwi::TriggerInfo::with_detail(
-                "error",
-                serde_json::json!({ "reason": reason }),
-            ),
+            Some(ProviderEvent::Error { reason }) => {
+                crate::rwi::TriggerInfo::Error {
+                    reason: reason.clone(),
+                }
+            }
             Some(ProviderEvent::Fail {
                 reason,
                 failed_step_id,
                 failed_step_name,
                 failed_action,
-            }) => crate::rwi::TriggerInfo::with_detail(
-                "fail",
-                serde_json::json!({
-                    "reason": reason,
-                    "failed_step_id": failed_step_id,
-                    "failed_step_name": failed_step_name,
-                    "failed_action": failed_action,
-                }),
-            ),
-            Some(ProviderEvent::DtmfMenuInvalid { digit }) => crate::rwi::TriggerInfo::with_detail(
-                "dtmf_menu_invalid",
-                serde_json::json!({ "digit": digit }),
-            ),
+            }) => crate::rwi::TriggerInfo::Fail {
+                reason: reason.clone(),
+                failed_step_id: failed_step_id.clone(),
+                failed_step_name: failed_step_name.clone(),
+                failed_action: failed_action.clone(),
+            },
+            Some(ProviderEvent::DtmfMenuInvalid { digit }) => {
+                crate::rwi::TriggerInfo::DtmfMenuInvalid {
+                    digit: digit.clone(),
+                }
+            }
             Some(ProviderEvent::DtmfMenuTimeout) => {
-                crate::rwi::TriggerInfo::new("dtmf_menu_timeout")
+                crate::rwi::TriggerInfo::DtmfMenuTimeout
             }
             Some(ProviderEvent::TransferResult { outcome }) => {
-                crate::rwi::TriggerInfo::with_detail(
-                    "transfer_result",
-                    serde_json::json!({ "outcome": outcome }),
-                )
+                crate::rwi::TriggerInfo::TransferResult {
+                    outcome: outcome.clone(),
+                }
             }
-            None => crate::rwi::TriggerInfo::new("unknown"),
+            None => crate::rwi::TriggerInfo::Unknown,
         });
 
         // Record the completed predecessor now that the successor is known:
@@ -2224,10 +2211,10 @@ impl CallApp for StepIvrApp {
                     caller: context.call_info.caller.clone(),
                     callee: invocation.callee.clone(),
                     step_index: ctx.step_index.unwrap_or(0),
-                    trigger: crate::rwi::TriggerInfo::with_detail(
-                        "dtmf",
-                        serde_json::json!({ "digit": first_digit, "digits": resume_digits }),
-                    ),
+                    trigger: crate::rwi::TriggerInfo::Dtmf {
+                        digit: first_digit,
+                        digits: Some(resume_digits),
+                    },
                     provider_url: None,
                     action_type: "Bridge".to_string(),
                     action_json: None,
@@ -2362,10 +2349,10 @@ impl CallApp for StepIvrApp {
                 self.interrupt_on_dtmf = false;
                 self.pending_menu.take();
                 if let Some(ref mut t) = self.pending_trace {
-                    t.trigger = crate::rwi::TriggerInfo::with_detail(
-                        "dtmf",
-                        serde_json::json!({ "digit": digit }),
-                    );
+                    t.trigger = crate::rwi::TriggerInfo::Dtmf {
+                        digit: digit.clone(),
+                        digits: None,
+                    };
                 }
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::Dtmf { digit }))
@@ -2386,14 +2373,15 @@ impl CallApp for StepIvrApp {
                 // Unified with the provider-driven path: a key press resolving
                 // a menu always reports `dtmf` + detail.digit (consumer
                 // contract: menu nodeType reads trigger.detail.digit).
-                let dtmf_detail = serde_json::json!({ "digit": digit.clone() });
-                self.current_trigger =
-                    Some(crate::rwi::TriggerInfo::with_detail("dtmf", dtmf_detail));
+                self.current_trigger = Some(crate::rwi::TriggerInfo::Dtmf {
+                    digit: digit.clone(),
+                    digits: None,
+                });
                 if let Some(ref mut t) = self.pending_trace {
-                    t.trigger = crate::rwi::TriggerInfo::with_detail(
-                        "dtmf",
-                        serde_json::json!({ "digit": digit }),
-                    );
+                    t.trigger = crate::rwi::TriggerInfo::Dtmf {
+                        digit: digit.clone(),
+                        digits: None,
+                    };
                 }
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
@@ -2419,10 +2407,7 @@ impl CallApp for StepIvrApp {
                 caller: provider_session.caller,
                 callee: provider_session.callee,
                 step_index: self.step_index,
-                trigger: crate::rwi::TriggerInfo::with_detail(
-                    "dtmf_menu_invalid",
-                    serde_json::json!({ "digit": digit }),
-                ),
+                trigger: crate::rwi::TriggerInfo::DtmfMenuInvalid { digit },
                 provider_url: None,
                 action_type: "DtmfMenu".to_string(),
                 action_json: None,
@@ -2456,10 +2441,10 @@ impl CallApp for StepIvrApp {
             }
 
             if let Some(ref mut t) = self.pending_trace {
-                t.trigger = crate::rwi::TriggerInfo::with_detail(
-                    "dtmf",
-                    serde_json::json!({ "digit": digit }),
-                );
+                t.trigger = crate::rwi::TriggerInfo::Dtmf {
+                    digit: digit.clone(),
+                    digits: None,
+                };
             }
             self.current_node = Some(
                 self.request_next(Some(ProviderEvent::Dtmf { digit }))
@@ -2521,7 +2506,7 @@ impl CallApp for StepIvrApp {
 
         if let Some(ref node) = self.current_node {
             if let Some(ref next) = node.next {
-                self.current_trigger = Some(crate::rwi::TriggerInfo::new("audio_complete"));
+                self.current_trigger = Some(crate::rwi::TriggerInfo::AudioComplete);
                 self.current_node = Some(*next.clone());
                 return self.__exec_node(ctrl, context).await;
             }
@@ -2593,21 +2578,21 @@ impl CallApp for StepIvrApp {
                 // Symmetric with key presses: the menu step's own trace
                 // records HOW it ended — overwrite the pending trigger.
                 if let Some(ref mut t) = self.pending_trace {
-                    t.trigger = crate::rwi::TriggerInfo::new("dtmf_menu_timeout");
+                    t.trigger = crate::rwi::TriggerInfo::DtmfMenuTimeout;
                 }
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::DtmfMenuTimeout))
                         .await?,
                 );
-                self.current_trigger = Some(crate::rwi::TriggerInfo::new("dtmf_menu_timeout"));
+                self.current_trigger = Some(crate::rwi::TriggerInfo::DtmfMenuTimeout);
                 return self.__exec_node(ctrl, context).await;
             }
 
             if let Some(next) = self.handle_menu_timeout() {
                 if let Some(ref mut t) = self.pending_trace {
-                    t.trigger = crate::rwi::TriggerInfo::new("dtmf_menu_timeout");
+                    t.trigger = crate::rwi::TriggerInfo::DtmfMenuTimeout;
                 }
-                self.current_trigger = Some(crate::rwi::TriggerInfo::new("dtmf_menu_timeout"));
+                self.current_trigger = Some(crate::rwi::TriggerInfo::DtmfMenuTimeout);
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
@@ -2638,13 +2623,17 @@ impl CallApp for StepIvrApp {
             // finished when the session terminates it). Vocabulary matches
             // the session-level end_reason tags.
             let hangup_trigger = match &reason {
-                crate::call::app::ExitReason::RemoteHangup(_) => Some("user_hangup"),
-                crate::call::app::ExitReason::Cancelled => Some("cancelled"),
-                crate::call::app::ExitReason::Hangup => Some("hangup"),
+                crate::call::app::ExitReason::RemoteHangup(_) => {
+                    Some(crate::rwi::TriggerInfo::UserHangup)
+                }
+                crate::call::app::ExitReason::Cancelled => {
+                    Some(crate::rwi::TriggerInfo::Cancelled)
+                }
+                crate::call::app::ExitReason::Hangup => Some(crate::rwi::TriggerInfo::Hangup),
                 _ => None,
             };
-            if let Some(t) = hangup_trigger {
-                pending.trigger = crate::rwi::TriggerInfo::new(t);
+            if let Some(trigger) = hangup_trigger {
+                pending.trigger = trigger;
             }
             let end = std::time::Instant::now();
             let duration = self
@@ -2765,7 +2754,7 @@ impl CallApp for StepIvrApp {
                 caller,
                 callee,
                 step_index: self.step_index,
-                trigger: crate::rwi::TriggerInfo::new("session_end"),
+                trigger: crate::rwi::TriggerInfo::SessionEnd,
                 provider_url: None,
                 action_type: last_action_type,
                 action_json: None,
@@ -4315,21 +4304,18 @@ mod tests {
             "expected a DtmfMenu trace entry, all entries: {:?}",
             entries
                 .iter()
-                .map(|e| (&e.action_type, &e.trigger.r#type))
+                .map(|e| (&e.action_type, e.trigger.type_name()))
                 .collect::<Vec<_>>()
         );
         let menu_entry = menu_entry.unwrap();
         assert_eq!(
-            menu_entry.trigger.r#type, "dtmf",
+            menu_entry.trigger.type_name(), "dtmf",
             "local DtmfMenu step trigger should be 'dtmf' (unified), got: {:?}",
             menu_entry.trigger
         );
         assert_eq!(
             menu_entry
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("1"),
             "DtmfMenu step trigger should contain digit '1'"
         );
@@ -4391,21 +4377,18 @@ mod tests {
             "expected a DtmfMenu trace entry, all entries: {:?}",
             entries
                 .iter()
-                .map(|e| (&e.action_type, &e.trigger.r#type))
+                .map(|e| (&e.action_type, e.trigger.type_name()))
                 .collect::<Vec<_>>()
         );
         let menu_entry = menu_entry.unwrap();
         assert_eq!(
-            menu_entry.trigger.r#type, "dtmf",
+            menu_entry.trigger.type_name(), "dtmf",
             "provider-driven DtmfMenu step trigger should be 'dtmf' (after fix), got: {:?}",
             menu_entry.trigger
         );
         assert_eq!(
             menu_entry
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("1"),
             "provider-driven DtmfMenu step trigger should contain digit '1'"
         );
@@ -4414,7 +4397,7 @@ mod tests {
             .find(|e| e.action_type == "Transfer")
             .expect("expected a Transfer trace entry");
         assert_eq!(
-            next_entry.trigger.r#type, "dtmf",
+            next_entry.trigger.type_name(), "dtmf",
             "Transfer step (after provider-driven menu) should have trigger 'dtmf', got: {:?}",
             next_entry.trigger
         );
@@ -4479,14 +4462,11 @@ mod tests {
         let entries = trace.query_by_session(&sess.session_id).await;
         let invalid = entries
             .iter()
-            .find(|e| e.trigger.r#type == "dtmf_menu_invalid")
+            .find(|e| e.trigger.type_name() == "dtmf_menu_invalid")
             .expect("unmatched key must produce a dtmf_menu_invalid trace entry");
         assert_eq!(
             invalid
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("9"),
             "dtmf_menu_invalid trace must carry the rejected digit"
         );
@@ -4574,7 +4554,7 @@ mod tests {
             .find(|e| e.action_type == "DtmfMenu")
             .expect("expected a DtmfMenu trace entry");
         assert_eq!(
-            menu_entry.trigger.r#type, "dtmf_menu_timeout",
+            menu_entry.trigger.type_name(), "dtmf_menu_timeout",
             "menu step ended by timeout must carry trigger 'dtmf_menu_timeout' (symmetric with key presses), got: {:?}",
             menu_entry.trigger
         );
@@ -4632,7 +4612,7 @@ mod tests {
         let entries = trace.query_by_session(&sess.session_id).await;
         let finalized = entries
             .iter()
-            .find(|e| e.trigger.r#type == "phone_collected")
+            .find(|e| e.trigger.type_name() == "phone_collected")
             .expect("InputPhone completion must emit a phone_collected entry");
         assert_eq!(
             finalized.action_type, "InputPhone",
@@ -4643,7 +4623,7 @@ mod tests {
             "the finalized entry must carry step_end_time (completion marker)"
         );
         assert!(
-            !entries.iter().any(|e| e.trigger.r#type == "session_end"
+            !entries.iter().any(|e| e.trigger.type_name() == "session_end"
                 && e.step_id.is_some()
                 && e.end_reason.is_none()),
             "mid-flow wait completion must NOT be reported as session_end (reserved for on_exit with end_reason)"
@@ -4722,16 +4702,13 @@ mod tests {
             .find(|e| e.action_type == "DtmfMenu")
             .expect("expected a DtmfMenu trace entry");
         assert_eq!(
-            menu_entry.trigger.r#type, "dtmf",
+            menu_entry.trigger.type_name(), "dtmf",
             "barge-in DtmfMenu step trigger should be 'dtmf', got: {:?}",
             menu_entry.trigger
         );
         assert_eq!(
             menu_entry
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("2")
         );
     }
@@ -4868,16 +4845,13 @@ mod tests {
             .find(|e| e.action_type == "DtmfMenu")
             .expect("expected a DtmfMenu trace entry");
         assert_eq!(
-            menu_entry.trigger.r#type, "dtmf",
+            menu_entry.trigger.type_name(), "dtmf",
             "menu_tts_api menu step trigger should be 'dtmf', got: {:?}",
             menu_entry.trigger
         );
         assert_eq!(
             menu_entry
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("1")
         );
     }
@@ -4964,14 +4938,11 @@ mod tests {
         let entries = trace.query_by_session("test-session").await;
         let traced = entries
             .iter()
-            .find(|e| e.trigger.r#type == "dtmf")
+            .find(|e| e.trigger.type_name() == "dtmf")
             .expect("expected a trace entry triggered by dtmf");
         assert_eq!(
             traced
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("1")
         );
     }
@@ -5066,14 +5037,11 @@ mod tests {
         let entries = trace.query_by_session("test-session").await;
         let traced = entries
             .iter()
-            .find(|e| e.trigger.r#type == "resume")
+            .find(|e| e.trigger.type_name() == "resume")
             .expect("expected a trace entry triggered by resume");
         assert_eq!(
             traced
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("resume_from_step_id").and_then(|v| v.as_str())),
+                .trigger.resume_step_id(),
             Some("1000141102024500020003")
         );
     }
@@ -5134,13 +5102,10 @@ mod tests {
             .expect("the suppressed bridge step must be reported by the resumed executor");
         assert_eq!(bridge_entry.step_id.as_deref(), Some("1000141102024500020003"));
         assert_eq!(bridge_entry.step_index, 2);
-        assert_eq!(bridge_entry.trigger.r#type, "dtmf");
+        assert_eq!(bridge_entry.trigger.type_name(), "dtmf");
         assert_eq!(
             bridge_entry
-                .trigger
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+                .trigger.digit(),
             Some("8")
         );
         assert_eq!(
@@ -5169,7 +5134,7 @@ mod tests {
             .iter()
             .find(|e| e.step_id.as_deref() == Some("1000141102024500020012"))
             .expect("the successor node must be traced");
-        assert_eq!(successor_entry.trigger.r#type, "dtmf");
+        assert_eq!(successor_entry.trigger.type_name(), "dtmf");
         assert!(successor_entry.next_node_id.is_none());
     }
 
@@ -5267,15 +5232,15 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let entries = trace.query_by_session("test-session").await;
         assert!(
-            entries.iter().any(|e| e.trigger.r#type == "resume"),
+            entries.iter().any(|e| e.trigger.type_name() == "resume"),
             "resumed first node must carry the `resume` lifecycle trigger, got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.r#type.clone())
+                .map(|e| e.trigger.type_name().clone())
                 .collect::<Vec<_>>()
         );
         assert!(
-            !entries.iter().any(|e| e.trigger.r#type == "session_start"),
+            !entries.iter().any(|e| e.trigger.type_name() == "session_start"),
             "a resumed flow must never re-emit session_start"
         );
     }
@@ -5385,14 +5350,14 @@ mod tests {
             "each menu cycle (initial + replay) must produce its own DtmfMenu trace, got: {:?}",
             entries
                 .iter()
-                .map(|e| (&e.action_type, &e.trigger.r#type))
+                .map(|e| (&e.action_type, e.trigger.type_name()))
                 .collect::<Vec<_>>()
         );
         // The replayed menu step ended by the second timeout.
         assert!(
             menu_entries
                 .iter()
-                .any(|e| e.trigger.r#type == "dtmf_menu_timeout"),
+                .any(|e| e.trigger.type_name() == "dtmf_menu_timeout"),
             "timeout-ended menu steps must carry trigger 'dtmf_menu_timeout'"
         );
     }
@@ -5550,11 +5515,11 @@ mod tests {
         let sess = &sessions[0];
         let entries = trace.query_by_session(&sess.session_id).await;
         assert!(
-            !entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            !entries.iter().any(|e| e.trigger.type_name() == "session_end"),
             "bridge hand-off with return_app must NOT emit session_end (flow resumes), got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.r#type.clone())
+                .map(|e| e.trigger.type_name().clone())
                 .collect::<Vec<_>>()
         );
         // Suspended-flow identity stash: the compensating session_end the
@@ -5647,11 +5612,11 @@ mod tests {
         let sess = &sessions[0];
         let entries = trace.query_by_session(&sess.session_id).await;
         assert!(
-            !entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            !entries.iter().any(|e| e.trigger.type_name() == "session_end"),
             "JumpIvr continues the SAME logical flow — no session_end at the jump, got: {:?}",
             entries
                 .iter()
-                .map(|e| e.trigger.r#type.clone())
+                .map(|e| e.trigger.type_name().clone())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -5728,7 +5693,7 @@ mod tests {
         let entries = trace.query_by_session(&sess.session_id).await;
         let session_end = entries
             .iter()
-            .find(|e| e.trigger.r#type == "session_end")
+            .find(|e| e.trigger.type_name() == "session_end")
             .expect("terminal transfer must still record session_end");
         assert_eq!(sess.status, "transfer");
         assert_eq!(
@@ -5739,7 +5704,7 @@ mod tests {
         // reason-free — the session_end above is the only end-reason carrier.
         let node_entry = entries
             .iter()
-            .find(|e| e.trigger.r#type != "session_end")
+            .find(|e| e.trigger.type_name() != "session_end")
             .expect("transfer node trace must exist");
         assert_eq!(node_entry.end_reason, None);
         assert_eq!(node_entry.end_detail, None);
@@ -5892,7 +5857,7 @@ mod tests {
         // The session_end entry should carry the transfer end reason + detail.
         let session_end = entries
             .iter()
-            .find(|e| e.trigger.r#type == "session_end")
+            .find(|e| e.trigger.type_name() == "session_end")
             .expect("expected a session_end trace entry");
         assert_eq!(
             session_end.end_reason,
@@ -7736,7 +7701,7 @@ mod tests {
         let entries = trace.query_by_session("test-session").await;
         let session_end = entries
             .iter()
-            .find(|e| e.trigger.r#type == "session_end")
+            .find(|e| e.trigger.type_name() == "session_end")
             .expect("remote hangup must record a session_end trace entry");
         assert_eq!(
             session_end.step_start_time.as_deref(),
@@ -7857,7 +7822,7 @@ mod tests {
 
         let menu_exit = entries
             .iter()
-            .find(|e| e.trigger.r#type == "dtmf")
+            .find(|e| e.trigger.type_name() == "dtmf")
             .expect("menu step trace must be recorded");
         assert_eq!(
             menu_exit.next_step_id.as_deref(),
@@ -7887,7 +7852,7 @@ mod tests {
 
         let session_end = entries
             .iter()
-            .find(|e| e.trigger.r#type == "session_end")
+            .find(|e| e.trigger.type_name() == "session_end")
             .expect("session_end trace must be recorded");
         assert_eq!(
             session_end.end,
@@ -7957,10 +7922,10 @@ mod tests {
             entries.len(),
             3,
             "exactly three trace entries must be recorded, got: {:?}",
-            entries.iter().map(|e| e.trigger.r#type.clone()).collect::<Vec<_>>()
+            entries.iter().map(|e| e.trigger.type_name().clone()).collect::<Vec<_>>()
         );
         for (entry, (trigger, end)) in entries.iter().zip(expected) {
-            assert_eq!(entry.trigger.r#type, trigger, "trace order mismatch");
+            assert_eq!(entry.trigger.type_name(), trigger, "trace order mismatch");
             assert_eq!(entry.end, end, "end-marker mismatch on trigger={trigger}");
             assert!(
                 entry.step_end_time.is_some(),
@@ -8037,11 +8002,11 @@ mod tests {
 
         app.record_trace(entry(
             "step-normal",
-            crate::rwi::TriggerInfo::new("audio_complete"),
+            crate::rwi::TriggerInfo::AudioComplete,
         ));
         app.record_trace(entry(
             "step-end",
-            crate::rwi::TriggerInfo::new("session_end"),
+            crate::rwi::TriggerInfo::SessionEnd,
         ));
 
         let first = events.try_recv().expect("ordinary trace must be enqueued");
@@ -8075,7 +8040,10 @@ mod tests {
             caller: "1001".into(),
             callee: "2000".into(),
             step_index: 1,
-            trigger: crate::rwi::TriggerInfo::new("ivr_fallback"),
+            trigger: crate::rwi::TriggerInfo::IvrFallback {
+                reason: "test".into(),
+                target: None,
+            },
             provider_url: None,
             action_type: "ivr_fallback".into(),
             action_json: None,
@@ -8126,7 +8094,10 @@ mod tests {
             caller: "1001".into(),
             callee: "2000".into(),
             step_index: 1,
-            trigger: crate::rwi::TriggerInfo::new("ivr_fallback"),
+            trigger: crate::rwi::TriggerInfo::IvrFallback {
+                reason: "test".into(),
+                target: None,
+            },
             provider_url: None,
             action_type: "ivr_fallback".into(),
             action_json: None,
@@ -8420,18 +8391,18 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|e| e.trigger.r#type == "dtmf_menu_invalid"),
+                .any(|e| e.trigger.type_name() == "dtmf_menu_invalid"),
             "expected a dtmf_menu_invalid entry in the trace"
         );
         assert!(
-            entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            entries.iter().any(|e| e.trigger.type_name() == "session_end"),
             "expected a session_end entry in the trace"
         );
         for e in &entries {
             assert!(
                 !(e.step_end_time.is_some() && e.step_start_time.is_none()),
                 "trace entry with trigger '{}' carries step_end_time ({:?}) but no step_start_time — duration_ms would be empty for consumers",
-                e.trigger.r#type,
+                e.trigger.type_name(),
                 e.step_end_time
             );
         }
@@ -8573,14 +8544,14 @@ mod tests {
             .find(|e| e.action_type == "DtmfMenu")
             .expect("expected a DtmfMenu trace entry");
         assert_eq!(
-            menu_entry.trigger.r#type, "user_hangup",
+            menu_entry.trigger.type_name(), "user_hangup",
             "menu step terminated by caller hangup must carry trigger 'user_hangup', got: {:?}",
             menu_entry.trigger
         );
         // Session-level end_reason remains on the final session_end entry only.
         let session_end = entries
             .iter()
-            .find(|e| e.trigger.r#type == "session_end")
+            .find(|e| e.trigger.type_name() == "session_end")
             .expect("expected a session_end entry");
         assert_eq!(
             session_end.end_reason,
@@ -8624,7 +8595,7 @@ mod tests {
             .find(|e| e.action_type == "DtmfMenu")
             .expect("expected a DtmfMenu trace entry");
         assert_eq!(
-            menu_entry.trigger.r#type, "cancelled",
+            menu_entry.trigger.type_name(), "cancelled",
             "menu step terminated by cancellation must carry trigger 'cancelled', got: {:?}",
             menu_entry.trigger
         );

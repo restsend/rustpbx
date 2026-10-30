@@ -295,10 +295,10 @@ async fn test_comprehensive_core_event_structs() {
                 caller: "alice".into(),
                 callee: "bob".into(),
                 step_index: 1,
-                trigger: rustpbx::rwi::TriggerInfo::with_detail(
-                    "dtmf",
-                    serde_json::json!({ "digit": "1" }),
-                ),
+                trigger: rustpbx::rwi::TriggerInfo::Dtmf {
+                    digit: "1".into(),
+                    digits: None,
+                },
                 action_type: "prompt".into(),
                 action_json: None,
                 duration_ms: 12,

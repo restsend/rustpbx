@@ -441,7 +441,7 @@ mod tests {
         let entry = EventCacheEntry {
             cached_at: chrono::Utc::now(),
             call_id: "c1".into(),
-            event: crate::rwi::event::to_legacy_event(
+            event: crate::rwi::event::RwiEvent::from_spec(
                 &crate::rwi::CallRinging {
                     leg_id: None,
                     call_id: "c1".into(),
@@ -549,6 +549,8 @@ mod tests {
             call_id: "burst-call".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "ivr_step_trace",
+                kind: Default::default(),
+                meta: Default::default(),
                 call_id: Some("burst-call".into()),
                 payload: serde_json::json!({
                     "event_type": "ivr_step_trace",
@@ -603,7 +605,7 @@ mod tests {
         let mk = || EventCacheEntry {
             cached_at: ts,
             call_id: "redelivery-call".into(),
-            event: crate::rwi::event::to_legacy_event(
+            event: crate::rwi::event::RwiEvent::from_spec(
                 &crate::rwi::CallRinging {
                     leg_id: None,
                     call_id: "redelivery-call".into(),
@@ -651,6 +653,8 @@ mod tests {
             call_id: String::new(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "agent_state_changed",
+                kind: Default::default(),
+                meta: Default::default(),
                 call_id: None,
                 payload: serde_json::json!({
                     "event_type": "agent_state_changed",
@@ -666,6 +670,8 @@ mod tests {
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "recording_metadata_available",
+                kind: Default::default(),
+                meta: Default::default(),
                 call_id: Some("call-1".into()),
                 payload: serde_json::json!({
                     "event_type": "recording_metadata_available",
@@ -680,6 +686,8 @@ mod tests {
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "record_end",
+                kind: Default::default(),
+                meta: Default::default(),
                 call_id: Some("call-1".into()),
                 payload: serde_json::json!({
                     "event_type": "record_end",
@@ -876,7 +884,7 @@ mod tests {
         EventCacheEntry {
             cached_at: chrono::Utc::now(),
             call_id: call_id.into(),
-            event: crate::rwi::event::to_legacy_event(
+            event: crate::rwi::event::RwiEvent::from_spec(
                 &crate::rwi::CallAnswered {
                     leg_id: None,
                     call_id: call_id.into(),
@@ -982,6 +990,8 @@ mod tests {
             call_id: "call-cn".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "recording_metadata_available",
+                kind: Default::default(),
+                meta: Default::default(),
                 call_id: Some("call-cn".into()),
                 payload: serde_json::json!({
                     "event_type": "recording_metadata_available",

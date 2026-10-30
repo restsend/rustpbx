@@ -1,5 +1,5 @@
 use crate::rwi::auth::RwiIdentity;
-use crate::rwi::event::{RwiEvent, RwiEventSpec, merge_event_context};
+use crate::rwi::event::{EventKind, RwiEvent, RwiEventSpec, merge_event_context};
 use crate::rwi::proto::CallMetaStore;
 use crate::rwi::session::{OwnershipMode, RwiSession};
 use chrono::{DateTime, Utc};
@@ -10,6 +10,50 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc, Weak as StdWeak};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
+
+/// Per-leg typed sections: leg id → section KEY → section JSON.
+type LegSections = std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>;
+
+/// Resolve the user-data object for a call: the session's own map, or the
+/// root session's for transfer children. `None` when nothing is set.
+fn resolve_user_data(
+    user_data: &DashMap<SessionId, SessionUserData>,
+    call_id: &str,
+    root: Option<&str>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    user_data
+        .get(call_id)
+        .map(|entry| entry.data.clone())
+        .or_else(|| {
+            let root = root.filter(|root| *root != call_id)?;
+            user_data.get(root).map(|entry| entry.data.clone())
+        })
+}
+
+/// Attach the user-data object under `user_data`. Insert-if-absent: the
+/// event's own field (e.g. `call_userdata_updated`) is never shadowed.
+fn attach_user_data(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    call_id: &str,
+    root: Option<&str>,
+    user_data: &DashMap<SessionId, SessionUserData>,
+) {
+    if let Some(data) = resolve_user_data(user_data, call_id, root) {
+        map.entry("user_data".to_string())
+            .or_insert(serde_json::Value::Object(data));
+    }
+}
+
+/// Phase-1 result: the context-merged payload plus the snapshots the later
+/// enrichment stages need (root id for user-data inheritance on transfer
+/// children, per-leg typed sections keyed by leg id).
+struct MergedCallContext {
+    payload: serde_json::Value,
+    /// Agent attribution from the merged call context (CallMeta) — covers
+    /// events whose own struct carries no `agent_id` field.
+    ctx_agent_id: Option<String>,
+    leg_sections: LegSections,
+}
 
 pub type SessionId = String;
 pub type CallId = String;
@@ -38,6 +82,9 @@ pub type UserDataSyncHook = StdArc<dyn Fn(&SessionId, Option<serde_json::Value>)
 
 /// Resolve an agent-stage recording identity for a call, agent and lifecycle event.
 pub type RecordingIdentityLookup = StdArc<dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync>;
+
+/// Resolve the registered client IP of an agent id (CC AgentRegistry).
+pub type ClientIpLookup = StdArc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Keeps gateway-owned call state alive until the `CallRecord` and all of its
 /// completion hooks have finished. `CallRecord.extensions` requires cloneable
@@ -112,10 +159,10 @@ pub struct RwiGateway {
     /// `node_ip`. `None` in single-node mode (cluster disabled or no self peer
     /// match) — no injection happens then.
     node_ip: Option<String>,
-    /// Optional source of the agent's client IP. When set, events whose payload
-    /// carries an `agent_id` get a `client_ip` field injected (looked up via the
-    /// CC AgentRegistry at dispatch time — no per-event locator/DB query).
-    client_ip_lookup: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    /// Optional source of the agent's client IP. When set, events attributed
+    /// to an agent get a `client_ip` field injected (looked up via the CC
+    /// AgentRegistry at dispatch time — no per-event locator/DB query).
+    client_ip_lookup: Option<ClientIpLookup>,
     recording_identity_lookup: Option<RecordingIdentityLookup>,
     /// Optional cross-node user-data replication hook (cluster mode only).
     user_data_sync: Option<UserDataSyncHook>,
@@ -457,128 +504,155 @@ impl RwiGateway {
     /// Owner / FanOut targets cache the (raw) event for session resume, enrich
     /// it from the `CallMetaStore`, and forward one enriched entry to both the
     /// webhook handler and the event tap. Broadcast targets do not cache —
-    /// they are direct global sends.
+    /// they are direct global sends. Every arm shares the enrich → entry →
+    /// fan-out spine below; only the delivery target differs.
     fn dispatch(&self, dispatch_call_id: &CallId, event: &RwiEvent, target: DispatchTarget) {
         let event = self.snapshot_recording_identity(event);
-        let event = &event;
+        let caches = !matches!(target, DispatchTarget::Broadcast);
+        if caches {
+            if let DispatchTarget::Owner(owner_call_id) = &target
+                && event.kind.contains(EventKind::DTMF)
+            {
+                // Feed DTMF digits to any active DtmfCollect tap for this
+                // call — typed extraction, no payload key reads.
+                if let Some(digit) = event.meta.dtmf_digit {
+                    if let Some(tx) = self.dtmf_taps.get(owner_call_id.as_str()) {
+                        let _ = tx.send((event.meta.leg_id.clone(), digit));
+                    }
+                }
+            }
+            self.cache_event(dispatch_call_id, &event);
+        }
+        let enriched = self.enrich_flat_event(event.into_owned());
+        let entry = EventCacheEntry {
+            cached_at: chrono::Utc::now(),
+            call_id: match target {
+                // Broadcast entries key on the event's own call scope
+                // (empty for truly global events).
+                DispatchTarget::Broadcast => enriched.call_id.clone().unwrap_or_default(),
+                _ => dispatch_call_id.clone(),
+            },
+            event: enriched,
+        };
+        self.fanout_webhook_tap(&entry);
         match target {
             DispatchTarget::Broadcast => {
-                let enriched = self.enrich_flat_event(event);
-                let entry = EventCacheEntry {
-                    cached_at: chrono::Utc::now(),
-                    call_id: enriched.call_id.clone().unwrap_or_default(),
-                    event: enriched.clone(),
-                };
-                self.fanout_webhook_tap(&entry);
                 for session_id in self.session_event_senders.keys() {
-                    self.send_flat_to_session(session_id, &enriched);
+                    self.send_flat_to_session(session_id, &entry.event);
                 }
             }
             DispatchTarget::Owner(owner_call_id) => {
-                // Feed DTMF digits to any active DtmfCollect tap for this call.
-                if event.event_type == "dtmf" {
-                    let digit_char = event
-                        .payload
-                        .get("digit")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.chars().next());
-                    let leg_id = event
-                        .payload
-                        .get("leg_id")
-                        .and_then(|v| v.as_str())
-                        .map(ToOwned::to_owned);
-                    if let Some(c) = digit_char {
-                        if let Some(tx) = self.dtmf_taps.get(owner_call_id) {
-                            let _ = tx.send((leg_id, c));
-                        }
-                    }
-                }
-
-                self.cache_event(dispatch_call_id, event);
-                let enriched = self.enrich_flat_event(event);
-                let entry = EventCacheEntry {
-                    cached_at: chrono::Utc::now(),
-                    call_id: dispatch_call_id.clone(),
-                    event: enriched.clone(),
-                };
-                self.fanout_webhook_tap(&entry);
-                if let Some(owner_id) = self.call_ownership.get(owner_call_id) {
-                    self.send_flat_to_session(owner_id, &enriched);
+                if let Some(owner_id) = self.call_ownership.get(owner_call_id.as_str()) {
+                    self.send_flat_to_session(owner_id, &entry.event);
                 }
             }
             DispatchTarget::FanOut(context, exclude) => {
-                self.cache_event(dispatch_call_id, event);
-                let enriched = self.enrich_flat_event(event);
-                let entry = EventCacheEntry {
-                    cached_at: chrono::Utc::now(),
-                    call_id: dispatch_call_id.clone(),
-                    event: enriched.clone(),
-                };
-                self.fanout_webhook_tap(&entry);
                 if let Some(subscribers) = self.context_subscriptions.get(context) {
                     for session_id in subscribers {
                         if exclude.map_or(false, |e| e == session_id) {
                             continue;
                         }
-                        self.send_flat_to_session(session_id, &enriched);
+                        self.send_flat_to_session(session_id, &entry.event);
                     }
                 }
             }
         }
     }
 
-    fn snapshot_recording_identity(&self, event: &RwiEvent) -> RwiEvent {
-        let mut snapshot = event.clone();
-        if !matches!(event.event_type, "call_created" | "call_ringing" | "call_answered"
-            | "call_hangup" | "call_held" | "call_unheld" | "call_transferred")
-        {
-            return snapshot;
+    /// Preserve the recording identity for lifecycle events. Borrowed (no
+    /// copy) on the hot path — every non-lifecycle event and lifecycle event
+    /// that already carries an identity or has no call id — and cloned only
+    /// when the lifecycle snapshot machinery below may actually mutate.
+    fn snapshot_recording_identity<'e>(&self, event: &'e RwiEvent) -> std::borrow::Cow<'e, RwiEvent> {
+        use std::borrow::Cow;
+        if !event.kind.contains(EventKind::LIFECYCLE) {
+            return Cow::Borrowed(event);
         }
         let Some(call_id) = event.call_id.as_deref() else {
-            return snapshot;
+            return Cow::Borrowed(event);
         };
-        if event.payload.get("recording_id").is_some() {
-            return snapshot;
+        if event.meta.has_recording_id {
+            return Cow::Borrowed(event);
         }
+        let mut snapshot = event.clone();
         let meta = self.meta_store.get_sync(call_id);
-        if event.event_type == "call_transferred" && let Some(meta) = meta.as_ref() {
-            // Completion and replay must retain the origin, not synthesize it from the live target.
-            Self::snapshot_transfer_source(&mut snapshot.payload, meta);
+        if event.kind.contains(EventKind::TRANSFER)
+            && let Some(meta) = meta.as_ref()
+        {
+            // Completion and replay must retain the origin, not synthesize
+            // it from the live target. Applied before the agent resolution
+            // below — the merged source may itself carry the agent id.
+            Self::snapshot_transfer_source(
+                &mut snapshot.payload,
+                meta,
+                snapshot.meta.has_transfer_source,
+            );
+            // The payload's source is now authoritative (own or merged) —
+            // enrichment on the replay path must not re-synthesize it.
+            snapshot.meta.has_transfer_source = true;
         }
-        let source_agent = (event.event_type == "call_transferred")
-            .then(|| snapshot.payload.get("transfer_source")
-                .and_then(|source| source.get("agent_id")).and_then(|id| id.as_str()))
-            .flatten().filter(|id| !id.is_empty()).map(str::to_string);
-        let agent_id = source_agent.as_deref().or_else(|| event.payload.get("agent_id").and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .or_else(|| meta.as_ref().and_then(|m| m.agent_id.as_deref())));
+        // The payload's transfer source is the event's own source plus the
+        // possible meta merge above — typed equivalent of reading the key.
+        let source_agent = snapshot
+            .meta
+            .transfer_source_agent
+            .clone()
+            .or_else(|| {
+                event.kind.contains(EventKind::TRANSFER)
+                    .then(|| {
+                        meta.as_ref()
+                            .and_then(|m| m.transfer_source.as_ref())
+                            .and_then(|s| s.agent_id.clone())
+                    })
+                    .flatten()
+            })
+            .filter(|id| !id.is_empty());
+        let agent_id = source_agent.as_deref().or_else(|| {
+            event
+                .meta
+                .agent_id
+                .as_deref()
+                .or_else(|| meta.as_ref().and_then(|m| m.agent_id.as_deref()))
+        });
         let Some(agent_id) = agent_id else {
-            return snapshot;
+            return Cow::Owned(snapshot);
         };
         let identity = source_agent.as_deref().and_then(|id| meta.as_ref()
             .filter(|m| m.transfer_source.as_ref().and_then(|source| source.agent_id.as_deref()) == Some(id))
             .and_then(|m| m.transfer_recording_id.clone()))
             .or_else(|| self.recording_identity_for_agent(call_id, agent_id, event.event_type));
-        if let Some(identity) = identity
-            && let Some(payload) = snapshot.payload.as_object_mut()
-        {
-            payload.insert("recording_id".into(), serde_json::Value::String(identity));
-            // Keep the identity's agent scope intact when cached events are replayed later.
-            payload.entry("agent_id").or_insert_with(|| serde_json::Value::String(agent_id.into()));
+        if let Some(identity) = identity {
+            if let Some(payload) = snapshot.payload.as_object_mut() {
+                payload.insert("recording_id".into(), serde_json::Value::String(identity));
+            }
+            // Keep the identity's agent scope intact when cached events are
+            // replayed later — the event's own field wins over the stamp.
+            if snapshot.meta.agent_id.is_none() {
+                if let Some(payload) = snapshot.payload.as_object_mut() {
+                    payload
+                        .entry("agent_id".to_string())
+                        .or_insert_with(|| serde_json::Value::String(agent_id.into()));
+                }
+                snapshot.meta.agent_id = Some(agent_id.to_string());
+            }
+            snapshot.meta.has_recording_id = true;
         }
-        snapshot
+        Cow::Owned(snapshot)
     }
 
-    fn snapshot_transfer_source(payload: &mut serde_json::Value, meta: &crate::rwi::proto::CallMeta) {
-        let Some(obj) = payload.as_object_mut() else { return };
-        let needs_source = match obj.get("transfer_source") {
-            Some(serde_json::Value::Object(source)) => source.get("source_type").is_none(),
-            Some(_) => false,
-            None => true,
-        };
-        if !needs_source {
+    /// Synthesize the transfer-source object from the call meta when the
+    /// event does not carry its own (`has_own` — an event-declared source
+    /// stays authoritative). The payload write is the wire contract; the
+    /// presence decision comes from the typed extraction.
+    fn snapshot_transfer_source(
+        payload: &mut serde_json::Value,
+        meta: &crate::rwi::proto::CallMeta,
+        has_own: bool,
+    ) {
+        if has_own {
             return;
         }
+        let Some(obj) = payload.as_object_mut() else { return };
         let source = if let Some(source) = meta.transfer_source.as_ref() {
             serde_json::json!(source)
         } else if let Some(agent_id) = meta.agent_id.as_ref() {
@@ -807,6 +881,9 @@ impl RwiGateway {
     ///
     /// This is the dispatch path used by addons that construct events
     /// dynamically (e.g. the CC addon's agent / queue / skill-group events).
+    /// Contract: dynamically-built [`RwiEvent`]s declare their
+    /// dispatch/enrichment-relevant fields on `meta` ([`EventMeta`]) — the
+    /// gateway reads typed extractions only, never payload keys.
     /// Call-scoped broadcasts are enriched with flat context (caller/callee/
     /// names/direction) from the `CallMetaStore` exactly like call_owner events.
     pub fn broadcast_event(&self, event: &RwiEvent) {
@@ -841,74 +918,158 @@ impl RwiGateway {
         EventCacheEntry {
             cached_at: entry.cached_at,
             call_id: entry.call_id.clone(),
-            event: self.enrich_flat_event(&entry.event),
+            event: self.enrich_flat_event(entry.event.clone()),
         }
     }
 
-    fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
-        let mut ctx_root: Option<String> = None;
-        let mut payload = if let Some(call_id) = &flat.call_id
-            && let Some(meta) = self.meta_store.get_sync(call_id)
+    fn enrich_flat_event(&self, flat: RwiEvent) -> RwiEvent {
+        // Destructure-move: the pipeline consumes the payload (zero clones);
+        // identity fields are moved back into the rebuilt event below.
+        let RwiEvent {
+            event_type,
+            kind,
+            call_id,
+            meta,
+            payload,
+        } = flat;
+        let MergedCallContext {
+            mut payload,
+            ctx_agent_id,
+            leg_sections,
+        } = self.merge_call_context(
+            &call_id,
+            kind,
+            payload,
+            meta.has_transfer_source,
+        );
+        self.normalize_transfer_target(&mut payload, kind, meta.transfer_target.as_deref());
+        self.merge_leg_sections(&mut payload, meta.leg_id.as_deref(), &leg_sections);
+        let agent_id = meta.agent_id.as_deref().or(ctx_agent_id.as_deref());
+        self.inject_origin_fields(&mut payload, agent_id);
+        RwiEvent {
+            event_type,
+            kind,
+            meta,
+            call_id,
+            payload,
+        }
+    }
+
+    /// The enrichment pipeline — a pure projection of the current stores
+    /// onto the event. Stateless by contract: session resume replays cached
+    /// events through this same pipeline, so it must never depend on
+    /// transient session state, only on the captured stores (meta, user
+    /// data, node identity).
+    fn merge_call_context(
+        &self,
+        call_id: &Option<String>,
+        kind: EventKind,
+        payload: serde_json::Value,
+        has_transfer_source: bool,
+    ) -> MergedCallContext {
+        if let Some(call_id) = call_id
+            && let Some(mut meta) = self.meta_store.get_sync(call_id)
         {
-            ctx_root = meta.session_id.clone();
-            let mut payload = flat.payload.clone();
-            if flat.event_type == "call_transferred" {
-                Self::snapshot_transfer_source(&mut payload, &meta);
+            let root = meta.session_id.clone();
+            let ctx_agent_id = meta.agent_id.clone();
+            // Take (not clone) — `From<CallMeta>` never maps leg sections,
+            // so moving them out loses nothing.
+            let leg_sections = std::mem::take(&mut meta.leg_sections);
+            let mut payload = payload;
+            if kind.contains(EventKind::TRANSFER) {
+                // Idempotent on the dispatch path (the identity snapshot in
+                // `dispatch` already merged) and fills the source on the
+                // replay path. `has_own` keeps an event-declared source
+                // authoritative over a meta-synthesized one.
+                Self::snapshot_transfer_source(&mut payload, &meta, has_transfer_source);
+                // (The authoritative stamp itself lives on the event meta —
+                // set by the identity snapshot before caching.)
             }
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
-            merge_event_context(&mut payload, Some(&ctx));
-            payload
-        } else {
-            if let Some(call_id) = &flat.call_id {
-                tracing::debug!(
-                    call_id = %call_id,
-                    event_type = flat.event_type,
-                    "event enrichment missed: no CallMeta entry"
-                );
-            }
-            flat.payload.clone()
-        };
-
-        // Canonical `transfer_target` form for `call_transferred`: several
-        // emitters report the raw Refer-To / consult target, which for a
-        // bare extension is `"1003"`. Normalize scheme-less, host-less
-        // values to `sip:1003` so webhook consumers see one stable,
-        // URI-shaped contract. Values that already carry a host (`@`) or a
-        // non-SIP scheme (`queue:`, `app:`) pass through untouched.
-        if flat.event_type == "call_transferred"
-            && let Some(obj) = payload.as_object_mut()
-            && let Some(target) = obj.get("transfer_target").and_then(|v| v.as_str())
-        {
-            let t = target.trim();
-            if !t.is_empty()
-                && !t.contains('@')
-                && !t.starts_with("sip:")
-                && !t.starts_with("sips:")
-                && !t.contains(':')
-            {
-                obj.insert(
-                    "transfer_target".to_string(),
-                    serde_json::Value::String(format!("sip:{t}")),
-                );
-            }
+            let serde_json::Value::Object(mut map) = payload else {
+                unreachable!("event payloads are objects by construction");
+            };
+            merge_event_context(&mut map, Some(ctx));
+            // Business context set on the root call rides every leg's
+            // events (the root id lives in the leg's CallMeta).
+            attach_user_data(&mut map, call_id, root.as_deref(), &self.user_data);
+            return MergedCallContext {
+                payload: serde_json::Value::Object(map),
+                ctx_agent_id,
+                leg_sections,
+            };
         }
-
-        // Attach the session user data object (REST/RWI-set business context)
-        // under `user_data`. Keyed by session_id; for the main call the event
-        // `call_id` equals the session_id. A transferred leg emits under a
-        // child `call_id`, so fall back to the root session id carried in the
-        // leg's `CallMeta` — business context set on the root call must ride
-        // every leg's events. Existing keys win, matching the
-        // `merge_event_context` convention (the `call_userdata_updated` event
-        // carries its own `user_data` field, which is never overwritten).
-        self.inject_user_data(&mut payload, flat.call_id.as_deref(), ctx_root.as_deref());
-
-        self.inject_origin_fields(&mut payload);
-
-        RwiEvent {
-            event_type: flat.event_type,
-            call_id: flat.call_id.clone(),
+        if let Some(call_id) = call_id {
+            tracing::debug!(
+                call_id = %call_id,
+                "event enrichment missed: no CallMeta entry"
+            );
+            // Deferred-removal window: the call meta may be gone while the
+            // business context lingers — keep attaching it.
+            let mut map = match payload {
+                serde_json::Value::Object(map) => map,
+                other => unreachable!("event payloads are objects by construction: {other:?}"),
+            };
+            attach_user_data(&mut map, call_id, None, &self.user_data);
+            return MergedCallContext {
+                payload: serde_json::Value::Object(map),
+                ctx_agent_id: None,
+                leg_sections: Default::default(),
+            };
+        }
+        MergedCallContext {
             payload,
+            ctx_agent_id: None,
+            leg_sections: Default::default(),
+        }
+    }
+
+    /// Canonical `transfer_target` form for transfer events: several
+    /// emitters report the raw Refer-To / consult target, which for a bare
+    /// extension is `"1003"`. Normalize scheme-less, host-less values to
+    /// `sip:1003` so webhook consumers see one stable, URI-shaped contract.
+    /// Values that already carry a host (`@`) or any scheme (`:`) pass
+    /// through untouched. The target is read from the typed extraction —
+    /// the payload write is the wire contract itself.
+    fn normalize_transfer_target(
+        &self,
+        payload: &mut serde_json::Value,
+        kind: EventKind,
+        transfer_target: Option<&str>,
+    ) {
+        if !kind.contains(EventKind::TRANSFER) {
+            return;
+        }
+        let Some(target) = transfer_target else {
+            return;
+        };
+        let t = target.trim();
+        if t.is_empty() || t.contains('@') || t.contains(':') {
+            return;
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "transfer_target".to_string(),
+                serde_json::Value::String(format!("sip:{t}")),
+            );
+        }
+    }
+
+    /// Per-leg typed sections ride only the events of their own leg. The
+    /// leg id comes from the typed extraction.
+    fn merge_leg_sections(
+        &self,
+        payload: &mut serde_json::Value,
+        leg_id: Option<&str>,
+        leg_sections: &LegSections,
+    ) {
+        if let Some(leg_id) = leg_id
+            && let Some(sections) = leg_sections.get(leg_id)
+            && let Some(obj) = payload.as_object_mut()
+        {
+            for (key, val) in sections {
+                obj.entry(key.clone()).or_insert_with(|| val.clone());
+            }
         }
     }
 
@@ -918,65 +1079,35 @@ impl RwiGateway {
             .call_id
             .as_ref()
             .and_then(|call_id| self.meta_store.get_sync(call_id))
-            .and_then(|meta| meta.session_id);
-        self.inject_user_data(
-            &mut event.payload,
-            event.call_id.as_deref(),
-            root.as_deref(),
-        );
-        event
-    }
-
-    fn inject_user_data(
-        &self,
-        payload: &mut serde_json::Value,
-        call_id: Option<&str>,
-        root: Option<&str>,
-    ) {
-        let Some(call_id) = call_id else { return };
-        let Some(obj) = payload
-            .as_object_mut()
-            .filter(|obj| !obj.contains_key("user_data"))
-        else {
-            return;
-        };
-        let data = self
-            .user_data
-            .get(call_id)
-            .map(|entry| entry.data.clone())
-            .or_else(|| {
-                let root = root.filter(|root| *root != call_id)?;
-                self.user_data.get(root).map(|entry| entry.data.clone())
-            });
-        if let Some(data) = data {
-            obj.insert("user_data".to_string(), serde_json::Value::Object(data));
+            .and_then(|meta| meta.session_id.clone());
+        if let Some(call_id) = event.call_id.as_deref()
+            && let Some(obj) = event.payload.as_object_mut()
+        {
+            attach_user_data(obj, call_id, root.as_deref(), &self.user_data);
         }
+        event
     }
 
     /// Stamp origin fields onto an event payload:
     /// - `node_ip` — this node's cluster IP (when cluster is enabled).
-    /// - `client_ip` — the agent's registered client IP, when the payload
-    ///   carries an `agent_id` and a lookup is configured.
+    /// - `client_ip` — the registered client IP of the attributed agent
+    ///   (typed `agent_id` extraction), when a lookup is configured.
     ///
-    /// Existing keys are never overwritten (event's own field wins), matching
-    /// the `merge_event_context` convention.
-    fn inject_origin_fields(&self, payload: &mut serde_json::Value) {
-        if let Some(ip) = &self.node_ip
-            && let Some(obj) = payload.as_object_mut()
-            && !obj.contains_key("node_ip")
-        {
-            obj.insert("node_ip".to_string(), serde_json::Value::String(ip.clone()));
-        }
-        if let Some(lookup) = &self.client_ip_lookup
-            && let Some(obj) = payload.as_object_mut()
-            && let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str())
-            && !obj.contains_key("client_ip")
-            && let Some(ip) = lookup(agent_id)
-        {
-            obj.insert(
-                "client_ip".to_string(),
-                serde_json::Value::String(ip.to_string()),
-            );
+    /// Stamp semantics: existing keys win (`entry().or_insert`), matching
+    /// the `merge_event_context` convention — hand-built payloads may
+    /// pre-carry origin fields.
+    fn inject_origin_fields(&self, payload: &mut serde_json::Value, agent_id: Option<&str>) {
+        if let Some(obj) = payload.as_object_mut() {
+            if let Some(ip) = &self.node_ip {
+                obj.entry("node_ip".to_string())
+                    .or_insert_with(|| serde_json::Value::String(ip.clone()));
+            }
+            if let Some(lookup) = &self.client_ip_lookup
+                && let Some(ip) = agent_id.and_then(|agent_id| lookup(agent_id))
+            {
+                obj.entry("client_ip".to_string())
+                    .or_insert_with(|| serde_json::Value::String(ip.to_string()));
+            }
         }
     }
 
@@ -1080,6 +1211,62 @@ mod tests {
             token: "t".into(),
             scopes: vec![],
         }
+    }
+
+    /// Addon typed sections merge into the payload under their reserved key
+    /// (existing keys win), and per-leg sections ride only the matching
+    /// leg's events.
+    #[tokio::test]
+    async fn test_sections_merge_into_payload() {
+        let gw = RwiGateway::new();
+        let mut meta = crate::rwi::proto::CallMeta::default();
+        meta.sections
+            .insert("cc".to_string(), serde_json::json!({"skill": "l2"}));
+        meta.leg_sections.insert(
+            "agent".to_string(),
+            std::collections::BTreeMap::from([("wrapup".to_string(), serde_json::json!(30))]),
+        );
+        gw.meta_store
+            .insert("call-s1".to_string(), meta);
+
+        // Session-level section rides the plain event.
+        let ev = crate::rwi::event::RwiEvent::from_spec(
+            &crate::rwi::CallAnswered {
+                leg_id: None,
+                leg_role: None,
+                call_id: "call-s1".into(),
+            },
+            None,
+        );
+        let enriched = gw.enrich_flat_event(ev);
+        assert_eq!(enriched.payload["cc"]["skill"], "l2");
+
+        // Leg section rides only the event carrying that leg_id.
+        let leg_ev = crate::rwi::event::RwiEvent::from_spec(
+            &crate::rwi::CallHeld {
+                leg_role: Some("agent".into()),
+                call_id: "call-s1".into(),
+                leg_id: "agent".into(),
+            },
+            None,
+        );
+        let enriched_leg = gw.enrich_flat_event(leg_ev);
+        assert_eq!(enriched_leg.payload["cc"]["skill"], "l2");
+        assert_eq!(enriched_leg.payload["wrapup"], 30);
+
+        // An unrelated leg's event gets the session section but not the
+        // leg section.
+        let other = crate::rwi::event::RwiEvent::from_spec(
+            &crate::rwi::CallHeld {
+                leg_role: Some("caller".into()),
+                call_id: "call-s1".into(),
+                leg_id: "caller".into(),
+            },
+            None,
+        );
+        let enriched_other = gw.enrich_flat_event(other);
+        assert_eq!(enriched_other.payload["cc"]["skill"], "l2");
+        assert!(enriched_other.payload.get("wrapup").is_none());
     }
 
     #[tokio::test]
@@ -1587,7 +1774,7 @@ mod tests {
 },
             None,
         );
-        let enriched = gw.enrich_flat_event(&flat);
+        let enriched = gw.enrich_flat_event(flat.clone());
         assert_eq!(enriched.payload["user_data"]["context_id"], "root-value");
         assert_eq!(gw.get_user_data(&"child-1".into())["context_id"], "root-value");
 
@@ -1602,14 +1789,14 @@ mod tests {
         .unwrap();
         assert_eq!(gw.get_user_data(&"child-1".into())["context_id"], "child-value");
         assert_eq!(
-            gw.enrich_flat_event(&flat).payload["user_data"]["context_id"],
+            gw.enrich_flat_event(flat.clone()).payload["user_data"]["context_id"],
             "child-value"
         );
         gw.set_user_data(&"child-1".into(), serde_json::Map::new())
             .unwrap();
         assert!(gw.get_user_data(&"child-1".into()).is_empty());
         assert_eq!(
-            gw.enrich_flat_event(&flat).payload["user_data"],
+            gw.enrich_flat_event(flat.clone()).payload["user_data"],
             serde_json::json!({})
         );
     }
@@ -1925,7 +2112,7 @@ mod tests {
             },
         );
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
@@ -1950,7 +2137,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "call-unknown".into(),
@@ -1990,7 +2177,7 @@ mod tests {
             },
         );
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
@@ -2028,7 +2215,7 @@ mod tests {
             },
         );
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "leg-child".into(),
@@ -2064,7 +2251,7 @@ mod tests {
             },
         );
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallCreated {
                 leg_id: None,
                 leg_role: None,
@@ -2108,7 +2295,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
@@ -2153,7 +2340,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
 
-        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+        gw.broadcast_event(&crate::rwi::event::RwiEvent::from_spec(
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
@@ -2184,6 +2371,8 @@ mod tests {
         payload["event_type"] = "call_ringing".into();
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
             event_type: "call_ringing",
+            kind: EventKind::LIFECYCLE,
+            meta: Default::default(),
             call_id: Some("c1".into()),
             payload,
         });
@@ -2212,8 +2401,15 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
 
+        // Dynamically-built addon events carry no typed struct — they
+        // declare dispatch/enrichment-relevant fields on `meta` instead.
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
             event_type: "agent_state_changed",
+            kind: EventKind::default(),
+            meta: crate::rwi::event::EventMeta {
+                agent_id: Some("agent-1".into()),
+                ..Default::default()
+            },
             call_id: None,
             payload: serde_json::json!({
                 "event_type": "agent_state_changed",
@@ -2240,6 +2436,8 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
             event_type: "agent_state_changed",
+            kind: EventKind::default(),
+            meta: Default::default(),
             call_id: None,
             payload: serde_json::json!({
                 "event_type": "agent_state_changed",
@@ -2266,6 +2464,8 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
             event_type: "call_ringing",
+            kind: EventKind::LIFECYCLE,
+            meta: Default::default(),
             call_id: Some("c1".into()),
             payload: serde_json::json!({
                 "event_type": "call_ringing",
