@@ -297,6 +297,7 @@ impl CallSessionBuilder {
             },
             extensions: dialplan.extensions.clone(),
             metadata,
+            amd: None,
             media_quality: None,
             recording_segments: Vec::new(),
         };

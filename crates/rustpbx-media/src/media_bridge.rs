@@ -2694,6 +2694,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
         };
         let mut mb = MediaBridge::new("s7");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -2760,6 +2761,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
         };
         let mut mb = MediaBridge::new("s-video-rtcp");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -2826,6 +2828,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
         };
 
         let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -2914,6 +2917,7 @@ mod tests {
                         comfort_noise_level_db: -35.0,
                         enable_latching: true,
                         probation_max_packets: None,
+                        inband_dtmf: Default::default(),
                     };
                     let rtp_opus_cfg = LegConfig {
                         volume_stats: Default::default(),
@@ -2940,6 +2944,7 @@ mod tests {
                         comfort_noise_level_db: -35.0,
                         enable_latching: true,
                         probation_max_packets: None,
+                        inband_dtmf: Default::default(),
                     };
 
                     let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -3024,6 +3029,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
         };
         let rtp_pcmu_cfg = LegConfig {
             volume_stats: crate::volume_stats::VolumeStatsConfig { enabled: true },
@@ -3052,6 +3058,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
         };
 
         // Leg A: WebRTC answerer whose remote (10.0.0.1) never connects, so its

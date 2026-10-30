@@ -1219,6 +1219,7 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
         "2000",
         None,
         None,
+        crate::media::ingress_tap::DtmfSource::Rfc2833,
     );
 
     assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
@@ -1249,6 +1250,7 @@ fn forward_dtmf_rejects_non_caller_leg_as_application_input() {
         "2000",
         None,
         None,
+        crate::media::ingress_tap::DtmfSource::Rfc2833,
     );
 
     assert!(!accepted);
@@ -1307,6 +1309,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
             "34".to_string(),
         )])),
         None,
+        crate::media::ingress_tap::DtmfSource::Rfc2833,
     );
 
     // 1. digit forwarded to the bridge websocket
@@ -1422,6 +1425,7 @@ fn forward_dtmf_resumable_bridge_defers_trace_to_resumed_ivr() {
         "sip:2000@x",
         None,
         None,
+        crate::media::ingress_tap::DtmfSource::Rfc2833,
     );
 
     // Digit still forwarded + buffered — only the eager trace is suppressed.

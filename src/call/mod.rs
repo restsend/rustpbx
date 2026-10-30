@@ -976,6 +976,11 @@ pub struct MediaConfig {
     #[serde(default)]
     pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
     pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
+    /// In-band audio DTMF detection policy (see `RtpConfig::inband_dtmf`).
+    /// Defaults to `auto` (detect on legs without a negotiated
+    /// telephone-event).
+    #[serde(default)]
+    pub inband_dtmf: crate::media::inband_dtmf::InbandDtmfMode,
 }
 
 impl Default for MediaConfig {
@@ -1008,6 +1013,7 @@ impl MediaConfig {
             media_trace_interval_secs: None,
             quality_stats: Default::default(),
             volume_stats: Default::default(),
+            inband_dtmf: Default::default(),
         }
     }
 
@@ -1085,6 +1091,11 @@ impl MediaConfig {
     pub fn with_comfort_noise(mut self, enabled: bool, level_db: f32) -> Self {
         self.comfort_noise = enabled;
         self.comfort_noise_level_db = level_db;
+        self
+    }
+
+    pub fn with_inband_dtmf(mut self, mode: crate::media::inband_dtmf::InbandDtmfMode) -> Self {
+        self.inband_dtmf = mode;
         self
     }
 
@@ -1208,6 +1219,12 @@ pub struct Dialplan {
     /// routing hints are applied. `None` → the session falls back to globals.
     pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
 
+    /// AMD (answering machine / AI assistant) detection config for the
+    /// outbound callee leg: route hints over trunk config (stamped at
+    /// routing), overlaid by `app_params` at answer time and the global
+    /// `[proxy] amd` as the last fallback. `None` → globals only.
+    pub amd: Option<crate::media::amd::AmdConfig>,
+
     /// Headers modified/added by routing (rewrite rules, trunk config, HTTP router).
     /// When present, these take priority over the original SIP request headers
     /// when building CallInfo for application flows (IVR, voicemail, etc.).
@@ -1275,6 +1292,7 @@ impl Dialplan {
             audio_profile: self.audio_profile.clone(),
             busy_wait: self.busy_wait.clone(),
             diversion_policy: self.diversion_policy,
+            amd: self.amd.clone(),
             routed_headers: self.routed_headers.clone(),
             concurrency_holds: self.concurrency_holds.clone(),
             concurrent_call_lease: Default::default(),
@@ -1475,6 +1493,7 @@ impl Dialplan {
             audio_profile: None,
             busy_wait: None,
             diversion_policy: None,
+            amd: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
             concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease::default(),

@@ -1388,6 +1388,13 @@ pub struct RtpConfig {
     pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
     #[serde(default)]
     pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
+    /// In-band audio DTMF detection policy (`auto` | `on` | `off`, default
+    /// `auto`): `auto` runs the Goertzel detector on every leg that
+    /// negotiated NO `telephone-event` (old phones / PSTN), so IVR /
+    /// voicemail flows still receive key presses. Detected digits are tagged
+    /// `source=inband` on the RWI `dtmf` event.
+    #[serde(default)]
+    pub inband_dtmf: crate::media::inband_dtmf::InbandDtmfMode,
 }
 
 fn default_comfort_noise() -> bool {
@@ -1431,6 +1438,10 @@ pub struct MediaSection {
     pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
     #[serde(default)]
     pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
+    /// In-band audio DTMF detection policy override (see
+    /// `RtpConfig::inband_dtmf`). Defaults to `auto`.
+    #[serde(default)]
+    pub inband_dtmf: crate::media::inband_dtmf::InbandDtmfMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1706,6 +1717,12 @@ pub struct ProxyConfig {
     /// declared but empty table disables the built-in failure audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
+    /// Global AMD (answering machine / AI assistant) detection defaults
+    /// (`[proxy] amd`). Route hints and trunk `[trunks.<name>] amd` sections
+    /// overlay it per-field; `app_params` overlay last at answer time.
+    /// Disabled unless `enabled = true` somewhere in the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd: Option<crate::media::amd::AmdConfig>,
     pub audio_codecs: Option<Vec<String>>,
     #[serde(default)]
     pub frequency_limiter: Option<String>,
@@ -2093,6 +2110,10 @@ pub struct DialplanHints {
     /// stamped during routing. `None` when no trunk/route policy applies —
     /// the session then falls back to the global proxy config.
     pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
+    /// AMD (answering machine / AI assistant) detection config: route-level
+    /// setting over the trunk's `[trunks.<name>] amd` section. `None` → the
+    /// session falls back to the global `[proxy] amd`.
+    pub amd: Option<crate::media::amd::AmdConfig>,
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
@@ -2118,6 +2139,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("ice_lite", &self.ice_lite)
             .field("busy_wait", &self.busy_wait)
             .field("diversion_policy", &self.diversion_policy)
+            .field("amd", &self.amd)
             .finish()
     }
 }
@@ -2469,6 +2491,7 @@ impl ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            amd: None,
             presence_sweep_secs: None,
             locator_sweep_secs: None,
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
@@ -2744,6 +2767,11 @@ impl Config {
             media_trace_interval_secs: media.and_then(|m| m.media_trace_interval_secs),
             quality_stats: media.map(|m| m.quality_stats.clone()).unwrap_or_default(),
             volume_stats: media.map(|m| m.volume_stats.clone()).unwrap_or_default(),
+            // The media section may override the platform default; absent →
+            // `auto` (serde default of `InbandDtmfMode`).
+            inband_dtmf: media
+                .map(|m| m.inband_dtmf)
+                .unwrap_or_default(),
         }
     }
 

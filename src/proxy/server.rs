@@ -1999,6 +1999,7 @@ impl SipServerInner {
             .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
             .with_quality_stats(rtp.quality_stats.clone())
             .with_volume_stats(rtp.volume_stats.clone())
+            .with_inband_dtmf(rtp.inband_dtmf)
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

@@ -38,16 +38,17 @@ use crate::dtmf::DtmfDetector;
 use crate::media_recorder::{CaptureChannel, RecorderSender};
 
 /// Lock-free 128-bit payload-type bitmask (PT 0..=127), shared by the DTMF
-/// and recording-audio allowlists.
-struct PtMask([AtomicU64; 2]);
+/// and recording-audio allowlists. Also used by the in-band DTMF tap's
+/// audio-PT filter.
+pub(crate) struct PtMask([AtomicU64; 2]);
 
 impl PtMask {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self([AtomicU64::new(0), AtomicU64::new(0)])
     }
 
     /// Replace the mask contents with `pts`.
-    fn set(&self, pts: &[u8]) {
+    pub(crate) fn set(&self, pts: &[u8]) {
         let mut words = [0u64; 2];
         for &p in pts {
             words[(p as usize) >> 6] |= 1u64 << (p & 63);
@@ -58,7 +59,7 @@ impl PtMask {
 
     /// Lock-free membership check.
     #[inline]
-    fn contains(&self, pt: u8) -> bool {
+    pub(crate) fn contains(&self, pt: u8) -> bool {
         let word = (pt as usize) >> 6;
         let bit = 1u64 << (pt & 63);
         self.0[word].load(Ordering::Relaxed) & bit != 0
@@ -74,11 +75,34 @@ pub enum PacketDirection {
     Egress,
 }
 
-/// A DTMF digit detected on a leg, tagged with its direction.
+/// How a DTMF digit was detected on a leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DtmfSource {
+    /// RFC 2833/4733 telephone-event RTP payload (or SIP INFO, which rides
+    /// the same "signaled" path).
+    Rfc2833,
+    /// Recovered from the audio stream by the in-band Goertzel detector
+    /// (`crate::inband_dtmf`) — only runs when no telephone-event was
+    /// negotiated (or the leg opted in with `inband_dtmf = "on"`).
+    Inband,
+}
+
+impl DtmfSource {
+    /// Wire tag used in RWI `dtmf` event extras and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rfc2833 => "rfc2833",
+            Self::Inband => "inband",
+        }
+    }
+}
+
+/// A DTMF digit detected on a leg, tagged with its direction and source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtmfEvent {
     pub direction: PacketDirection,
     pub digit: char,
+    pub source: DtmfSource,
 }
 
 /// Snapshot of the per-direction counters.
@@ -295,6 +319,14 @@ impl IngressTap {
         self.dtmf_tx.subscribe()
     }
 
+    /// The DTMF broadcast sender, for producers that feed the same channel
+    /// from outside this tap (the in-band audio DTMF detector injects its
+    /// digits here tagged [`DtmfSource::Inband`], so downstream subscribers
+    /// see one unified event stream).
+    pub(crate) fn dtmf_event_sender(&self) -> broadcast::Sender<DtmfEvent> {
+        self.dtmf_tx.clone()
+    }
+
     /// Snapshot the per-direction counters.
     pub(crate) fn stats(&self) -> TapStats {
         TapStats {
@@ -401,7 +433,11 @@ impl IngressTap {
                 .lock()
                 .observe(&packet.payload, packet.header.timestamp);
             if let Some(digit) = digit {
-                let event = DtmfEvent { direction, digit };
+                let event = DtmfEvent {
+                    direction,
+                    digit,
+                    source: DtmfSource::Rfc2833,
+                };
                 // Broadcast (lagged subscribers dropped, never blocks).
                 let _ = self.dtmf_tx.send(event);
             }

@@ -16,7 +16,7 @@
 //! sources to the always-alive [`EgressPipeline`].
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -34,6 +34,10 @@ use tokio::sync::{broadcast, oneshot};
 use tracing::debug;
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
+use crate::amd;
+use crate::inband_dtmf;
+use crate::inband_dtmf::InbandDtmfMode;
+use crate::pcm_analysis_tap::{AnalysisSinkKind, PcmAnalysisTap, PcmBlockSink};
 use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
 use crate::leg_id::LegId;
 use crate::leg_stats::{LegRtcpStats, SrTimeTracker, spawn_rtcp_listener};
@@ -128,6 +132,10 @@ pub struct LegConfig {
     /// media/ICE log lines carry the call id (session id). `None` renders as
     /// "-" in rustrtc logs.
     pub call_id: Option<String>,
+    /// In-band audio DTMF detection policy for this leg. `Auto` (default)
+    /// runs the Goertzel detector whenever the leg negotiates NO
+    /// telephone-event; `on` forces it alongside RFC 2833; `off` disables it.
+    pub inband_dtmf: InbandDtmfMode,
 }
 
 impl LegConfig {
@@ -156,6 +164,7 @@ impl LegConfig {
             probation_max_packets: None,
             relay_ready_timeout: None,
             call_id: None,
+            inband_dtmf: InbandDtmfMode::Auto,
             volume_stats: Default::default(),
             quality_stats: Default::default(),
         }
@@ -217,10 +226,61 @@ pub struct LegInner {
     /// after a profile is negotiated (`dtmf_pt` set); until then `send_dtmf`
     /// is a no-op.
     dtmf_send: parking_lot::Mutex<DtmfSendState>,
+    /// In-band audio DTMF policy (`Auto`/`on`/`off`), fixed at construction
+    /// from `LegConfig` and resolved against every negotiated profile.
+    inband_dtmf_mode: AtomicU8,
+    /// DTMF sink bookkeeping: the codec "key" its sink was built for and how
+    /// many times it was (re)created. The sink itself lives in the shared
+    /// analysis tap's registry.
+    inband_dtmf: parking_lot::Mutex<InbandDtmfState>,
+    /// The leg's single shared ingress-audio analysis tap (in-band DTMF +
+    /// AMD sinks). Created only while at least one analyser wants audio.
+    analysis: parking_lot::Mutex<AnalysisState>,
+    /// Armed AMD analysis (survives tap rebuilds: the detector lives in a
+    /// shared slot, only the transport is recreated on codec changes).
+    amd: parking_lot::Mutex<AmdState>,
     /// Comfort-noise settings, preserved so `update_codec` (re-INVITE codec
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
+}
+
+/// DTMF sink bookkeeping on the shared analysis tap.
+#[derive(Default)]
+struct InbandDtmfState {
+    /// `(audio payload_type, clock_rate)` the DTMF sink was built for
+    /// (`None` when the policy does not want detection).
+    key: Option<(u8, u32)>,
+    /// How many times a DTMF sink was (re)created (diagnostics + tests
+    /// observe re-INVITE rebuilds without reaching into the tap itself).
+    generation: u64,
+}
+
+/// The leg's single shared analysis tap. Exists only while at least one
+/// analyser wants ingress audio — legs that never ask (RFC 2833 negotiated,
+/// no AMD) run with no observer and no decode task at all.
+#[derive(Default)]
+struct AnalysisState {
+    tap: Option<crate::pcm_analysis_tap::PcmAnalysisTap>,
+    /// `(audio payload_type, clock_rate)` the running tap decodes for.
+    key: Option<(u8, u32)>,
+    /// Whether the running tap was built with the DTMF / AMD sinks.
+    dtmf_sink: bool,
+    amd_sink: bool,
+}
+
+/// Armed AMD analysis on this leg.
+#[derive(Default)]
+struct AmdState {
+    /// Shared detector slot (`None` = not armed). Kept across tap rebuilds
+    /// so analysis state survives re-INVITE codec changes.
+    slot: Option<crate::amd::SharedDetector>,
+    local_speech: Option<Arc<AtomicBool>>,
+    outcome_tx: Option<tokio::sync::mpsc::Sender<crate::amd::AmdVerdict>>,
+    /// Codec key the AMD sink was (last) built for.
+    key: Option<(u8, u32)>,
+    /// How many times an AMD sink was (re)created.
+    generation: u64,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -457,6 +517,10 @@ impl LegInner {
             rtcp_stats,
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
+            inband_dtmf_mode: AtomicU8::new(InbandDtmfMode::Auto.to_u8()),
+            inband_dtmf: parking_lot::Mutex::new(InbandDtmfState::default()),
+            analysis: parking_lot::Mutex::new(AnalysisState::default()),
+            amd: parking_lot::Mutex::new(AmdState::default()),
             comfort_noise,
             comfort_noise_level_db,
         }))
@@ -506,6 +570,8 @@ impl LegInner {
             cfg.relay_ready_timeout,
             recorder_sender,
         )?;
+        leg.inband_dtmf_mode
+            .store(cfg.inband_dtmf.to_u8(), Ordering::SeqCst);
         if cfg.quality_stats.enabled {
             leg.tap.enable_audio_packet_samples();
         }
@@ -812,7 +878,261 @@ impl LegInner {
         let mut dtmf = self.dtmf_send.lock();
         dtmf.dtmf_pt = profile.dtmf.as_ref().map(|d| d.payload_type);
         dtmf.dtmf_clock_rate = profile.dtmf.as_ref().map(|d| d.clock_rate).unwrap_or(8000);
+        drop(dtmf);
+        // Shared analysis tap policy: start/stop/swap the audio analysers
+        // (in-band DTMF, AMD) for this profile (every SDP apply — including
+        // re-INVITEs — lands here).
+        self.apply_analysis_policy(profile);
         Ok(())
+    }
+
+    /// Resolve the leg's shared analysis tap against the freshly negotiated
+    /// profile. The tap exists only while at least one analyser wants ingress
+    /// audio — a leg with RFC 2833 negotiated and no AMD armed runs with no
+    /// observer and no decode task at all:
+    ///
+    /// - **in-band DTMF** (`Auto`/`on`/`off` policy): `Auto` wants detection
+    ///   exactly when NO telephone-event was negotiated; `on` always (with
+    ///   audio); `off` never.
+    /// - **AMD**: wanted while armed via [`Self::arm_amd`] (session arms at
+    ///   answer time).
+    ///
+    /// A codec change (PT or clock) rebuilds the tap: the DTMF sink restarts
+    /// (same as the old dedicated-tap behaviour), the AMD sink carries its
+    /// detector across so analysis state survives re-INVITEs. An unwanted tap
+    /// is dropped synchronously (`Drop` deactivates its observer and cancels
+    /// the decode task).
+    fn apply_analysis_policy(&self, profile: &NegotiatedLegProfile) {
+        let mode = InbandDtmfMode::from_u8(self.inband_dtmf_mode.load(Ordering::SeqCst));
+        let want_dtmf = match mode {
+            InbandDtmfMode::Off => false,
+            InbandDtmfMode::Auto => {
+                profile.audio.is_some() && profile.dtmf_pts().is_empty()
+            }
+            InbandDtmfMode::AlwaysOn => profile.audio.is_some(),
+        };
+        let codec_key = profile
+            .audio
+            .as_ref()
+            .map(|a| (a.payload_type, a.clock_rate));
+        let session_id = self.pc.config().label.as_deref().unwrap_or_default();
+
+        // Lock order everywhere: analysis → inband_dtmf → amd.
+        let mut analysis = self.analysis.lock();
+        let mut dtmf_state = self.inband_dtmf.lock();
+        let mut amd = self.amd.lock();
+        let want_amd = amd.slot.is_some() && profile.audio.is_some();
+
+        // Same codec as the running tap: adjust sinks in place so an
+        // unrelated sink change (AMD arm/disarm) never disturbs DTMF state.
+        if analysis.tap.is_some() && codec_key.is_some() && analysis.key == codec_key {
+            let dtmf_changed = analysis.dtmf_sink != want_dtmf;
+            let amd_changed = analysis.amd_sink != want_amd;
+            {
+                let tap = analysis.tap.as_ref().expect("tap checked above");
+                if dtmf_changed {
+                    if want_dtmf {
+                        let audio = profile.audio.as_ref().expect("want_dtmf implies audio");
+                        tap.add_sink(inband_dtmf::make_sink(
+                            audio.codec.samplerate(),
+                            self.tap.dtmf_event_sender(),
+                            self.id.clone(),
+                        ));
+                        dtmf_state.generation += 1;
+                        dtmf_state.key = codec_key;
+                        debug!(
+                            session_id = %session_id,
+                            leg = %self.id, mode = ?mode,
+                            "in-band DTMF detection started",
+                        );
+                    } else {
+                        tap.remove_sink(AnalysisSinkKind::InbandDtmf);
+                        dtmf_state.key = None;
+                        debug!(
+                            session_id = %session_id,
+                            leg = %self.id, mode = ?mode,
+                            "in-band DTMF detection stopped",
+                        );
+                    }
+                }
+                if amd_changed {
+                    if want_amd {
+                        tap.add_sink(amd::make_sink(
+                            amd.slot.clone().expect("want_amd implies armed slot"),
+                            amd.local_speech
+                                .clone()
+                                .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                            amd.outcome_tx
+                                .clone()
+                                .expect("armed AMD carries an outcome channel"),
+                        ));
+                        amd.generation += 1;
+                    } else {
+                        tap.remove_sink(AnalysisSinkKind::Amd);
+                    }
+                }
+            }
+            analysis.dtmf_sink = want_dtmf;
+            analysis.amd_sink = want_amd;
+            amd.key = if want_amd { codec_key } else { None };
+            if analysis.dtmf_sink || analysis.amd_sink {
+                return;
+            }
+            // Last sink gone → tear the tap down entirely.
+            analysis.tap.take();
+            analysis.key = None;
+            return;
+        }
+
+        // Codec changed (or no tap yet): full rebuild with the wanted sinks.
+        let mut sinks: Vec<(AnalysisSinkKind, Box<dyn PcmBlockSink>)> = Vec::new();
+        if want_dtmf {
+            let audio = profile.audio.as_ref().expect("want_dtmf implies audio");
+            sinks.push(inband_dtmf::make_sink(
+                audio.codec.samplerate(),
+                self.tap.dtmf_event_sender(),
+                self.id.clone(),
+            ));
+        }
+        if want_amd {
+            sinks.push(amd::make_sink(
+                amd.slot.clone().expect("want_amd implies armed slot"),
+                amd.local_speech
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                amd.outcome_tx
+                    .clone()
+                    .expect("armed AMD carries an outcome channel"),
+            ));
+        }
+
+        if sinks.is_empty() {
+            if analysis.tap.take().is_some() {
+                debug!(
+                    session_id = %session_id,
+                    leg = %self.id, mode = ?mode,
+                    "audio analysis tap stopped",
+                );
+            }
+            analysis.key = None;
+            analysis.dtmf_sink = false;
+            analysis.amd_sink = false;
+            dtmf_state.key = None;
+            amd.key = None;
+            return;
+        }
+
+        let Some(audio) = profile.audio.as_ref() else {
+            return;
+        };
+        match PcmAnalysisTap::attach(&self.pc, profile, self.id.clone(), sinks) {
+            Ok(tap) => {
+                debug!(
+                    session_id = %session_id,
+                    leg = %self.id,
+                    codec = ?audio.codec,
+                    payload_type = audio.payload_type,
+                    clock_rate = audio.clock_rate,
+                    dtmf = want_dtmf,
+                    amd = want_amd,
+                    "audio analysis tap started",
+                );
+                if want_dtmf {
+                    dtmf_state.generation += 1;
+                }
+                dtmf_state.key = if want_dtmf { codec_key } else { None };
+                if want_amd {
+                    amd.generation += 1;
+                }
+                amd.key = if want_amd { codec_key } else { None };
+                analysis.key = codec_key;
+                analysis.dtmf_sink = want_dtmf;
+                analysis.amd_sink = want_amd;
+                analysis.tap = Some(tap);
+            }
+            Err(error) => {
+                // Drop the stale tap too: it would decode the new codec's
+                // packets with the old decoder (garbage → phantom digits).
+                analysis.tap.take();
+                analysis.key = None;
+                analysis.dtmf_sink = false;
+                analysis.amd_sink = false;
+                dtmf_state.key = None;
+                amd.key = None;
+                tracing::warn!(
+                    session_id = %session_id,
+                    leg = %self.id, %error,
+                    "audio analysis tap attach failed",
+                );
+            }
+        }
+    }
+
+    /// Arm AMD analysis on this leg (the session calls this when the callee
+    /// answers). The detector slot survives re-INVITE tap rebuilds;
+    /// [`Self::disarm_amd`] releases it. Takes effect immediately when an
+    /// audio profile is already negotiated; otherwise the next profile apply
+    /// attaches the sink.
+    pub fn arm_amd(&self, armament: amd::AmdArmament) {
+        let slot: amd::SharedDetector =
+            Arc::new(parking_lot::Mutex::new(Some(armament.detector)));
+        {
+            let mut state = self.amd.lock();
+            state.slot = Some(slot);
+            state.local_speech = Some(armament.local_speech);
+            state.outcome_tx = Some(armament.outcome_tx);
+        }
+        if let Some(profile) = self.negotiated() {
+            self.apply_analysis_policy(&profile);
+        }
+    }
+
+    /// Disarm AMD analysis and remove its sink from the shared tap. The last
+    /// sink going away also tears the tap down.
+    pub fn disarm_amd(&self) {
+        {
+            let mut state = self.amd.lock();
+            if state.slot.take().is_none() {
+                return;
+            }
+            state.local_speech = None;
+            state.outcome_tx = None;
+            state.key = None;
+        }
+        if let Some(profile) = self.negotiated() {
+            self.apply_analysis_policy(&profile);
+        }
+    }
+
+    /// Whether AMD is currently armed on this leg (diagnostics / tests).
+    pub fn amd_armed(&self) -> bool {
+        self.amd.lock().slot.is_some()
+    }
+
+    /// How many times an AMD sink was (re)created on this leg.
+    pub fn amd_generation(&self) -> u64 {
+        self.amd.lock().generation
+    }
+
+    /// Notify the AMD detector that the local side started speaking (extra
+    /// Human evidence; optional v1 wiring).
+    pub fn notify_amd_local_speech(&self) {
+        if let Some(flag) = self.amd.lock().local_speech.as_ref() {
+            flag.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether the in-band audio DTMF detector is currently running on this
+    /// leg (diagnostics / tests).
+    pub fn inband_dtmf_active(&self) -> bool {
+        self.analysis.lock().dtmf_sink
+    }
+
+    /// How many times the in-band DTMF sink was (re)created on this leg.
+    /// Increments on every codec change; a stable value across re-INVITEs
+    /// means the same sink kept running.
+    pub fn inband_dtmf_generation(&self) -> u64 {
+        self.inband_dtmf.lock().generation
     }
 
     /// Update the leg's negotiated profile and sender from an SDP built outside
@@ -1177,6 +1497,17 @@ impl LegInner {
     pub fn stop(&self) {
         self.disarm_rtp_timeout();
         self.egress.stop();
+        // Tear the shared analysis tap down synchronously (Drop cancels its
+        // decode task and deactivates the packet observer).
+        {
+            let mut analysis = self.analysis.lock();
+            analysis.tap.take();
+            analysis.key = None;
+            analysis.dtmf_sink = false;
+            analysis.amd_sink = false;
+            self.inband_dtmf.lock().key = None;
+            self.amd.lock().key = None;
+        }
         if let Some(handle) = self.observer_task.lock().take() {
             handle.abort();
         }
@@ -1633,6 +1964,7 @@ mod relay_policy_tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
             ice_servers,
             relay_only,
@@ -2182,6 +2514,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
         };
         let a = LegInner::new("a", &cfg, None).expect("webrtc leg");
@@ -2268,6 +2601,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
         };
         let leg = LegInner::new("video", &cfg, None).expect("video leg");
@@ -2331,6 +2665,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
         };
         let leg = LegInner::new("answerer", &cfg, None).expect("answerer leg");
@@ -2445,6 +2780,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
         };
 
@@ -2558,6 +2894,7 @@ mod p24_uac_test {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            inband_dtmf: Default::default(),
             relay_ready_timeout: None,
         };
         let leg = LegInner::new("plain-rtp-av", &cfg, None).expect("leg");

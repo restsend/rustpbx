@@ -926,6 +926,48 @@ pub struct RecordResumed {
 }
 rwi_event!(RecordResumed, "record_resumed");
 
+/// AMD (answering machine / AI assistant) detection verdict for the outbound
+/// callee leg. Emitted once per armed attempt when the engine reaches a
+/// decision (early verdict or detection-window flush). Only fired on calls
+/// where the resolved `amd` config enabled detection.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallAmdDetected {
+    pub call_id: String,
+    /// `"human" | "answering_machine" | "ai_assistant" | "silence" | "unknown"`.
+    pub result: String,
+    /// 0.0..1.0 engine confidence.
+    pub confidence: f32,
+    /// ms after answer when the decision was reached.
+    pub decision_time_ms: u64,
+    /// Detected greeting/opener duration (first speech run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech_duration_ms: Option<u64>,
+    /// Sustained ~1 kHz beep seen (voicemail hallmark).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beep_detected: Option<bool>,
+    /// Engine identifier (e.g. `"heuristic"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+}
+rwi_event!(CallAmdDetected, "call_amd_detected");
+
+impl CallAmdDetected {
+    pub fn from_verdict(
+        call_id: impl Into<String>,
+        verdict: &crate::media::amd::AmdVerdict,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            result: verdict.result.to_string(),
+            confidence: verdict.confidence,
+            decision_time_ms: verdict.decision_time_ms,
+            speech_duration_ms: Some(verdict.speech_duration_ms),
+            beep_detected: Some(verdict.beep_detected),
+            engine: Some(verdict.engine.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptStarted {
     pub call_id: String,

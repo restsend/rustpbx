@@ -251,6 +251,11 @@ pub(super) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
 /// the injection succeeds). Returns `true` only when a running app consumed
 /// the event — `false` means no app is running (starting up / between apps /
 /// none scheduled) and the caller may want to buffer the digit.
+///
+/// `source` describes how the digit entered the system (RFC 2833 / SIP INFO
+/// vs in-band audio detection); on the RWI `dtmf` event it is exposed as
+/// `extra.source` only for in-band digits, so legacy consumers of
+/// signaling-sourced events see byte-identical payloads.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inject_dtmf_into_app(
     digit: char,
@@ -259,6 +264,7 @@ pub(super) fn inject_dtmf_into_app(
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
     leg_role: Option<String>,
+    source: crate::media::ingress_tap::DtmfSource,
 ) -> bool {
     if !app_runtime.is_running() {
         return false;
@@ -276,7 +282,7 @@ pub(super) fn inject_dtmf_into_app(
             false
         }
         Ok(()) => {
-            debug!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
+            debug!(session_id = %session_id, leg_id, digit = %digit_str, source = source.as_str(), "DTMF injected into app");
             if let Some(gw) = rwi_gateway.as_ref() {
                 let g = gw.read();
                 g.send_to_owner(&crate::rwi::Dtmf {
@@ -284,7 +290,10 @@ pub(super) fn inject_dtmf_into_app(
                     digit: digit_str.clone(),
                     leg_id: Some(leg_id.to_string()),
                     leg_role,
-                    extra: None,
+                    // Only in-band digits carry the marker; RFC 2833 / SIP
+                    // INFO events keep `extra: None` for payload stability.
+                    extra: (source == crate::media::ingress_tap::DtmfSource::Inband)
+                        .then(|| serde_json::json!({ "source": source.as_str() })),
                 });
             }
             true
@@ -337,6 +346,7 @@ pub(super) fn forward_dtmf_event(
     callee: &str,
     sip_headers: Option<std::collections::HashMap<String, String>>,
     leg_role: Option<String>,
+    source: crate::media::ingress_tap::DtmfSource,
 ) -> bool {
     // A transferred application serves its bound participant, which can be
     // the callee. Input from the other leg must not drive the customer menu.
@@ -417,6 +427,7 @@ pub(super) fn forward_dtmf_event(
         app_runtime,
         rwi_gateway,
         leg_role,
+        source,
     )
 }
 

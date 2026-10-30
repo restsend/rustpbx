@@ -5,9 +5,11 @@
 
 pub mod app_ingress;
 pub mod audio_source;
+pub mod amd;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
+pub mod inband_dtmf;
 pub mod ingress_tap;
 pub mod leg;
 pub mod leg_id;
@@ -17,6 +19,7 @@ pub mod media_health;
 pub mod media_recorder;
 pub mod mixer;
 pub mod negotiate;
+pub mod pcm_analysis_tap;
 pub mod quality_stats;
 pub mod recorder;
 pub mod rtc_track;
@@ -26,6 +29,9 @@ pub mod telephone_event;
 pub mod volume_stats;
 pub mod wav_reader;
 pub mod wav_writer;
+
+// Test/synthesis helper: the DTMF dual-tone generator (record-common).
+pub use rustpbx_record_common::dtmf::DtmfGenerator;
 
 #[cfg(test)]
 mod media_track_tests;

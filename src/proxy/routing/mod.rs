@@ -130,6 +130,10 @@ pub struct TrunkConfig {
     pub inbound_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingPolicy>,
+    /// Per-trunk AMD (answering machine / AI assistant) detection config:
+    /// overlays the global `[proxy] amd` per-field; route hints override both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd: Option<crate::media::amd::AmdConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_from_user_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -551,6 +555,7 @@ impl Default for TrunkConfig {
         Self {
             dest: String::new(),
             backup_dest: None,
+            amd: None,
             outbound_proxy: None,
             username: None,
             password: None,

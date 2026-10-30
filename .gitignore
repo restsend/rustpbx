@@ -46,6 +46,8 @@ config/
 *.log
 .DS_Store
 *.raw
+# In-band DTMF reference fixtures (upstream dtmfdecoder testdata, s16le PCM).
+!crates/rustpbx-media/testdata/*.raw
 *.db
 *.toml
 !Cargo.toml

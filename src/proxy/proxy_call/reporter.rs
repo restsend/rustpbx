@@ -287,6 +287,7 @@ impl CallReporter {
             recording_url: recording_path_for_db,
             rewrite,
             last_error,
+            amd: snapshot.amd.clone(),
             metadata: if metadata_map.is_empty() {
                 None
             } else {
@@ -951,6 +952,7 @@ mod tests {
             },
             extensions: http::Extensions::new(),
             metadata: HashMap::new(),
+            amd: None,
             media_quality: None,
             recording_segments: Vec::new(),
         }

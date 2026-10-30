@@ -830,6 +830,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         comfort_noise_level_db: -35.0,
         enable_latching: true,
         probation_max_packets: None,
+        inband_dtmf: Default::default(),
         relay_ready_timeout: None,
     };
     let mut mb = MediaBridge::new("it-rtp-webrtc");

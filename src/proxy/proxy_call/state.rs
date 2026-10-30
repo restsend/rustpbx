@@ -47,6 +47,10 @@ pub struct CallSessionRecordSnapshot {
     /// Values are JSON so structured entries (e.g. the `trace` array) persist
     /// cleanly into the call-record `metadata` column.
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
+    /// AMD (answering machine / AI assistant) detection verdict, when the
+    /// resolved `amd` config enabled detection. Rides `CallDetails.amd` and
+    /// is mirrored into metadata by the reporter.
+    pub amd: Option<crate::media::amd::AmdVerdict>,
     /// Per-leg media quality (packets, RTCP jitter/RTT/loss) captured from the
     /// MediaBridge at call end. Persisted into the call-record `metadata` under
     /// `media_quality`.

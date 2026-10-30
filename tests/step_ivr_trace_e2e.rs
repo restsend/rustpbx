@@ -13,3 +13,5 @@ mod common;
 
 #[path = "ivr_e2e/test_step_ivr_trace_webhook_e2e.rs"]
 mod test_step_ivr_trace_webhook_e2e;
+#[path = "ivr_e2e/test_inband_dtmf_e2e.rs"]
+mod test_inband_dtmf_e2e;

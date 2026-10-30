@@ -383,6 +383,7 @@ mod tests {
                 transcript_status: None,
                 transcript_language: None,
                 tags: None,
+                amd: None,
                 rewrite: Default::default(),
                 last_error: None,
                 metadata: None,

@@ -674,6 +674,7 @@ impl CallModule {
                 .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
                 .with_quality_stats(rtp.quality_stats.clone())
                 .with_volume_stats(rtp.volume_stats.clone())
+                .with_inband_dtmf(rtp.inband_dtmf)
         };
 
         let caller_is_same_realm = self
@@ -1363,6 +1364,7 @@ impl CallModule {
                 dialplan.busy_wait = Some(busy_wait.to_plan());
             }
             dialplan.diversion_policy = hints.diversion_policy;
+            dialplan.amd = hints.amd.take();
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             dialplan.concurrent_call_lease = hints.concurrent_call_lease;

@@ -46,6 +46,7 @@ fn create_test_record() -> CallRecord {
             transcript_status: None,
             transcript_language: None,
             tags: None,
+            amd: None,
             rewrite: Default::default(),
             last_error: None,
             metadata: None,

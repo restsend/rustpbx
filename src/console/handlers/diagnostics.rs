@@ -679,6 +679,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         dest,
         outbound_proxy: backup_dest.clone(),
         backup_dest,
+        amd: None,
         username: model.auth_username.clone(),
         password: model.auth_password.clone(),
         codec: Vec::new(),

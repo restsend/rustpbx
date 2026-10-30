@@ -124,6 +124,13 @@ pub struct CallDetails {
     pub transcript_language: Option<String>,
     pub tags: Option<Value>,
 
+    /// AMD (answering machine / AI assistant) detection verdict for the
+    /// outbound callee leg, when the resolved `amd` config enabled detection
+    /// and the engine reached a decision. Mirrored into `metadata.amd` so the
+    /// DB JSON column stays queryable without a schema migration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amd: Option<crate::media::amd::AmdVerdict>,
+
     #[serde(default)]
     pub rewrite: CallRecordRewrite,
     pub last_error: Option<CallRecordLastError>,
@@ -1660,6 +1667,14 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
                     None
                 }
             });
+        // Restore the AMD verdict from the metadata JSON column (the SQL model
+        // carries no dedicated amd column — zero-migration design; the writer
+        // mirrors `details.amd` into `metadata.amd`).
+        let amd = val
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("amd"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let details = CallDetails {
             direction: val.direction,
             status: val.status,
@@ -1684,6 +1699,7 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
             transcript_status: Some(val.transcript_status),
             transcript_language: val.transcript_language,
             tags: val.tags,
+            amd,
             metadata: val.metadata.and_then(|v| serde_json::from_value(v).ok()),
             cdr_file_path: None,
             rewrite: CallRecordRewrite {

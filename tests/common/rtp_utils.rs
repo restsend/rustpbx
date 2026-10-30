@@ -549,6 +549,31 @@ impl RtpEndpoint {
         self.captured.lock().unwrap().len()
     }
 
+    /// Synchronously send pre-built PCMU (PT 0) payloads to `target`, one
+    /// RTP packet each, paced at `interval_ms`. Used to push arbitrary
+    /// caller uplink audio (e.g. synthesized DTMF dual tones) into the
+    /// server's ingress from the SAME socket the SDP advertised, so the
+    /// flow matches a real UA.
+    pub async fn send_pcmu_blocking(
+        &self,
+        target: SocketAddr,
+        payloads: Vec<Vec<u8>>,
+        interval_ms: u64,
+    ) -> Result<()> {
+        let socket = Arc::clone(&self.socket);
+        let mut packet = RtpPacket::new(0, 0, 0, 0x5254_5045, Vec::new());
+        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        for payload in payloads {
+            interval.tick().await;
+            packet.sequence_number = packet.sequence_number.wrapping_add(1);
+            packet.timestamp = packet.timestamp.wrapping_add(160);
+            packet.payload = payload;
+            let data = packet.encode();
+            socket.send_to(&data, target).await?;
+        }
+        Ok(())
+    }
+
     /// Payloads of captured PCMU (PT 0) packets, in arrival order.
     pub fn captured_pcmu_payloads(&self) -> Vec<Vec<u8>> {
         self.captured
