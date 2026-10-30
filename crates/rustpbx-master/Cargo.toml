@@ -1,0 +1,37 @@
+[package]
+name = "rustpbx-master"
+version = "0.2.0"
+edition = "2024"
+description = "rustpbx-master: listener owner + supervisor for zero-downtime worker rotation"
+
+[[bin]]
+name = "rustpbx-master"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-worker"
+path = "src/bin/fake_worker.rs"
+
+[dependencies]
+rustpbx-master-ipc = { path = "../rustpbx-master-ipc", version = "0.2.0" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dashmap = "6"
+libc = "0.2"
+nix = { version = "0.30", features = ["socket", "uio", "net", "fs", "signal", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
+
+[dev-dependencies]
+rsipstack = { version = "0.7", features = ["rustls"] }
+tokio-util = "0.7"
+serde_json = "1"
+futures = "0.3"
+tempfile = "3"

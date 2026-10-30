@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::Parser as _;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
@@ -31,6 +31,26 @@ use tracing_subscriber::{
 /// `systemctl stop` and the HTTP endpoint are interchangeable. The
 /// drain timeout comes from `[graceful_shutdown].drain_timeout_secs`
 /// (default 300s, 0 = wait forever).
+/// `logs/rustpbx.log` + gen 2 → `logs/rustpbx-gen2.log`（保留原扩展名）。
+fn with_generation_suffix(file: &str, generation: u32) -> String {
+    let path = std::path::Path::new(file);
+    match (path.parent(), path.file_stem(), path.extension()) {
+        (Some(dir), Some(stem), Some(ext)) => dir
+            .join(format!(
+                "{}-gen{generation}.{}",
+                stem.to_string_lossy(),
+                ext.to_string_lossy()
+            ))
+            .to_string_lossy()
+            .into_owned(),
+        (Some(dir), Some(stem), None) => dir
+            .join(format!("{}-gen{generation}", stem.to_string_lossy()))
+            .to_string_lossy()
+            .into_owned(),
+        _ => format!("{file}-gen{generation}"),
+    }
+}
+
 pub async fn drain_and_stop(state: &crate::app::AppState) {
     let first = crate::shutdown::initiate();
     let timeout = state.config().graceful_shutdown_timeout();
@@ -121,6 +141,7 @@ impl AppBuilder {
         let cli = self.cli;
         let extra_addons = Arc::new(self.extra_addons);
         let config_path = cli.conf.clone();
+        let worker_mode = cli.master.is_some();
         let config = if let Some(ref path) = config_path {
             println!("Loading config from: {}", path);
             Config::load(path).expect("Failed to load config")
@@ -391,7 +412,7 @@ impl AppBuilder {
             let retry_interval = Duration::from_secs(5);
 
             loop {
-                let config = if let Some(cfg) = cached_config.take() {
+                let mut config = if let Some(cfg) = cached_config.take() {
                     cfg
                 } else if let Some(ref path) = next_config_path {
                     match Config::load_async(path).await {
@@ -428,6 +449,26 @@ impl AppBuilder {
                     .with_extra_addons(extra_addons.clone());
                 if cli.skip_migrate {
                     state_builder = state_builder.with_skip_migrate();
+                }
+                if worker_mode {
+                    state_builder = state_builder
+                        .with_skip_sip_bind()
+                        .with_no_http_bind();
+                }
+                // The master hands each generation a disjoint RTP slice; it
+                // wins over the config file so two generations never share
+                // media ports.
+                if let Some(v) = cli.rtp_start {
+                    config.rtp_start_port = Some(v);
+                }
+                if let Some(v) = cli.rtp_end {
+                    config.rtp_end_port = Some(v);
+                }
+                // master 与 worker 可能写同一个 log_file —— 轮转 rename 在
+                // 多进程下会互相踩（丢日志）。worker 模式给日志文件加代数
+                // 后缀，保证每个文件只有一个写入者。
+                if let Some(file) = &config.log_file {
+                    config.log_file = Some(with_generation_suffix(file, cli.worker_gen));
                 }
 
                 let (app_reload_requested, app_config_path) = {
@@ -492,6 +533,38 @@ impl AppBuilder {
 
                     info!("starting rustpbx on {}", state.config().http_addr);
                     let router = create_router(state.clone());
+                    let router = if worker_mode {
+                        match rustpbx_master_ipc::worker_connect(Path::new(
+                            cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock"),
+                        ))
+                        .await
+                        {
+                            Ok(link) => {
+                                // Forwarded WSS fds need the upgrade route
+                                // before the router is served by master_link
+                                // (run() skips it in worker mode to avoid a
+                                // duplicate-route panic).
+                                let router = crate::app::with_ws_routes(&state, router);
+                                crate::master_link::start_worker_mode(
+                                    link,
+                                    cli.worker_gen,
+                                    cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock").into(),
+                                    state.clone(),
+                                    router.clone(),
+                                );
+                                router
+                            }
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "worker mode: cannot connect to master at {}: {}",
+                                    cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock"),
+                                    e
+                                ));
+                            }
+                        }
+                    } else {
+                        router
+                    };
                     let mut app_future = Box::pin(crate::app::run(state.clone(), router));
 
                     #[cfg(unix)]
@@ -714,4 +787,19 @@ async fn dump_ddl(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod log_suffix_tests {
+    use super::with_generation_suffix;
+
+    #[test]
+    fn appends_generation_before_extension() {
+        assert_eq!(
+            with_generation_suffix("logs/rustpbx.log", 2),
+            "logs/rustpbx-gen2.log"
+        );
+        assert_eq!(with_generation_suffix("rustpbx.log", 7), "rustpbx-gen7.log");
+        assert_eq!(with_generation_suffix("logs/rustpbx", 3), "logs/rustpbx-gen3");
+    }
 }

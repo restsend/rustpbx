@@ -51,6 +51,16 @@ pub struct Cli {
         help = "Skip running database migrations on startup"
     )]
     pub skip_migrate: bool,
+    #[clap(long, global = true, help = "Run as a rustpbx-master worker")]
+    pub master: Option<String>,
+    #[clap(long, global = true, default_value = "0")]
+    pub worker_gen: u32,
+    /// RTP port slice start assigned by the master (overrides config).
+    #[clap(long, global = true)]
+    pub rtp_start: Option<u16>,
+    /// RTP port slice end assigned by the master (overrides config).
+    #[clap(long, global = true)]
+    pub rtp_end: Option<u16>,
     #[clap(subcommand)]
     pub command: Option<Commands>,
 }
@@ -79,6 +89,10 @@ impl Default for Cli {
             #[cfg(feature = "console")]
             super_email: None,
             skip_migrate: false,
+            master: None,
+            worker_gen: 0,
+            rtp_start: None,
+            rtp_end: None,
             command: None,
         }
     }

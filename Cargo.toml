@@ -8,6 +8,8 @@ members = [
     "crates/rustpbx-sipflow",
     "crates/rustpbx-media",
     "crates/rustpbx-record-common",
+    "crates/rustpbx-master-ipc",
+    "crates/rustpbx-master",
 ]
 
 [package]
@@ -103,6 +105,12 @@ tokio = { version = "1.53", features = ["full", "tracing", "test-util"] }
 socket2 = "0.6"
 parking_lot = "0.12"
 dashmap = "6"
+# master/worker: worker-side link + fd-forwarded HTTP serving (src/master_link.rs)
+rustpbx-master-ipc = { path = "crates/rustpbx-master-ipc", version = "0.2.0" }
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tower = { version = "0.5", features = ["util"] }
 tokio-util = "0.7.18"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing = "0.1.43"

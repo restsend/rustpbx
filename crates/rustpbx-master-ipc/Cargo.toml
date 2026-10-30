@@ -1,0 +1,16 @@
+[package]
+name = "rustpbx-master-ipc"
+version = "0.2.0"
+edition = "2024"
+description = "Wire protocol + fd passing between rustpbx-master and its workers"
+
+[dependencies]
+nix = { version = "0.30", features = ["socket", "uio", "net", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "sync", "time", "macros", "rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+futures = "0.3"

@@ -79,6 +79,8 @@ pub struct AppStateInner {
     pub sip_server: SipServer,
     pub http_client: reqwest::Client,
     pub skip_migrate: bool,
+    /// Worker mode (`--master`): HTTP served from master-forwarded fds.
+    pub no_http_bind: bool,
     /// In-process lifetime counters, shared with `CallCountHook` (registered on
     /// the call-record manager). `Arc` because the hook is built before the app
     /// state exists. They reset on process restart — `uptime` is reported
@@ -116,6 +118,9 @@ pub struct AppStateBuilder {
     pub config_path: Option<String>,
     pub skip_sip_bind: bool,
     pub skip_migrate: bool,
+    /// Worker mode (`--master`): HTTP/HTTPS are served from fds forwarded by
+    /// the master process; do not bind public HTTP listeners here.
+    pub no_http_bind: bool,
     pub extra_addons: Arc<Vec<Arc<dyn crate::addons::Addon>>>,
 }
 
@@ -255,6 +260,7 @@ impl AppStateBuilder {
             config_path: None,
             skip_sip_bind: false,
             skip_migrate: false,
+            no_http_bind: false,
             extra_addons: Arc::new(Vec::new()),
         }
     }
@@ -271,6 +277,12 @@ impl AppStateBuilder {
 
     pub fn with_skip_migrate(mut self) -> Self {
         self.skip_migrate = true;
+        self
+    }
+
+    /// Worker mode: serve HTTP from master-forwarded fds instead of binding.
+    pub fn with_no_http_bind(mut self) -> Self {
+        self.no_http_bind = true;
         self
     }
 
@@ -702,6 +714,7 @@ impl AppStateBuilder {
             sip_server,
             http_client,
             skip_migrate: self.skip_migrate,
+            no_http_bind: self.no_http_bind,
             total_calls: total_calls_counter.clone(),
             total_failed_calls: total_failed_calls_counter.clone(),
             uptime: chrono::Utc::now(),
@@ -1054,30 +1067,21 @@ impl AppStateBuilder {
     }
 }
 
-pub async fn run(state: AppState, mut router: Router) -> Result<()> {
-    let token = state.token().clone();
-    let addr: SocketAddr = state.config().http_addr.parse()?;
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind to {}: {}", addr, e);
-            return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
-        }
-    };
-
+/// Register the SIP-over-WebSocket upgrade route. Used by standalone `run`
+/// and by the builder before handing the router to worker mode (forwarded
+/// WSS fds need the upgrade route on the router `master_link` serves).
+pub fn with_ws_routes(state: &AppState, mut router: Router) -> Router {
     if let Some(ref ws_handler) = state.sip_server().inner.proxy_config.load().ws_handler {
         info!(
             "Registering WebSocket handler to sip server: {}",
             ws_handler
         );
         let endpoint_ref = state.sip_server().inner.endpoint.inner.clone();
-        let token = token.clone();
+        let token = state.token().clone();
         router = router.route(
             ws_handler,
             axum::routing::get(
                 async move |client_ip: ClientAddr, ws: WebSocketUpgrade| -> Response {
-                    let token = token.clone();
-
                     ws.protocols(["sip"]).on_upgrade(async move |socket| {
                         sip_ws_handler(token, client_ip, socket, endpoint_ref.clone()).await
                     })
@@ -1085,6 +1089,33 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
             ),
         );
     }
+    router
+}
+
+pub async fn run(state: AppState, mut router: Router) -> Result<()> {
+    let token = state.token().clone();
+    let addr: SocketAddr = state.config().http_addr.parse()?;
+    let worker_mode = state.no_http_bind;
+    let listener = if worker_mode {
+        info!("worker mode: HTTP served via master fd forwarding (public {})", addr);
+        None
+    } else {
+        match TcpListener::bind(addr).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::error!("Failed to bind to {}: {}", addr, e);
+                return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
+            }
+        }
+    };
+
+    // In worker mode the builder already installed ws routes (the router is
+    // served by master_link for forwarded fds); adding again would panic.
+    router = if worker_mode {
+        router
+    } else {
+        with_ws_routes(&state, router)
+    };
 
     // Check for HTTPS config
     let mut ssl_config = None;
@@ -1137,7 +1168,10 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         }
     }
 
-    let https_addr = if https_config.is_some() {
+    let https_addr = if worker_mode {
+        // WSS/HTTPS arrive as master-forwarded fds; never bind locally.
+        None
+    } else if https_config.is_some() {
         let addr_str = state
             .config()
             .https_addr
@@ -1158,12 +1192,22 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         info!("HTTPS enabled on {}", addr);
     }
 
-    let http_task = axum::serve(
-        listener,
-        router
-            .clone()
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    );
+    let http_router = router.clone();
+    let http_task = async move {
+        if let Some(l) = listener {
+            if let Err(e) = axum::serve(
+                l,
+                http_router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
+                tracing::error!("HTTP server error: {}", e);
+            }
+        } else {
+            // worker mode: HTTP arrives via master-forwarded fds
+            std::future::pending::<()>().await;
+        }
+    };
 
     let https_router = if https_addr.is_some() {
         router.layer(middleware::from_fn(
@@ -1178,14 +1222,8 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     };
 
     select! {
-        http_result = http_task => {
-            match http_result {
-                Ok(_) => info!("Server shut down gracefully"),
-                Err(e) => {
-                    tracing::error!("Server error: {}", e);
-                    return Err(anyhow::anyhow!("Server error: {}", e));
-                }
-            }
+        _ = http_task => {
+            info!("Server shut down gracefully");
         }
         https_result = async {
             if let (Some(config), Some(addr)) = (https_config, https_addr) {
