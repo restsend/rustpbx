@@ -467,7 +467,9 @@ impl AppBuilder {
                 // master 与 worker 可能写同一个 log_file —— 轮转 rename 在
                 // 多进程下会互相踩（丢日志）。worker 模式给日志文件加代数
                 // 后缀，保证每个文件只有一个写入者。
-                if let Some(file) = &config.log_file {
+                // Standalone keeps log_file as configured (the suffix would also
+                // stack on every retry through `cached_config`).
+                if worker_mode && let Some(file) = &config.log_file {
                     config.log_file = Some(with_generation_suffix(file, cli.worker_gen));
                 }
 

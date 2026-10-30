@@ -2,7 +2,7 @@
 
 use crate::control::{decode_control, encode_control, ControlMessage};
 use crate::frame::{DataWriter, FrameParser};
-use nix::sys::socket::{self, sockopt, ControlMessageOwned, MsgFlags, SockType};
+use nix::sys::socket::{self, ControlMessageOwned, MsgFlags, SockType};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
@@ -83,10 +83,18 @@ pub fn socketpair_std() -> io::Result<(std::os::unix::net::UnixStream, std::os::
     ))
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn peer_pid_of(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
-    socket::getsockopt(&stream, sockopt::PeerCredentials)
+    socket::getsockopt(&stream, socket::sockopt::PeerCredentials)
         .ok()
         .map(|c: nix::sys::socket::UnixCredentials| c.pid() as u32)
+}
+
+/// SO_PEERCRED is Linux-only. The master is Linux-only too; this stub only
+/// keeps core building on other unix targets (macOS dev).
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn peer_pid_of(_stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    None
 }
 
 pub fn control_send_with_fds(stream: &std::os::unix::net::UnixStream, payload: &[u8], fd: Option<RawFd>) -> io::Result<()> {
