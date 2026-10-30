@@ -26,18 +26,6 @@ fn free_udp_port() -> u16 {
     s.local_addr().unwrap().port()
 }
 
-fn stage_release(releases: &Path, name: &str, bin: &Path) {
-    stage_release_with_args(releases, name, bin, &[]);
-}
-
-fn stage_release_with_args(releases: &Path, name: &str, bin: &Path, args: &[&str]) {
-    let body = std::fs::read(bin).unwrap();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    // Stage through the real release pipeline (manifest + atomic rename);
-    // the execve/ETXTBSY race is handled inside stage + spawn retry.
-    rustpbx_master::releases::stage_with_args(releases, name, &body, &args).unwrap();
-}
-
 fn setup_env(name: &str) -> TestEnv {
     let dir = tempfile::Builder::new().prefix(name).tempdir().unwrap();
     let conf = dir.path().join("config.toml");
@@ -50,16 +38,24 @@ fn setup_env(name: &str) -> TestEnv {
     )
     .unwrap();
     let sock = dir.path().join("master.sock");
-    std::fs::create_dir_all(dir.path().join("releases")).unwrap();
     TestEnv { _dir: dir, conf, sock, udp_port }
 }
 
-async fn boot_master(env: &TestEnv) -> Arc<SupCore> {
+async fn boot_master(
+    env: &TestEnv,
+    worker_bin: &Path,
+    worker_env: Vec<(String, String)>,
+) -> Arc<SupCore> {
     let conf = ConfigSubset::load(&env.conf).unwrap();
     let sockets = Access::bind_udp(std::net::IpAddr::from([127, 0, 0, 1]), &[env.udp_port]).unwrap();
     let udp_map: HashMap<u16, Arc<tokio::net::UdpSocket>> =
         sockets.iter().map(|(id, s)| (*id, s.clone())).collect();
-    let core = SupCore::new(conf, &env.conf, &env.sock, udp_map).unwrap();
+    let mut core = SupCore::new(conf, &env.conf, &env.sock, udp_map).unwrap();
+    // Set BEFORE the Arc is shared with access/ipc tasks.
+    core.set_worker_bin(PathBuf::from(worker_bin));
+    if !worker_env.is_empty() {
+        core.set_worker_env(worker_env);
+    }
     let access = Access::new(core.clone());
     access.spawn_udp_recvs(sockets);
     rustpbx_master_ipc::set_runtime_handle(Handle::current());
@@ -81,13 +77,11 @@ async fn wait_until(mut pred: impl AsyncFnMut() -> bool, what: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drain_then_rotate() {
     let env = setup_env("drain-rotate");
-    let core = boot_master(&env).await;
-    let releases = env.conf.parent().unwrap().join("releases");
-    stage_release(&releases, "r1", Path::new(FAKE_WORKER));
-    stage_release(&releases, "r2", Path::new(FAKE_WORKER));
+    let core = boot_master(&env, Path::new(FAKE_WORKER), vec![]).await;
+    // worker binary = the fake worker itself; no release staging.
 
     // gen1 boot
-    let (g1, child1) = core.upgrade_to("r1").await.expect("gen1 boot");
+    let (g1, child1) = core.upgrade_to().await.expect("gen1 boot");
     spawn_reaper(core.clone(), g1, child1);
     let st = core.status().await;
     assert_eq!(st["current_generation"], g1);
@@ -96,7 +90,7 @@ async fn drain_then_rotate() {
     let rtp1: u16 = st["generations"][0]["rtp_slice"][0].as_u64().unwrap() as u16;
 
     // gen2 rotate: gen1 must drain and exit
-    let (g2, child2) = core.upgrade_to("r2").await.expect("gen2 rotate");
+    let (g2, child2) = core.upgrade_to().await.expect("gen2 rotate");
     spawn_reaper(core.clone(), g2, child2);
     assert_ne!(g1, g2);
     let st = core.status().await;
@@ -120,11 +114,9 @@ async fn drain_then_rotate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn crash_restarts_worker() {
     let env = setup_env("crash-restart");
-    let core = boot_master(&env).await;
-    let releases = env.conf.parent().unwrap().join("releases");
-    stage_release(&releases, "r1", Path::new(FAKE_WORKER));
+    let core = boot_master(&env, Path::new(FAKE_WORKER), vec![]).await;
 
-    let (g1, child1) = core.upgrade_to("r1").await.expect("gen1 boot");
+    let (g1, child1) = core.upgrade_to().await.expect("gen1 boot");
     spawn_reaper(core.clone(), g1, child1);
 
     // SIGKILL the worker: supervisor must notice and boot a replacement.
@@ -168,11 +160,9 @@ async fn crash_restarts_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn udp_relay_roundtrip() {
     let env = setup_env("udp-relay");
-    let core = boot_master(&env).await;
-    let releases = env.conf.parent().unwrap().join("releases");
-    stage_release(&releases, "r1", Path::new(FAKE_WORKER));
+    let core = boot_master(&env, Path::new(FAKE_WORKER), vec![]).await;
 
-    let (_g, child) = core.upgrade_to("r1").await.expect("gen1 boot");
+    let (_g, child) = core.upgrade_to().await.expect("gen1 boot");
     spawn_reaper(core.clone(), _g, child);
 
     // Client PING via the master's public port → fake worker PONG back.
@@ -198,17 +188,17 @@ async fn udp_relay_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dialog_routing_sticky() {
     let env = setup_env("dialog-sticky");
-    let core = boot_master(&env).await;
-    let releases = env.conf.parent().unwrap().join("releases");
-    // r1 drains slowly so the drain window is observable.
-    stage_release_with_args(&releases, "r1", Path::new(FAKE_WORKER), &["--drain-secs", "3"]);
-    stage_release(&releases, "r2", Path::new(FAKE_WORKER));
-
+    let core = boot_master(
+        &env,
+        Path::new(FAKE_WORKER),
+        vec![("FAKE_DRAIN_SECS".into(), "3".into())],
+    )
+    .await;
     // No worker yet: unroutable.
     assert_eq!(core.route_gen(Some("cid-x")).await, None);
     assert_eq!(core.route_gen(None).await, None);
 
-    let (g1, child1) = core.upgrade_to("r1").await.expect("gen1 boot");
+    let (g1, child1) = core.upgrade_to().await.expect("gen1 boot");
     spawn_reaper(core.clone(), g1, child1);
 
     // Unknown Call-ID → current gen; known Call-ID → sticky owner.
@@ -217,7 +207,7 @@ async fn dialog_routing_sticky() {
     assert_eq!(core.route_gen(Some("cid-a")).await, Some(g1));
 
     // Rotate: gen1 drains (slowly) but keeps ownership of its dialogs.
-    let (g2, child2) = core.upgrade_to("r2").await.expect("gen2");
+    let (g2, child2) = core.upgrade_to().await.expect("gen2");
     spawn_reaper(core.clone(), g2, child2);
     assert_eq!(core.route_gen(Some("cid-a")).await, Some(g1));
     assert_eq!(core.route_gen(Some("cid-b")).await, Some(g2));
@@ -233,7 +223,7 @@ async fn dialog_routing_sticky() {
     .await;
 }
 
-// nix kill helper (dev-dependency-free via libc-free path)
-unsafe fn kill(pid: i32) {
-    unsafe { nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL).unwrap() };
+// nix kill helper
+fn kill(pid: i32) {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL).unwrap();
 }

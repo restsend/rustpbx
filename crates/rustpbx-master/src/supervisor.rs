@@ -77,7 +77,6 @@ pub struct SupervisorStats {
 }
 
 struct Generation {
-    release_name: String,
     rtp: RtpSlice,
     state: GenState,
     link: Option<Arc<GenLink>>,
@@ -93,14 +92,19 @@ struct SupState {
     gens: HashMap<u32, Generation>,
     current: Option<u32>,
     next_gen: u32,
-    restarts: HashMap<String, u32>,
+    /// Crash-restart attempts since the last successful generation.
+    restart_attempts: u32,
 }
 
 pub struct SupCore {
     pub cfg: ConfigSubset,
     pub conf_path: PathBuf,
     pub master_sock: PathBuf,
-    pub releases_dir: PathBuf,
+    /// Worker binary path. Defaults to `rustpbx` next to this binary; tests
+    /// point it at a freshly built worker.
+    pub worker_bin: PathBuf,
+    /// Extra environment for spawned workers (tests set e.g. FAKE_DRAIN_SECS).
+    pub worker_env: Vec<(String, String)>, 
     pub dialogs: Arc<DialogTable>,
     pub udp_sockets: Mutex<HashMap<u16, Arc<tokio::net::UdpSocket>>>,
     pub stats: SupervisorStats,
@@ -115,10 +119,6 @@ impl SupCore {
         master_sock: &Path,
         udp_sockets: HashMap<u16, Arc<tokio::net::UdpSocket>>,
     ) -> Result<Arc<Self>, SupError> {
-        let releases_dir = conf_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("releases");
         let dialogs = Arc::new(DialogTable::new(
             cfg.master.max_dialog_entries(),
             Arc::new(Metrics::default()),
@@ -132,13 +132,35 @@ impl SupCore {
                 gens: HashMap::new(),
                 current: None,
                 next_gen: 1,
-                restarts: HashMap::new(),
+                restart_attempts: 0,
             }),
             cfg,
             conf_path: conf_path.to_path_buf(),
             master_sock: master_sock.to_path_buf(),
-            releases_dir,
+            worker_bin: std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("rustpbx")))
+                .unwrap_or_else(|| PathBuf::from("rustpbx")),
+            worker_env: Vec::new(),
         }))
+    }
+
+    /// Point the supervisor at a different worker binary (tests). Must be
+    /// called before any generation exists (requires exclusive Arc access).
+    pub fn set_worker_bin(self: &mut Arc<Self>, path: PathBuf) {
+        match Arc::get_mut(self) {
+            Some(this) => this.worker_bin = path,
+            None => panic!("set_worker_bin: supervisor already shared"),
+        }
+    }
+
+    /// Extra env for spawned workers (tests). Same exclusivity contract as
+    /// [`Self::set_worker_bin`].
+    pub fn set_worker_env(self: &mut Arc<Self>, env: Vec<(String, String)>) {
+        match Arc::get_mut(self) {
+            Some(this) => this.worker_env = env,
+            None => panic!("set_worker_env: supervisor already shared"),
+        }
     }
 
     /// Snapshot for the admin API / tests.
@@ -150,7 +172,6 @@ impl SupCore {
             .map(|(id, g)| {
                 serde_json::json!({
                     "generation": id,
-                    "release": g.release_name,
                     "state": g.state.as_str(),
                     "pid": g.pid,
                     "rtp_slice": [g.rtp.start, g.rtp.end],
@@ -222,21 +243,24 @@ impl SupCore {
     /// arrange for [`spawn_reaper`] to run (this keeps the future's `Send`
     /// proof acyclic — the reaper path re-enters `on_gen_exited`, which may
     /// restart via this very method).
-    pub async fn upgrade_to(
-        self: &Arc<Self>,
-        release_name: &str,
-    ) -> Result<(u32, tokio::process::Child), SupError> {
+    pub async fn upgrade_to(self: &Arc<Self>) -> Result<(u32, tokio::process::Child), SupError> {
         self.stats.upgrades_started.fetch_add(1, Ordering::Relaxed);
-        let staged = crate::releases::validate(
-            &self.releases_dir,
-            &self.releases_dir.join(release_name),
-        )
-        .map_err(|e| {
+        let worker_bin = self.worker_bin.clone();
+        let meta = std::fs::metadata(&worker_bin).map_err(|e| {
             self.stats.upgrades_failed.fetch_add(1, Ordering::Relaxed);
-            SupError::Release(release_name.into(), e.to_string())
+            SupError::Release(worker_bin.to_string_lossy().into_owned(), e.to_string())
         })?;
-        let worker_bin = staged.binary.clone();
-        let worker_args = staged.manifest.worker_args.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o111 == 0 {
+                self.stats.upgrades_failed.fetch_add(1, Ordering::Relaxed);
+                return Err(SupError::Release(
+                    worker_bin.to_string_lossy().into_owned(),
+                    "not executable".into(),
+                ));
+            }
+        }
 
         let (generation, rtp) = {
             let mut st = self.state.lock().await;
@@ -256,7 +280,6 @@ impl SupCore {
             st.gens.insert(
                 generation,
                 Generation {
-                    release_name: release_name.to_string(),
                     rtp,
                     state: GenState::Starting,
                     link: None,
@@ -281,11 +304,13 @@ impl SupCore {
             "--rtp-end",
             &rtp.end.to_string(),
         ])
-        .args(&worker_args)
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+        for (k, v) in &self.worker_env {
+            cmd.env(k, v);
+        }
 
     // CRITICAL: the worker must NOT inherit the master's file descriptors.
     // Inherited copies of the IPC socketpair keep the control channel "open"
@@ -334,7 +359,10 @@ impl SupCore {
                 let mut st = self.state.lock().await;
                 st.gens.remove(&generation);
                 self.stats.upgrades_failed.fetch_add(1, Ordering::Relaxed);
-                return Err(SupError::Release(release_name.into(), format!("spawn: {e}")));
+                return Err(SupError::Release(
+                    self.worker_bin.to_string_lossy().into_owned(),
+                    format!("spawn: {e}"),
+                ));
             }
         };
         let pid = child.id();
@@ -352,7 +380,7 @@ impl SupCore {
                 st.gens.remove(&generation);
                 self.stats.upgrades_failed.fetch_add(1, Ordering::Relaxed);
                 return Err(SupError::Release(
-                    release_name.into(),
+                    self.worker_bin.to_string_lossy().into_owned(),
                     "worker exited before Ready".into(),
                 ));
             }
@@ -385,16 +413,13 @@ impl SupCore {
         // reconnecting with its original id. ADOPT it (never kill it): its
         // calls are still live and its RTP ports are still its own.
         if !st.gens.contains_key(&generation) {
-            let release_name = crate::supervisor::current_release_or_newest(self)
-                .unwrap_or_else(|| "adopted".to_string());
-            tracing::warn!(generation, %release_name, peer_pid, "adopting surviving worker");
+            tracing::warn!(generation, peer_pid, "adopting surviving worker");
             // Reserve the id range: a later upgrade_to must never collide
             // with an adopted generation id.
             st.next_gen = st.next_gen.max(generation + 1);
             st.gens.insert(
                 generation,
                 Generation {
-                    release_name,
                     rtp: RtpSlice { start: 0, end: 0 },
                     state: GenState::Starting,
                     link: None,
@@ -438,8 +463,9 @@ impl SupCore {
             let new_adopted = st.gens.get(&generation).map(|g| g.adopted).unwrap_or(false);
             if let Some(g) = st.gens.get_mut(&generation) {
                 g.state = GenState::Active;
-                let name = g.release_name.clone();
-                st.restarts.remove(&name);
+            }
+            if !new_adopted {
+                st.restart_attempts = 0;
             }
             if new_adopted {
                 // ADOPTION: never displace a live generation and never drain
@@ -468,6 +494,35 @@ impl SupCore {
         } else {
             self.stats.upgrades_ok.fetch_add(1, Ordering::Relaxed);
             tracing::info!(generation, "generation active");
+        }
+    }
+
+    /// Drain EVERY live generation (docker stop / SIGTERM): reject new
+    /// traffic everywhere, then wait until all workers have exited or the
+    /// timeout elapses.
+    pub async fn drain_all_and_wait(self: &Arc<Self>, timeout: Duration) {
+        let this = Arc::clone(self);
+        let gens: Vec<u32> = {
+            let st = self.state.lock().await;
+            st.gens.keys().copied().collect()
+        };
+        for g in gens {
+            this.begin_drain(g).await;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            {
+                let st = self.state.lock().await;
+                if st.gens.is_empty() {
+                    tracing::info!("all generations exited — drained");
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(timeout_secs = timeout.as_secs(), "drain timeout — exiting with live generations");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -542,14 +597,13 @@ impl SupCore {
 
     /// Reaper: clean up after a worker exits; auto-restart on crash.
     pub async fn on_gen_exited(self: &Arc<Self>, generation: u32, code: Option<i32>) {
-        let release_name = {
+        let was_draining = {
             let st = self.state.lock().await;
             match st.gens.get(&generation) {
-                Some(g) => (g.release_name.clone(), g.state == GenState::Draining),
+                Some(g) => g.state == GenState::Draining,
                 None => return,
             }
         };
-        let (release_name, was_draining) = release_name;
         self.dialogs.purge_generation(generation);
         {
             let mut st = self.state.lock().await;
@@ -562,46 +616,29 @@ impl SupCore {
         if self.shutting_down.load(Ordering::SeqCst) || was_draining {
             return;
         }
-        // Crash of a non-draining worker → bounded auto-restart.
+        // Crash of a non-draining worker → bounded auto-restart from the
+        // CURRENT worker binary (a recent rotate intentionally restarts on
+        // the new version).
         let attempts = {
             let mut st = self.state.lock().await;
-            let n = st.restarts.entry(release_name.clone()).or_insert(0);
-            *n += 1;
-            *n
+            st.restart_attempts += 1;
+            st.restart_attempts
         };
         if attempts > MAX_RESTARTS_PER_RELEASE {
-            tracing::error!(release = %release_name, "restart limit reached");
+            tracing::error!("restart limit reached");
             return;
         }
         self.stats.worker_restarts.fetch_add(1, Ordering::Relaxed);
-        tracing::warn!(release = %release_name, attempts, "restarting crashed worker");
-        match self.upgrade_to(&release_name).await {
+        tracing::warn!(attempts, "restarting crashed worker");
+        match self.upgrade_to().await {
             // The child owns `kill_on_drop`: dropping it would kill the
             // freshly restarted worker. Always hand it to a reaper.
             Ok((generation, child)) => spawn_reaper(self.clone(), generation, child),
-            Err(e) => tracing::error!(release = %release_name, "restart failed: {e}"),
+            Err(e) => tracing::error!("restart failed: {e}"),
         }
     }
 }
 
-/// Bootstrap target: the `current` pointer file, else the newest staged release.
-pub fn current_release_or_newest(core: &SupCore) -> Option<String> {
-    let pointer = core.releases_dir.join("current");
-    if let Ok(name) = std::fs::read_to_string(&pointer) {
-        let name = name.trim();
-        if !name.is_empty() && core.releases_dir.join(name).join("bin").is_file() {
-            return Some(name.to_string());
-        }
-    }
-    let mut names: Vec<String> = std::fs::read_dir(&core.releases_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("rustpbx").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    names.sort();
-    names.pop()
-}
 
 /// The wire Call-ID portion of a rsipstack DialogId string
 /// (`{call_id}-{local_tag}-{remote_tag}`): everything before the first `-`.

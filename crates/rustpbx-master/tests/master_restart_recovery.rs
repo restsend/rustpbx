@@ -39,9 +39,6 @@ async fn master_restart_adopts_surviving_worker() {
     let conf = dir.path().join("config.toml");
     let master_sock = dir.path().join("master.sock");
     let admin_sock = admin_sock_path(&master_sock, None);
-    let releases = dir.path().join("releases");
-    std::fs::create_dir_all(&releases).unwrap();
-
     let udp = free_udp_port();
     std::fs::write(
         &conf,
@@ -51,9 +48,6 @@ async fn master_restart_adopts_surviving_worker() {
     )
     .unwrap();
 
-    // Stage r1 (real rustpbx binary as the release payload).
-    let body = std::fs::read(&bin).unwrap();
-    rustpbx_master::releases::stage(&releases, "r1", &body).unwrap();
 
     use std::process::Stdio;
     let logs = PathBuf::from("/tmp/master_restart_logs");
@@ -115,7 +109,7 @@ async fn master_restart_adopts_surviving_worker() {
     }
     let g = adopted.expect("surviving worker was not adopted by the new master");
     assert_eq!(g["state"], "active", "adopted worker must be active: {g}");
-    assert_eq!(g["release"], "r1", "adopted worker keeps its release: {g}");
+    assert_eq!(g["state"], "active", "adopted worker must be active: {g}");
 
     // The worker process itself never died (same pid still on the box).
     assert!(

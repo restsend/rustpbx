@@ -40,6 +40,11 @@ impl MasterSubset {
     pub fn max_dialog_entries(&self) -> usize {
         self.max_dialog_entries.unwrap_or(500_000)
     }
+
+    /// Drain window on SIGTERM before the master exits with live generations.
+    pub fn drain_timeout_secs(&self) -> u64 {
+        self.drain_timeout_secs.unwrap_or(30)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -23,9 +23,6 @@ struct Cli {
     #[clap(long, default_value = "0")]
     #[allow(dead_code)]
     rtp_end: u16,
-    /// Seconds to delay the Drained report (exercises the drain window).
-    #[clap(long, default_value = "0")]
-    drain_secs: u64,
 }
 
 fn main() {
@@ -35,11 +32,17 @@ fn main() {
         .enable_all()
         .build()
         .expect("runtime");
-    let code = rt.block_on(run(cli.master_sock, cli.worker_gen, cli.drain_secs));
+    let code = rt.block_on(run(cli.master_sock, cli.worker_gen));
     std::process::exit(code);
 }
 
-async fn run(master_sock: std::path::PathBuf, worker_gen: u32, drain_secs: u64) -> i32 {
+async fn run(master_sock: std::path::PathBuf, worker_gen: u32) -> i32 {
+    // Drain delay for testing the drain window, set via the spawner's env
+    // (the master passes worker_env entries down to spawned workers).
+    let drain_secs: u64 = std::env::var("FAKE_DRAIN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let Ok(link) = worker_connect(&master_sock).await else {
         eprintln!("fake-worker: cannot connect to {}", master_sock.display());
         return 1;

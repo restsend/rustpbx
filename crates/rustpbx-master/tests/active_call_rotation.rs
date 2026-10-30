@@ -51,12 +51,6 @@ fn free_udp_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-fn stage(releases: &Path, name: &str, bin: &Path) {
-    let body = std::fs::read(bin).unwrap();
-    // releases::stage creates the dir + manifest + atomically renamed binary.
-    rustpbx_master::releases::stage(releases, name, &body).unwrap();
-}
-
 fn setup_env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let (sip_udp, sip_tcp, http) = (free_port(), free_port(), free_port());
@@ -99,18 +93,19 @@ password = "12345678"
         ),
     )
     .unwrap();
-    std::fs::create_dir_all(dir.path().join("releases")).unwrap();
     let sock = dir.path().join("master.sock");
     Env { _dir: dir, conf, sock, sip_udp }
 }
 
-async fn boot_master(env: &Env) -> Arc<SupCore> {
+async fn boot_master(env: &Env, worker_bin: &Path) -> Arc<SupCore> {
     let conf = ConfigSubset::load(&env.conf).unwrap();
     let bind_ip = conf.bind_ip().unwrap();
     let udp = Access::bind_udp(bind_ip, &[env.sip_udp]).unwrap();
     let udp_map: std::collections::HashMap<u16, Arc<tokio::net::UdpSocket>> =
         udp.iter().map(|(id, s)| (*id, s.clone())).collect();
-    let core = SupCore::new(conf, &env.conf, &env.sock, udp_map).unwrap();
+    let mut core = SupCore::new(conf, &env.conf, &env.sock, udp_map).unwrap();
+    // Set BEFORE the Arc is shared with access/ipc tasks.
+    core.set_worker_bin(PathBuf::from(worker_bin));
     let access = Access::new(core.clone());
     access.spawn_udp_recvs(udp);
     access
@@ -169,13 +164,10 @@ async fn active_call_survives_rotation() {
         return;
     };
     let env = setup_env();
-    let core = boot_master(&env).await;
-    let releases = env.conf.parent().unwrap().join("releases");
-    stage(&releases, "r1", &bin);
-    stage(&releases, "r2", &bin);
+    let core = boot_master(&env, &bin).await;
 
     // ── gen1 boots (real rustpbx worker) ──
-    let (g1, child1) = core.upgrade_to("r1").await.expect("gen1 boot");
+    let (g1, child1) = core.upgrade_to().await.expect("gen1 boot");
     spawn_reaper(core.clone(), g1, child1);
 
     let proxy = format!("127.0.0.1:{}", env.sip_udp);
@@ -283,7 +275,7 @@ async fn active_call_survives_rotation() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // ── rotate MID-CALL ──
-    let (g2, child2) = core.upgrade_to("r2").await.expect("mid-call rotation");
+    let (g2, child2) = core.upgrade_to().await.expect("mid-call rotation");
     spawn_reaper(core.clone(), g2, child2);
     assert_ne!(g1, g2);
 

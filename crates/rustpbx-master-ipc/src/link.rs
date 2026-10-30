@@ -135,13 +135,11 @@ pub fn control_recv_with_fds(stream: &mut std::os::unix::net::UnixStream) -> io:
     // "keep waiting". Without these checks the reader thread spins forever
     // and the worker never learns the master died.
     if got == 0 {
-        eprintln!("[ipc-eof] header EOF");
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof"));
     }
     while got < 4 {
         let n = recvmsg_prefix(stream, &mut header[got..], got, &mut fds)?;
         if n == 0 {
-            eprintln!("[ipc-eof] header partial EOF");
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof"));
         }
         got += n;
@@ -195,7 +193,7 @@ pub fn handle_for_end(
                     Err(e) => { tracing::error!("bad control frame: {e}"); break; }
                 },
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => { eprintln!("[ipc-reader] err → break: {e}"); break; }
+                Err(e) => break,
             }
         }
     }).map_err(|e| io::Error::other(format!("spawn: {e}")))?;

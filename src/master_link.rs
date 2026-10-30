@@ -305,7 +305,6 @@ pub fn start_worker_mode(
                     let full_resend = version != seen_version;
                     seen_version = version;
                     let live = dialogs.live_dialog_ids();
-                    eprintln!("[reporter] tick={tick} live={} {:?} v{}", live.len(), live, writers.version());
                     let live_set: HashSet<String> = live.iter().cloned().collect();
                     for id in &live {
                         if full_resend || !last.contains(id) {

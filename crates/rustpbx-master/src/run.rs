@@ -5,6 +5,7 @@ use crate::config::ConfigSubset;
 use crate::supervisor::SupCore;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::sync::Arc;
 
 pub struct MasterOpts {
@@ -74,18 +75,42 @@ pub async fn run(opts: MasterOpts) -> anyhow::Result<()> {
     tokio::time::sleep(ADOPTION_GRACE).await;
     if core.status().await["generations"].as_array().map(|g| !g.is_empty()).unwrap_or(false) {
         tracing::info!("surviving workers adopted — skipping fresh bootstrap");
-    } else if let Some(release) = crate::supervisor::current_release_or_newest(&core) {
-        match core.upgrade_to(&release).await {
+    } else if core.worker_bin.is_file() {
+        match core.upgrade_to().await {
             Ok((generation, child)) => {
                 crate::supervisor::spawn_reaper(core.clone(), generation, child);
-                tracing::info!(release = %release, generation, "bootstrapped");
+                tracing::info!(bin = %core.worker_bin.display(), generation, "bootstrapped");
             }
-            Err(e) => tracing::error!(release = %release, "bootstrap failed: {e}"),
+            Err(e) => tracing::error!("bootstrap failed: {e}"),
         }
+    } else {
+        tracing::error!(
+            "worker binary {} not found — no generation to bootstrap",
+            core.worker_bin.display()
+        );
     }
 
-    // Signal handling
+    // Signal handling: docker stop sends SIGTERM; Ctrl-C is the manual
+    // equivalent. Both trigger a full drain (reject new + wait for dialogs)
+    // before the process exits.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("SIGINT — draining");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM — draining");
+            }
+        }
+    }
+    #[cfg(not(unix))]
     tokio::signal::ctrl_c().await.ok();
+
     core.shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let timeout = Duration::from_secs(conf.master.drain_timeout_secs());
+    core.drain_all_and_wait(timeout).await;
     Ok(())
 }

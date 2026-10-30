@@ -4,7 +4,6 @@ pub mod config;
 pub mod dialogs;
 pub mod admin_client;
 pub mod ipc_server;
-pub mod releases;
 pub mod run;
 pub mod sip_scan;
 pub mod supervisor;

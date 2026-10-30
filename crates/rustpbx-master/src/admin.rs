@@ -12,7 +12,6 @@
 //! hijacking the socket; CLI commands are pure clients and never bind.
 
 use crate::config::MasterSubset;
-use crate::releases;
 use crate::supervisor::{spawn_reaper, SupCore};
 use serde::Deserialize;
 use serde_json::json;
@@ -126,12 +125,10 @@ pub async fn serve_on(
 #[derive(Deserialize)]
 struct AdminRequest {
     cmd: String,
-    #[serde(default)]
-    release: Option<String>,
 }
 
 async fn dispatch(state: Arc<(Arc<SupCore>, MasterSubset)>, req: AdminRequest) -> serde_json::Value {
-    let (core, master) = (state.0.clone(), state.1.clone());
+    let core = state.0.clone();
     match req.cmd.as_str() {
         "status" => {
             let mut status = core.status().await;
@@ -140,81 +137,38 @@ async fn dispatch(state: Arc<(Arc<SupCore>, MasterSubset)>, req: AdminRequest) -
             }
             status
         }
-        "test" => match resolve_release(&core, req.release.as_deref()) {
-            Ok(release) => match static_validate(&release) {
-                Ok(size) => json!({
-                    "ok": true,
-                    "release": release.name,
-                    "size": size,
-                    "sha256": release.manifest.sha256,
-                }),
-                Err(e) => json!({"ok": false, "release": release.name, "error": e}),
-            },
-            Err(e) => json!({"ok": false, "error": e}),
+        "test" => match static_validate(&core.worker_bin) {
+            Ok(size) => json!({
+                "ok": true,
+                "bin": core.worker_bin.to_string_lossy(),
+                "size": size,
+            }),
+            Err(e) => json!({"ok": false, "bin": core.worker_bin.to_string_lossy(), "error": e}),
         },
         "reload" => {
-            let release = match resolve_release(&core, req.release.as_deref()) {
-                Ok(r) => r,
-                Err(e) => return json!({"ok": false, "error": e}),
-            };
-            if let Err(e) = static_validate(&release) {
-                return json!({"ok": false, "release": release.name, "error": e});
+            // The NEW worker binary must already be in place at
+            // `core.worker_bin` (rename is atomic; see the rotate flow).
+            if let Err(e) = static_validate(&core.worker_bin) {
+                return json!({"ok": false, "error": e});
             }
-            match core.upgrade_to(&release.name).await {
+            match core.upgrade_to().await {
                 Ok((generation, child)) => {
                     spawn_reaper(core.clone(), generation, child);
-                    // Record the `current` pointer (restart bootstrap) and GC
-                    // old releases — best-effort; rotation already succeeded.
-                    let current_link = core
-                        .releases_dir
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .join("current");
-                    let _ = releases::activate(&core.releases_dir, &current_link, &release);
-                    let status = core.status().await;
-                    let live: Vec<u32> = status["generations"]
-                        .as_array()
-                        .map(|gens| {
-                            gens.iter()
-                                .filter_map(|g| g["pid"].as_u64().map(|p| p as u32))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = releases::gc(
-                        &core.releases_dir,
-                        &current_link,
-                        master.keep_releases(),
-                        &live,
-                    );
-                    json!({"ok": true, "generation": generation, "release": release.name})
+                    json!({"ok": true, "generation": generation})
                 }
                 Err(crate::supervisor::SupError::InProgress) => {
                     json!({"ok": false, "error": "upgrade already in progress"})
                 }
-                Err(e) => json!({"ok": false, "release": release.name, "error": e.to_string()}),
+                Err(e) => json!({"ok": false, "error": e.to_string()}),
             }
         }
         other => json!({"ok": false, "error": format!("unknown command `{other}`")}),
     }
 }
 
-/// Pick the release to operate on: explicit name, else the newest staged.
-fn resolve_release(core: &SupCore, name: Option<&str>) -> Result<releases::Release, String> {
-    if let Some(n) = name {
-        let dir = core.releases_dir.join(n);
-        return releases::validate(&core.releases_dir, &dir)
-            .map_err(|e| format!("release `{n}`: {e}"));
-    }
-    releases::discover(&core.releases_dir)
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no staged release found".to_string())
-}
-
 /// Static pre-flight (option A): binary present, non-empty, executable,
-/// ELF magic, and sha256 matches the staged manifest. Does not boot anything.
-fn static_validate(release: &releases::Release) -> Result<u64, String> {
-    let bin = &release.binary;
+/// ELF magic. Does not boot anything.
+fn static_validate(bin: &Path) -> Result<u64, String> {
     let meta = std::fs::metadata(bin).map_err(|e| format!("{}: {e}", bin.display()))?;
     if meta.len() == 0 {
         return Err("binary is empty".into());
@@ -226,18 +180,10 @@ fn static_validate(release: &releases::Release) -> Result<u64, String> {
             return Err("binary is not executable".into());
         }
     }
+    // Full read validates the file is readable end-to-end.
     let bytes = std::fs::read(bin).map_err(|e| format!("{}: {e}", bin.display()))?;
     if bytes.len() >= 4 && bytes[..4] != [0x7f, b'E', b'L', b'F'] {
         return Err("not an ELF binary".into());
-    }
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(&bytes);
-    let actual = format!("{:x}", digest);
-    if actual != release.manifest.sha256 {
-        return Err(format!(
-            "sha256 mismatch: manifest {}, actual {}",
-            release.manifest.sha256, actual
-        ));
     }
     Ok(meta.len())
 }
