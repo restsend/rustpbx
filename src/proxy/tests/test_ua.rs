@@ -57,6 +57,15 @@ pub struct TestUa {
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store received offer SDP per dialog from incoming INVITE
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// From-user of each incoming INVITE (caller-id assertions).
+    incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// All headers of each incoming initial INVITE — screen-pop `Call-Info` /
+    /// `User-to-User` assertions on queue-dispatched legs.
+    incoming_invite_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
+    /// Headers of every 1xx response seen on this UA's dialogs.
+    provisional_headers: Arc<Mutex<Vec<(String, String)>>>,
+    /// Headers of the 200 OK answering each outgoing INVITE.
+    answer_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real WebRTC PeerConnection used when `config.webrtc` is set.
@@ -157,9 +166,68 @@ pub enum TestUaEvent {
     DtmfInfo(DialogId, String),
     /// SIP INFO (non-DTMF) received: (dialog_id, content_type, body)
     InfoReceived(DialogId, String, Vec<u8>),
+    /// REFER progress: dialog, sipfrag body, Subscription-State.
+    ReferNotify(DialogId, String, String),
+    /// Per-consult state sync marker (cc transfer flows observe this).
+    ConsultStateUpdated(DialogId),
 }
 
 impl TestUa {
+    /// Create a plain (fake-SDP) UA bound to `127.0.0.1:{port}` against
+    /// `proxy_addr`.
+    pub async fn create_test_ua(
+        username: &str,
+        password: &str,
+        proxy_addr: SocketAddr,
+        port: u16,
+    ) -> Result<TestUa> {
+        let config = TestUaConfig {
+            webrtc: false,
+            username: username.to_string(),
+            password: password.to_string(),
+            realm: proxy_addr.ip().to_string(),
+            local_port: port,
+            proxy_addr,
+            extra_invite_headers: Vec::new(),
+        };
+
+        let mut ua = TestUa::new(config);
+        ua.start().await?;
+        Ok(ua)
+    }
+
+    /// Create a TestUa that uses a real rustrtc PeerConnection (WebRTC
+    /// DTLS-SRTP) for offer/answer generation instead of fake SDP strings.
+    pub async fn create_test_ua_webrtc(
+        username: &str,
+        password: &str,
+        proxy_addr: SocketAddr,
+        port: u16,
+    ) -> Result<TestUa> {
+        let config = TestUaConfig {
+            webrtc: true,
+            username: username.to_string(),
+            password: password.to_string(),
+            realm: proxy_addr.ip().to_string(),
+            local_port: port,
+            proxy_addr,
+            extra_invite_headers: Vec::new(),
+        };
+
+        let mut ua = TestUa::new(config);
+        ua.start().await?;
+        Ok(ua)
+    }
+
+    /// The local address this UA binds (`127.0.0.1:{config.local_port}`) —
+    /// used by downstream crates' tests to aim SIP flows at a specific UA
+    /// (convergence shim support; see cc tests/helpers/test_ua.rs).
+    pub fn get_addr(&self) -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", self.config.local_port)
+            .parse()
+            .unwrap()
+    }
+
     pub fn new(config: TestUaConfig) -> Self {
         Self::new_inner(config, None)
     }
@@ -205,6 +273,10 @@ impl TestUa {
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            incoming_from_users: Arc::new(Mutex::new(HashMap::new())),
+            incoming_invite_headers: Arc::new(Mutex::new(HashMap::new())),
+            provisional_headers: Arc::new(Mutex::new(Vec::new())),
+            answer_headers: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
             webrtc_rx,
@@ -268,6 +340,8 @@ impl TestUa {
             let contact_clone = self.contact_uri.clone().unwrap();
             let cancel_token = self.cancel_token.clone();
             let received_sdps_clone = self.received_offer_sdps.clone();
+            let incoming_from_users_clone = self.incoming_from_users.clone();
+            let incoming_headers_clone = self.incoming_invite_headers.clone();
 
             crate::utils::spawn(async move {
                 Self::process_incoming_request(
@@ -277,6 +351,8 @@ impl TestUa {
                     contact_clone,
                     cancel_token,
                     received_sdps_clone,
+                    incoming_from_users_clone,
+                    incoming_headers_clone,
                 )
                 .await
                 .ok();
@@ -344,6 +420,97 @@ impl TestUa {
         callee: &str,
         sdp_offer: Option<String>,
     ) -> Result<DialogId> {
+        self.make_call_uri_inner(
+            format!(
+                "sip:{}@{}:{}",
+                callee,
+                self.config.proxy_addr.ip(),
+                self.config.proxy_addr.port()
+            )
+            .try_into()
+            .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?,
+            sdp_offer,
+            None,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Make a call to an explicit URI (queue overflow tests target
+    /// arbitrary overflow destinations).
+    pub async fn make_call_to_uri(
+        &self,
+        callee_uri: &str,
+        sdp_offer: Option<String>,
+    ) -> Result<DialogId> {
+        let callee_uri: rsipstack::sip::Uri = callee_uri
+            .parse()
+            .map_err(|e| anyhow!("Invalid callee URI '{callee_uri}': {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_uri_inner(callee_uri.clone(), sdp_offer, None, Vec::new()),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_to_uri timed out after 30s for callee '{callee_uri}'"))?
+    }
+
+    /// Make a call whose initial INVITE carries extra application headers
+    /// (surfaced in `call_created.sip_headers`).
+    pub async fn make_call_with_headers(
+        &self,
+        callee: &str,
+        sdp_offer: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<DialogId> {
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_uri_inner(callee_uri, sdp_offer, None, extra_headers),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_with_headers timed out after 30s for callee '{}'", callee))?
+    }
+
+    /// Make a call whose PC-generated SDP offer advertises `fake_ip` in the
+    /// `c=` line instead of the real address (NAT simulation: the advertised
+    /// address is unreachable, so the remote can only reach us via
+    /// symmetric-RTP latching). The PeerConnection still sends from its real
+    /// socket.
+    pub async fn make_call_spoofed_cline(
+        &self,
+        callee: &str,
+        fake_ip: &str,
+    ) -> Result<DialogId> {
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_uri_inner(callee_uri, None, Some(fake_ip.to_string()), Vec::new()),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_spoofed_cline timed out after 30s for callee '{callee}'"))?
+    }
+
+    async fn make_call_uri_inner(
+        &self,
+        callee_uri: rsipstack::sip::Uri,
+        sdp_offer: Option<String>,
+        spoof_cline_ip: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<DialogId> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -360,15 +527,6 @@ impl TestUa {
             password: self.config.password.clone(),
             realm: Some(self.config.realm.clone()),
         };
-
-        let callee_uri = format!(
-            "sip:{}@{}:{}",
-            callee,
-            self.config.proxy_addr.ip(),
-            self.config.proxy_addr.port()
-        )
-        .try_into()
-        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
 
         let proxy_uri: rsipstack::sip::Uri = format!(
             "sip:{}:{};lr",
@@ -394,21 +552,46 @@ impl TestUa {
                 .await
                 .map_err(|e| anyhow!("create_offer (gathered) failed: {}", e))?;
             offer.sdp_type = rustrtc::SdpType::Offer;
-            // Set the local description so the PC enters have-local-offer and
-            // can later apply the remote answer (ICE + DTLS role negotiation).
-            pc.set_local_description(offer.clone())
-                .map_err(|e| anyhow!("set_local_description(offer) failed: {}", e))?;
-            (
-                Some("application/sdp".to_string()),
-                Some(offer.to_sdp_string().into_bytes()),
-            )
+            if let Some(ref ip) = spoof_cline_ip {
+                // NAT simulation: advertise the unreachable address but keep
+                // the PC's local description in sync (as a parsed SDP) so the
+                // remote answer can still be applied.
+                let spoofed = offer
+                    .to_sdp_string()
+                    .replace("IN IP4 127.0.0.1", &format!("IN IP4 {ip}"));
+                let desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &spoofed)
+                    .map_err(|e| anyhow!("parse spoofed offer failed: {}", e))?;
+                pc.set_local_description(desc)
+                    .map_err(|e| anyhow!("set_local_description(spoofed offer) failed: {}", e))?;
+                (
+                    Some("application/sdp".to_string()),
+                    Some(spoofed.into_bytes()),
+                )
+            } else {
+                // Set the local description so the PC enters have-local-offer
+                // and can later apply the remote answer (ICE + DTLS role
+                // negotiation).
+                pc.set_local_description(offer.clone())
+                    .map_err(|e| anyhow!("set_local_description(offer) failed: {}", e))?;
+                (
+                    Some("application/sdp".to_string()),
+                    Some(offer.to_sdp_string().into_bytes()),
+                )
+            }
+        } else if spoof_cline_ip.is_some() {
+            return Err(anyhow!(
+                "spoofed c= line requires a WebRTC UA (webrtc: true)"
+            ));
         } else {
             (None, None)
         };
 
-        let mut extra_headers = vec![route_header];
+        let mut invite_headers = vec![route_header];
         for (k, v) in &self.config.extra_invite_headers {
-            extra_headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
+            invite_headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
+        }
+        for (name, value) in extra_headers {
+            invite_headers.push(rsipstack::sip::Header::Other(name.into(), value.into()));
         }
         let invite_option = InviteOption {
             callee: callee_uri,
@@ -417,7 +600,7 @@ impl TestUa {
             offer,
             contact: contact.clone(),
             credential: Some(credential),
-            headers: Some(extra_headers),
+            headers: Some(invite_headers),
             ..Default::default()
         };
 
@@ -571,10 +754,72 @@ impl TestUa {
     }
 
     /// Answer an incoming call with optional SDP
+    /// From-user of each incoming INVITE (caller-id assertions).
+    pub async fn incoming_from_user(&self, dialog_id: &DialogId) -> Option<String> {
+        self.incoming_from_users.lock().await.get(dialog_id).cloned()
+    }
+
+    /// First header `name` (case-insensitive) of the initial INVITE that
+    /// created `dialog_id` — screen-pop `Call-Info` / `User-to-User`
+    /// assertions on queue-dispatched legs.
+    pub async fn incoming_invite_header(
+        &self,
+        dialog_id: &DialogId,
+        name: &str,
+    ) -> Option<String> {
+        self.incoming_invite_headers
+            .lock()
+            .await
+            .get(dialog_id)?
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Values of header `name` (case-insensitive) across every 1xx response
+    /// seen on this UA's dialogs, in arrival order. Query it on the caller UA
+    /// to inspect what the proxy relayed.
+    pub async fn provisional_header_values(&self, name: &str) -> Vec<String> {
+        self.provisional_headers
+            .lock()
+            .await
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
+    /// Values of header `name` (case-insensitive) on the 200 OK that answered
+    /// `dialog_id`.
+    pub async fn answer_header_values(&self, dialog_id: &DialogId, name: &str) -> Vec<String> {
+        self.answer_headers
+            .lock()
+            .await
+            .get(dialog_id)
+            .map(|hs| {
+                hs.iter()
+                    .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub async fn answer_call(
         &self,
         dialog_id: &DialogId,
         sdp_answer: Option<String>,
+    ) -> Result<()> {
+        self.answer_call_with_headers(dialog_id, sdp_answer, Vec::new())
+            .await
+    }
+
+    /// Answer with a 200 OK carrying extra headers (e.g. `X-` metadata).
+    pub async fn answer_call_with_headers(
+        &self,
+        dialog_id: &DialogId,
+        sdp_answer: Option<String>,
+        extra_headers: Vec<(String, String)>,
     ) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
@@ -625,14 +870,25 @@ impl TestUa {
                         sdps.insert(dialog_id.clone(), sdp.clone());
                     }
 
+                    // Record the 200 OK headers for assertions.
+                    self.answer_headers.lock().await.insert(
+                        dialog_id.clone(),
+                        extra_headers.clone(),
+                    );
+
                     let body = sdp_answer.map(|sdp| sdp.into_bytes());
-                    let headers = if body.is_some() {
+                    let mut headers = if body.is_some() {
                         vec![rsipstack::sip::Header::ContentType(
                             "application/sdp".into(),
                         )]
                     } else {
                         vec![]
                     };
+                    headers.extend(
+                        extra_headers
+                            .into_iter()
+                            .map(|(name, value)| rsipstack::sip::Header::Other(name, value)),
+                    );
 
                     d.accept(Some(headers), body).map_err(|e| e.into_anyhow())?;
                     Ok(())
@@ -681,6 +937,17 @@ impl TestUa {
         dialog_id: &DialogId,
         early_media_sdp: Option<String>,
     ) -> Result<()> {
+        self.send_ringing_with_headers(dialog_id, early_media_sdp, Vec::new())
+            .await
+    }
+
+    /// Send a ringing response carrying extra headers (e.g. `P-Early-Media`).
+    pub async fn send_ringing_with_headers(
+        &self,
+        dialog_id: &DialogId,
+        early_media_sdp: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -696,6 +963,11 @@ impl TestUa {
                     };
 
                     let mut headers = vec![contact.into()];
+                    headers.extend(
+                        extra_headers
+                            .into_iter()
+                            .map(|(name, value)| rsipstack::sip::Header::Other(name, value)),
+                    );
                     let body = if let Some(sdp) = early_media_sdp {
                         headers.push(rsipstack::sip::Header::ContentType(
                             "application/sdp".into(),
@@ -710,6 +982,26 @@ impl TestUa {
                     Ok(())
                 }
                 _ => Err(anyhow!("Invalid dialog type for sending ringing")),
+            }
+        } else {
+            Err(anyhow!("Dialog not found: {}", dialog_id))
+        }
+    }
+
+    /// Manually send a 180 Ringing for an incoming dialog (no Contact
+    /// rebuild — plain ringing for server-side UA flows).
+    pub async fn ring_call(&self, dialog_id: &DialogId) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+        if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
+            match dialog {
+                Dialog::Invite(d) => {
+                    d.ringing(None, None).map_err(|e| e.into_anyhow())?;
+                    Ok(())
+                }
+                _ => Err(anyhow!("Invalid dialog type for ringing")),
             }
         } else {
             Err(anyhow!("Dialog not found: {}", dialog_id))
@@ -924,6 +1216,13 @@ impl TestUa {
                             "TestUa: Received Early state ({}) for {}",
                             resp.status_code, id
                         );
+                        // Capture every 1xx header (assertions on what the
+                        // proxy relayed — P-Early-Media / Call-Info / ...).
+                        self.provisional_headers.lock().await.extend(
+                            resp.headers
+                                .iter()
+                                .map(|h| (h.name().to_string(), h.value().to_string())),
+                        );
                         // Mirror JsSIP/browser behaviour: apply a 1xx body as a
                         // PRANSWER on the WebRTC PeerConnection so ICE/DTLS (and
                         // early-media transmission) start before the 200 OK.
@@ -1088,6 +1387,8 @@ impl TestUa {
         contact: rsipstack::sip::Uri,
         cancel_token: CancellationToken,
         received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+        incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
+        incoming_invite_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
     ) -> Result<()> {
         loop {
             select! {
@@ -1125,6 +1426,35 @@ impl TestUa {
                                         let dialog_id = dialog.id();
                                         let mut sdps = received_sdps.lock().await;
                                         sdps.insert(dialog_id, sdp_str);
+                                    }
+                                    // Capture the presented caller-id and
+                                    // every header of the initial INVITE
+                                    // (Call-Info / User-to-User assertions).
+                                    let from_user = tx
+                                        .original
+                                        .from_header()
+                                        .ok()
+                                        .and_then(|f| f.uri().ok())
+                                        .and_then(|u| u.user().map(|s| s.to_string()));
+                                    if let Some(from_user) = from_user {
+                                        let dialog_id = dialog.id();
+                                        incoming_from_users
+                                            .lock()
+                                            .await
+                                            .insert(dialog_id, from_user);
+                                    }
+                                    let invite_headers: Vec<(String, String)> = tx
+                                        .original
+                                        .headers
+                                        .iter()
+                                        .map(|h| (h.name().to_string(), h.value().to_string()))
+                                        .collect();
+                                    {
+                                        let dialog_id = dialog.id();
+                                        incoming_invite_headers
+                                            .lock()
+                                            .await
+                                            .insert(dialog_id, invite_headers);
                                     }
                                     crate::utils::spawn(async move {
                                         dialog.handle(&mut tx).await.ok();
@@ -1229,51 +1559,6 @@ mod tests {
     use super::*;
     use crate::config::MediaProxyMode;
 
-    // Simplified test helper functions
-    pub async fn create_test_ua(
-        username: &str,
-        password: &str,
-        proxy_addr: SocketAddr,
-        port: u16,
-    ) -> Result<TestUa> {
-        let config = TestUaConfig {
-            webrtc: false,
-            username: username.to_string(),
-            password: password.to_string(),
-            realm: proxy_addr.ip().to_string(),
-            local_port: port,
-            proxy_addr,
-            extra_invite_headers: Vec::new(),
-        };
-
-        let mut ua = TestUa::new(config);
-        ua.start().await?;
-        Ok(ua)
-    }
-
-    /// Create a TestUa that uses a real rustrtc PeerConnection (WebRTC
-    /// DTLS-SRTP) for offer/answer generation instead of fake SDP strings.
-    pub async fn create_test_ua_webrtc(
-        username: &str,
-        password: &str,
-        proxy_addr: SocketAddr,
-        port: u16,
-    ) -> Result<TestUa> {
-        let config = TestUaConfig {
-            webrtc: true,
-            username: username.to_string(),
-            password: password.to_string(),
-            realm: proxy_addr.ip().to_string(),
-            local_port: port,
-            proxy_addr,
-            extra_invite_headers: Vec::new(),
-        };
-
-        let mut ua = TestUa::new(config);
-        ua.start().await?;
-        Ok(ua)
-    }
-
     async fn await_caller_with_timeout(
         handle: tokio::task::JoinHandle<Result<DialogId>>,
         timeout: Duration,
@@ -1323,13 +1608,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25000);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25001);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1368,13 +1653,13 @@ mod tests {
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(25010);
             let alice = Arc::new(
-                create_test_ua("alice", "password123", proxy_addr, alice_port)
+                TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                     .await
                     .unwrap(),
             );
 
             let bob_port = portpicker::pick_unused_port().unwrap_or(25011);
-            let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
                 .await
                 .unwrap();
 
@@ -1449,13 +1734,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25020);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25021);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1545,7 +1830,7 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25030);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
@@ -1603,7 +1888,7 @@ mod tests {
             let username = format!("user{}", i);
             let password = format!("password{}", i);
 
-            if let Ok(ua) = create_test_ua(&username, &password, proxy_addr, port).await {
+            if let Ok(ua) = TestUa::create_test_ua(&username, &password, proxy_addr, port).await {
                 ua.register().await.ok();
                 users.push(ua);
             }
@@ -1660,13 +1945,13 @@ mod tests {
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(25050);
             let alice = Arc::new(
-                create_test_ua("alice", "password123", proxy_addr, alice_port)
+                TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                     .await
                     .unwrap(),
             );
 
             let bob_port = portpicker::pick_unused_port().unwrap_or(25051);
-            let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
                 .await
                 .unwrap();
 
@@ -1722,13 +2007,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25060);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25061);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1821,13 +2106,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25070);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25071);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1891,7 +2176,7 @@ mod tests {
 
         // Test 1: Wrong password
         let alice_port = portpicker::pick_unused_port().unwrap_or(25080);
-        let alice_wrong_pass = create_test_ua("alice", "wrongpassword", proxy_addr, alice_port)
+        let alice_wrong_pass = TestUa::create_test_ua("alice", "wrongpassword", proxy_addr, alice_port)
             .await
             .unwrap();
 
@@ -1902,7 +2187,7 @@ mod tests {
         );
 
         // Test 2: Correct password after failure
-        let alice_correct = create_test_ua("alice", "password123", proxy_addr, alice_port + 1)
+        let alice_correct = TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port + 1)
             .await
             .unwrap();
         assert!(
@@ -1912,7 +2197,7 @@ mod tests {
 
         // Test 3: Non-existent user
         let charlie_port = portpicker::pick_unused_port().unwrap_or(25082);
-        let charlie = create_test_ua("charlie", "password", proxy_addr, charlie_port)
+        let charlie = TestUa::create_test_ua("charlie", "password", proxy_addr, charlie_port)
             .await
             .unwrap();
         let result = charlie.register().await;
@@ -1937,13 +2222,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25090);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25091);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2011,13 +2296,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25100);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25101);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2081,13 +2366,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25110);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25111);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2146,13 +2431,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25120);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25121);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2225,13 +2510,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25130);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25131);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2295,7 +2580,7 @@ mod tests {
         let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25140);
-        let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
+        let alice = TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
             .await
             .unwrap();
 
@@ -2350,13 +2635,13 @@ mod tests {
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25150);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25151);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2464,13 +2749,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26000);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(26001);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2575,13 +2860,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26010);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(26011);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2649,13 +2934,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(26020);
             let alice = Arc::new(
-                create_test_ua("alice", "password123", proxy_addr, alice_port)
+                TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                     .await
                     .unwrap(),
             );
 
             let bob_port = portpicker::pick_unused_port().unwrap_or(26021);
-            let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
                 .await
                 .unwrap();
 
@@ -2776,13 +3061,13 @@ a=rtpmap:111 opus/48000/2"#;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26030);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(26031);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2883,7 +3168,7 @@ a=rtpmap:0 PCMU/8000"#;
         let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25200);
-        let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
+        let alice = TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
             .await
             .unwrap();
 
@@ -2911,13 +3196,13 @@ a=rtpmap:0 PCMU/8000"#;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25210);
         let alice = Arc::new(
-            create_test_ua("alice", "password123", proxy_addr, alice_port)
+            TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
                 .await
                 .unwrap(),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25211);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let mut bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -2964,7 +3249,7 @@ a=rtpmap:0 PCMU/8000"#;
         let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25220);
-        let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
+        let alice = TestUa::create_test_ua("alice", "password123", proxy_addr, alice_port)
             .await
             .unwrap();
 
@@ -3015,11 +3300,11 @@ a=rtpmap:0 PCMU/8000"#;
         let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26040);
-        let alice = create_test_ua_webrtc("alice", "password123", proxy_addr, alice_port)
+        let alice = TestUa::create_test_ua_webrtc("alice", "password123", proxy_addr, alice_port)
             .await
             .unwrap();
         let bob_port = portpicker::pick_unused_port().unwrap_or(26041);
-        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = TestUa::create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
