@@ -88,7 +88,7 @@ mod tests {
     }
 }
 
-pub(super) fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
+pub(crate) fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
     match status_code {
         486 | 600 => CallRecordHangupReason::Rejected,
         487 => CallRecordHangupReason::Canceled,
@@ -108,7 +108,7 @@ pub(super) fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupR
     }
 }
 
-pub(super) fn format_duration_ms(ms: i64) -> String {
+pub(crate) fn format_duration_ms(ms: i64) -> String {
     if ms >= 1000 {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
@@ -230,7 +230,7 @@ pub(crate) async fn route_leg(
     }
 }
 
-pub(super) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
+pub(crate) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
     for line in body_text.lines() {
         let line = line.trim();
         if line.to_lowercase().starts_with("signal=") {
@@ -332,7 +332,7 @@ pub(super) async fn trace_sip_headers(
 ///    trace is suppressed (the resumed executor reports the bridge step with
 ///    `next_node_id`); the buffered digit still reaches the provider.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn forward_dtmf_event(
+pub(crate) fn forward_dtmf_event(
     digit: char,
     leg_id: &str,
     application_leg: &str,
@@ -542,7 +542,7 @@ pub(super) fn emit_suspended_flow_session_end(
     gw.read().fan_out(session_id, &ev);
 }
 
-pub(super) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
+pub(crate) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
     if dest.trim().is_empty() {
         return None;
     }
@@ -573,7 +573,7 @@ pub(super) fn parse_dial_target(target: &str) -> Result<rsipstack::sip::Uri> {
         .map_err(|e| anyhow!("invalid SIP target '{}': {}", target, e))
 }
 
-pub(super) fn other_header_ci(
+pub(crate) fn other_header_ci(
     headers: &[rsipstack::sip::Header],
     names: &[&str],
 ) -> Option<String> {
@@ -587,7 +587,7 @@ pub(super) fn other_header_ci(
     None
 }
 
-pub(super) fn parse_sipfrag_status(body: &str) -> Option<u16> {
+pub(crate) fn parse_sipfrag_status(body: &str) -> Option<u16> {
     let line = body.lines().next()?;
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() >= 2 && parts[0] == "SIP/2.0" {

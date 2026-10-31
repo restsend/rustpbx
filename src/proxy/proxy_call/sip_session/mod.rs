@@ -3,10 +3,15 @@
 pub mod prelude;
 
 pub(crate) mod inbox;
+pub(crate) mod session_bridge;
+pub(crate) mod session_hold;
+pub(crate) mod session_media;
+pub(crate) mod session_app;
+pub(crate) mod session_recording;
 mod builtin_app_factory;
 mod realtime_bridge;
-mod session;
-mod util;
+pub(crate) mod session;
+pub(crate) mod util;
 
 mod conference;
 mod live_transcription;

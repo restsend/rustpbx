@@ -1,5 +1,7 @@
 use super::*;
 use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
+use crate::proxy::proxy_call::sip_session::util::trunk_host_port;
+use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::sip_session::builtin_app_factory::BuiltinAppFactory;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

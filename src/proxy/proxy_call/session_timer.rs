@@ -13,6 +13,10 @@ use std::time::Instant;
 use rsipstack::dialog::DialogId;
 use tokio_util::time::delay_queue;
 
+use crate::proxy::proxy_call::sip_session::util::{into_callee_err, CalleeError};
+use rsipstack::sip::StatusCode;
+use crate::proxy::proxy_call::sip_session::session::TimerAction;
+
 // Session timer header constants
 pub const HEADER_SESSION_EXPIRES: &str = "Session-Expires";
 pub const HEADER_MIN_SE: &str = "Min-SE";
@@ -551,5 +555,168 @@ impl SessionTimers {
     pub(crate) fn remove_dialog(&mut self, dialog_id: &DialogId) {
         self.timers.remove(dialog_id);
         self.refresh_disabled.remove(dialog_id);
+    }
+}
+
+// ===================================================================
+// SipSession timer methods (moved from sip_session/session.rs — this is
+// the natural home: the RFC 4028 session-timer feature lives here).
+// ===================================================================
+
+impl crate::proxy::proxy_call::sip_session::session::SipSession {
+    pub(crate) fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
+        self.session_timers.queue_keys.remove(scheduled);
+        let timer = self.session_timers.timers.get_mut(scheduled)?;
+
+        if timer.is_expired() {
+            return Some(TimerAction::Expired);
+        }
+
+        if timer.should_we_refresh() && timer.should_refresh() && timer.start_refresh() {
+            return Some(TimerAction::Refresh);
+        }
+
+        None
+    }
+
+    pub fn init_server_timer(&mut self, default_expires: u64) -> Result<(), CalleeError> {
+        let Some(server_dialog) = self.caller_dialog.as_ref() else {
+            // UAC mode: no inbound caller dialog, so no session timer negotiation
+            // against a caller.
+            return Ok(());
+        };
+        let request = server_dialog.initial_request();
+        let headers = &request.headers;
+        let dialog_id = self.caller_dialog_id();
+        let session_timer_mode = self.server.proxy_config.load().session_timer_mode();
+
+        let supported = has_timer_support(headers);
+        let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
+        let mut timer = SessionTimerState::default();
+        timer.mode = session_timer_mode;
+
+        if let Some(min_se) = get_header_value(headers, HEADER_MIN_SE)
+            .as_deref()
+            .and_then(parse_min_se)
+        {
+            if timer.min_se < min_se {
+                timer.min_se = min_se;
+            }
+        }
+
+        if let Some(value) = session_expires_value {
+            if let Some(session_expires) = SessionExpires::parse(&value) {
+                if session_expires.interval < timer.min_se {
+                    return Err(into_callee_err(
+                        &StatusCode::SessionIntervalTooSmall,
+                        Some(timer.min_se.as_secs().to_string()),
+                    ));
+                }
+
+                timer.enabled = true;
+                timer.session_interval = session_expires.interval;
+                timer.active = true;
+                timer.refresher =
+                    select_server_timer_refresher(supported, true, session_expires.refresher);
+            }
+        } else if session_timer_mode.is_always() {
+            timer.enabled = true;
+            timer.session_interval = Duration::from_secs(default_expires).max(timer.min_se);
+            timer.active = true;
+            timer.refresher = select_server_timer_refresher(supported, false, None);
+        }
+
+        self.session_timers.timers.insert(dialog_id.clone(), timer);
+        self.schedule_timer(dialog_id);
+
+        Ok(())
+    }
+
+    pub(crate) fn init_callee_timer(
+        &mut self,
+        dialog_id: DialogId,
+        response: &rsipstack::sip::Response,
+        requested_session_interval: Duration,
+    ) {
+        let headers = &response.headers;
+        let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
+
+        let mut timer = SessionTimerState::default();
+        timer.mode = self.server.proxy_config.load().session_timer_mode();
+        if let Some(session_expires) = session_expires_value
+            .as_deref()
+            .and_then(SessionExpires::parse)
+        {
+            timer.enabled = true;
+            timer.active = true;
+            timer.last_refresh = Instant::now();
+            timer.session_interval = session_expires.interval;
+            timer.refresher = select_client_timer_refresher(session_expires.refresher);
+        } else if timer.mode.is_always() {
+            timer.enabled = true;
+            timer.active = true;
+            timer.last_refresh = Instant::now();
+            timer.session_interval = requested_session_interval;
+            timer.refresher = SessionRefresher::Local;
+        } else {
+            timer.session_interval = requested_session_interval;
+        }
+
+        self.session_timers.timers.insert(dialog_id.clone(), timer);
+        self.schedule_timer(dialog_id);
+    }
+
+    pub(crate) fn schedule_timer(&mut self, dialog_id: DialogId) {
+        let timeout = self
+            .session_timers.timers
+            .get(&dialog_id)
+            .and_then(SessionTimerState::next_timeout);
+        self.schedule_timer_with_timeout(dialog_id, timeout);
+    }
+
+    pub(crate) fn schedule_expiration_timer(&mut self, dialog_id: DialogId) {
+        let timeout = self
+            .session_timers.timers
+            .get(&dialog_id)
+            .and_then(SessionTimerState::time_until_expiration);
+        self.schedule_timer_with_timeout(dialog_id, timeout);
+    }
+
+    pub(crate) fn schedule_timer_with_timeout(&mut self, dialog_id: DialogId, timeout: Option<Duration>) {
+        match timeout {
+            Some(timeout) => {
+                let current_key = self.session_timers.queue_keys.get(&dialog_id).copied();
+                let queue_key = if let Some(key) = current_key {
+                    self.session_timers.queue.reset(&key, timeout);
+                    key
+                } else {
+                    self.session_timers.queue.insert(dialog_id.clone(), timeout)
+                };
+                self.session_timers.queue_keys.insert(dialog_id, queue_key);
+            }
+            None => self.unschedule_timer(&dialog_id),
+        }
+    }
+
+    pub(crate) fn unschedule_timer(&mut self, dialog_id: &DialogId) {
+        if let Some(key) = self.session_timers.queue_keys.remove(dialog_id) {
+            self.session_timers.queue.remove(&key);
+        }
+    }
+
+    pub(crate) fn update_dialog_timer_from_headers(
+        &mut self,
+        dialog_id: &DialogId,
+        headers: &rsipstack::sip::Headers,
+    ) -> Result<()> {
+        if let Some(timer) = self.session_timers.timers.get_mut(dialog_id) {
+            apply_session_timer_headers(timer, headers)?;
+            if timer.active {
+                timer.update_refresh();
+            }
+
+            self.schedule_timer(dialog_id.clone());
+        }
+        Ok(())
     }
 }
