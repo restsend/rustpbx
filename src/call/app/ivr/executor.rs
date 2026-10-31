@@ -986,6 +986,51 @@ impl StepIvrApp {
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
                         }
 
+                        // API/webhook executed synchronously inside
+                        // execute_action: the status/body are already in hand,
+                        // and nothing downstream ever delivers ApiResponse as
+                        // a ControllerEvent — waiting for one stalls the flow
+                        // forever (acceptance §3.2.1.1 api row: "no flow
+                        // advance after api/ApiResponse"). Ask the provider
+                        // for the successor NOW; the provider owns the
+                        // branch/dynamic-tree decision for the response
+                        // (third_party getDynamicTree merges here), so
+                        // `node.next` must NOT short-circuit it.
+                        if let WaitEvent::ApiResponse { status, body } = wait_event {
+                            let next = self
+                                .request_next(Some(ProviderEvent::ApiResponse {
+                                    status: *status,
+                                    body: body.clone(),
+                                }))
+                                .await?;
+                            let next_id =
+                                next.step_id.clone().or_else(|| next.step_name.clone());
+                            self.record_trace(IvrTraceEntry {
+                                step_end_time: Some(step_end),
+                                duration_ms: elapsed_ms,
+                                next_node_id: next_id.clone(),
+                                next_step_id: next_id,
+                                ..self.trace_entry(
+                                    &session_id,
+                                    &caller,
+                                    &callee,
+                                    crate::rwi::TriggerInfo::with_detail(
+                                        "api_response",
+                                        serde_json::json!({ "status": status }),
+                                    ),
+                                    &node_type_str,
+                                    action_json,
+                                    None,
+                                    step_id.clone(),
+                                    step_name.clone(),
+                                )
+                            });
+                            self.current_trigger =
+                                Some(crate::rwi::TriggerInfo::new("api_response"));
+                            self.current_node = Some(next);
+                            return Box::pin(self.__exec_node(ctrl, ctx)).await;
+                        }
+
                         let step_trigger = match wait_event {
                             WaitEvent::DtmfCollected { digit } => {
                                 crate::rwi::TriggerInfo::with_detail(
@@ -9140,6 +9185,35 @@ mod tests {
                 "transfer",
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_api_response_advances_flow_without_stalling() {
+        // Acceptance §3.2.1.1 api row: the HTTP call executes synchronously
+        // inside execute_action, so the ApiResponse wait event must advance
+        // immediately — no ControllerEvent ever carries it (RED: the flow
+        // stalled forever after api/ApiResponse and the successor command
+        // never arrived). The unreachable URL keeps the test deterministic:
+        // the transport-failure arm still yields ApiResponse{status: 0}.
+        let api = ActionNode::new(EntryAction::Api {
+            url: "http://127.0.0.1:1/unreachable".into(),
+            method: None,
+            headers: HashMap::new(),
+            variables: None,
+            timeout: 1,
+            get_dynamic_tree: None,
+        });
+        let hangup = ActionNode::new(EntryAction::hangup_none());
+        let mut stack =
+            MockCallStack::run(Box::new(mock_app(vec![api, hangup])), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // The successor must follow the api step without waiting for an
+        // ApiResponse controller event that never comes.
+        stack
+            .assert_cmd(8000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
             .await;
     }
 
