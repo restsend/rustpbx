@@ -57,6 +57,10 @@ pub struct TestUa {
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store received offer SDP per dialog from incoming INVITE
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// Events buffered by the background dialog-state pump; drained by
+    /// `process_dialog_events` (fork semantics: accumulate between calls,
+    /// never lost).
+    pending_events: Arc<tokio::sync::Mutex<Vec<TestUaEvent>>>,
     /// From-user of each incoming INVITE (caller-id assertions).
     incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
     /// All headers of each incoming initial INVITE — screen-pop `Call-Info` /
@@ -273,6 +277,7 @@ impl TestUa {
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            pending_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             incoming_from_users: Arc::new(Mutex::new(HashMap::new())),
             incoming_invite_headers: Arc::new(Mutex::new(HashMap::new())),
             provisional_headers: Arc::new(Mutex::new(Vec::new())),
@@ -330,6 +335,27 @@ impl TestUa {
             select! {
                 _ = endpoint.serve() => {},
                 _ = cancel_token.cancelled() => {}
+            }
+        });
+
+        // Background dialog-state pump: performs the in-band replies the
+        // harness owes the peer (200 for re-INVITE / NOTIFY / INFO, ...) in
+        // real time and buffers events for process_dialog_events.
+        let pump_ua = self.clone();
+        let state_receiver_pump = self.state_receiver.take();
+        crate::utils::spawn(async move {
+            let Some(rx_mutex) = state_receiver_pump else { return; };
+            let mut rx = rx_mutex.lock().await;
+            loop {
+                match rx.recv().await {
+                    Some(state) => {
+                        let mut events = Vec::new();
+                        pump_ua.collect_dialog_event(state, &mut events).await;
+                        pump_ua.pending_events.lock().await.extend(events);
+                    }
+                    // Channel closed: dialog layer gone — pump exits.
+                    None => break,
+                }
             }
         });
 
@@ -1186,12 +1212,17 @@ impl TestUa {
     }
 
     /// Process dialog events and return collected events
+    /// Drain the events buffered by the background pump (fork semantics:
+    /// events accumulate between calls and are never lost).
     pub async fn process_dialog_events(&self) -> Result<Vec<TestUaEvent>> {
-        let mut events = Vec::new();
+        let events = std::mem::take(&mut *self.pending_events.lock().await);
+        Ok(events)
+    }
 
-        if let Some(state_receiver_mutex) = &self.state_receiver {
-            let mut state_receiver = state_receiver_mutex.lock().await;
-            while let Ok(state) = state_receiver.try_recv() {
+    /// Background-pump event translation: perform the in-band replies the
+    /// harness owes the peer (200 for re-INVITE / NOTIFY / INFO, ...), buffer
+    /// the resulting events. Runs on the pump task spawned in `start`.
+    async fn collect_dialog_event(&self, state: DialogState, events: &mut Vec<TestUaEvent>) {
                 match state {
                     DialogState::Calling(id) => {
                         debug!("TestUa: Received Calling state for {}", id);
@@ -1370,10 +1401,6 @@ impl TestUa {
                     }
                     _ => {}
                 }
-            }
-        }
-
-        Ok(events)
     }
 
     pub fn stop(&self) {
