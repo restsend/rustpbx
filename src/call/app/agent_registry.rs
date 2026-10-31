@@ -50,6 +50,20 @@ pub enum PresenceState {
 }
 
 impl PresenceState {
+    /// Canonical wire/DB status names — the single source of truth for the
+    /// PresenceState vocabulary (mirrors `cc::agent::AgentStatus::NAME_*`).
+    /// `name()` serializes to these; persistence filters and ACD parsers
+    /// reference the consts instead of repeating raw literals.
+    pub const NAME_OFFLINE: &'static str = "offline";
+    pub const NAME_AWAY: &'static str = "away";
+    pub const NAME_IDLE: &'static str = "idle";
+    pub const NAME_RINGING: &'static str = "ringing";
+    pub const NAME_BUSY: &'static str = "busy";
+    pub const NAME_WRAPUP: &'static str = "wrapup";
+    pub const NAME_DND: &'static str = "dnd";
+}
+
+impl PresenceState {
     /// Check if agent can receive calls
     pub fn can_receive_calls(&self) -> bool {
         matches!(self, PresenceState::Idle)
@@ -67,19 +81,19 @@ impl PresenceState {
     /// `Away("lunch")` serialises as `"away:lunch"`; `Away("")` as `"away"`.
     pub fn as_str(&self) -> String {
         match self {
-            PresenceState::Offline => "offline".to_string(),
+            PresenceState::Offline => Self::NAME_OFFLINE.to_string(),
             PresenceState::Away(detail) => {
                 if detail.is_empty() {
-                    "away".to_string()
+                    Self::NAME_AWAY.to_string()
                 } else {
-                    format!("away:{}", detail)
+                    format!("{}:{}", Self::NAME_AWAY, detail)
                 }
             }
-            PresenceState::Idle => "idle".to_string(),
-            PresenceState::Ringing { .. } => "ringing".to_string(),
-            PresenceState::Busy { .. } => "busy".to_string(),
-            PresenceState::Wrapup { .. } => "wrapup".to_string(),
-            PresenceState::Dnd => "dnd".to_string(),
+            PresenceState::Idle => Self::NAME_IDLE.to_string(),
+            PresenceState::Ringing { .. } => Self::NAME_RINGING.to_string(),
+            PresenceState::Busy { .. } => Self::NAME_BUSY.to_string(),
+            PresenceState::Wrapup { .. } => Self::NAME_WRAPUP.to_string(),
+            PresenceState::Dnd => Self::NAME_DND.to_string(),
         }
     }
 
