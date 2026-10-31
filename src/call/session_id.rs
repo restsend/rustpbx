@@ -71,6 +71,12 @@ impl Default for SessionIdSettings {
 pub const LENGTH_MIN: usize = 8;
 pub const LENGTH_MAX: usize = 32;
 
+// Classification: startup-immutable **configuration** — written exactly once
+// by `init_settings` at server boot (proxy/server.rs), read-only afterwards.
+// Injection candidates exist (SipServerInner.proxy_config carries the same
+// values) but `settings()` is consumed deep inside SIP wire building
+// (`build_wire_header`) and routing fallbacks; threading the settings there
+// was judged higher-risk than the static (no leak surface, single writer).
 static SETTINGS: RwLock<SessionIdSettings> = RwLock::new(SessionIdSettings {
     length: 32,
     header_mode: SessionIdHeaderMode::Native,

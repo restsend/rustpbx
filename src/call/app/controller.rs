@@ -4,7 +4,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -34,6 +34,85 @@ pub struct RecordingInfo {
     pub size_bytes: u64,
 }
 
+/// Single owner of a session's named one-shot timers. Replaces the former
+/// three parallel maps (task-handle table + cancellation-flag set +
+/// fired-but-unconsumed counts): cancellation is expressed by entry removal
+/// plus a per-id generation counter — a waking task fires only when it can
+/// remove an entry still bearing its own generation, so a stale task from a
+/// cancelled or re-registered timer can never deliver, and no cross-map
+/// flag bookkeeping is needed.
+#[derive(Clone, Default)]
+struct TimerTable {
+    entries: Arc<DashMap<String, TimerEntry>>,
+    /// Delivery counts for events already queued into `fired_timer_tx` but
+    /// not yet consumed by the app event loop (`timeout_is_armed` observes
+    /// them; `record_timer_consumed` retires them).
+    pending: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+struct TimerEntry {
+    /// Bumped on every `set_timeout` for the same id; a task's claim only
+    /// matches its own generation.
+    generation: u64,
+    handle: JoinHandle<()>,
+}
+
+impl TimerTable {
+    /// Abort and drop any existing entry for `id`, returning the generation
+    /// the next timer for this id must carry.
+    fn reregister(&self, id: &str) -> u64 {
+        match self.entries.remove(id) {
+            Some((_, entry)) => {
+                entry.handle.abort();
+                entry.generation + 1
+            }
+            None => 0,
+        }
+    }
+
+    fn attach(&self, id: &str, generation: u64, handle: JoinHandle<()>) {
+        self.entries.insert(id.to_string(), TimerEntry { generation, handle });
+    }
+
+    /// Fire claim: remove the entry iff it still carries `generation`.
+    fn claim(&self, id: &str, generation: u64) -> bool {
+        self.entries
+            .remove_if(id, |_, e| e.generation == generation)
+            .is_some()
+    }
+
+    fn cancel(&self, id: &str) {
+        if let Some((_, entry)) = self.entries.remove(id) {
+            entry.handle.abort();
+        }
+    }
+
+    fn cancel_all(&self) {
+        let ids: Vec<String> = self.entries.iter().map(|e| e.key().clone()).collect();
+        for id in ids {
+            self.cancel(&id);
+        }
+    }
+
+    fn bump_pending(&self, id: &str) {
+        *self.pending.lock().entry(id.to_string()).or_default() += 1;
+    }
+
+    fn pending_count(&self, id: &str) -> usize {
+        self.pending.lock().get(id).copied().unwrap_or(0)
+    }
+
+    fn consume_pending(&self, id: &str) {
+        let mut pending = self.pending.lock();
+        if let Some(count) = pending.get_mut(id) {
+            *count -= 1;
+            if *count == 0 {
+                pending.remove(id);
+            }
+        }
+    }
+}
+
 /// High-level API for controlling a call from within a `CallApp`.
 ///
 /// Wraps the underlying `SipSessionHandle` but provides a simplified,
@@ -49,14 +128,8 @@ pub struct CallController {
     pub(crate) event_rx: mpsc::UnboundedReceiver<ControllerEvent>,
     /// Sends fired timer IDs to the AppEventLoop.
     pub(crate) fired_timer_tx: mpsc::UnboundedSender<String>,
-    /// Set of timer IDs that have been cancelled and should be suppressed.
-    pub(crate) cancelled_timers: Arc<Mutex<HashSet<String>>>,
-    /// JoinHandles of pending timer tasks, keyed by timer id, so they can be
-    /// aborted on cancel/re-register instead of sleeping for the full delay
-    /// (which previously kept Arc clones + the channel sender alive past call
-    /// end and skewed task metrics).
-    pub(crate) timer_tasks: Arc<DashMap<String, JoinHandle<()>>>,
-    pending_fired_timers: Arc<Mutex<HashMap<String, usize>>>,
+    /// Named one-shot timers (handle table + fired-but-unconsumed counts).
+    timers: TimerTable,
     queue_recovery_request: Option<super::QueueDiagnosticRequest>,
 }
 
@@ -133,9 +206,7 @@ impl CallController {
             session,
             event_rx,
             fired_timer_tx,
-            cancelled_timers: Arc::new(Mutex::new(HashSet::new())),
-            timer_tasks: Arc::new(DashMap::new()),
-            pending_fired_timers: Arc::new(Mutex::new(HashMap::new())),
+            timers: TimerTable::default(),
             queue_recovery_request: None,
         };
         (ctrl, fired_timer_rx)
@@ -364,55 +435,37 @@ impl CallController {
     /// to suppress a pending fire without re-registering.
     pub fn set_timeout(&self, id: impl Into<String>, delay: Duration) {
         let id = id.into();
-        // Re-registering: abort the previous timer task (if any) and clear any
-        // cancellation flag so the new timer is armed fresh.
-        if let Some((_, handle)) = self.timer_tasks.remove(&id) {
-            handle.abort();
-        }
-        self.cancelled_timers.lock().remove(&id);
+        // Re-registering: abort the previous timer task (if any). The new
+        // entry's generation invalidates the old task's fire claim even if
+        // the abort loses the wake race.
+        let generation = self.timers.reregister(&id);
 
         let tx = self.fired_timer_tx.clone();
-        let cancelled = self.cancelled_timers.clone();
-        let tasks = self.timer_tasks.clone();
-        let pending_fired = self.pending_fired_timers.clone();
+        let timers = self.timers.clone();
         let id_task = id.clone();
         let handle = crate::utils::spawn(async move {
             tokio::time::sleep(delay).await;
-            // Count queued delivery before removing the task, so observation
-            // never mistakes a fired-but-unconsumed retry for a missing timer.
-            *pending_fired.lock().entry(id_task.clone()).or_default() += 1;
-            // Self-remove so the handle map does not retain finished tasks.
-            tasks.remove(&id_task);
-            // Only fire if not cancelled in the meantime.
-            let was_cancelled = cancelled.lock().remove(&id_task);
-            if !was_cancelled {
-                if tx.send(id_task.clone()).is_err() {
-                    Self::consume_pending_timer(&pending_fired, &id_task);
-                }
-            } else {
-                Self::consume_pending_timer(&pending_fired, &id_task);
+            // Claim the fire: remove the entry only if it still carries this
+            // task's generation — a cancel or re-register removed/replaced it.
+            if !timers.claim(&id_task, generation) {
+                return; // cancelled or superseded — suppress the fire.
+            }
+            // Count queued delivery so `timeout_is_armed` never mistakes a
+            // fired-but-unconsumed timer for a missing one.
+            timers.bump_pending(&id_task);
+            if tx.send(id_task.clone()).is_err() {
+                timers.consume_pending(&id_task);
             }
         });
-        self.timer_tasks.insert(id, handle);
+        self.timers.attach(&id, generation, handle);
     }
 
     pub(crate) fn timeout_is_armed(&self, id: &str) -> bool {
-        self.timer_tasks.contains_key(id)
-            || self.pending_fired_timers.lock().get(id).copied().unwrap_or(0) > 0
-    }
-
-    fn consume_pending_timer(pending: &Mutex<HashMap<String, usize>>, id: &str) {
-        let mut pending = pending.lock();
-        if let Some(count) = pending.get_mut(id) {
-            *count -= 1;
-            if *count == 0 {
-                pending.remove(id);
-            }
-        }
+        self.timers.entries.contains_key(id) || self.timers.pending_count(id) > 0
     }
 
     pub(crate) fn record_timer_consumed(&self, id: &str) {
-        Self::consume_pending_timer(&self.pending_fired_timers, id);
+        self.timers.consume_pending(id);
     }
 
     pub(crate) fn set_queue_recovery_request(
@@ -426,12 +479,12 @@ impl CallController {
     ///
     /// If the timer has already fired, this is a no-op.
     pub fn cancel_timeout(&self, id: &str) {
-        self.cancelled_timers.lock().insert(id.to_string());
-        // Abort the sleeping task immediately rather than letting it run for the
-        // remainder of its delay.
-        if let Some((_, handle)) = self.timer_tasks.remove(id) {
-            handle.abort();
-        }
+        // Removing the entry invalidates the task's fire claim (its
+        // generation no longer matches); aborting releases the sleeper
+        // immediately. If the task already claimed the fire, the queued
+        // event is still delivered — same "already fired" semantics as the
+        // former cancellation-flag design.
+        self.timers.cancel(id);
     }
 
     /// Start recording the call audio.
@@ -866,12 +919,7 @@ impl Drop for CallController {
     fn drop(&mut self) {
         // Abort every still-pending timer task so they don't keep sleeping (and
         // holding their captured Arc/channel clones) after the call has ended.
-        let keys: Vec<String> = self.timer_tasks.iter().map(|e| e.key().clone()).collect();
-        for key in keys {
-            if let Some((_, handle)) = self.timer_tasks.remove(&key) {
-                handle.abort();
-            }
-        }
+        self.timers.cancel_all();
     }
 }
 

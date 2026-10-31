@@ -142,6 +142,48 @@ impl LegRef {
     }
 }
 
+/// Mid-call / auto recording state. `completed_segments` feeds CDR and the
+/// `recording_segments` metadata; `seq` feeds auto-generated segment file
+/// names (`{session_id}_{seq}_{label}.wav`), bumped on file collision for
+/// cross-session (transfer) segments.
+#[derive(Default)]
+struct RecordingState {
+    active: Option<crate::callrecord::ActiveRecording>,
+    completed_segments: Vec<crate::callrecord::RecordingSegment>,
+    seq: u32,
+}
+
+/// Terminal-event emission progress latches — "which of the session's
+/// terminal events already fired" as one unit. `Arc` fields are cloned into
+/// spawned tasks / select arms that must observe latching without borrowing
+/// the session (see `answered_latch` in the originate path); the rest are
+/// session-local.
+struct EventProgress {
+    /// CDR already sent (cleanup path or the Drop safety net — exactly-once).
+    cdr_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Session-level `call_answered` emitted (one-per-call contract; latched
+    /// eagerly for originate sessions, enforced by the cleanup safety net).
+    answered_emitted: Arc<std::sync::atomic::AtomicBool>,
+    /// Any leg reached Connected — drives the cleanup safety net for the
+    /// session-level-only `call_answered` policy (a call shape missing its
+    /// emit site gets flagged).
+    any_leg_connected: bool,
+    /// Child-leg only: a leg-scoped `call_hangup` claimed the agent role for
+    /// this dialog; session-level teardown must not re-claim it — and MUST
+    /// claim it otherwise (incl. ring-timeout teardowns with no leg-scoped
+    /// report).
+    child_role_hangup_reported: std::sync::atomic::AtomicBool,
+}
+
+/// AMD (answering-machine / AI-assistant) detection state for one session.
+/// Exists only while the `amd` config resolved at least once; the channel is
+/// replaced on each re-arm, `armed_leg` is `None` between verdicts (the
+/// disarm releases the shared analysis tap slot).
+struct AmdState {
+    outcome_rx: tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>,
+    armed_leg: Option<LegId>,
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -193,10 +235,7 @@ pub struct SipSession {
     /// copied from its 18x/2xx back to the caller.
     response_header_passthrough: Option<crate::proxy::routing::HeaderPassthrough>,
 
-    timers: HashMap<DialogId, SessionTimerState>,
-    update_refresh_disabled: HashSet<DialogId>,
-    timer_queue: DelayQueue<DialogId>,
-    timer_keys: HashMap<DialogId, delay_queue::Key>,
+    session_timers: crate::proxy::proxy_call::session_timer::SessionTimers,
 
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
     /// Dynamic dialogs can receive in-dialog requests after ACK but before the
@@ -204,45 +243,18 @@ pub struct SipSession {
     pending_dynamic_dialogs: Arc<DashMap<DialogId, LegId>>,
     pub callee_guards: Vec<ClientDialogGuard>,
 
-    pub dtmf_digits: Vec<char>,
-
     pub reporter: Option<CallReporter>,
-    cdr_sent: Arc<std::sync::atomic::AtomicBool>,
-    /// One-shot latch for the core `call_answered` event: `accept_call`
-    /// (direct UAS answer) and the queue-agent `LegConnected` branch can both
-    /// observe an answer moment for the same logical call (app-startup race);
-    /// only the first emits. A transfer to a new agent runs in a NEW
-    /// session with its own latch, so per-agent attribution is preserved.
-    answered_event_emitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
-
-    /// Set once any leg of this session transitions into `LegState::Connected`.
-    /// Drives the cleanup safety net for the session-level-only
-    /// `call_answered` policy: if a leg connected but the session-level event
-    /// never fired on a session that never ran an app, a call shape is
-    /// missing its emit site.
-    any_leg_reached_connected: bool,
-
-    /// AMD (answering machine / AI assistant) detection: verdict channel from
-    /// the armed callee leg's detector (armed at answer when the resolved
-    /// `amd` config is enabled). Polled in the main loop; the latest verdict
-    /// lands in `amd_verdict` for the RWI `call_amd_detected` event and CDR.
-    amd_outcome_rx: Option<tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
+    event_progress: EventProgress,
+    /// AMD (answering machine / AI assistant) detection: armed at answer when
+    /// the resolved `amd` config is enabled. The verdict channel is polled in
+    /// the main loop; the latest verdict lands in `amd_verdict` for the RWI
+    /// `call_amd_detected` event and CDR.
+    amd: Option<AmdState>,
 
     /// Latest AMD verdict for this call (per callee-leg attempt: each new
     /// answer re-arms, the last verdict wins into CDR). `None` when AMD never
     /// armed or produced no decision.
     amd_verdict: Option<crate::media::amd::AmdVerdict>,
-
-    /// Media leg the AMD detector is currently armed on (disarmed at verdict
-    /// to release the shared analysis tap slot).
-    amd_armed_leg: Option<LegId>,
-
-    /// Child-leg session only: a leg-scoped `call_hangup` already reported
-    /// the agent role for this session's dialog (the emitter removes the
-    /// leg with the report). The session-level teardown must not re-claim
-    /// the role then — and MUST claim it otherwise, including ring-timeout
-    /// teardowns where no leg ever connected (no leg-scoped report exists).
-    child_role_hangup_reported: std::sync::atomic::AtomicBool,
 
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
@@ -256,6 +268,14 @@ pub struct SipSession {
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
     /// bridge ends. SIP INFO DTMF is also forwarded through this channel.
+    ///
+    /// Bridge-slot fields (`bridge_dtmf_tx` / `bridge_trace_context` /
+    /// `resumed_bridge_ctx` / `bridge_dtmf_digits` / `external_bridge`) are
+    /// deliberately NOT folded into one struct: each `Arc` is cloned
+    /// independently into spawned tasks and closures (81 reference sites
+    /// across the crate), so a namespace fold would churn every site for
+    /// naming cohesion alone while the per-field sharing model stays
+    /// unchanged. Revisit only if a single bridge-lifecycle owner emerges.
     pub bridge_dtmf_tx:
         Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 
@@ -305,14 +325,9 @@ pub struct SipSession {
     /// Live transcription state; `None` while nobody subscribes.
     pub(crate) live_transcription: Option<live_transcription::LiveTranscription>,
 
-    /// Currently active mid-call / auto recording (if any).
-    active_recording: Option<crate::callrecord::ActiveRecording>,
-    /// Completed recording segments for this leg (full-call + mid-call slices).
-    completed_recording_segments: Vec<crate::callrecord::RecordingSegment>,
-    /// 1-based counter feeding auto-generated segment file names
-    /// (`{session_id}_{seq}_{label}.wav`). Per-session; `segmented_wav_path`
-    /// bumps on file collision for cross-session (transfer) segments.
-    recording_seq: u32,
+    /// Mid-call / auto recording state: the active recording (if any) plus
+    /// completed segment history feeding CDR / `recording_segments` metadata.
+    recording: RecordingState,
 
     /// Whether this session was constructed in UAC mode (RWI/CC originate).
     /// The caller (A) media leg is then the *dialed destination*, not an
@@ -723,10 +738,10 @@ impl SipSession {
             return;
         }
         if !self
-            .answered_event_emitted
+            .event_progress.answered_emitted
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            self.answered_event_emitted
+            self.event_progress.answered_emitted
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                 leg_id: None,
@@ -910,8 +925,17 @@ impl SipSession {
             local_speech: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             outcome_tx,
         });
-        self.amd_outcome_rx = Some(outcome_rx);
-        self.amd_armed_leg = Some(leg_id.clone());
+        self.amd = Some(match self.amd.take() {
+            Some(mut state) => {
+                state.outcome_rx = outcome_rx;
+                state.armed_leg = Some(leg_id.clone());
+                state
+            }
+            None => AmdState {
+                outcome_rx,
+                armed_leg: Some(leg_id.clone()),
+            },
+        });
         debug!(
             session_id = %self.id,
             leg_id = %leg_id,
@@ -932,7 +956,8 @@ impl SipSession {
             "amd verdict"
         );
         self.amd_verdict = Some(verdict.clone());
-        if let Some(leg_id) = self.amd_armed_leg.take() {
+        // Disarm: release the shared analysis tap slot on the armed leg.
+        if let Some(leg_id) = self.amd.as_mut().and_then(|state| state.armed_leg.take()) {
             if let Some(media_leg) = self.media_leg(&leg_id) {
                 media_leg.disarm_amd();
             }
@@ -1129,7 +1154,7 @@ impl SipSession {
     /// (an unanswered call's artifact) when it stops the recorder — answered
     /// calls instead stop while the marker is armed, deleting the file.
     pub(crate) fn clear_active_recording_discard(&mut self) {
-        if let Some(active) = self.active_recording.as_mut() {
+        if let Some(active) = self.recording.active.as_mut() {
             active.discard = false;
         }
     }
@@ -1142,7 +1167,7 @@ impl SipSession {
     /// (`full`) and external segments keep rolling across the hand-off.
     pub(crate) async fn close_app_scoped_recording(&mut self) {
         let is_app_scoped = self
-            .active_recording
+            .recording.active
             .as_ref()
             .is_some_and(|a| a.source == crate::callrecord::RecordingSource::Ivr);
         if !is_app_scoped {
@@ -1232,7 +1257,7 @@ impl SipSession {
                 .recording
                 .start_recording(profile, option, 2, false, None)
                 .await?;
-            self.active_recording = Some(crate::callrecord::ActiveRecording {
+            self.recording.active = Some(crate::callrecord::ActiveRecording {
                 path,
                 segment_type: "full".to_string(),
                 source: crate::callrecord::RecordingSource::Full,
@@ -1254,7 +1279,7 @@ impl SipSession {
                 .code(crate::callrecord::recording_upload::recording_trace_codes::STARTED)
                 .detail(serde_json::json!({
                     "backend": "file",
-                    "path": self.active_recording.as_ref().map(|r| r.path.clone()),
+                    "path": self.recording.active.as_ref().map(|r| r.path.clone()),
                     "segment_type": "full",
                     "recording_type": format!("{:?}", recording.recording_type),
                 })),
@@ -1373,7 +1398,7 @@ impl SipSession {
         result: &crate::media::media_recorder::RecordingResult,
     ) -> Option<(bool, Option<String>)> {
         let ended_at = chrono::Utc::now();
-        let active = self.active_recording.take();
+        let active = self.recording.active.take();
         if active.as_ref().is_some_and(|a| a.discard) {
             let path = std::path::Path::new(&result.path);
             if let Err(error) = std::fs::remove_file(path) {
@@ -1409,7 +1434,7 @@ impl SipSession {
                     false,
                 )
             };
-        self.completed_recording_segments
+        self.recording.completed_segments
             .push(crate::callrecord::RecordingSegment {
                 path: result.path.clone(),
                 size: result.file_size,
@@ -1924,21 +1949,19 @@ impl SipSession {
             meta,
             media: crate::proxy::proxy_call::media_state::MediaState::new(caller_offer),
             response_header_passthrough: None,
-            timers: HashMap::new(),
-            update_refresh_disabled: HashSet::new(),
-            timer_queue: DelayQueue::new(),
-            timer_keys: HashMap::new(),
+            session_timers: crate::proxy::proxy_call::session_timer::SessionTimers::default(),
             callee_event_tx: None,
             pending_dynamic_dialogs: Arc::new(DashMap::new()),
             callee_guards: Vec::new(),
             reporter: None,
-            cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            answered_event_emitted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            any_leg_reached_connected: false,
-            amd_outcome_rx: None,
+            amd: None,
             amd_verdict: None,
-            amd_armed_leg: None,
-            child_role_hangup_reported: std::sync::atomic::AtomicBool::new(false),
+            event_progress: EventProgress {
+                cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                answered_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                any_leg_connected: false,
+                child_role_hangup_reported: std::sync::atomic::AtomicBool::new(false),
+            },
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
@@ -1951,12 +1974,9 @@ impl SipSession {
             handle: sip_handle.clone(),
             session_registry_guard: None,
             dialog_registry_guards: HashMap::new(),
-            dtmf_digits: Vec::new(),
             active_plays: std::collections::HashMap::new(),
             live_transcription: None,
-            active_recording: None,
-            completed_recording_segments: Vec::new(),
-            recording_seq: 0,
+            recording: RecordingState::default(),
             primary_leg_uac,
         };
 
@@ -2708,7 +2728,7 @@ impl SipSession {
     /// Poll the AMD verdict channel; pends forever when AMD never armed so
     /// the select arm stays dormant.
     async fn recv_amd_verdict(
-        rx: &mut Option<tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
+        rx: Option<&mut tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
     ) -> crate::media::amd::AmdVerdict {
         match rx {
             Some(r) => match r.recv().await {
@@ -2868,7 +2888,9 @@ impl SipSession {
                     }
                 }
 
-                verdict = Self::recv_amd_verdict(&mut self.amd_outcome_rx) => {
+                verdict = Self::recv_amd_verdict(
+                    self.amd.as_mut().map(|state| &mut state.outcome_rx),
+                ) => {
                     self.handle_amd_verdict(verdict);
                 }
 
@@ -2888,7 +2910,7 @@ impl SipSession {
                     break;
                 }
 
-                Some(expired) = self.timer_queue.next(), if !cancelled && !self.timer_queue.is_empty() => {
+                Some(expired) = self.session_timers.queue.next(), if !cancelled && !self.session_timers.queue.is_empty() => {
                     let scheduled = expired.into_inner();
 
                     match self.next_timer_action(&scheduled) {
@@ -2965,7 +2987,7 @@ impl SipSession {
         let setup_cancel_token = self.cancel_token.clone();
         // Borrow-free handle to the answered latch, so the timeout arm below
         // can check it while `setup` borrows `self` mutably.
-        let answered_latch = self.answered_event_emitted.clone();
+        let answered_latch = self.event_progress.answered_emitted.clone();
         // Ring/setup timeout: how long to keep dialing before giving up on a
         // no-answer call. Configurable per call (default 60s). Firing here —
         // rather than in `serve` — keeps the caller-dialog message pump alive
@@ -3547,15 +3569,15 @@ impl SipSession {
         // `RwiCommandProcessor`'s originate task), so latch it here: the
         // cleanup safety net must not flag originate sessions, and any late
         // accept_call must not double-emit.
-        self.answered_event_emitted
+        self.event_progress.answered_emitted
             .store(true, std::sync::atomic::Ordering::Relaxed);
         info!(session_id = %self.id, "UAC caller leg marked Connected after attaching caller dialog");
         Ok(())
     }
 
     fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
-        self.timer_keys.remove(scheduled);
-        let timer = self.timers.get_mut(scheduled)?;
+        self.session_timers.queue_keys.remove(scheduled);
+        let timer = self.session_timers.timers.get_mut(scheduled)?;
 
         if timer.is_expired() {
             return Some(TimerAction::Expired);
@@ -5191,7 +5213,7 @@ impl SipSession {
         };
 
         let mut headers = if update_result.is_err() {
-            self.timers.get(&dialog_id).map(|timer| {
+            self.session_timers.timers.get(&dialog_id).map(|timer| {
                 vec![rsipstack::sip::Header::Other(
                     HEADER_MIN_SE.to_string(),
                     timer.min_se.as_secs().to_string(),
@@ -5435,8 +5457,7 @@ impl SipSession {
                     .await
                 {
                     self.unschedule_timer(&dialog_id);
-                    self.timers.remove(&dialog_id);
-                    self.update_refresh_disabled.remove(&dialog_id);
+                    self.session_timers.remove_dialog(&dialog_id);
                     self.legs.remove(&LegId::from("caller"));
                     self.unregister_dialog_owner(&dialog_id).await;
                     self.server.dialog_layer.remove_dialog(&dialog_id);
@@ -5549,8 +5570,8 @@ impl SipSession {
         self.server.dialog_layer.remove_dialog(dialog_id);
         self.legs.retain_dialogs_by_dialog_id(dialog_id);
         self.unschedule_timer(dialog_id);
-        self.timers.remove(dialog_id);
-        self.update_refresh_disabled.remove(dialog_id);
+        self.session_timers.timers.remove(dialog_id);
+        self.session_timers.refresh_disabled.remove(dialog_id);
         // Drop the caller leg (and detach it from the media bridge) when it is
         // still registered. The remote/queued BYE already terminated its
         // dialog, so no BYE is queued back; a server-driven API transfer may
@@ -6039,10 +6060,10 @@ impl SipSession {
                 .await?;
             return Ok(());
         };
-        let ours = self.active_recording.as_ref().is_some_and(|active| {
+        let ours = self.recording.active.as_ref().is_some_and(|active| {
             active.segment_type == "agent" && active.label == label && active.unique_id == unique_id
         });
-        let completed = self.completed_recording_segments.iter().any(|segment| {
+        let completed = self.recording.completed_segments.iter().any(|segment| {
             segment.segment_type == "agent"
                 && segment.label == label
                 && segment.unique_id.as_deref() == Some(unique_id)
@@ -6055,7 +6076,7 @@ impl SipSession {
             let result = self.stop_and_publish_recording().await;
             // A failed finalize consumes the backend; a later Ok(None) is not success.
             let finalized = matches!(&result, Ok(Some(_)))
-                && self.completed_recording_segments.iter().any(|segment| {
+                && self.recording.completed_segments.iter().any(|segment| {
                     segment.segment_type == "agent"
                         && segment.label == label
                         && segment.unique_id.as_deref() == Some(unique_id)
@@ -7198,8 +7219,7 @@ impl SipSession {
                 self.callee_dialogs.remove(&terminated_dialog_id);
                 self.legs.retain_dialogs_by_dialog_id(&terminated_dialog_id);
                 self.unschedule_timer(&terminated_dialog_id);
-                self.timers.remove(&terminated_dialog_id);
-                self.update_refresh_disabled.remove(&terminated_dialog_id);
+                self.session_timers.remove_dialog(&terminated_dialog_id);
                 self.unregister_dialog_owner(&terminated_dialog_id).await;
                 // The remote BYE already terminated this leg; remove it before dropping
                 // its guard so guard cleanup does not send a second BYE back.
@@ -10396,7 +10416,7 @@ impl SipSession {
             match self.init_server_timer(default_expires) {
                 Ok(()) => {
                     let caller_dialog_id = self.caller_dialog_id();
-                    if let Some(timer) = self.timers.get(&caller_dialog_id) {
+                    if let Some(timer) = self.session_timers.timers.get(&caller_dialog_id) {
                         if timer.enabled {
                             timer_headers.extend(build_session_timer_response_headers(timer));
                             debug!(session_id = %self.id,
@@ -11516,7 +11536,7 @@ impl SipSession {
         // Trace the finalized segment so the CDR timeline shows captured
         // media even when the upload pipeline fails later (missing
         // `recording.uploaded` next to this entry = upload-side problem).
-        if let Some(segment) = self.completed_recording_segments.last() {
+        if let Some(segment) = self.recording.completed_segments.last() {
             self.record_trace(
                 crate::call_errors::TraceEvent::new(
                     crate::call_errors::TraceKind::Recording,
@@ -11552,7 +11572,7 @@ impl SipSession {
         // Session-path calls are excluded: their reporter already consumes
         // `completed_recording_segments`.
         if self.reporter.is_none()
-            && let Some(segment) = self.completed_recording_segments.last()
+            && let Some(segment) = self.recording.completed_segments.last()
             && let Some(gateway) = self.server.rwi_gateway.as_ref()
         {
             let call_id = self.context.session_id.clone();
@@ -11660,9 +11680,9 @@ impl SipSession {
         // events when the caller never reaches an agent, so those are excluded
         // via `has_started_app()`. Anything else is a call shape missing its
         // session-level emit site and must be investigated.
-        if self.any_leg_reached_connected
+        if self.event_progress.any_leg_connected
             && !self
-                .answered_event_emitted
+                .event_progress.answered_emitted
                 .load(std::sync::atomic::Ordering::Relaxed)
             && !self.app_runtime.has_started_app()
         {
@@ -11774,10 +11794,7 @@ impl SipSession {
 
         self.callee_dialogs.clear();
         self.meta.connected_callee_dialog_id = None;
-        self.timers.clear();
-        self.update_refresh_disabled.clear();
-        self.timer_queue.clear();
-        self.timer_keys.clear();
+        self.session_timers.clear_all();
 
         // Setup failures bypass the caller state receiver in run_main_loop.
         // Terminal cleanup must finish the unanswered UAS caller leg before
@@ -11842,7 +11859,7 @@ impl SipSession {
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
             reporter.report_with_rwi_guard(snapshot, rwi_state_guard.clone());
-            self.cdr_sent
+            self.event_progress.cdr_sent
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -11970,7 +11987,7 @@ impl SipSession {
             // attributed `call_hangup` (prd contract).
             leg_role: self.meta.child_leg_role.clone().filter(|_| {
                 !self
-                    .child_role_hangup_reported
+                    .event_progress.child_role_hangup_reported
                     .load(std::sync::atomic::Ordering::Relaxed)
             }),
             call_id: self.context.session_id.clone(),
@@ -12235,7 +12252,7 @@ impl SipSession {
             timer.refresher = select_server_timer_refresher(supported, false, None);
         }
 
-        self.timers.insert(dialog_id.clone(), timer);
+        self.session_timers.timers.insert(dialog_id.clone(), timer);
         self.schedule_timer(dialog_id);
 
         Ok(())
@@ -12271,7 +12288,7 @@ impl SipSession {
             timer.session_interval = requested_session_interval;
         }
 
-        self.timers.insert(dialog_id.clone(), timer);
+        self.session_timers.timers.insert(dialog_id.clone(), timer);
         self.schedule_timer(dialog_id);
     }
 
@@ -12310,7 +12327,7 @@ impl SipSession {
 
     fn schedule_timer(&mut self, dialog_id: DialogId) {
         let timeout = self
-            .timers
+            .session_timers.timers
             .get(&dialog_id)
             .and_then(SessionTimerState::next_timeout);
         self.schedule_timer_with_timeout(dialog_id, timeout);
@@ -12318,7 +12335,7 @@ impl SipSession {
 
     fn schedule_expiration_timer(&mut self, dialog_id: DialogId) {
         let timeout = self
-            .timers
+            .session_timers.timers
             .get(&dialog_id)
             .and_then(SessionTimerState::time_until_expiration);
         self.schedule_timer_with_timeout(dialog_id, timeout);
@@ -12327,34 +12344,34 @@ impl SipSession {
     fn schedule_timer_with_timeout(&mut self, dialog_id: DialogId, timeout: Option<Duration>) {
         match timeout {
             Some(timeout) => {
-                let current_key = self.timer_keys.get(&dialog_id).copied();
+                let current_key = self.session_timers.queue_keys.get(&dialog_id).copied();
                 let queue_key = if let Some(key) = current_key {
-                    self.timer_queue.reset(&key, timeout);
+                    self.session_timers.queue.reset(&key, timeout);
                     key
                 } else {
-                    self.timer_queue.insert(dialog_id.clone(), timeout)
+                    self.session_timers.queue.insert(dialog_id.clone(), timeout)
                 };
-                self.timer_keys.insert(dialog_id, queue_key);
+                self.session_timers.queue_keys.insert(dialog_id, queue_key);
             }
             None => self.unschedule_timer(&dialog_id),
         }
     }
 
     fn unschedule_timer(&mut self, dialog_id: &DialogId) {
-        if let Some(key) = self.timer_keys.remove(dialog_id) {
-            self.timer_queue.remove(&key);
+        if let Some(key) = self.session_timers.queue_keys.remove(dialog_id) {
+            self.session_timers.queue.remove(&key);
         }
     }
 
     fn disable_update_refresh(&mut self, dialog_id: &DialogId) {
-        self.update_refresh_disabled.insert(dialog_id.clone());
+        self.session_timers.refresh_disabled.insert(dialog_id.clone());
     }
 
     fn successful_refresh_response_headers(
         &self,
         dialog_id: &DialogId,
     ) -> Option<Vec<rsipstack::sip::Header>> {
-        let timer = self.timers.get(dialog_id)?;
+        let timer = self.session_timers.timers.get(dialog_id)?;
         if !timer.enabled || !timer.active {
             return None;
         }
@@ -12370,7 +12387,7 @@ impl SipSession {
     }
 
     fn should_try_update_refresh(&self, dialog_id: &DialogId) -> bool {
-        !self.update_refresh_disabled.contains(dialog_id)
+        !self.session_timers.refresh_disabled.contains(dialog_id)
     }
 
     fn apply_refresh_min_se(
@@ -12386,7 +12403,7 @@ impl SipSession {
         };
 
         let timer = self
-            .timers
+            .session_timers.timers
             .get_mut(dialog_id)
             .ok_or_else(|| anyhow!("No session timer for dialog {}", dialog_id))?;
         if timer.min_se < min_se {
@@ -12404,14 +12421,14 @@ impl SipSession {
         dialog_id: &DialogId,
         response: &rsipstack::sip::Response,
     ) -> Result<()> {
-        if let Some(timer) = self.timers.get_mut(dialog_id) {
+        if let Some(timer) = self.session_timers.timers.get_mut(dialog_id) {
             apply_refresh_response(timer, &response.headers)?;
         }
         Ok(())
     }
 
     fn fail_refresh_if_pending(&mut self, dialog_id: &DialogId) {
-        if let Some(timer) = self.timers.get_mut(dialog_id)
+        if let Some(timer) = self.session_timers.timers.get_mut(dialog_id)
             && timer.refreshing
         {
             timer.fail_refresh();
@@ -12424,7 +12441,7 @@ impl SipSession {
         include_content_type: bool,
     ) -> Result<Vec<rsipstack::sip::Header>> {
         let timer = self
-            .timers
+            .session_timers.timers
             .get(dialog_id)
             .ok_or_else(|| anyhow!("No session timer for dialog {}", dialog_id))?;
         Ok(build_session_timer_headers(timer, include_content_type))
@@ -12678,7 +12695,7 @@ impl SipSession {
         dialog_id: &DialogId,
         headers: &rsipstack::sip::Headers,
     ) -> Result<()> {
-        if let Some(timer) = self.timers.get_mut(dialog_id) {
+        if let Some(timer) = self.session_timers.timers.get_mut(dialog_id) {
             apply_session_timer_headers(timer, headers)?;
             if timer.active {
                 timer.update_refresh();
@@ -13115,7 +13132,7 @@ impl SipSession {
             metadata,
             amd: self.amd_verdict.clone(),
             media_quality,
-            recording_segments: self.completed_recording_segments.clone(),
+            recording_segments: self.recording.completed_segments.clone(),
             extensions,
         }
     }
@@ -13907,8 +13924,8 @@ impl SipSession {
                     // Every start is a new segment in the logical call; the
                     // auto-generated name additionally bumps past any file
                     // collision left by segments of other legs (transfers).
-                    self.recording_seq = self.recording_seq.saturating_add(1);
-                    let mut seq = self.recording_seq;
+                    self.recording.seq = self.recording.seq.saturating_add(1);
+                    let mut seq = self.recording.seq;
                     let path = if config.path.trim().is_empty() {
                         let mut file_session_id = self.root_session_id_str();
                         // Separate nodes cannot detect each other's files; supplied
@@ -13926,7 +13943,7 @@ impl SipSession {
                             &label,
                         );
                         seq = resolved_seq;
-                        self.recording_seq = resolved_seq;
+                        self.recording.seq = resolved_seq;
                         resolved_path.to_string_lossy().into_owned()
                     } else {
                         config.path.clone()
@@ -13942,7 +13959,7 @@ impl SipSession {
                     // be lost. Stop the auto segment (compliance keeps its
                     // portion) before starting the app's recording.
                     if notify_app
-                        && self.active_recording.as_ref().is_some_and(|r| {
+                        && self.recording.active.as_ref().is_some_and(|r| {
                             !r.notify_app && r.source == crate::callrecord::RecordingSource::Full
                         })
                     {
@@ -13976,7 +13993,7 @@ impl SipSession {
                                 .map(|seconds| Duration::from_secs(seconds as u64)),
                         )
                         .await?;
-                    self.active_recording = Some(crate::callrecord::ActiveRecording {
+                    self.recording.active = Some(crate::callrecord::ActiveRecording {
                         path,
                         segment_type: segment_type.clone(),
                         source: crate::callrecord::RecordingSource::classify(&segment_type),
@@ -14002,7 +14019,7 @@ impl SipSession {
                 let result: anyhow::Result<String> = result;
                 match result {
                     Ok(unique_id) => {
-                        if let Some(active) = self.active_recording.as_ref() {
+                        if let Some(active) = self.recording.active.as_ref() {
                             self.record_trace(
                                 crate::call_errors::TraceEvent::new(
                                     crate::call_errors::TraceKind::Recording,
@@ -14057,7 +14074,7 @@ impl SipSession {
                 // is never touched. The core hangup finalize remains the
                 // backstop when this hook never fires.
                 let ours = self
-                    .active_recording
+                    .recording.active
                     .as_ref()
                     .is_some_and(|active| active.segment_type == "agent" && active.label == label);
                 if !ours {
@@ -15290,8 +15307,7 @@ impl SipSession {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                     self.callee_dialogs.remove(&dialog_id);
                     self.unschedule_timer(&dialog_id);
-                    self.timers.remove(&dialog_id);
-                    self.update_refresh_disabled.remove(&dialog_id);
+                    self.session_timers.remove_dialog(&dialog_id);
                     self.server.dialog_layer.remove_dialog(&dialog_id);
                     self.callee_guards.retain(|guard| guard.id() != &dialog_id);
                     self.legs.remove(&leg_id);
@@ -16109,7 +16125,7 @@ impl SipSession {
         {
             // Latch the report: the session-level teardown must not re-claim
             // the role (the leg is reported here and removed).
-            self.child_role_hangup_reported
+            self.event_progress.child_role_hangup_reported
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
@@ -16154,7 +16170,7 @@ impl SipSession {
                     "leg state transition"
                 );
                 if matches!(new_state, LegState::Connected) {
-                    self.any_leg_reached_connected = true;
+                    self.event_progress.any_leg_connected = true;
                 }
                 match Self::leg_transition_action(prev_state, new_state) {
                     LegTransitionAction::CallRinging { early_media } => {
@@ -17504,16 +17520,6 @@ impl SipSession {
 }
 
 impl SipSession {
-    /// Append DTMF digits to the session's digit history, bounded so a very
-    /// long call cannot grow this Vec without limit.
-    fn record_dtmf_digits(&mut self, digits: &[char]) {
-        const MAX_DTMF_DIGITS: usize = 512;
-        let room = MAX_DTMF_DIGITS.saturating_sub(self.dtmf_digits.len());
-        if room > 0 {
-            self.dtmf_digits.extend(digits.iter().take(room));
-        }
-    }
-
     pub async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
         if leg_a == leg_b || !self.legs.contains_key(&leg_a) || !self.legs.contains_key(&leg_b) {
             return false;
@@ -18081,7 +18087,6 @@ impl SipSession {
         if let Some(peer) = self.media_leg(&leg_id) {
             match peer.send_dtmf(&digit_str).await {
                 Ok(()) => {
-                    self.record_dtmf_digits(&valid_digits);
                     info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via RTP RFC 2833 telephone-events");
                     return Ok(());
                 }
@@ -18127,7 +18132,6 @@ impl SipSession {
 
         match info_result {
             Ok(()) => {
-                self.record_dtmf_digits(&valid_digits);
                 info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via SIP INFO");
             }
             Err(e) => {
@@ -18631,9 +18635,9 @@ impl Drop for SipSession {
 
         self.callee_dialogs.clear();
         self.meta.connected_callee_dialog_id = None;
-        self.timers.clear();
-        self.timer_queue.clear();
-        self.timer_keys.clear();
+        self.session_timers.timers.clear();
+        self.session_timers.queue.clear();
+        self.session_timers.queue_keys.clear();
 
         if let Some(conf_id) = self.conference_bridge.conf_id.clone()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
@@ -18700,11 +18704,11 @@ impl Drop for SipSession {
 
         // Safety net: send CDR if cleanup() was never called
         // (e.g. tokio task cancellation, B2BUA session stuck in process()).
-        if !self.cdr_sent.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.event_progress.cdr_sent.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(reporter) = &self.reporter {
                 let snapshot = self.record_snapshot();
                 reporter.report(snapshot);
-                self.cdr_sent
+                self.event_progress.cdr_sent
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 debug!(session_id = %self.context.session_id, "CDR sent from Drop safety net");
             }

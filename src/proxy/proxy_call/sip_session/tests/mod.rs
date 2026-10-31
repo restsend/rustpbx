@@ -2407,7 +2407,7 @@ async fn test_init_callee_timer_disabled_without_session_expires() {
     );
 
     let timer = session
-        .timers
+        .session_timers.timers
         .get(&dialog_id)
         .expect("missing callee timer");
     assert!(!timer.enabled);
@@ -2416,7 +2416,7 @@ async fn test_init_callee_timer_disabled_without_session_expires() {
         timer.session_interval,
         Duration::from_secs(DEFAULT_SESSION_EXPIRES)
     );
-    assert!(!session.timer_keys.contains_key(&dialog_id));
+    assert!(!session.session_timers.queue_keys.contains_key(&dialog_id));
 }
 
 /// Regression: preparing the app/IVR caller media bridge must NOT open the

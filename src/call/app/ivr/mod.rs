@@ -3,6 +3,8 @@ pub mod common;
 pub mod config;
 pub mod exec;
 pub mod executor;
+#[cfg(test)]
+mod executor_test;
 pub mod fallback;
 pub mod provider;
 pub mod third_party;

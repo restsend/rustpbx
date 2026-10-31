@@ -63,7 +63,7 @@ async fn test_many_participants_single_conference() {
         .destroy_conference(&"load-conf".into())
         .await
         .unwrap();
-    assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
+    assert_eq!(manager.dashmap_sizes(), (0, 0, 0));
 }
 
 #[tokio::test]
@@ -107,7 +107,7 @@ async fn test_many_conferences_no_cross_contamination() {
             .await
             .unwrap();
     }
-    assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
+    assert_eq!(manager.dashmap_sizes(), (0, 0, 0));
 }
 
 #[tokio::test]
@@ -142,16 +142,16 @@ async fn test_rapid_join_leave_no_panics() {
             .unwrap();
     }
 
-    let (_c, leg_map, _mixers, ch, out) = manager.dashmap_sizes();
-    // The keeper participant remains registered.
+    let (_rooms, leg_map, attachments) = manager.dashmap_sizes();
+    // The keeper participant remains registered (reverse index + one
+    // combined input/output attachment entry).
     assert_eq!(leg_map, 1, "keeper should still be in the conference");
-    assert_eq!(ch, 1, "keeper channel should remain");
-    assert_eq!(out, 1, "keeper output should remain");
+    assert_eq!(attachments, 1, "keeper attachment should remain");
     manager
         .destroy_conference(&"churn-conf".into())
         .await
         .unwrap();
-    assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
+    assert_eq!(manager.dashmap_sizes(), (0, 0, 0));
 }
 
 #[tokio::test]
@@ -179,7 +179,7 @@ async fn test_no_dashmap_leak_after_lifecycle() {
     }
     assert_eq!(
         manager.dashmap_sizes(),
-        (0, 0, 0, 0, 0),
+        (0, 0, 0),
         "all internal maps must be empty after conference lifecycle"
     );
 }
@@ -208,7 +208,7 @@ async fn test_destroy_within_bounded_time() {
         "destroy_conference exceeded 2s: {elapsed:?}"
     );
     assert!(manager.get_conference(&cid).await.is_none());
-    assert_eq!(manager.dashmap_sizes(), (0, 0, 0, 0, 0));
+    assert_eq!(manager.dashmap_sizes(), (0, 0, 0));
 }
 
 #[tokio::test]

@@ -217,15 +217,33 @@ impl ParticipantChannels {
     }
 }
 
+/// Everything owned by one live conference. Room state, audio mixer, and
+/// the max-duration watchdog token share a lifecycle (create → destroy);
+/// folding them into one entry replaces three parallel conference-keyed
+/// DashMaps whose rows could drift apart.
+struct ConferenceState {
+    room: ConferenceRoom,
+    mixer: Arc<ConferenceAudioMixer>,
+    /// Set only when a max-duration watchdog was spawned for this room.
+    timeout_token: Option<tokio_util::sync::CancellationToken>,
+}
+
+/// Per-leg media attachment: the input channel plus the pending mixed-audio
+/// output receiver. Both were created together in `add_participant` and
+/// removed together on departure; folding them replaces two parallel
+/// leg-keyed DashMaps.
+struct LegAttachment {
+    input_tx: mpsc::Sender<AudioFrame>,
+    /// `None` once `take_participant_output_rx` claimed the receiver.
+    output_rx: Option<mpsc::Receiver<AudioFrame>>,
+}
+
 /// Global conference manager with in-server audio mixing
 #[derive(Clone)]
 pub struct ConferenceManager {
-    conferences: Arc<DashMap<ConferenceId, ConferenceRoom>>,
+    conferences: Arc<DashMap<ConferenceId, ConferenceState>>,
+    leg_attachments: Arc<DashMap<LegId, LegAttachment>>,
     leg_to_conference: Arc<DashMap<LegId, ConferenceId>>,
-    audio_mixers: Arc<DashMap<ConferenceId, Arc<ConferenceAudioMixer>>>,
-    participant_channels: Arc<DashMap<LegId, ParticipantChannels>>,
-    participant_output_rxs: Arc<DashMap<LegId, mpsc::Receiver<AudioFrame>>>,
-    timeout_tokens: Arc<DashMap<ConferenceId, tokio_util::sync::CancellationToken>>,
     /// How long a room may stay participant-less before the watchdog destroys
     /// it (`0` = watchdog disabled).
     empty_room_grace: Duration,
@@ -235,11 +253,8 @@ impl ConferenceManager {
     pub fn new() -> Self {
         Self {
             conferences: Arc::new(DashMap::new()),
+            leg_attachments: Arc::new(DashMap::new()),
             leg_to_conference: Arc::new(DashMap::new()),
-            audio_mixers: Arc::new(DashMap::new()),
-            participant_channels: Arc::new(DashMap::new()),
-            participant_output_rxs: Arc::new(DashMap::new()),
-            timeout_tokens: Arc::new(DashMap::new()),
             empty_room_grace: Duration::from_secs(DEFAULT_CONFERENCE_EMPTY_GRACE_SECS),
         }
     }
@@ -252,13 +267,11 @@ impl ConferenceManager {
 
     /// Diagnostic: current size of every internal map. Used by leak tests to
     /// assert that conference lifecycle leaves no residue behind.
-    pub fn dashmap_sizes(&self) -> (usize, usize, usize, usize, usize) {
+    pub fn dashmap_sizes(&self) -> (usize, usize, usize) {
         (
             self.conferences.len(),
             self.leg_to_conference.len(),
-            self.audio_mixers.len(),
-            self.participant_channels.len(),
-            self.participant_output_rxs.len(),
+            self.leg_attachments.len(),
         )
     }
 
@@ -292,18 +305,20 @@ impl ConferenceManager {
         // overwriting a room whose mixer may already be running (a leaked
         // permanently-running task).
         use dashmap::mapref::entry::Entry;
+        let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         match self.conferences.entry(conf_id.clone()) {
             Entry::Vacant(e) => {
-                e.insert(conference.clone());
+                e.insert(ConferenceState {
+                    room: conference,
+                    mixer: mixer.clone(),
+                    timeout_token: None,
+                });
             }
             Entry::Occupied(_) => {
                 return Err(anyhow!("Conference {} already exists", conf_id.0));
             }
         }
-
-        let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
-        self.audio_mixers.insert(conf_id.clone(), mixer);
         info!(conf_id = %conf_id.0, "Conference created with local audio mixing");
 
         if let Some(dur) = max_duration_secs {
@@ -312,7 +327,7 @@ impl ConferenceManager {
 
         self.spawn_empty_room_watchdog(conf_id.clone());
 
-        Ok(conference)
+        Ok(self.conferences.get(&conf_id).map(|s| s.room.clone()).expect("just inserted"))
     }
 
     async fn spawn_timeout(&self, conf_id: ConferenceId, dur_secs: u64) {
@@ -320,7 +335,9 @@ impl ConferenceManager {
         let cancel = tokio_util::sync::CancellationToken::new();
         let child = cancel.child_token();
 
-        self.timeout_tokens.insert(conf_id.clone(), cancel);
+        if let Some(mut state) = self.conferences.get_mut(&conf_id) {
+            state.timeout_token = Some(cancel);
+        }
 
         crate::utils::spawn(async move {
             tokio::select! {
@@ -347,7 +364,8 @@ impl ConferenceManager {
             loop {
                 tokio::time::sleep(manager.empty_room_grace).await;
                 let verdict = {
-                    let Some(room) = manager.conferences.get(&conf_id) else { return; };
+                    let Some(state) = manager.conferences.get(&conf_id) else { return; };
+                    let room = &state.room;
                     if room.is_empty() {
                         Some("empty")
                     } else if room.participants.len() == 1
@@ -373,27 +391,27 @@ impl ConferenceManager {
     }
 
     pub fn set_focus(&self, id: &ConferenceId, uri: String) -> Result<()> {
-        let mut room = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference not found"))?;
-        room.focus_uri = Some(uri);
+        let mut state = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference not found"))?;
+        state.room.focus_uri = Some(uri);
         Ok(())
     }
 
     /// Commit the existing A/C attachments with the surviving caller as owner.
     /// Until this succeeds, no participant departure cascades to A.
     pub(crate) fn bind_transfer_owner(&self, id: &ConferenceId, caller: &LegId, peer: &LegId) -> Result<()> {
-        let mut room = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference ended"))?;
+        let mut state = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference ended"))?;
         for leg in [caller, peer] {
-            if room.participants.get(leg).is_none_or(|member| member.session_commands.is_none()) {
+            if state.room.participants.get(leg).is_none_or(|member| member.session_commands.is_none()) {
                 return Err(anyhow!("Transfer participant {} is no longer attached", leg));
             }
         }
-        room.host_leg_id = Some(caller.clone());
+        state.room.host_leg_id = Some(caller.clone());
         Ok(())
     }
 
     /// Get a conference if it exists
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
-        self.conferences.get(conf_id).map(|v| v.clone())
+        self.conferences.get(conf_id).map(|v| v.room.clone())
     }
 
     /// Bind an attached SIP participant to its owning session's command queue.
@@ -403,9 +421,9 @@ impl ConferenceManager {
         leg_id: &LegId,
         commands: mpsc::Sender<CallCommand>,
     ) -> Result<()> {
-        let mut room = self.conferences.get_mut(conf_id)
+        let mut state = self.conferences.get_mut(conf_id)
             .ok_or_else(|| anyhow!("Conference {} has ended", conf_id.0))?;
-        let participant = room.participants.get_mut(leg_id)
+        let participant = state.room.participants.get_mut(leg_id)
             .ok_or_else(|| anyhow!("Conference participant {} has left", leg_id))?;
         participant.session_commands = Some(commands);
         Ok(())
@@ -414,14 +432,13 @@ impl ConferenceManager {
     /// Destroy the room and explicitly end its remaining SIP participants.
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
         // Removing first prevents new attachments and makes destruction idempotent.
-        let Some((_, room)) = self.conferences.remove(conf_id) else { return Ok(()) };
-        if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
+        let Some((_, mut state)) = self.conferences.remove(conf_id) else { return Ok(()) };
+        if let Some(token) = state.timeout_token.take() {
             token.cancel();
         }
-        for (leg_id, participant) in room.participants {
+        for (leg_id, participant) in state.room.participants {
             self.leg_to_conference.remove(&leg_id);
-            self.participant_channels.remove(&leg_id);
-            self.participant_output_rxs.remove(&leg_id);
+            self.leg_attachments.remove(&leg_id);
             if let Some(commands) = participant.session_commands {
                 let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
                 // A room can be destroyed from an owning session's command handler.
@@ -431,9 +448,7 @@ impl ConferenceManager {
                 }
             }
         }
-        if let Some((_, mixer)) = self.audio_mixers.remove(conf_id) {
-            mixer.stop().await;
-        }
+        state.mixer.stop().await;
         info!(conf_id = %conf_id.0, "Conference destroyed");
         Ok(())
     }
@@ -466,37 +481,32 @@ impl ConferenceManager {
             ));
         }
 
-        // Add to conference room
-        {
-            let mut conference = self
+        // Add to conference room, then clone the mixer out of the same entry:
+        // the DashMap shard guard must not be held across the `.await` below.
+        let mixer = {
+            let mut state = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-            conference.add_participant_with_role(leg_id.clone(), role)?;
-        }
-
-        // Add to local audio mixer
-        let mixer = self
-            .audio_mixers
-            .get(conf_id)
-            .ok_or_else(|| anyhow!("Audio mixer not found for conference {}", conf_id.0))?
-            .value()
-            .clone();
+            state.room.add_participant_with_role(leg_id.clone(), role)?;
+            state.mixer.clone()
+        };
         let (input_tx, output_rx) = mixer
             .add_participant(leg_id.clone(), CodecType::PCMU)
             .await?;
 
-        let channels = ParticipantChannels::new(input_tx);
+        let channels = ParticipantChannels::new(input_tx.clone());
 
-        // Store channels and mapping
-        self.participant_channels
-            .insert(leg_id.clone(), channels.clone());
+        // Store attachment and mapping
+        self.leg_attachments.insert(
+            leg_id.clone(),
+            LegAttachment {
+                input_tx,
+                output_rx: Some(output_rx),
+            },
+        );
         self.leg_to_conference
             .insert(leg_id.clone(), conf_id.clone());
-
-        // Store output_rx separately for media path integration
-        self.participant_output_rxs
-            .insert(leg_id.clone(), output_rx);
 
         Ok(channels)
     }
@@ -509,40 +519,34 @@ impl ConferenceManager {
         conf_id: &ConferenceId,
         leg_id: &LegId,
     ) -> Result<usize> {
-        // Remove from conference room
         let remaining;
         let creator_left;
         let owner_commands;
-        {
-            let mut conference = self
+        // Remove from conference room, then clone the mixer out of the same
+        // entry: the DashMap shard guard must not be held across the `.await`
+        // below (shard lock pins other map operations for the whole await).
+        let mixer = {
+            let mut state = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-            let managed_owner = conference.host_leg_id.as_ref()
-                .and_then(|owner| conference.participants.get(owner))
+            let managed_owner = state.room.host_leg_id.as_ref()
+                .and_then(|owner| state.room.participants.get(owner))
                 .and_then(|owner| owner.session_commands.clone());
-            creator_left = conference.is_host(leg_id)
-                && (conference.focus_uri.is_some() || managed_owner.is_some());
+            creator_left = state.room.is_host(leg_id)
+                && (state.room.focus_uri.is_some() || managed_owner.is_some());
             // A transfer has no SIP focus: its peer leaving ends the owner's
             // call. Ordinary SIP conference members only remove themselves.
-            owner_commands = if !creator_left && conference.focus_uri.is_none() {
+            owner_commands = if !creator_left && state.room.focus_uri.is_none() {
                 managed_owner
             } else { None };
-            conference.remove_participant(leg_id)?;
-            remaining = conference.participant_count();
-        }
-
-        // Remove from local audio mixer. Clone the mixer out of the map first:
-        // holding the DashMap shard guard across the `.await` below is a known
-        // footgun (shard lock pins other map operations for the whole await).
-        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
-        if let Some(mixer) = mixer {
-            mixer.remove_participant(leg_id).await?;
-        }
-
-        // Remove channels and mapping
-        self.participant_channels.remove(leg_id);
-        self.participant_output_rxs.remove(leg_id);
+            state.room.remove_participant(leg_id)?;
+            remaining = state.room.participant_count();
+            state.mixer.clone()
+        };
+        mixer.remove_participant(leg_id).await?;
+        // Remove attachment and mapping
+        self.leg_attachments.remove(leg_id);
         self.leg_to_conference.remove(leg_id);
 
         if creator_left {
@@ -578,19 +582,17 @@ impl ConferenceManager {
     pub async fn mute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conference = self
+            let mut state = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-            conference.mute_participant(leg_id)?;
+            state.room.mute_participant(leg_id)?;
+            state.mixer.clone()
         }
-
-        // Update local audio mixer. Clone the mixer out of the map first —
-        // the DashMap shard guard must not be held across the `.await`.
-        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
-        if let Some(mixer) = mixer {
-            mixer.set_muted(leg_id, true).await?;
-        }
+        // The mixer was cloned out of the entry — the DashMap shard guard is
+        // not held across the `.await`.
+        .set_muted(leg_id, true)
+        .await?;
 
         Ok(())
     }
@@ -599,19 +601,15 @@ impl ConferenceManager {
     pub async fn unmute_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
         // Update conference room state
         {
-            let mut conference = self
+            let mut state = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-            conference.unmute_participant(leg_id)?;
+            state.room.unmute_participant(leg_id)?;
+            state.mixer.clone()
         }
-
-        // Update local audio mixer. Clone the mixer out of the map first —
-        // the DashMap shard guard must not be held across the `.await`.
-        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
-        if let Some(mixer) = mixer {
-            mixer.set_muted(leg_id, false).await?;
-        }
+        .set_muted(leg_id, false)
+        .await?;
 
         Ok(())
     }
@@ -623,7 +621,9 @@ impl ConferenceManager {
 
     /// Get participant channels for audio streaming (input only)
     pub async fn get_participant_channels(&self, leg_id: &LegId) -> Option<ParticipantChannels> {
-        self.participant_channels.get(leg_id).map(|v| v.clone())
+        self.leg_attachments
+            .get(leg_id)
+            .map(|a| ParticipantChannels::new(a.input_tx.clone()))
     }
 
     /// Get participant output receiver for mixed audio (to participant)
@@ -633,7 +633,9 @@ impl ConferenceManager {
         &self,
         leg_id: &LegId,
     ) -> Option<mpsc::Receiver<AudioFrame>> {
-        self.participant_output_rxs.remove(leg_id).map(|(_, rx)| rx)
+        self.leg_attachments
+            .get_mut(leg_id)
+            .and_then(|mut a| a.output_rx.take())
     }
 
     /// List all conferences
@@ -643,15 +645,16 @@ impl ConferenceManager {
 
     /// List all conferences with full details
     pub async fn list_conferences_detail(&self) -> Vec<ConferenceRoom> {
-        self.conferences.iter().map(|r| r.value().clone()).collect()
+        self.conferences.iter().map(|r| r.value().room.clone()).collect()
     }
 
     /// Get conference statistics
     pub async fn get_conference_stats(&self, conf_id: &ConferenceId) -> Result<ConferenceStats> {
-        let conference = self
+        let state = self
             .conferences
             .get(conf_id)
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
+        let conference = &state.room;
 
         Ok(ConferenceStats {
             conference_id: conf_id.0.clone(),
@@ -681,11 +684,11 @@ impl ConferenceManager {
         host_leg_id: &LegId,
     ) -> Result<Vec<LegId>> {
         let (is_host, participant_ids) = {
-            let conf = self
+            let state = self
                 .conferences
                 .get(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-            (conf.is_host(host_leg_id), conf.participant_ids())
+            (state.room.is_host(host_leg_id), state.room.participant_ids())
         };
 
         if !is_host {
@@ -1290,8 +1293,8 @@ mod tests {
             manager.get_conference(&conf_id).await.is_none(),
             "Never-joined room must be auto-destroyed by the watchdog"
         );
-        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
-        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
+        let (rooms, legs, attachments) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, attachments), (0, 0, 0), "no leaked state");
     }
 
     #[tokio::test]
@@ -1338,8 +1341,8 @@ mod tests {
             rx.recv().await
         }).await.expect("lone-member room must be reaped");
         assert!(matches!(notified, Some(CallCommand::ConferenceEnded { .. })), "{notified:?}");
-        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
-        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
+        let (rooms, legs, attachments) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, attachments), (0, 0, 0), "no leaked state");
     }
 
     /// R3 protection: an owner-bound survivor is a legal lone member.
@@ -1417,8 +1420,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         assert!(manager.get_conference(&conf_id).await.is_none());
-        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
-        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
+        let (rooms, legs, attachments) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, attachments), (0, 0, 0), "no leaked state");
     }
 
     #[tokio::test]

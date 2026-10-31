@@ -21,6 +21,10 @@ pub use proto::{
 
 use std::sync::OnceLock;
 
+/// Classification: process-global **infrastructure handle** — the app-level
+/// RWI gateway, installed exactly once at startup (`app.rs`) and mirrored in
+/// `AppState`. `global_gateway()` exists for deep error-reporting paths
+/// (`db_report`) that carry no state; keep those call sites count small.
 static GLOBAL_GATEWAY: OnceLock<RwiGatewayRef> = OnceLock::new();
 
 /// Register the process-wide RWI gateway so non-session code paths (cluster

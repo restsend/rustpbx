@@ -332,26 +332,33 @@ impl ResumeEventMode {
 /// by `/step` URL for the process lifetime: one legacy endpoint must not
 /// cost every subsequent resumed call a failed round-trip, while distinct
 /// endpoints (multi-tenant) keep their own verdict.
-static RESUME_DOWNGRADED_ENDPOINTS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
-    std::sync::Mutex::new(None);
+///
+/// Classification: process-global **business state**, deliberately shared
+/// across all [`StepProvider`] instances so the fuse survives per-call
+/// provider recreation. Bounded by the number of distinct `/step` URLs in
+/// config (never grows per call). Injection candidate if provider lifetime
+/// ever becomes config-scoped; not per-call state.
+static RESUME_DOWNGRADED_ENDPOINTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 fn resume_downgraded_for(url: &str) -> bool {
     match RESUME_DOWNGRADED_ENDPOINTS.lock() {
-        Ok(guard) => guard.as_ref().is_some_and(|set| set.contains(url)),
+        Ok(set) => set.contains(url),
         Err(_) => false,
     }
 }
 
 fn mark_resume_downgraded(url: &str) {
-    if let Ok(mut guard) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
-        guard.get_or_insert_with(Default::default).insert(url.to_string());
+    if let Ok(mut set) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
+        set.insert(url.to_string());
     }
 }
 
 #[cfg(test)]
 pub(crate) fn reset_resume_downgrades_for_test() {
-    if let Ok(mut guard) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
-        *guard = None;
+    if let Ok(mut set) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
+        set.clear();
     }
 }
 

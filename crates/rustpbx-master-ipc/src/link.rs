@@ -201,7 +201,7 @@ pub fn handle_for_end(
                     Err(e) => { tracing::error!("bad control frame: {e}"); break; }
                 },
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => break,
+                Err(_) => break,
             }
         }
     }).map_err(|e| io::Error::other(format!("spawn: {e}")))?;

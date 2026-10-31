@@ -6,8 +6,12 @@
 
 use crate::config::SessionTimerMode;
 use anyhow::{Result, anyhow};
+use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
+
+use rsipstack::dialog::DialogId;
+use tokio_util::time::delay_queue;
 
 // Session timer header constants
 pub const HEADER_SESSION_EXPIRES: &str = "Session-Expires";
@@ -518,3 +522,34 @@ pub fn build_session_timer_response_headers(
 #[cfg(test)]
 #[path = "session_timer_tests.rs"]
 mod session_timer_tests;
+
+/// All per-dialog session-timer state for one [`SipSession`](crate::proxy::proxy_call::sip_session::session::SipSession).
+/// Replaces four parallel collections keyed by DialogId that had to be kept
+/// in sync by hand; the paired mutations (`clear_all`, `remove_dialog`)
+/// express the sync points that were previously adjacent-line conventions.
+#[derive(Default)]
+pub(crate) struct SessionTimers {
+    pub(crate) timers: HashMap<DialogId, SessionTimerState>,
+    /// Dialogs whose re-INVITE refreshes must not trigger a timer reset.
+    pub(crate) refresh_disabled: std::collections::HashSet<DialogId>,
+    /// Refresh deadline schedule + reverse index into it (the pair must
+    /// stay in sync: `queue_keys[id]` is the handle for `queue.remove`).
+    pub(crate) queue: delay_queue::DelayQueue<DialogId>,
+    pub(crate) queue_keys: HashMap<DialogId, delay_queue::Key>,
+}
+
+impl SessionTimers {
+    /// Drop every trace of timer state (teardown path).
+    pub(crate) fn clear_all(&mut self) {
+        self.timers.clear();
+        self.refresh_disabled.clear();
+        self.queue.clear();
+        self.queue_keys.clear();
+    }
+
+    /// Remove one dialog's timer state (leg terminated).
+    pub(crate) fn remove_dialog(&mut self, dialog_id: &DialogId) {
+        self.timers.remove(dialog_id);
+        self.refresh_disabled.remove(dialog_id);
+    }
+}

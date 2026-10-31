@@ -292,14 +292,14 @@ pub struct TaskGuard {
 impl TaskGuard {
     pub fn new(loc: String) -> Self {
         GLOBAL_TASK_COUNT.fetch_add(1, Ordering::Relaxed);
-        if let Some(entry) = TASK_LOCATIONS.get(&loc) {
-            entry.fetch_add(1, Ordering::Relaxed);
-        } else {
-            TASK_LOCATIONS
-                .entry(loc.clone())
-                .or_insert_with(|| AtomicI64::new(0))
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        // entry() holds the shard write-lock across insert-or-get +
+        // increment, pairing with the lock-protected conditional removal in
+        // `drop` (a plain get-then-add could race a concurrent removal and
+        // orphan the increment).
+        TASK_LOCATIONS
+            .entry(loc.clone())
+            .or_insert_with(|| AtomicI64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
         Self { loc }
     }
 }
@@ -307,8 +307,15 @@ impl TaskGuard {
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         GLOBAL_TASK_COUNT.fetch_sub(1, Ordering::Relaxed);
-        if let Some(entry) = TASK_LOCATIONS.get(&self.loc) {
-            entry.fetch_sub(1, Ordering::Relaxed);
+        let reached_zero = TASK_LOCATIONS
+            .get_mut(&self.loc)
+            .is_some_and(|entry| entry.fetch_sub(1, Ordering::Relaxed) == 1);
+        if reached_zero {
+            // Remove-at-zero keeps the diagnostics map from accumulating one
+            // entry per spawn site forever. The count is re-checked under the
+            // map lock: a concurrent spawn that re-incremented between the
+            // decrement and this removal keeps its entry.
+            TASK_LOCATIONS.remove_if(&self.loc, |_k, v| v.load(Ordering::Relaxed) == 0);
         }
     }
 }
@@ -488,6 +495,7 @@ pub fn task_metrics_snapshot() -> std::collections::HashMap<String, usize> {
 /// Reset all metrics (useful for tests)
 pub fn reset_task_metrics() {
     GLOBAL_TASK_COUNT.store(0, Ordering::Relaxed);
+    TASK_LOCATIONS.clear();
 }
 
 /// Default maximum size (in bytes) for audio files downloaded over HTTP from
