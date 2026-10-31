@@ -655,6 +655,18 @@ pub enum WebhookResponse {
         code: Option<u16>,
     },
     Back,
+    /// Mid-flow HTTP call (acceptance §3.2.1.1 api row): the executor runs
+    /// the request and hands the status/body back to the provider as an
+    /// `api_response` event — branching on the body is the provider's job.
+    /// (Wire counterpart of `EntryAction::Api`; without it an HTTP step
+    /// provider cannot express the node.)
+    Api {
+        url: String,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        timeout: Option<u64>,
+    },
 }
 
 impl WebhookResponse {
@@ -739,6 +751,18 @@ impl WebhookResponse {
                 delay_after_ms: 0,
             },
             WebhookResponse::Back => EntryAction::Back,
+            WebhookResponse::Api {
+                url,
+                method,
+                timeout,
+            } => EntryAction::Api {
+                url,
+                method,
+                headers: HashMap::new(),
+                variables: None,
+                timeout: timeout.unwrap_or_else(default_webhook_timeout),
+                get_dynamic_tree: None,
+            },
         }
     }
 }
