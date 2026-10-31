@@ -123,6 +123,17 @@ impl TimerTable {
 /// Use [`set_timeout`](Self::set_timeout) to schedule named one-shot timers.
 /// When the delay elapses, [`CallApp::on_timeout`] is invoked with the same id.
 /// Use [`cancel_timeout`](Self::cancel_timeout) to suppress a pending fire.
+///
+/// # Two-channel app-event contract (deliberate)
+///
+/// The app event loop consumes **two** channels with different latency
+/// contracts — do NOT merge them:
+/// - `event_rx` ([`ControllerEvent`]): ordered app events (DTMF, playback /
+///   recording completion, hangup, transfer results, custom). Ordering
+///   matters; queuing behind prior events is correct.
+/// - `fired_timer_rx`: timer fires — the **urgency lane**. A ring timeout
+///   drives ACD no-answer rotation; letting it queue behind an event backlog
+///   would delay rotation. Timers bypass the event queue by design.
 pub struct CallController {
     pub(crate) session: SipSessionHandle,
     pub(crate) event_rx: mpsc::UnboundedReceiver<ControllerEvent>,

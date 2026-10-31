@@ -1,5 +1,6 @@
 use super::builtin_app_factory::BuiltinAppFactory;
 use super::prelude::*;
+use super::inbox::{SessionEvent, SessionInbox};
 use super::supervisor::SupervisorMode;
 use super::util::{
     CalleeError, format_duration_ms, forward_dtmf_event, inject_dtmf_into_app, into_callee_err,
@@ -2670,6 +2671,8 @@ impl SipSession {
         mb.force_transcode().await
     }
 
+    /// Poll the AMD verdict channel; pends forever when AMD never armed so
+    /// the select arm stays dormant.
     /// Human-readable label for the leg that stopped sending RTP: the session
     /// leg's display name + endpoint when available, falling back to the
     /// routing metadata (routed / connected URI), and finally to the running
@@ -2713,20 +2716,6 @@ impl SipSession {
                 .unwrap_or_else(|| "unknown".to_string()),
         }
     }
-    /// Adapter that makes an optional caller-dialog receiver behave like a
-    /// real one in `run_main_loop`. When `None` (UAC mode) it parks forever so
-    /// the corresponding `select!` arm never fires.
-    async fn recv_opt_state(
-        rx: &mut Option<mpsc::UnboundedReceiver<DialogState>>,
-    ) -> Option<DialogState> {
-        match rx {
-            Some(r) => r.recv().await,
-            None => std::future::pending::<Option<DialogState>>().await,
-        }
-    }
-
-    /// Poll the AMD verdict channel; pends forever when AMD never armed so
-    /// the select arm stays dormant.
     async fn recv_amd_verdict(
         rx: Option<&mut tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
     ) -> crate::media::amd::AmdVerdict {
@@ -2758,9 +2747,13 @@ impl SipSession {
     async fn run_main_loop(
         &mut self,
         mut state_rx: Option<mpsc::UnboundedReceiver<DialogState>>,
-        mut callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
-        mut cmd_rx: mpsc::Receiver<CallCommand>,
+        callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
+        cmd_rx: mpsc::Receiver<CallCommand>,
     ) -> Result<()> {
+        // All mpsc input sources unified: one recv, centralized closed-channel
+        // semantics (media-plane events stay in their dedicated arms — see
+        // sip_session/inbox.rs).
+        let mut inbox = SessionInbox::new(state_rx.take(), callee_state_rx, cmd_rx);
         let hangup_futures = FuturesUnordered::new();
         let timeout = futures::future::pending::<()>().boxed();
         let mut cancelled = false;
@@ -2855,36 +2848,38 @@ impl SipSession {
                     cancelled = true;
                 }
 
-                Some(state) = Self::recv_opt_state(&mut state_rx) => {
-                    let result = match state {
-                        DialogState::Refer(id, request, transaction) => {
-                            self.handle_received_refer(id, request, transaction, &mut callee_state_rx).await
+                event = inbox.recv() => {
+                    match event {
+                        SessionEvent::CallerDialog(state) => {
+                            let result = match state {
+                                DialogState::Refer(id, request, transaction) => {
+                                    self.handle_received_refer(id, request, transaction, inbox.callee_rx()).await
+                                }
+                                state => self.handle_dialog_state(state).await,
+                            };
+                            if let Err(e) = result {
+                                warn!(session_id = %self.id, error = %e, "Error handling dialog state");
+                            }
                         }
-                        state => self.handle_dialog_state(state).await,
-                    };
-                    if let Err(e) = result {
-                        warn!(session_id = %self.id, error = %e, "Error handling dialog state");
-                    }
-                }
-
-                Some(state) = callee_state_rx.recv() => {
-                    let result = match state {
-                        DialogState::Refer(id, request, transaction) => {
-                            self.handle_received_refer(id, request, transaction, &mut callee_state_rx).await
+                        SessionEvent::CalleeDialog(state) => {
+                            let result = match state {
+                                DialogState::Refer(id, request, transaction) => {
+                                    self.handle_received_refer(id, request, transaction, inbox.callee_rx()).await
+                                }
+                                state => self.handle_callee_state(state).await,
+                            };
+                            if let Err(e) = result {
+                                warn!(session_id = %self.id, error = %e, "Error handling callee state");
+                            }
                         }
-                        state => self.handle_callee_state(state).await,
-                    };
-                    if let Err(e) = result {
-                        warn!(session_id = %self.id, error = %e, "Error handling callee state");
-                    }
-                }
-
-                Some(cmd) = cmd_rx.recv() => {
-                    let result = self
-                        .execute_command(cmd, Some(&mut callee_state_rx))
-                        .await;
-                    if !result.success {
-                        warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
+                        SessionEvent::Command(cmd) => {
+                            let result = self
+                                .execute_command(cmd, Some(inbox.callee_rx()))
+                                .await;
+                            if !result.success {
+                                warn!(session_id = %self.id, error = ?result.message, "Command execution failed");
+                            }
+                        }
                     }
                 }
 

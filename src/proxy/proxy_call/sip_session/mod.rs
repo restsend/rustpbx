@@ -2,6 +2,7 @@
 
 pub mod prelude;
 
+pub(crate) mod inbox;
 mod builtin_app_factory;
 mod realtime_bridge;
 mod session;
