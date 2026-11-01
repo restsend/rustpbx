@@ -1,11 +1,10 @@
 //! Live transcription orchestration for a call session.
 //!
 //! `StartTranscription` attaches decoded-PCM taps to both MediaBridge legs
-//! (the same `leg_pcm_stream` primitive the conference / supervisor mixers
-//! use), forwards frames to a [`TranscriptionProvider`], and publishes every
-//! recognized segment as a `transcript_segment` RWI event. Subscribers (the
-//! CC addon's SSE endpoint, webhooks, RWI sessions) receive them through the
-//! gateway's normal dispatch paths.
+//! (via `Leg::pcm_stream`), forwards frames to a [`TranscriptionProvider`],
+//! and publishes every recognized segment as a `transcript_segment` RWI
+//! event. Subscribers (the CC addon's SSE endpoint, webhooks, RWI sessions)
+//! receive them through the gateway's normal dispatch paths.
 //!
 //! Start/stop are reference-counted: the pump starts on the first
 //! `StartTranscription` and stops when the matching number of

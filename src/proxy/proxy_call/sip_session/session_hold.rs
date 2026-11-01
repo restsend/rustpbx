@@ -10,56 +10,8 @@ use super::prelude::*;
 use super::session::{DialogSide, SipSession};
 
 impl SipSession {
-    pub(crate) fn is_hold_direction(
-        direction: rustrtc::Direction,
-        offer: Option<&rustrtc::SessionDescription>,
-    ) -> bool {
-        if !matches!(direction, rustrtc::Direction::SendRecv) {
-            return true;
-        }
-        // Per RFC 4317, c=IN IP4 0.0.0.0 also signals hold even when
-        // direction is sendrecv (some endpoints use this convention). WebRTC
-        // uses the same zero C-line with ICE for active media, so do not treat
-        // an ICE media section as held.
-        if let Some(offer) = offer {
-            for section in offer
-                .media_sections
-                .iter()
-                .filter(|section| section.kind == rustrtc::MediaKind::Audio)
-            {
-                if section.port == 0 {
-                    return true;
-                }
-                if Self::section_has_zero_hold_connection(
-                    section,
-                    offer.session.connection.as_deref(),
-                ) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     pub(crate) async fn get_local_reinvite_pc(&self, leg_id: &LegId) -> Option<rustrtc::PeerConnection> {
         self.media_leg(leg_id).map(|peer| peer.pc().clone())
-    }
-
-    pub(crate) fn section_has_zero_hold_connection(
-        section: &rustrtc::MediaSection,
-        session_connection: Option<&str>,
-    ) -> bool {
-        let uses_ice = section.protocol.contains("UDP/TLS")
-            || section
-                .attributes
-                .iter()
-                .any(|attribute| matches!(attribute.key.as_str(), "ice-ufrag" | "candidate"));
-        !uses_ice
-            && section
-                .connection
-                .as_deref()
-                .or(session_connection)
-                .is_some_and(Self::is_zero_connection)
     }
 
     /// Propagate hold to the selected peer: updates leg state, sends a hold re-INVITE
@@ -201,8 +153,8 @@ impl SipSession {
             .find(|s| s.kind == rustrtc::MediaKind::Audio)
             .map(|s| s.direction);
 
-        let new_state = if Self::is_hold_direction(offer_direction.unwrap_or_default(), Some(offer))
-        {
+        let new_state =
+            if MediaNegotiator::signals_hold(offer_direction.unwrap_or_default(), Some(offer)) {
             LegState::Hold
         } else {
             LegState::Connected

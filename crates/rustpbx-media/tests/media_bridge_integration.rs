@@ -324,13 +324,14 @@ async fn play_file_fires_on_end() {
     mb.close();
 }
 
-/// `bridge_play_pcm` — the raw-PCM streaming inject used by `voip_bridge` and
-/// the realtime app — must pace written frames out the leg egress and resolve
-/// the `on_end` callback when the writer drops the channel (natural end).
-/// Guard test: any regression in `ChannelAudioSource` pacing/EOF semantics
-/// breaks both consumers, so it is pinned here at the integration level.
+/// `ChannelAudioSource` — the raw-PCM streaming inject used by `voip_bridge`
+/// and the realtime app (via `Leg::play`) — must pace written frames out the
+/// leg egress and resolve the `on_end` callback when the writer drops the
+/// channel (natural end). Guard test: any regression in `ChannelAudioSource`
+/// pacing/EOF semantics breaks both consumers, so it is pinned here at the
+/// integration level.
 #[tokio::test]
-async fn bridge_play_pcm_streams_and_fires_on_end() {
+async fn channel_audio_source_writer_drop_fires_natural_end() {
     let mut mb = MediaBridge::new("it-pcm-stream");
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
     let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
@@ -356,10 +357,17 @@ async fn bridge_play_pcm_streams_and_fires_on_end() {
         });
 
     // 20ms @ 8kHz = 160 samples per frame; stream 10 frames (200ms) then drop.
-    let tx = mb
-        .bridge_play_pcm(LegSide::A, 8000, Some(on_end))
-        .await
-        .expect("bridge_play_pcm");
+    // Same wiring the session uses (Leg::play over a ChannelAudioSource).
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    la.play(
+        Box::new(rustpbx_media::audio_source::ChannelAudioSource::new(
+            rx, 8000,
+        )),
+        false,
+        Some(on_end),
+    )
+    .await
+    .expect("channel source playback must start");
     let frame = vec![1000i16; 160];
     for _ in 0..10 {
         tx.send(frame.clone())
@@ -370,7 +378,7 @@ async fn bridge_play_pcm_streams_and_fires_on_end() {
 
     let interrupted = tokio::time::timeout(std::time::Duration::from_secs(3), end_rx)
         .await
-        .expect("bridge_play_pcm must fire on_end after writer drop")
+        .expect("playback must fire on_end after writer drop")
         .expect("on_end channel must resolve");
     assert!(
         !interrupted,

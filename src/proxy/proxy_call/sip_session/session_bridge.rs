@@ -14,6 +14,68 @@ use tracing::warn;
 use crate::call::domain::{CallCommand, LegId};
 
 impl crate::proxy::proxy_call::sip_session::session::SipSession {
+    /// Map bridge health-monitor events onto session diagnostics: bounded
+    /// CDR `media_health` trace entries, and a one-shot `proxy.media_stalled`
+    /// call-error per stalled leg (the monitor owns tick bounding and the
+    /// once-per-leg latch; this only forwards).
+    pub(crate) fn forward_media_health_event(
+        cmd_tx: Option<mpsc::Sender<CallCommand>>,
+        session_id: String,
+    ) -> impl Fn(crate::media::media_health::HealthEvent) + Send + 'static {
+        move |event| match event {
+            crate::media::media_health::HealthEvent::Trace {
+                route_age_secs,
+                snapshot,
+            } => {
+                if let Ok(detail) = serde_json::to_value(snapshot.as_ref()) {
+                    if let Some(tx) = &cmd_tx {
+                        let _ = tx.try_send(CallCommand::Trace {
+                            event: crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::MediaHealth,
+                                format!("media health @ {:.0}s", route_age_secs),
+                            )
+                            .detail(detail),
+                        });
+                    }
+                }
+            }
+            crate::media::media_health::HealthEvent::Stalled { side, snapshot } => {
+                let detail = serde_json::to_value(snapshot.as_ref()).ok();
+                warn!(
+                    session_id = %session_id,
+                    leg = side,
+                    route_age_s = format!("{:.0}", snapshot.route_age_secs),
+                    "media stalled: no inbound RTP on connected leg"
+                );
+                if let Some(tx) = &cmd_tx {
+                    let _ = tx.try_send(CallCommand::ReportCallError {
+                        stage: "proxy".to_string(),
+                        app: "proxy".to_string(),
+                        code: "proxy.media_stalled".to_string(),
+                        severity: crate::call_errors::ErrSeverity::Warn,
+                        message: format!("no inbound media on {side} leg"),
+                        sip_status: None,
+                        detail,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Forward the relay-arm-failure latch flip to the session command
+    /// channel so the session re-bridges in transcode mode.
+    pub(crate) fn forward_relay_arm_failure(
+        cmd_tx: Option<mpsc::Sender<CallCommand>>,
+        session_id: String,
+    ) -> impl FnOnce() + Send + 'static {
+        move || {
+            warn!(session_id = %session_id, "fast-path relay arming failed");
+            if let Some(tx) = cmd_tx {
+                let _ = tx.try_send(CallCommand::RelayArmFailure);
+            }
+        }
+    }
+
     /// Cancel and drop any external (voip/realtime) WS bridge handle.
     /// Idempotent; safe from Drop (cancel is synchronous).
     pub(crate) fn teardown_external_bridge(&mut self, why: &str) {

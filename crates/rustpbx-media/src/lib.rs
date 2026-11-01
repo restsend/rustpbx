@@ -44,10 +44,32 @@ pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
 
 pub use leg_id::LegId;
+pub use leg::{CaptureRoute, LegConfig};
 pub use mixer::AudioMixer;
 pub use negotiate::{CodecInfo, MediaNegotiator};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;
+
+/// Create a media leg handle from a simplified [`LegConfig`].
+///
+/// The single construction seam for code outside this crate: callers never
+/// name [`leg::LegInner`] nor touch tap internals, keeping the constructor
+/// free to evolve (transports, pooling, capture wiring) without churn at
+/// the call layer. `recorder_sender` wires the leg's RTP tap into the
+/// call-scoped recording task; `route` picks the initial capture layout
+/// (classic caller layout vs. starts-fully-off for non-owner legs).
+pub fn create_leg(
+    id: impl Into<String>,
+    cfg: &LegConfig,
+    recorder_sender: Option<media_recorder::RecorderSender>,
+    route: CaptureRoute,
+) -> anyhow::Result<leg::Leg> {
+    let leg = leg::LegInner::new(id, cfg, recorder_sender)?;
+    if route == CaptureRoute::Deferred {
+        leg.ingress_tap().set_capture_route(None, None);
+    }
+    Ok(leg)
+}
 
 // ── Shared utility types ────────────────────────────────────────────
 

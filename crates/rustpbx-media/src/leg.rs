@@ -342,6 +342,21 @@ impl Default for RtpTimeoutState {
 /// A single media leg. Cheaply cloneable (`Arc<LegInner>`).
 pub type Leg = Arc<LegInner>;
 
+/// Initial recording-capture routing for a leg's tap, chosen at construction.
+/// Dynamic retargeting later (hold, recording start/stop) goes through
+/// [`Leg::ingress_tap`] → [`crate::ingress_tap::IngressTap::set_capture_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRoute {
+    /// Classic caller layout: ingress→Caller, egress→Callee. With no recorder
+    /// sender installed, capture stays off regardless of the route.
+    Classic,
+    /// Starts fully off. Used for non-owner legs (callee/B, consult peers):
+    /// while bridged the caller leg's egress owns the B channel, and a second
+    /// live source would interleave into garbage. Hold routing flips the
+    /// ingress channel on for as long as the leg is the held peer.
+    Deferred,
+}
+
 impl LegInner {
     /// Create a leg from a pre-built [`RtcConfiguration`] (so callers can
     /// reuse their existing dialplan/transport config logic verbatim) and the

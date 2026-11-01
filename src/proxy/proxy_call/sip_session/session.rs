@@ -1928,37 +1928,6 @@ impl SipSession {
         })
     }
 
-
-    /// Spawn a monitor for fast-path relay arming failure. When the relay
-    /// cannot be armed (e.g. a WebRTC leg's DTLS/SRTP transport never becomes
-    /// ready), the bridge latch flips and the monitor sends
-    /// `CallCommand::RelayArmFailure` so the session re-bridges in transcode
-    /// mode instead of going silently dead.
-    pub(crate) fn arm_relay_arm_failure_monitor(
-        mb: &crate::media::media_bridge::MediaBridge,
-        cmd_tx: Option<mpsc::Sender<CallCommand>>,
-        session_id: &str,
-    ) {
-        let mut rx = mb.relay_arm_failed_rx();
-        let cmd_tx = cmd_tx.clone();
-        let sid = session_id.to_string();
-        crate::utils::spawn(async move {
-            loop {
-                if *rx.borrow_and_update() {
-                    break;
-                }
-                if rx.changed().await.is_err() {
-                    return;
-                }
-            }
-            warn!(session_id = %sid, "fast-path relay arming failed");
-            if let Some(tx) = cmd_tx {
-                let _ = tx.try_send(CallCommand::RelayArmFailure);
-            }
-        });
-    }
-
-
     /// Reconcile the RTP-inactivity watchdog suppression against the current
     /// session state: apps keep the watchdog active (a caller dropping media
     /// without a BYE must still be detected); only a blind transfer in
@@ -2773,7 +2742,7 @@ impl SipSession {
         let cfg = self.build_leg_config(rustrtc::TransportMode::Rtp, codecs, Vec::new());
         let recorder_sender = self.setup_recording_capture()?;
         let leg_label = "caller";
-        let leg = crate::media::leg::LegInner::new(leg_label, &cfg, recorder_sender)?;
+        let leg = crate::media::create_leg(leg_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
         let offer = leg.create_offer().await?;
         if offer.is_empty() {
             return Err(anyhow!("Originate caller SDP offer is empty"));
@@ -4293,7 +4262,7 @@ impl SipSession {
                         };
                         let config = self.build_leg_config(mode.clone(), codecs, video);
                         let peer =
-                            crate::media::leg::LegInner::new(leg_id.as_str(), &config, None)?;
+                            crate::media::create_leg(leg_id.as_str(), &config, None, crate::media::CaptureRoute::Classic)?;
                         self.legs.set_media_leg(&leg_id, peer.clone());
                         self.legs.set_transport(leg_id.clone(), mode);
                         peer
@@ -4301,7 +4270,7 @@ impl SipSession {
                     let answer = peer.apply_sdp(&offer_sdp, rustrtc::SdpType::Offer).await?;
                     peer.accept();
                     self.legs.set_answer(leg_id.clone(), answer.clone());
-                    Ok::<_, anyhow::Error>(Self::align_answer_direction_with_offer(
+                    Ok::<_, anyhow::Error>(MediaNegotiator::align_answer_direction_with_offer(
                         &offer_sdp, &answer,
                     ))
                 }
@@ -4321,7 +4290,7 @@ impl SipSession {
                     .map(|(result_status, answer_sdp)| {
                         // Align answer direction for bypass mode
                         let aligned = answer_sdp
-                            .map(|sdp| Self::align_answer_direction_with_offer(&offer_sdp, &sdp));
+                            .map(|sdp| MediaNegotiator::align_answer_direction_with_offer(&offer_sdp, &sdp));
                         (result_status, aligned)
                     })
                     .map_err(|e| {
@@ -4366,7 +4335,7 @@ impl SipSession {
                                 .iter()
                                 .find(|m| m.kind == rustrtc::MediaKind::Audio)
                             {
-                                let state = if Self::is_hold_direction(audio.direction, Some(offer))
+                                let state = if MediaNegotiator::signals_hold(audio.direction, Some(offer))
                                 {
                                     LegState::Hold
                                 } else {
@@ -7158,7 +7127,7 @@ impl SipSession {
         }
         let recorder_sender = self.setup_recording_capture()?;
         let prepared = async {
-            let leg = crate::media::leg::LegInner::new(caller_label, &cfg, recorder_sender)?;
+            let leg = crate::media::create_leg(caller_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
             let answer = leg
                 .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
                 .await?;
@@ -7802,11 +7771,16 @@ impl SipSession {
                     // channel while the call is held; its tap starts fully
                     // off (the caller leg owns both channels while bridged).
                     let recorder_sender = self.media.recording.capture_sender();
-                    match crate::media::leg::LegInner::new("callee", &cfg, recorder_sender) {
+                    match crate::media::create_leg(
+                        "callee",
+                        &cfg,
+                        recorder_sender,
+                        crate::media::CaptureRoute::Deferred,
+                    ) {
                         Ok(leg) => {
-                            // Starts fully OFF -- see `ensure_media_leg`; hold
-                            // flips ingress->B via `apply_hold_recording_routes`.
-                            leg.ingress_tap().set_capture_route(None, None);
+                            // Starts fully OFF (Deferred route) -- see
+                            // `ensure_media_leg`; hold flips ingress->B via
+                            // `apply_hold_recording_routes`.
                             if let Ok(offer) = leg.create_offer().await {
                                 if self.bridge().is_some() {
                                     self.legs.set_media_leg(&LegId::from("callee"), leg);
@@ -8289,86 +8263,6 @@ impl SipSession {
             .ok_or_else(|| anyhow!("PeerConnection has no local description after re-INVITE"))
     }
 
-    /// Returns `true` when the connection C-line value represents a "zero" address,
-    /// commonly used to signal media hold per RFC 4317.
-    pub(crate) fn is_zero_connection(c: &str) -> bool {
-        let trimmed = c.trim();
-        trimmed == "IN IP4 0.0.0.0" || trimmed == "IN IP6 ::" || trimmed == "IN IP6 0:0:0:0:0:0:0:0"
-    }
-
-
-    /// Align the answer SDP direction per media section to the mirror of the
-    /// offer direction per RFC 3264 §5.1:
-    ///
-    /// | Offer        | Answer       |
-    /// |--------------|--------------|
-    /// | `sendonly`   | `recvonly`   |
-    /// | `recvonly`   | `sendonly`   |
-    /// | `inactive`   | `inactive`   |
-    /// | `sendrecv`   | `sendrecv`   |
-    ///
-    /// Also treats `port=0` and `c=IN IP4 0.0.0.0` (or `c=IN IP6 ::`)
-    /// as equivalent to `inactive`.
-    ///
-    /// Sections are matched by index between offer and answer (the answer
-    /// is expected to have the same number of `m=` lines).
-    fn align_answer_direction_with_offer(offer_sdp: &str, answer_sdp: &str) -> String {
-        let Ok(offer) = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
-        else {
-            warn!("Failed to parse offer SDP, returning answer unchanged");
-            return answer_sdp.to_string();
-        };
-
-        // Per offer-section: target answer direction string, or None to keep as-is.
-        let target_dirs: Vec<Option<&'static str>> = offer
-            .media_sections
-            .iter()
-            .map(|s| {
-                if s.port == 0 {
-                    return Some("inactive");
-                }
-                if Self::section_has_zero_hold_connection(s, offer.session.connection.as_deref()) {
-                    return Some("inactive");
-                }
-                match s.direction {
-                    rustrtc::Direction::SendOnly => Some("recvonly"),
-                    rustrtc::Direction::RecvOnly => Some("sendonly"),
-                    rustrtc::Direction::Inactive => Some("inactive"),
-                    rustrtc::Direction::SendRecv => None,
-                }
-            })
-            .collect();
-
-        let mut out = String::with_capacity(answer_sdp.len() + 64);
-        let mut section_idx = 0usize;
-        let mut seen_m = false;
-
-        for line in answer_sdp.lines() {
-            let l = line.strip_suffix('\r').unwrap_or(line);
-            if l.starts_with("m=") {
-                section_idx = if seen_m { section_idx + 1 } else { 0 };
-                seen_m = true;
-                out.push_str(l);
-                out.push_str("\r\n");
-                continue;
-            }
-            if seen_m {
-                if let Some(dir) = target_dirs.get(section_idx).copied().flatten() {
-                    if matches!(l, "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive") {
-                        out.push_str("a=");
-                        out.push_str(dir);
-                        out.push_str("\r\n");
-                        continue;
-                    }
-                }
-            }
-            out.push_str(l);
-            out.push_str("\r\n");
-        }
-
-        out
-    }
-
     async fn build_local_dialog_answer(
         &mut self,
         side: DialogSide,
@@ -8495,7 +8389,7 @@ impl SipSession {
         }
 
         // Align answer direction with offer per RFC 3264 §5.1
-        answer_sdp = Self::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
+        answer_sdp = MediaNegotiator::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
 
         // Refresh the peer's negotiated profile from the re-INVITE answer.
         // The session updates routing after applying the hold transition,
@@ -12960,8 +12854,14 @@ impl SipSession {
         // or transfer. Capture stays off until hold selects that exact peer,
         // so an unselected consultation cannot leak into the recording.
         let recorder_sender = self.media.recording.capture_sender();
-        let peer = crate::media::leg::LegInner::new(leg_id.as_str(), &cfg, recorder_sender)?;
-        peer.ingress_tap().set_capture_route(None, None);
+        // Deferred route: capture stays off until hold selects that exact
+        // peer, so an unselected consultation cannot leak into the recording.
+        let peer = crate::media::create_leg(
+            leg_id.as_str(),
+            &cfg,
+            recorder_sender,
+            crate::media::CaptureRoute::Deferred,
+        )?;
         let offer = peer.create_offer().await?;
         Ok((peer, offer))
     }
@@ -13476,20 +13376,22 @@ impl SipSession {
                 ));
             }
             if !self.meta.media_health_monitor_spawned {
-                Self::arm_media_health_monitor(
-                    self.bridge().unwrap(),
-                    self.cmd_tx.clone(),
-                    &self.context.session_id,
+                self.bridge().unwrap().spawn_health_monitor(
                     self.context.dialplan.media.stall_detect_secs,
                     self.context.dialplan.media.media_trace_interval_secs,
+                    Self::forward_media_health_event(
+                        self.cmd_tx.clone(),
+                        self.context.session_id.clone(),
+                    ),
                 );
                 self.meta.media_health_monitor_spawned = true;
             }
             if !self.meta.relay_arm_monitor_spawned {
-                Self::arm_relay_arm_failure_monitor(
-                    self.bridge().unwrap(),
-                    self.cmd_tx.clone(),
-                    &self.context.session_id,
+                self.bridge().unwrap().spawn_relay_arm_monitor(
+                    Self::forward_relay_arm_failure(
+                        self.cmd_tx.clone(),
+                        self.context.session_id.clone(),
+                    ),
                 );
                 self.meta.relay_arm_monitor_spawned = true;
             }

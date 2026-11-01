@@ -796,6 +796,46 @@ impl MediaNegotiator {
         filtered
     }
 
+    /// Select the final audio codec list for an SDP answer: a strict subset of
+    /// the offer, keeping the caller-offered payload types. Preference order:
+    /// a previously negotiated codec (if still offered) wins, else the peer
+    /// answer's order (when available), else the configured allow-list.
+    /// Returns `None` when no compatible audio codec exists.
+    pub fn select_answer_codecs(
+        offer_sdp: &str,
+        preferred_peer_sdp: Option<&str>,
+        previous_negotiated_codec: Option<CodecType>,
+        allow_codecs: &[CodecType],
+    ) -> Option<Vec<CodecInfo>> {
+        let preferred_audio_codecs: Vec<CodecType> = preferred_peer_sdp
+            .map(|sdp| {
+                Self::extract_codec_params(sdp)
+                    .audio
+                    .into_iter()
+                    .map(|codec| codec.codec)
+                    .collect()
+            })
+            .filter(|codecs: &Vec<CodecType>| !codecs.is_empty())
+            .unwrap_or_else(|| allow_codecs.to_vec());
+        let offered_audio_codecs = Self::extract_codec_params(offer_sdp);
+        let previous_offered = previous_negotiated_codec.filter(|previous_codec| {
+            offered_audio_codecs
+                .audio
+                .iter()
+                .any(|codec| codec.codec == *previous_codec)
+        });
+        let selected_audio_codecs = if let Some(previous_codec) = previous_offered {
+            Self::build_codec_list_from_offer(offer_sdp, &[previous_codec])
+        } else {
+            Self::build_codec_list_from_offer(offer_sdp, &preferred_audio_codecs)
+        };
+        if selected_audio_codecs.is_empty() {
+            None
+        } else {
+            Some(selected_audio_codecs)
+        }
+    }
+
     pub fn rewrite_sdp_codec_list(sdp: &str, new_codecs: &[CodecInfo]) -> Option<String> {
         if new_codecs.is_empty() {
             return None;
@@ -906,6 +946,135 @@ impl MediaNegotiator {
             );
         }
         result
+    }
+
+    /// RFC 3264/4317 hold-signal test for a re-INVITE offer's audio
+    /// direction: any non-`sendrecv` direction signals hold; `sendrecv`
+    /// with a zero C-line (port 0 / `0.0.0.0`, non-ICE sections) also
+    /// signals hold per the RFC 4317 convention some endpoints use.
+    pub fn signals_hold(
+        direction: rustrtc::Direction,
+        offer: Option<&SessionDescription>,
+    ) -> bool {
+        if !matches!(direction, rustrtc::Direction::SendRecv) {
+            return true;
+        }
+        if let Some(offer) = offer {
+            for section in offer
+                .media_sections
+                .iter()
+                .filter(|section| section.kind == MediaKind::Audio)
+            {
+                if section.port == 0 {
+                    return true;
+                }
+                if Self::section_has_zero_hold_connection(
+                    section,
+                    offer.session.connection.as_deref(),
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns `true` when the connection C-line value represents a "zero" address,
+    /// commonly used to signal media hold per RFC 4317.
+    pub fn is_zero_connection(c: &str) -> bool {
+        let trimmed = c.trim();
+        trimmed == "IN IP4 0.0.0.0" || trimmed == "IN IP6 ::" || trimmed == "IN IP6 0:0:0:0:0:0:0:0"
+    }
+
+    /// True when an SDP media section signals hold via a zero C-line
+    /// (RFC 4317 convention). Sections using ICE (WebRTC) are excluded:
+    /// they reuse the zero C-line with active media flowing.
+    pub fn section_has_zero_hold_connection(
+        section: &rustrtc::MediaSection,
+        session_connection: Option<&str>,
+    ) -> bool {
+        let uses_ice = section.protocol.contains("UDP/TLS")
+            || section
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute.key.as_str(), "ice-ufrag" | "candidate"));
+        !uses_ice
+            && section
+                .connection
+                .as_deref()
+                .or(session_connection)
+                .is_some_and(Self::is_zero_connection)
+    }
+
+    /// Align the answer SDP direction per media section to the mirror of the
+    /// offer direction per RFC 3264 §5.1:
+    ///
+    /// | Offer        | Answer       |
+    /// |--------------|--------------|
+    /// | `sendonly`   | `recvonly`   |
+    /// | `recvonly`   | `sendonly`   |
+    /// | `inactive`   | `inactive`   |
+    /// | `sendrecv`   | `sendrecv`   |
+    ///
+    /// Also treats `port=0` and `c=IN IP4 0.0.0.0` (or `c=IN IP6 ::`)
+    /// as equivalent to `inactive`.
+    ///
+    /// Sections are matched by index between offer and answer (the answer
+    /// is expected to have the same number of `m=` lines).
+    pub fn align_answer_direction_with_offer(offer_sdp: &str, answer_sdp: &str) -> String {
+        let Ok(offer) = SessionDescription::parse(SdpType::Offer, offer_sdp) else {
+            tracing::warn!("Failed to parse offer SDP for direction alignment, returning answer unchanged");
+            return answer_sdp.to_string();
+        };
+
+        // Per offer-section: target answer direction string, or None to keep as-is.
+        let target_dirs: Vec<Option<&'static str>> = offer
+            .media_sections
+            .iter()
+            .map(|s| {
+                if s.port == 0 {
+                    return Some("inactive");
+                }
+                if Self::section_has_zero_hold_connection(s, offer.session.connection.as_deref()) {
+                    return Some("inactive");
+                }
+                match s.direction {
+                    rustrtc::Direction::SendOnly => Some("recvonly"),
+                    rustrtc::Direction::RecvOnly => Some("sendonly"),
+                    rustrtc::Direction::Inactive => Some("inactive"),
+                    rustrtc::Direction::SendRecv => None,
+                }
+            })
+            .collect();
+
+        let mut out = String::with_capacity(answer_sdp.len() + 64);
+        let mut section_idx = 0usize;
+        let mut seen_m = false;
+
+        for line in answer_sdp.lines() {
+            let l = line.strip_suffix('\r').unwrap_or(line);
+            if l.starts_with("m=") {
+                section_idx = if seen_m { section_idx + 1 } else { 0 };
+                seen_m = true;
+                out.push_str(l);
+                out.push_str("\r\n");
+                continue;
+            }
+            if seen_m {
+                if let Some(dir) = target_dirs.get(section_idx).copied().flatten() {
+                    if matches!(l, "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive") {
+                        out.push_str("a=");
+                        out.push_str(dir);
+                        out.push_str("\r\n");
+                        continue;
+                    }
+                }
+            }
+            out.push_str(l);
+            out.push_str("\r\n");
+        }
+
+        out
     }
 }
 

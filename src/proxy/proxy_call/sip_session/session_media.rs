@@ -75,90 +75,6 @@ impl SipSession {
     /// `proxy.media_stalled` (CDR error chip + RWI `call_error`) once per
     /// leg that keeps receiving zero inbound RTP while the route is active —
     /// the mid-call signal for firewall / mis-advertised-address black holes.
-    pub(crate) fn arm_media_health_monitor(
-        mb: &crate::media::media_bridge::MediaBridge,
-        cmd_tx: Option<mpsc::Sender<CallCommand>>,
-        session_id: &str,
-        stall_detect_secs: Option<u64>,
-        trace_interval_secs: Option<u64>,
-    ) {
-        match stall_detect_secs {
-            // `0` disables stall detection: route age can never reach
-            // `Duration::MAX`, so no leg is ever flagged stalled.
-            Some(0) => mb.set_stall_detect(std::time::Duration::MAX),
-            Some(secs) => {
-                mb.set_stall_detect(std::time::Duration::from_secs(secs));
-            }
-            None => {} // bridge default (15s)
-        }
-        let mut rx = mb.health_rx();
-        let sid = session_id.to_string();
-        let reported: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
-            Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
-        // Periodic snapshots: 5s sampler tick, publish every
-        // `trace_interval_secs`, bounded to 20 entries per call so long
-        // calls cannot bloat the CDR metadata.
-        let every_ticks = match trace_interval_secs.unwrap_or(30) {
-            0 => 0,
-            secs => (secs as usize / 5).max(1),
-        };
-        let tick: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
-        let periodic_emitted: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
-        const MAX_PERIODIC_TRACE_EVENTS: usize = 20;
-        crate::utils::spawn(async move {
-            loop {
-                match rx.changed().await {
-                    Ok(()) => {}
-                    Err(_) => return, // bridge dropped — session is over
-                }
-                let Some(snapshot) = rx.borrow_and_update().clone() else {
-                    continue;
-                };
-                let n = tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if every_ticks > 0
-                    && n % every_ticks == 0
-                    && periodic_emitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        < MAX_PERIODIC_TRACE_EVENTS
-                {
-                    if let Ok(detail) = serde_json::to_value(snapshot.as_ref()) {
-                        if let Some(tx) = &cmd_tx {
-                            let _ = tx.try_send(CallCommand::Trace {
-                                event: crate::call_errors::TraceEvent::new(
-                                    crate::call_errors::TraceKind::MediaHealth,
-                                    format!("media health @ {:.0}s", snapshot.route_age_secs),
-                                )
-                                .detail(detail),
-                            });
-                        }
-                    }
-                }
-                for side in snapshot.stalled_sides() {
-                    if !reported.lock().insert(side.to_string()) {
-                        continue; // once per leg per call
-                    }
-                    let detail = serde_json::to_value(snapshot.as_ref()).ok();
-                    warn!(
-                        session_id = %sid,
-                        leg = side,
-                        route_age_s = format!("{:.0}", snapshot.route_age_secs),
-                        "media stalled: no inbound RTP on connected leg"
-                    );
-                    if let Some(tx) = &cmd_tx {
-                        let _ = tx.try_send(CallCommand::ReportCallError {
-                            stage: "proxy".to_string(),
-                            app: "proxy".to_string(),
-                            code: "proxy.media_stalled".to_string(),
-                            severity: crate::call_errors::ErrSeverity::Warn,
-                            message: format!("no inbound media on {side} leg"),
-                            sip_status: None,
-                            detail,
-                        });
-                    }
-                }
-            }
-        });
-    }
-
     /// Ensure the proxy role has an independent media peer, using the codecs
     /// negotiated in `sdp` if needed. Idempotent.
     pub(crate) async fn ensure_media_leg(
@@ -192,17 +108,12 @@ impl SipSession {
                 self.media.recording.capture_sender()
             }
         };
-        let leg = crate::media::leg::LegInner::new(leg_name, &cfg, recorder_sender)?;
+        let route = match side {
+            LegSide::A => crate::media::CaptureRoute::Classic,
+            LegSide::B => crate::media::CaptureRoute::Deferred,
+        };
+        let leg = crate::media::create_leg(leg_name, &cfg, recorder_sender, route)?;
         self.legs.set_media_leg(&LegId::from(leg_name), leg);
-        if side == LegSide::B
-            && let Some(leg) = self.media_leg(&LegId::from(leg_name))
-        {
-            // Starts fully OFF: while bridged the caller leg's egress owns the
-            // B channel (relayed far-party audio). A second live source on the
-            // same sequential channel would interleave into garbage. Hold
-            // flips this on via `apply_hold_recording_routes`.
-            leg.ingress_tap().set_capture_route(None, None);
-        }
         if side == LegSide::A {
             self.spawn_dtmf_forwarder();
         }
@@ -527,36 +438,19 @@ impl SipSession {
         context: &str,
     ) -> String {
         let allow_codecs = self.resolve_effective_codecs();
-        let preferred_audio_codecs: Vec<CodecType> = preferred_peer_sdp
-            .map(|sdp| {
-                MediaNegotiator::extract_codec_params(sdp)
-                    .audio
-                    .into_iter()
-                    .map(|codec| codec.codec)
-                    .collect()
-            })
-            .filter(|codecs: &Vec<CodecType>| !codecs.is_empty())
-            .unwrap_or(allow_codecs);
-        let offered_audio_codecs = MediaNegotiator::extract_codec_params(offer_sdp);
-        let previous_offered = previous_negotiated_codec.filter(|previous_codec| {
-            offered_audio_codecs
-                .audio
-                .iter()
-                .any(|codec| codec.codec == *previous_codec)
-        });
-        let selected_audio_codecs = if let Some(previous_codec) = previous_offered {
-            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &[previous_codec])
-        } else {
-            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &preferred_audio_codecs)
-        };
-        if selected_audio_codecs.is_empty() {
+        let Some(selected_audio_codecs) = MediaNegotiator::select_answer_codecs(
+            offer_sdp,
+            preferred_peer_sdp,
+            previous_negotiated_codec,
+            &allow_codecs,
+        ) else {
             warn!(session_id = %self.id,
                 session_id = %self.context.session_id,
                 context,
                 "No compatible audio codec selected for SDP answer"
             );
             return answer_sdp.to_string();
-        }
+        };
         debug!(
             session_id = %self.context.session_id,
             context,
@@ -784,16 +678,20 @@ impl SipSession {
                     Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
                 }
                 if arm_health_monitor {
-                    Self::arm_media_health_monitor(
-                        mb,
-                        cmd_tx.clone(),
-                        &session_id,
+                    mb.spawn_health_monitor(
                         stall_detect_secs,
                         trace_interval_secs,
+                        Self::forward_media_health_event(
+                            cmd_tx.clone(),
+                            session_id.clone(),
+                        ),
                     );
                 }
                 if arm_relay_monitor {
-                    Self::arm_relay_arm_failure_monitor(mb, cmd_tx, &session_id);
+                    mb.spawn_relay_arm_monitor(Self::forward_relay_arm_failure(
+                        cmd_tx,
+                        session_id.clone(),
+                    ));
                 }
 
                 // A real callee answered — any in-progress transfer is over.

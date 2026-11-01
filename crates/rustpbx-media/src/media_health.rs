@@ -17,6 +17,8 @@
 //! localises them to the network path.
 
 use serde::Serialize;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Selected per-leg egress path, independent of negotiated codec equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25,7 +27,6 @@ pub enum MediaEgressMode {
     DirectRtpForwarding,
     PcmPacing,
 }
-use std::time::Duration;
 
 /// Default window after route activation with zero inbound RTP on a leg
 /// before the leg is flagged stalled. Overridable via
@@ -109,4 +110,24 @@ impl MediaHealthSnapshot {
             .map(|l| l.side)
             .collect()
     }
+}
+
+/// Events surfaced by [`MediaBridge::spawn_health_monitor`]. The monitor
+/// owns the watch channel, sampler-tick bounding and once-per-leg latching;
+/// the consumer maps events onto its own diagnostics channels.
+#[derive(Debug, Clone)]
+pub enum HealthEvent {
+    /// Periodic bounded health snapshot for call-trace metadata (emitted
+    /// every `trace_interval_secs`, capped per call by the monitor).
+    Trace {
+        route_age_secs: f64,
+        snapshot: Arc<MediaHealthSnapshot>,
+    },
+    /// Zero inbound RTP on a connected leg — the firewall /
+    /// mis-advertised-address black-hole signature. Fires once per leg
+    /// per call.
+    Stalled {
+        side: &'static str,
+        snapshot: Arc<MediaHealthSnapshot>,
+    },
 }

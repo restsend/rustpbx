@@ -7059,12 +7059,13 @@ async fn media_stalled_fires_when_connected_leg_receives_nothing() {
     // stall_detect_secs = Some(1): the first sampler snapshot (5s tick)
     // already exceeds the window, and no RTP flows in unit context — both
     // legs must be flagged stalled.
-    SipSession::arm_media_health_monitor(
-        session.media.bridge.as_ref().unwrap(),
-        session.cmd_tx.clone(),
-        "media-stalled-test",
+    session.media.bridge.as_ref().unwrap().spawn_health_monitor(
         Some(1),
         Some(5),
+        SipSession::forward_media_health_event(
+            session.cmd_tx.clone(),
+            "media-stalled-test".to_string(),
+        ),
     );
 
     let mut seen_stall = false;

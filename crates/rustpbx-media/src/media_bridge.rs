@@ -227,17 +227,6 @@ impl MediaBridge {
         *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
     }
 
-    /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
-    /// have the leg's negotiated profile ready (i.e. SDP already applied).
-    /// Used as the conference / supervisor mixer data source: each leg's PCM
-    /// flows into the mixer instead of being read from an independent PC.
-    pub fn leg_pcm_stream(&self, side: LegSide) -> Result<crate::app_ingress::LegPcmStream> {
-        let leg = self
-            .leg(side)
-            .ok_or_else(|| anyhow!("no leg on side {:?}", side))?;
-        leg.pcm_stream(self.root_cancel.child_token())
-    }
-
     /// A selected peer's output was overridden (for example by mute or playback).
     /// Keep the pair and other direction alive, but rebuild routing on the next bridge request.
     pub fn invalidate_route_cache(&mut self) {
@@ -1045,61 +1034,6 @@ impl MediaBridge {
     /// This replaces the legacy "add a sample track to the independent
     /// VoiceEnginePeer PC" conference output path: the mixer's mixed audio now
     /// rides the same MediaBridge leg that carries the call's media.
-    pub fn inject(
-        &self,
-        side: LegSide,
-    ) -> Result<tokio::sync::mpsc::Sender<rustrtc::media::MediaSample>> {
-        let leg = self
-            .leg(side)
-            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        // Spawn the switch so we don't block the session loop on the egress
-        // command channel.
-        tokio::spawn(async move {
-            if let Err(e) = leg
-                .set_egress_source(EgressSource::Inject {
-                    rx: parking_lot::Mutex::new(rx),
-                })
-                .await
-            {
-                warn!(error = ?e, side = ?side, "inject: failed to switch leg egress to Inject");
-            }
-        });
-        Ok(tx)
-    }
-
-    /// Set up a raw-PCM channel audio source on the given leg. The returned
-    /// sender feeds the egress pipeline via [`ChannelAudioSource`]. Underruns
-    /// while the sender is alive keep RTP cadence with **digital silence**
-    /// (not comfort-noise — CNG→speech transitions click every chunk). When
-    /// the sender is dropped and the buffer drains, the source EOFs
-    /// (`loop_playback=false`) so IVR return-app can start without an
-    /// infinite CNG/silence tail.
-    ///
-    /// The source does NOT pre-encode — the leg's egress encoder converts
-    /// PCM→codec at its own 20 ms cadence ("filetrack mode").
-    ///
-    /// `on_end` (if provided) fires when playback stops: `false` on natural
-    /// EOF after the channel drains (delayed by the EOF grace tail so the
-    /// last frames play out remotely), `true` if interrupted.
-    pub async fn bridge_play_pcm(
-        &self,
-        side: LegSide,
-        sample_rate: u32,
-        on_end: Option<crate::egress::EgressEndCallback>,
-    ) -> Result<tokio::sync::mpsc::Sender<Vec<i16>>> {
-        let leg = self
-            .leg(side)
-            .ok_or_else(|| anyhow!("no leg on {side:?}"))?;
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
-        let source = Box::new(crate::audio_source::ChannelAudioSource::new(
-            rx,
-            sample_rate,
-        ));
-        leg.play(source, false, on_end).await?;
-        Ok(tx)
-    }
-
     // ── Timeout / lifecycle ──────────────────────────────────────────────
 
     /// Arm an RTP inactivity timeout for a leg. Returns a `oneshot::Receiver`
@@ -1128,6 +1062,104 @@ impl MediaBridge {
     /// latest value, so a failure that already fired is not missed.
     pub fn relay_arm_failed_rx(&self) -> watch::Receiver<bool> {
         self.relay_arm_failed.subscribe()
+    }
+
+    /// Configure stall detection and spawn the health monitor: watches the
+    /// health snapshot stream and forwards bounded [`HealthEvent`]s to
+    /// `on_event` from a spawned task (keep the callback cheap and
+    /// non-blocking — it forwards into the caller's command channel).
+    ///
+    /// `stall_detect_secs`: `Some(0)` disables stall detection, `None` keeps
+    /// the bridge default (15 s). `trace_interval_secs`: snapshot trace
+    /// period, `None` = 30 s, `0` disables periodic traces (anomaly events
+    /// still fire).
+    ///
+    /// Returns the monitor's `JoinHandle` so tests can assert the task
+    /// terminates once the bridge (the watch senders) is dropped; callers
+    /// may ignore it (dropping a handle just detaches the task).
+    pub fn spawn_health_monitor(
+        &self,
+        stall_detect_secs: Option<u64>,
+        trace_interval_secs: Option<u64>,
+        on_event: impl Fn(crate::media_health::HealthEvent) + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        match stall_detect_secs {
+            // `0` disables stall detection: route age can never reach
+            // `Duration::MAX`, so no leg is ever flagged stalled.
+            Some(0) => self.set_stall_detect(Duration::MAX),
+            Some(secs) => {
+                self.set_stall_detect(Duration::from_secs(secs));
+            }
+            None => {} // bridge default (15s)
+        }
+        let mut rx = self.health_rx();
+        // Periodic snapshots: 5s sampler tick, publish every
+        // `trace_interval_secs`, bounded to 20 entries per call so long
+        // calls cannot bloat the CDR metadata.
+        let every_ticks = match trace_interval_secs.unwrap_or(30) {
+            0 => 0,
+            secs => (secs as usize / 5).max(1),
+        };
+        let tick: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+        let periodic_emitted: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+        const MAX_PERIODIC_TRACE_EVENTS: usize = 20;
+        let reported: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> = Arc::default();
+        tokio::spawn(async move {
+            loop {
+                match rx.changed().await {
+                    Ok(()) => {}
+                    Err(_) => return, // bridge dropped — session is over
+                }
+                let Some(snapshot) = rx.borrow_and_update().clone() else {
+                    continue;
+                };
+                let n = tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if every_ticks > 0
+                    && n % every_ticks == 0
+                    && periodic_emitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        < MAX_PERIODIC_TRACE_EVENTS
+                {
+                    on_event(crate::media_health::HealthEvent::Trace {
+                        route_age_secs: snapshot.route_age_secs,
+                        snapshot: snapshot.clone(),
+                    });
+                }
+                for side in snapshot.stalled_sides() {
+                    if !reported.lock().insert(side.to_string()) {
+                        continue; // once per leg per call
+                    }
+                    on_event(crate::media_health::HealthEvent::Stalled {
+                        side,
+                        snapshot: snapshot.clone(),
+                    });
+                }
+            }
+        })
+    }
+    /// Spawn the relay-arm-failure monitor: invokes `on_failure` once when
+    /// the fast-path relay arming latch flips (a WebRTC leg's transport
+    /// never became ready). The caller reacts by re-bridging in transcode
+    /// mode instead of going silently dead.
+    ///
+    /// Returns the monitor's `JoinHandle` so tests can assert the task
+    /// terminates once the bridge is dropped; callers may ignore it
+    /// (dropping a handle just detaches the task).
+    pub fn spawn_relay_arm_monitor(
+        &self,
+        on_failure: impl FnOnce() + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut rx = self.relay_arm_failed_rx();
+        tokio::spawn(async move {
+            loop {
+                if *rx.borrow_and_update() {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+            on_failure();
+        })
     }
 
     /// Permanently force the transcode path for this session. The relay
@@ -2126,6 +2158,45 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
+
+    /// Leak regression for the spawned monitors (they are no longer visible
+    /// to the session-side TaskGuard counter): both monitor tasks must
+    /// terminate once the bridge — the watch senders — is dropped, and must
+    /// not emit any event after that.
+    #[tokio::test]
+    async fn monitor_tasks_exit_when_bridge_drops() {
+        use tokio::sync::mpsc;
+
+        let mut mb = MediaBridge::new("monitor-exit");
+        let leg = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+        mb.replace_leg(LegSide::A, leg).await;
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let health = mb.spawn_health_monitor(Some(1), Some(0), move |ev| {
+            let _ = event_tx.send(ev);
+        });
+        let relay = mb.spawn_relay_arm_monitor(|| {});
+
+        mb.close();
+        drop(mb);
+
+        // The bridge is gone: both watch senders are dropped, so both tasks
+        // must observe the closed channels and exit promptly.
+        tokio::time::timeout(Duration::from_secs(2), health)
+            .await
+            .expect("health monitor must exit once the bridge drops")
+            .expect("health monitor task must not panic");
+        tokio::time::timeout(Duration::from_secs(2), relay)
+            .await
+            .expect("relay-arm monitor must exit once the bridge drops")
+            .expect("relay-arm monitor task must not panic");
+
+        // And nothing may be emitted after the drop.
+        assert!(
+            event_rx.try_recv().is_err(),
+            "no health events may arrive after the bridge dropped"
+        );
+    }
 
     /// Forwarded header extensions survive only toward WebRTC legs: SIP
     /// peers (plain RTP and SDES-SRTP) never negotiated the source's ids.
@@ -3212,8 +3283,9 @@ mod tests {
         mb.close();
     }
 
-    /// P2.4 data-source migration: `leg_pcm_stream` decodes a leg's ingress
-    /// RTP into PCM frames. Two RTP legs negotiate + bridge; leg A plays a
+    /// End-to-end audio decode: a leg's ingress RTP reaches PCM via
+    /// [`Leg::pcm_stream`] (the primitive live transcription / realtime
+    /// bridges use). Two RTP legs negotiate + bridge; leg A plays a
     /// sine tone; the stream on leg B must emit non-silence PCM.
     #[tokio::test]
     async fn leg_pcm_stream_decodes_bridged_audio() {
@@ -3239,7 +3311,10 @@ mod tests {
         assert!(mb.is_bridged(), "route should be active after both answer");
 
         // Subscribe to leg B's PCM before playing, so we catch frames early.
-        let mut stream = mb.leg_pcm_stream(LegSide::B).expect("leg B PCM stream");
+        let leg_b = mb.leg(LegSide::B).expect("leg B");
+        let mut stream = leg_b
+            .pcm_stream(tokio_util::sync::CancellationToken::new())
+            .expect("leg B PCM stream");
 
         // Play a 440 Hz tone on leg A (egress → RTP → B ingress).
         mb.unbridge().await.expect("unbridge before tone");

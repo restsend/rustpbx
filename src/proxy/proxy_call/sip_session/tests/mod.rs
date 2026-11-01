@@ -6994,18 +6994,18 @@ url = "https://provider.example.test/ivr/step"
 
 #[test]
 fn test_is_zero_connection() {
-    assert!(SipSession::is_zero_connection("IN IP4 0.0.0.0"));
-    assert!(SipSession::is_zero_connection("IN IP6 ::"));
-    assert!(SipSession::is_zero_connection("IN IP6 0:0:0:0:0:0:0:0"));
-    assert!(!SipSession::is_zero_connection("IN IP4 192.168.1.1"));
-    assert!(!SipSession::is_zero_connection("IN IP4 127.0.0.1"));
+    assert!(MediaNegotiator::is_zero_connection("IN IP4 0.0.0.0"));
+    assert!(MediaNegotiator::is_zero_connection("IN IP6 ::"));
+    assert!(MediaNegotiator::is_zero_connection("IN IP6 0:0:0:0:0:0:0:0"));
+    assert!(!MediaNegotiator::is_zero_connection("IN IP4 192.168.1.1"));
+    assert!(!MediaNegotiator::is_zero_connection("IN IP4 127.0.0.1"));
 }
 
 #[test]
 fn test_align_answer_direction_audio_hold() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=recvonly"),
         "hold offer sendonly → answer recvonly:\n{}",
@@ -7022,7 +7022,7 @@ fn test_align_answer_direction_audio_hold() {
 fn test_align_answer_direction_unhold() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=sendrecv"),
         "unhold offer sendrecv → answer keep sendrecv:\n{}",
@@ -7045,11 +7045,11 @@ a=sendrecv\r\n";
     let parsed =
         SipSession::parse_sdp(rustrtc::SdpType::Offer, offer, "test").expect("parse WebRTC offer");
 
-    assert!(!SipSession::is_hold_direction(
+    assert!(!MediaNegotiator::signals_hold(
         rustrtc::Direction::SendRecv,
         Some(&parsed),
     ));
-    let aligned = SipSession::align_answer_direction_with_offer(offer, &answer);
+    let aligned = MediaNegotiator::align_answer_direction_with_offer(offer, &answer);
     assert!(aligned.contains("a=sendrecv"));
     assert!(!aligned.contains("a=inactive"));
 }
@@ -7058,7 +7058,7 @@ a=sendrecv\r\n";
 fn test_align_answer_direction_audio_recvonly() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=sendonly"),
         "offer recvonly → answer sendonly:\n{}",
@@ -7070,7 +7070,7 @@ fn test_align_answer_direction_audio_recvonly() {
 fn test_align_answer_direction_inactive() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=inactive\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=inactive"),
         "offer inactive → answer inactive:\n{}",
@@ -7082,7 +7082,7 @@ fn test_align_answer_direction_inactive() {
 fn test_align_answer_direction_port_zero() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=inactive"),
         "port=0 → answer inactive:\n{}",
@@ -7094,7 +7094,7 @@ fn test_align_answer_direction_port_zero() {
 fn test_align_answer_direction_zero_connection() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=inactive"),
         "c=0.0.0.0 → answer inactive:\n{}",
@@ -7106,7 +7106,7 @@ fn test_align_answer_direction_zero_connection() {
 fn test_align_answer_direction_mixed_audio_video() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=sendrecv\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=recvonly"),
         "audio hold → audio recvonly:\n{}",
@@ -7132,7 +7132,7 @@ fn test_align_answer_direction_mixed_audio_video() {
 fn test_align_answer_direction_no_offer_direction() {
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     // No direction in offer → default is sendrecv → answer unchanged
     assert!(
         result.contains("a=sendrecv"),
@@ -7145,7 +7145,7 @@ fn test_align_answer_direction_no_offer_direction() {
 fn test_align_answer_direction_invalid_offer() {
     let offer = "not an sdp at all";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert_eq!(result, answer, "invalid offer → answer unchanged");
 }
 
@@ -7154,7 +7154,7 @@ fn test_align_answer_direction_section_connection_zero() {
     // Section-level c=0.0.0.0, session-level c=10.0.0.1
     let offer = "v=0\r\no=- 123 456 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
     let answer = "v=0\r\no=- 789 101 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
-    let result = SipSession::align_answer_direction_with_offer(offer, answer);
+    let result = MediaNegotiator::align_answer_direction_with_offer(offer, answer);
     assert!(
         result.contains("a=inactive"),
         "section c=0.0.0.0 → answer inactive:\n{}",
