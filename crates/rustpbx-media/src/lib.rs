@@ -19,6 +19,7 @@ pub mod media_stream;
 pub mod mixer;
 pub mod negotiate;
 pub mod quality_stats;
+pub mod packet_diagnostics;
 pub mod recorder;
 pub mod rtc_track;
 pub mod rtp_track_builder;

@@ -355,3 +355,78 @@ histogram_quantile(0.95, rate(rustpbx_call_duration_seconds_bucket[5m]))
 # P95 talk time for answered calls
 histogram_quantile(0.95, rate(rustpbx_call_talk_time_seconds_bucket[5m]))
 ```
+
+## Retained packet-stage evidence
+
+`[media.quality_stats]` also controls per-leg INFO `media.packet_stages` records,
+from leg creation (including IVR/queue) through a stopping snapshot marked
+`event="final"`, `snapshot_scope="leg_stopping"`. Existing quality/CDR metadata
+retains this point-in-time snapshot as `packetDiagnostics`; actual late deferred
+send outcomes appear in correlated `media.packet_send_tail` INFO and do not
+backfill the CDR.
+Use `sample_interval_ms` for counter sampling and `log_interval_ms` for normal
+output; production configuration sources use 500ms sampling and 5s output.
+Initial/error/idle/recovery/route transitions may emit early. Repeated errors
+are coalesced and route changes are limited while retaining cumulative counts.
+These are observations, not fault verdicts or new media timeout actions.
+
+Records carry full local and root session IDs, leg, direction, monotonic window,
+cumulative counts and deltas. Initial/reset deltas are unknown. RFC3339 log times
+include a timezone; snapshot Unix milliseconds are UTC. Counter first/last ages
+are monotonic; null means never, and omitted error counters mean never/zero.
+Snapshots are not atomic across stages.
+
+Raw application UDP reads, shared-socket dispatch, TURN unwrap, pre-DTLS
+classification, SRTP/SRTCP/RTP acceptance, listener delivery, rewrite submission,
+send attempts, asynchronous queue acceptance and completed sends are distinct.
+Socket reads are not NIC observations; accepted RTP is post-parse/decrypt;
+pre-protect tap egress is not send completion; send completion is not peer
+receipt or playback. Existing tap counters have sampled growth times rather
+than packet-boundary first/last timestamps. DTX/hold/handshake/end context matters.
+Unavailable DTLS error or replay classifications are not fabricated. Direct
+forwarding retains unmeasured PCM semantics. No keys or media payloads are logged.
+
+For retrospective queries enumerate `/settings/logs/nodes`, search every actual
+node with full `callIds`, zoned `start`/`end` and node ID, and follow `nextCursor`.
+Check `complete`, `gaps` and file identities even on empty pages. Join root session
+to local session/leg, then selected relay address to TURN allocation/client/peer/
+channel and the client's persisted telemetry. TURN does not have a SIP Call-ID.
+Missing evidence must remain unknown; a recording with audio does not establish
+remote playback. See the Chinese section for the complete stage table and steps.
+
+Keep active and hourly/daily collision-numbered archives on persistent storage.
+The writer rotates but does not enforce archive deletion; operators must provision
+capacity/retention for the incident reporting window (30 days recommended).
+Release source configuration uniformly and verify actual deployed versions and
+runtime configuration. Disabling quality logs does not disable lower transport
+atomic counters. No production concurrency load test or deployment is implied.
+
+The leg's stopping `final` snapshot has `snapshot_scope="leg_stopping"`,
+`async_send_results_in_cdr_final=false`, and point-in-time
+`deferred_sends_pending` / `deferred_sends_drained_at_snapshot`. It is captured
+before the existing media shutdown and is not a deferred-send drain receipt.
+Actual late deferred outcomes appear in correlated INFO `media.packet_send_tail`
+records with full root/node session IDs, leg and `pbx_to_peer` direction; CDRs
+are not backfilled. The first result and first failure emit immediately; later
+results merge into one on-demand flush at the configured log interval, keeping
+the latest totals separately for every real connection. `connection_id` is a
+process-local stable diagnostic owner ID joining stage/CDR snapshots to late
+results, without changing routing, generations or session identity. `snapshot_age_ms` distinguishes sampling from delayed output.
+A drained snapshot is not peer delivery or media recovery. No queue drain is
+awaited and no leg, PC or transport is retained by the observer. Writes without
+an observed result before process/runtime termination remain unknown.
+Negotiated direction suppression is recorded separately as
+`send_direction_dropped` / `bridge_direction_dropped`, without a stage-error
+verdict. Actual `rtcp_listener_closed` events trigger first-error peer snapshots.
+
+The subsequent adversarial-review fixes add actual consultation-leg sampling and
+durable reports, use transport-accepted counters for diagnostic liveness, and
+separate PCM submission/queue outcomes from actual encoder consumption. Encode,
+decode and device boundaries now carry real monotonic first/last activity ages;
+device counters remain process-global. TURN teardown evidence no longer waits for
+blocked TCP writes to drain, and malformed/orphan byte and age evidence is kept.
+Authenticated RTCP parse failures have an independent client counter. The review
+fixes passed PBX8/media2/vendor8, TURN6 and client157 related distinct tests,
+including real consultation RTC/SIP through the embedded event pump and durable
+outbox. Physical hardware, Windows/iOS, production load and deployment receipts
+remain unverified; no deployment was performed.

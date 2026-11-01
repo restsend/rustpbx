@@ -742,6 +742,7 @@ impl SipSession {
             probation_max_packets: self.context.dialplan.media.probation_max_packets,
             // Tag rustrtc media/ICE logs with the session (call) id.
             call_id: Some(self.context.session_id.clone()),
+            root_session_id: Some(self.root_session_id_str()),
             relay_ready_timeout: self
                 .context
                 .dialplan

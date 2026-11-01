@@ -72,6 +72,8 @@ impl LegRtcpSnapshot {
 pub struct LegQualityReport {
     /// Which side of the bridge ("A" = caller, "B" = callee).
     pub side: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_diagnostics: Option<crate::packet_diagnostics::LegPacketSnapshot>,
     /// Last observed PCM window, retained across source replacement and teardown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_egress: Option<PcmEgressWindow>,

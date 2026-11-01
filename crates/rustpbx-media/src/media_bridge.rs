@@ -260,6 +260,7 @@ impl MediaBridge {
     /// Monitor RTP activity for each selected peer and forward compatibility
     /// DTMF events. The transport counter advances before fast-path forwarding.
     fn wire_leg(&mut self, side: LegSide, leg: &Leg) {
+        leg.set_packet_diagnostic_bridge(Arc::downgrade(&self.legs_shared));
         // Cancel any prior monitor task for this side first (e.g. after a
         // transfer / REFER replaced the leg) so old tasks don't leak and keep
         // the old PeerConnection / IngressTap / RTP timeout state alive.
@@ -2659,6 +2660,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2725,6 +2727,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2791,6 +2794,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2879,6 +2883,7 @@ mod tests {
                         volume_stats: Default::default(),
                         quality_stats: Default::default(),
                         call_id: None,
+                        root_session_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
                         relay_only: false,
@@ -2905,6 +2910,7 @@ mod tests {
                         volume_stats: Default::default(),
                         quality_stats: Default::default(),
                         call_id: None,
+                        root_session_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
                         relay_only: false,
@@ -2989,6 +2995,7 @@ mod tests {
                 sample_interval_ms: 500, window_ms: 2000, log_interval_ms: 2000, ..Default::default()
             },
             call_id: None,
+            root_session_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -3017,6 +3024,7 @@ mod tests {
                 sample_interval_ms: 500, window_ms: 2000, log_interval_ms: 2000, ..Default::default()
             },
             call_id: None,
+            root_session_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,

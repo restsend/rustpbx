@@ -129,6 +129,8 @@ pub struct LegConfig {
     /// media/ICE log lines carry the call id (session id). `None` renders as
     /// "-" in rustrtc logs.
     pub call_id: Option<String>,
+    /// Logical call root; the local call_id remains independently searchable.
+    pub root_session_id: Option<String>,
 }
 
 impl LegConfig {
@@ -157,6 +159,7 @@ impl LegConfig {
             probation_max_packets: None,
             relay_ready_timeout: None,
             call_id: None,
+            root_session_id: None,
             volume_stats: Default::default(),
             quality_stats: Default::default(),
         }
@@ -222,6 +225,7 @@ pub struct LegInner {
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
+    pub(crate) packet_diagnostics: Mutex<Option<crate::packet_diagnostics::LegPacketDiagnostics>>,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -456,6 +460,7 @@ impl LegInner {
             relay_arm_task: Mutex::new(None),
             relay_ready_timeout,
             rtcp_stats,
+            packet_diagnostics: Mutex::new(None),
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
@@ -515,6 +520,7 @@ impl LegInner {
             cfg.quality_stats.clone(),
             cfg.call_id.as_ref().map(|session_id| (session_id.clone(), leg.id().to_string())),
         )?;
+        Self::start_packet_diagnostics(&leg, cfg);
         Ok(leg)
     }
 
@@ -951,6 +957,7 @@ impl LegInner {
             .map(|pair| pair.remote.address.to_string());
         crate::leg_stats::LegQualityReport {
             side,
+            packet_diagnostics: self.packet_diagnostic_snapshot(),
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
                 leg_id: self.id.to_string(),
                 egress_mode: crate::media_health::MediaEgressMode::PcmPacing,
@@ -1151,6 +1158,10 @@ impl LegInner {
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
+        if let Some(state) = self.packet_diagnostics.lock().as_mut() {
+            state.sample(self, true);
+            if let Some(task) = state.task.take() { task.abort(); }
+        }
         self.disarm_rtp_timeout();
         self.egress.stop();
         if let Some(handle) = self.observer_task.lock().take() {
@@ -1595,6 +1606,7 @@ mod relay_policy_tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -2124,6 +2136,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2210,6 +2223,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2273,6 +2287,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2378,6 +2393,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2493,6 +2509,7 @@ mod p24_uac_test {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2560,6 +2577,7 @@ mod ice_lite_tests {
     fn rtp_cfg(enable_ice_lite: bool) -> LegConfig {
         LegConfig {
             call_id: None,
+            root_session_id: None,
             enable_ice_lite,
             ..LegConfig::rtp_pcmu()
         }
@@ -2653,6 +2671,7 @@ mod ice_lite_tests {
     async fn build_rtc_config_forces_ice_lite_off_for_webrtc() {
         let cfg = LegConfig {
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::WebRtc,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
@@ -2666,6 +2685,7 @@ mod ice_lite_tests {
         assert!(rtc_rtp.enable_ice_lite, "RTP legs honor the flag");
         let rtc_srtp = build_rtc_config(&LegConfig {
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::Srtp,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
