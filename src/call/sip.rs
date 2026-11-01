@@ -453,7 +453,7 @@ impl Drop for ClientDialogGuard {
     fn drop(&mut self) {
         let dlg = match self.dialog_layer.get_dialog(&self.id) {
             Some(dlg) => {
-                debug!(%self.id, state = %dlg.state(), "client dialog removed on drop");
+                debug!(call_id = %self.id.call_id, leg_id = %self.id, %self.id, state = %dlg.state(), "client dialog removed on drop");
                 self.dialog_layer.remove_dialog(&self.id);
                 dlg
             }
@@ -469,7 +469,7 @@ impl Drop for ClientDialogGuard {
         if tokio::runtime::Handle::try_current().is_ok() {
             crate::utils::spawn(async move {
                 if let Err(e) = dlg.hangup().await {
-                    warn!(id=%dlg.id(), "error hanging up client dialog on drop: {}", e);
+                    warn!(call_id = %dlg.id().call_id, leg_id = %dlg.id(), id=%dlg.id(), "error hanging up client dialog on drop: {}", e);
                 }
             });
         }
@@ -496,4 +496,32 @@ pub fn spawn_client_dialog_guard(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dialog_guard_log_correlation_preserves_complete_sip_call_id() {
+        use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+        use rsipstack::sip::prelude::HeadersExt;
+
+        let (logs, _log_guard, _interest) = crate::log_capture::LogCapture::start();
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "example.test", None);
+        let call_id = request.call_id_header().unwrap().value().to_string();
+        let (tx, _endpoint) = create_transaction(request).await;
+        let (state_tx, _state_rx) = server.dialog_layer.new_dialog_state_channel();
+        let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let id = dialog.id();
+        drop(ClientDialogGuard::new(server.dialog_layer.clone(), id.clone()));
+        assert!(server.dialog_layer.get_dialog(&id).is_none());
+        let text = logs.text();
+        let removed = text.lines().find(|line| line.contains("client dialog removed on drop")).unwrap();
+        assert!(removed.contains(&format!("call_id={call_id}")), "{removed}");
+        assert!(logs.search(&call_id).await.iter()
+            .any(|line| line.contains("client dialog removed on drop")));
+        server.cancel_token.cancel();
+    }
 }

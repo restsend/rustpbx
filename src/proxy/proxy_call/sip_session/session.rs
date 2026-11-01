@@ -952,6 +952,22 @@ impl SipSession {
         (handle, cmd_rx)
     }
 
+    /// Create the capture queue and task before constructing caller leg A.
+    /// The sender becomes immutable state on the leg's plaintext RTP tap.
+    /// Recording capture is attached to the caller peer so a call can
+    /// start recording on demand at any later stage (IVR node, agent
+    /// connect, API command) even when no recording policy enabled it.
+    /// Without an installed recorder the task simply discards the tapped
+    /// packets, so the idle cost is a single lightweight task per session.
+    fn setup_recording_capture(
+        &mut self,
+    ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
+        let _media_runtime_guard = crate::utils::media_enter();
+        // Match the recorder's target so enabling its logs also enables call context.
+        let sender = tracing::info_span!(target: "rustpbx_media::recorder", "recording", session_id = %self.id)
+            .in_scope(|| self.media.recording.setup_recorder_task())?;
+        Ok(Some(sender))
+    }
 
     /// Auto-start live transcription when `[proxy.transcript.remote]
     /// auto_start = true` **or** the dialplan carries a per-call

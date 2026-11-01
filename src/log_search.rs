@@ -425,10 +425,68 @@ fn matches_id(line: &[u8], matcher: &AhoCorasick) -> bool {
                     | b'}'
             )
     }
+
+    fn span_suffix(after: &[u8]) -> bool {
+        let Some(mut rest) = after.strip_prefix(b"}:") else { return false; };
+        loop {
+            if rest.first().is_some_and(u8::is_ascii_whitespace) {
+                return true;
+            }
+            let name_len = rest.iter().take_while(|&&byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+            }).count();
+            if name_len == 0 {
+                return false;
+            }
+            rest = &rest[name_len..];
+            if rest.starts_with(b"{") {
+                // Quoted field values can contain braces and colons themselves.
+                let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+                let end = rest.iter().position(|&byte| {
+                    if escaped {
+                        escaped = false;
+                        return false;
+                    }
+                    if quoted && byte == b'\\' {
+                        escaped = true;
+                        return false;
+                    }
+                    if byte == b'"' {
+                        quoted = !quoted;
+                        return false;
+                    }
+                    if quoted {
+                        return false;
+                    }
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                });
+                let Some(end) = end else { return false; };
+                rest = &rest[end + 1..];
+            }
+            let Some(next) = rest.strip_prefix(b":") else { return false; };
+            rest = next;
+        }
+    }
     // Overlapping patterns preserve the longer complete ID when a shorter prefix fails its boundary.
     matcher.find_overlapping_iter(line).any(|found| {
+        let before = &line[..found.start()];
+        let after = &line[found.end()..];
+        // Span/session delimiters are also legal SIP Call-ID characters. Recognize
+        // their log context rather than allowing partial matches in arbitrary IDs.
+        let span_end = after.starts_with(b"}:")
+            && before.ends_with(b"=")
+            && before.iter().rposition(|byte| *byte == b'{').is_some_and(|open| {
+                !before[open + 1..].contains(&b'}')
+            })
+            && span_suffix(after);
+        let session_end = after.starts_with(b": ") && before.ends_with(b"session ");
         (found.start() == 0 || !id_byte(line[found.start() - 1]))
-            && (found.end() == line.len() || !id_byte(line[found.end()]))
+            && (found.end() == line.len() || !id_byte(line[found.end()]) || span_end || session_end)
     })
 }
 

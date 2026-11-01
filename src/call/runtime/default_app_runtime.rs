@@ -374,6 +374,7 @@ impl AppRuntime for DefaultAppRuntime {
                 }
 
                 tracing::info!(
+                    session_id = %self.session_id,
                     "App {} stopped for session {}: {}",
                     running.name,
                     self.session_id,
@@ -777,6 +778,7 @@ mod tests {
     /// the app (unchanged legacy behavior).
     #[tokio::test]
     async fn stop_app_still_clears_slot() {
+        let (logs, _log_guard, _interest) = crate::log_capture::LogCapture::start();
         let (runtime, _cmd_rx) = make_runtime();
         runtime
             .start_app("exit_app", None, false)
@@ -791,6 +793,12 @@ mod tests {
             runtime.stop_app(None).await.is_err(),
             "second stop: NotRunning"
         );
+        let text = logs.text();
+        let stopped = text.lines().find(|line| line.contains("App exit_app stopped"))
+            .expect("explicit stop must emit its lifecycle log");
+        assert!(stopped.contains("session_id=runtime-test"), "{stopped}");
+        assert!(logs.search("runtime-test").await.iter()
+            .any(|line| line.contains("App exit_app stopped")));
     }
 
     #[tokio::test]

@@ -4453,6 +4453,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historical_log_search_matches_span_and_session_delimiters() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let expected = [
+            "2026-10-04T10:00:01Z DEBUG pc{label=call-abcdef}: transport ready",
+            "2026-10-04T10:00:02Z DEBUG session{call_id=call-abcdef}: receiver registered",
+            "2026-10-04T10:00:03Z INFO App ivr stopped for session call-abcdef: restart",
+            "2026-10-04T10:00:04Z DEBUG pc{label=\"call-abcdef\"}: transport closed",
+        ];
+        let excluded = [
+            "2026-10-04T10:00:05Z DEBUG pc{label=call-abcdef-long}: another call",
+            "2026-10-04T10:00:06Z INFO App ivr stopped for session call-abcdef-long: restart",
+            "2026-10-04T10:00:07Z INFO call_id=call-abcdef}: another literal ID",
+            "2026-10-04T10:00:08Z INFO call_id=other/call-abcdef another call",
+            "2026-10-04T10:00:09Z INFO call_id=call-abcdef:5060 another call",
+            "2026-10-04T10:00:10Z DEBUG pc{label=call-abcdef}:suffix}: another literal ID",
+            "2026-10-04T10:00:11Z INFO App ivr stopped for session call-abcdef:: restart",
+            "2026-10-04T10:00:12Z DEBUG pc{label=call-abcdef-long}:gather: another call",
+            "2026-10-04T10:00:13Z DEBUG pc{label=call-abcdef}:gather:: malformed scope",
+            "2026-10-04T10:00:14Z DEBUG pc{label=call-abcdef}:ice{state=ready}suffix: malformed scope",
+        ];
+        // Use the same formatter as production for nested instrumented scopes.
+        let (logs, _log_guard, _interest) = crate::log_capture::LogCapture::start();
+        tracing::info_span!("pc", label = %"call-abcdef").in_scope(|| {
+            tracing::info_span!("gather").in_scope(|| tracing::debug!("nested gather"));
+            tracing::info_span!("ice", state = "connected").in_scope(|| {
+                tracing::info_span!("gather").in_scope(|| tracing::debug!("nested ICE gather"));
+            });
+            tracing::info_span!("ice", state = "ready }: path {x}")
+                .in_scope(|| tracing::debug!("quoted span fields"));
+        });
+        let expected: Vec<String> = expected.into_iter().map(str::to_owned)
+            .chain(logs.text().lines().map(|line| format!("2026-10-04T10:00:15Z {line}")))
+            .collect();
+        std::fs::write(file.path(), expected.iter().map(String::as_str).chain(excluded)
+            .collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let app = crate::app::AppStateBuilder::new().with_config(Config {
+            database_url: "sqlite::memory:".into(),
+            log_file: Some(file.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }).with_skip_sip_bind().build().await.unwrap();
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let router = api_urls().with_state(state).layer(axum::Extension(
+            crate::console::middleware::ApiTokenAuth(superuser())));
+        let response = search_with_retry(&router,
+            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T10%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D".to_string())
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["lines"], json!(expected));
+        assert_eq!(body["complete"], true);
+        assert_eq!(body["gaps"], json!([]));
+    }
+
+    #[tokio::test]
     async fn historical_log_search_reads_rotated_files_and_resumes_without_duplicates() {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
