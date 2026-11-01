@@ -826,6 +826,7 @@ impl SipSession {
             // In-band audio DTMF policy (global `[rtp] inband_dtmf`, default
             // auto — detect on legs that negotiate no telephone-event).
             inband_dtmf: self.context.dialplan.media.inband_dtmf,
+            root_session_id: Some(self.root_session_id_str()),
             relay_ready_timeout: self
                 .context
                 .dialplan
