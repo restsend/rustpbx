@@ -1931,6 +1931,10 @@ impl SipSession {
                 !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
             if !dest_is_agent {
                 session.extensions.set_agent_attribution(&cand);
+                // Keep the producing state, before downstream responses or queued events.
+                session.extensions.write().insert(
+                    crate::proxy::proxy_call::session_hooks::OriginatingAgentSnapshot(agent),
+                );
             }
             if let Some(caller) = session.legs.get_mut(&LegId::from("caller")) {
                 caller.agent_id = Some(cand.clone());

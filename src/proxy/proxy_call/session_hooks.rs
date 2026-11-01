@@ -79,6 +79,11 @@ impl std::ops::Deref for SessionExtensions {
     }
 }
 
+/// Originating agent state captured before a direct outbound INVITE is dialed.
+/// Stored in session extensions so terminal hooks retain the producing state.
+#[derive(Clone)]
+pub struct OriginatingAgentSnapshot(pub crate::call::app::agent_registry::AgentRecord);
+
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
 pub struct CallSessionContext {
