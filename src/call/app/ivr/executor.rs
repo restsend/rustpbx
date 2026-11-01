@@ -2279,7 +2279,12 @@ impl CallApp for StepIvrApp {
             return self.__exec_node(ctrl, context).await;
         }
 
-        self.provider.on_session_start(&sess_ctx).await.ok();
+        if let Err(err) = self.provider.on_session_start(&sess_ctx).await {
+            self.set_runtime_status(context, "startup_error");
+            self.set_runtime_error(context, &err.to_string());
+            self.current_node = Some(self.enter_ivr_fallback_node(&format!("start:{err}")));
+            return self.__exec_node(ctrl, context).await;
+        }
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
 
@@ -6180,7 +6185,8 @@ mod tests {
         let app = Router::new().route(
             "/ivr/step",
             post(|| async { StatusCode::SERVICE_UNAVAILABLE.into_response() }),
-        );
+        )
+        .route("/ivr/step/start", post(|| async { StatusCode::OK }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         crate::utils::spawn(async move {
@@ -6350,7 +6356,8 @@ mod tests {
                     }
                 }
             }),
-        );
+        )
+        .route("/ivr/step/start", post(|| async { StatusCode::OK }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         crate::utils::spawn(async move {
@@ -9213,6 +9220,22 @@ mod tests {
     }
 
     fn start_mock_step_provider(start_action: &'static [u8]) -> MockStepProviderServer {
+        start_mock_step_provider_with_start_failures(start_action, Vec::new())
+    }
+
+    enum StartFailure {
+        Disconnect,
+        Reject(u16),
+        Delay(Duration),
+    }
+
+    fn start_mock_step_provider_with_start_failures(
+        start_action: &'static [u8],
+        failures: Vec<StartFailure>,
+    ) -> MockStepProviderServer {
+        let failures = Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::from(failures),
+        ));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
         let url = format!(
             "http://{}/ivr/step",
@@ -9225,8 +9248,9 @@ mod tests {
             for stream in accept_listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let connection_requests = recorded_requests.clone();
+                let failures = failures.clone();
                 std::thread::spawn(move || {
-                    let _ = serve_connection(stream, connection_requests, start_action);
+                    let _ = serve_connection(stream, connection_requests, start_action, failures);
                 });
             }
         });
@@ -9241,6 +9265,7 @@ mod tests {
         mut stream: std::net::TcpStream,
         requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
         start_action: &[u8],
+        failures: Arc<std::sync::Mutex<std::collections::VecDeque<StartFailure>>>,
     ) -> std::io::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -9277,6 +9302,19 @@ mod tests {
             if let Ok(value) = serde_json::from_slice(&body) {
                 requests.lock().unwrap().push((path.clone(), value));
             }
+            if path == "/ivr/step/start" {
+                let failure = failures.lock().unwrap().pop_front();
+                match failure {
+                    Some(StartFailure::Disconnect) => return Ok(()),
+                    Some(StartFailure::Reject(status)) => {
+                        write!(stream, "HTTP/1.1 {status} Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+                        stream.flush()?;
+                        return Ok(());
+                    }
+                    Some(StartFailure::Delay(delay)) => std::thread::sleep(delay),
+                    None => {}
+                }
+            }
             let payload = mock_step_response(&path, &body, start_action);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -9291,7 +9329,7 @@ mod tests {
 
     fn mock_step_response(path: &str, body: &[u8], start_action: &[u8]) -> Vec<u8> {
         if path != "/ivr/step" {
-            // /ivr/step/start and /ivr/step/end are fire-and-forget.
+            // Lifecycle endpoints acknowledge without an action node.
             return br#"{"status":"ok"}"#.to_vec();
         }
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -9304,6 +9342,243 @@ mod tests {
             }
         }
         br#"{"type":"hangup"}"#.to_vec()
+    }
+
+    async fn finish_startup_fallback(mut stack: MockCallStack) {
+        stack
+            .assert_cmd(500, "answer before startup fallback", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(500, "startup fallback prompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "startup fallback hangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
+            .await;
+        stack
+            .join()
+            .await
+            .expect("startup fallback must finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_start_failure_never_requests_step() {
+        use crate::call::app::ivr::provider::{RetryConfig, StepProvider};
+
+        let server = start_mock_step_provider_with_start_failures(
+            br#"{"type":"hangup"}"#,
+            vec![StartFailure::Reject(410)],
+        );
+        let provider =
+            StepProvider::new(&server.url, reqwest::Client::new()).with_retry(RetryConfig {
+                max_retries: 3,
+                timeout_ms: 100,
+                retry_delay_ms: 1,
+                fallback_action: None,
+            });
+        let context = make_test_context();
+        let stack = MockCallStack::run_with_context(
+            Box::new(StepIvrApp::with_provider(Box::new(provider))),
+            context.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(2), finish_startup_fallback(stack))
+            .await
+            .expect("startup rejection must finish within the request budget");
+        let requests = server.requests.lock().unwrap();
+        assert!(
+            requests.iter().all(|(path, _)| path != "/ivr/step"),
+            "uninitialized session must never request a step: {requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(path, _)| path == "/ivr/step/start")
+                .count(),
+            1,
+            "terminal 410 must fail immediately"
+        );
+        assert_eq!(requests.last().unwrap().0, "/ivr/step/end");
+        assert_eq!(context.get_var(IVR_STATUS_KEY).as_deref(), Some("hangup"));
+        assert!(context.get_var(IVR_LAST_ERROR_KEY).unwrap().contains("410"));
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_start_transport_recovers_before_first_step() {
+        let server = start_mock_step_provider_with_start_failures(
+            br#"{"type":"hangup"}"#,
+            vec![StartFailure::Disconnect],
+        );
+        let provider =
+            StepProvider::new(&server.url, reqwest::Client::new()).with_retry(RetryConfig {
+                max_retries: 3,
+                timeout_ms: 20,
+                retry_delay_ms: 1,
+                fallback_action: None,
+            });
+        let stack = MockCallStack::run(
+            Box::new(StepIvrApp::with_provider(Box::new(provider))),
+            "1001",
+            "2000",
+        );
+        tokio::time::timeout(Duration::from_secs(2), stack.join())
+            .await
+            .expect("startup recovery must be bounded")
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        let paths: Vec<_> = requests.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/ivr/step/start",
+                "/ivr/step/start",
+                "/ivr/step",
+                "/ivr/step/end"
+            ]
+        );
+        assert_eq!(
+            requests[0].1, requests[1].1,
+            "retry must retain the same invocation body"
+        );
+        assert_eq!(requests[2].1["session_id"], requests[0].1["session_id"]);
+        assert_eq!(
+            requests[2].1["app_execution_id"],
+            requests[0].1["app_execution_id"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_start_transport_budget_never_requests_step() {
+        let server = start_mock_step_provider_with_start_failures(
+            br#"{"type":"hangup"}"#,
+            vec![
+                StartFailure::Disconnect,
+                StartFailure::Disconnect,
+                StartFailure::Disconnect,
+            ],
+        );
+        let provider =
+            StepProvider::new(&server.url, reqwest::Client::new()).with_retry(RetryConfig {
+                max_retries: 3,
+                timeout_ms: 20,
+                retry_delay_ms: 1,
+                fallback_action: None,
+            });
+        let context = make_test_context();
+        let stack = MockCallStack::run_with_context(
+            Box::new(StepIvrApp::with_provider(Box::new(provider))),
+            context.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(2), finish_startup_fallback(stack))
+            .await
+            .expect("startup attempts must be bounded");
+        assert_eq!(context.get_var(IVR_STATUS_KEY).as_deref(), Some("hangup"));
+        let requests = server.requests.lock().unwrap();
+        let starts: Vec<_> = requests
+            .iter()
+            .filter(|(path, _)| path == "/ivr/step/start")
+            .collect();
+        assert_eq!(
+            starts.len(),
+            3,
+            "exactly the configured attempts must be made"
+        );
+        assert!(starts.iter().all(|(_, body)| body == &starts[0].1));
+        assert!(!requests.iter().any(|(path, _)| path == "/ivr/step"));
+        assert_eq!(requests.last().unwrap().0, "/ivr/step/end");
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_start_keeps_existing_initialization_budget() {
+        let server = start_mock_step_provider_with_start_failures(
+            br#"{"type":"hangup"}"#,
+            vec![StartFailure::Delay(Duration::from_millis(200))],
+        );
+        let provider =
+            StepProvider::new(&server.url, reqwest::Client::new()).with_retry(RetryConfig {
+                timeout_ms: 100,
+                ..RetryConfig::default()
+            });
+        let stack = MockCallStack::run(
+            Box::new(StepIvrApp::with_provider(Box::new(provider))),
+            "1001",
+            "2000",
+        );
+        // Initialization has always had a 10s budget, independent of /step's timeout.
+        tokio::time::timeout(Duration::from_secs(2), stack.join())
+            .await
+            .expect("slow initialization must still complete")
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests[0].0, "/ivr/step/start");
+        assert_eq!(requests[1].0, "/ivr/step");
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_start_total_deadline_stops_without_step() {
+        let entered = Arc::new(Notify::new());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler_entered = entered.clone();
+        let handler_requests = requests.clone();
+        let other_requests = requests.clone();
+        let app = axum::Router::new()
+            .route(
+                "/ivr/step/start",
+                axum::routing::post(move || {
+                    let entered = handler_entered.clone();
+                    let requests = handler_requests.clone();
+                    async move {
+                        requests.lock().unwrap().push("/ivr/step/start".to_string());
+                        entered.notify_one();
+                        std::future::pending::<axum::http::StatusCode>().await
+                    }
+                }),
+            )
+            .fallback(axum::routing::post(move |uri: axum::http::Uri| {
+                other_requests.lock().unwrap().push(uri.path().to_string());
+                async { axum::Json(serde_json::json!({"type": "hangup"})) }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ivr/step", listener.local_addr().unwrap());
+        let server = crate::utils::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = StepProvider::new(url, reqwest::Client::new()).with_retry(RetryConfig {
+            retry_delay_ms: 1,
+            ..RetryConfig::default()
+        });
+        let context = make_test_context();
+        let stack = MockCallStack::run_with_context(
+            Box::new(StepIvrApp::with_provider(Box::new(provider))),
+            context.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        // Pause only after real network admission; advancing before it would race I/O.
+        tokio::time::pause();
+        let paused_at = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            context
+                .get_var(IVR_LAST_ERROR_KEY)
+                .unwrap()
+                .contains("timed out")
+        );
+        assert!(tokio::time::Instant::now() - paused_at <= Duration::from_secs(10));
+        tokio::time::resume();
+        finish_startup_fallback(stack).await;
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["/ivr/step/start", "/ivr/step/end"]
+        );
+        server.abort();
     }
 
     #[tokio::test]
