@@ -17,7 +17,8 @@ use rustpbx_sipflow::{SipFlowBackend, SipFlowItem as BackendSipFlowItem, SipFlow
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::rtp::RtpPacket;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{trace, warn};
+use tracing::instrument::WithSubscriber;
+use tracing::{Instrument, trace, warn};
 
 use crate::ingress_tap::PacketDirection;
 use crate::negotiate::NegotiatedLegProfile;
@@ -401,7 +402,7 @@ impl RecorderHandle {
             RecorderTask::new(rtp_rx, command_rx, recorder_finished_tx)
                 .run()
                 .await;
-        });
+        }.in_current_span().with_current_subscriber());
         let sender = RecorderSender::new(rtp_tx);
         (Self { tx: command_tx }, sender, recorder_finished_rx)
     }

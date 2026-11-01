@@ -1428,64 +1428,89 @@ async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
     assert_eq!(session.media_profile.path, MediaPathMode::Bypass);
 }
 
-#[tokio::test]
-async fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
-        "ivr".to_string(),
-        None,
-        true,
-    );
-    // Recording policy left disabled: the capture tap is armed unconditionally
-    // so a call can start recording on demand at any stage (IVR node, agent
-    // connect, API command) regardless of the routing-time policy.
-    let mut session = build_session(dialplan).await;
+#[test]
+fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
+    let media_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1).thread_name("recording-log-test-media")
+        .enable_all().build().unwrap();
+    let control_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all().build().unwrap();
+    control_runtime.block_on(async {
+        for filter in [
+            "trace",
+            "warn,rustpbx_media=debug",
+            "warn,rustpbx_media::recorder=debug,rustpbx::proxy::proxy_call::sip_session=warn",
+        ] {
+            let (logs, _log_guard, _interest) = crate::log_capture::LogCapture::start_filtered(filter);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+                "ivr".to_string(),
+                None,
+                true,
+            );
+            // Recording policy left disabled: the capture tap is armed unconditionally
+            // so a call can start recording on demand at any stage (IVR node, agent
+            // connect, API command) regardless of the routing-time policy.
+            let mut session = build_session(dialplan).await;
 
-    setup_recording_test_media(&mut session).await;
+            {
+                // This control runtime is current-thread, so the enter guard cannot migrate.
+                let _media_guard = media_runtime.enter();
+                setup_recording_test_media(&mut session).await;
+            }
 
-    {
-        let recording = &session.media.recording;
-        assert!(
-            recording.has_recorder_task(),
-            "capture sender/task must be armed even with recording disabled"
-        );
-        assert!(
-            !recording.has_recorder().await,
-            "no recorder backend may be installed until recording starts"
-        );
-    }
+            {
+                let recording = &session.media.recording;
+                assert!(
+                    recording.has_recorder_task(),
+                    "capture sender/task must be armed even with recording disabled"
+                );
+                assert!(
+                    !recording.has_recorder().await,
+                    "no recorder backend may be installed until recording starts"
+                );
+            }
 
-    // On-demand start succeeds without recording enabled.
-    let out_path = dir.path().join("ondemand.wav");
-    let result = session
-        .execute_command(
-            CallCommand::StartRecording {
-                config: crate::call::domain::RecordConfig {
-                    path: out_path.to_string_lossy().into_owned(),
-                    ..Default::default()
-                },
-            },
-            None,
-        )
-        .await;
-    assert!(
-        result.success,
-        "on-demand start must succeed with recording disabled: {result:?}"
-    );
-    {
-        let recording = &session.media.recording;
-        assert!(
-            recording.has_recorder().await,
-            "recorder must be installed by the on-demand start"
-        );
-    }
-    {
-        let recording = &mut session.media.recording;
-        recording
-            .stop_recording()
-            .await
-            .expect("stop on-demand recorder");
-    }
+            // On-demand start succeeds without recording enabled.
+            let out_path = dir.path().join("ondemand.wav");
+            let result = session
+                .execute_command(
+                    CallCommand::StartRecording {
+                        config: crate::call::domain::RecordConfig {
+                            path: out_path.to_string_lossy().into_owned(),
+                            ..Default::default()
+                        },
+                    },
+                    None,
+                )
+                .await;
+            assert!(
+                result.success,
+                "on-demand start must succeed with recording disabled: {result:?}"
+            );
+            {
+                let recording = &session.media.recording;
+                assert!(
+                    recording.has_recorder().await,
+                    "recorder must be installed by the on-demand start"
+                );
+            }
+            {
+                let recording = &mut session.media.recording;
+                recording
+                    .stop_recording()
+                    .await
+                    .expect("stop on-demand recorder");
+            }
+            let text = logs.text();
+            let created = text.lines().find(|line| line.contains("Creating recorder:"))
+                .expect("asynchronous recorder initialization must emit its diagnostic");
+            assert!(created.contains("recording-log-test-media"), "{created}");
+            assert!(created.contains("session_id=test-session"), "{filter}: {created}");
+            assert!(logs.search("test-session").await.iter()
+                .any(|line| line.contains("Creating recorder:")));
+        }
+    });
 }
 
 #[tokio::test]

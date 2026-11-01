@@ -2713,6 +2713,7 @@ impl ProxyModule for CallModule {
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         info!(
+            call_id = %dialog_id.call_id,
             %dialog_id,
             tx = %tx.key,
             uri = %tx.original.uri,

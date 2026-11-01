@@ -1691,6 +1691,7 @@ impl SipServer {
             crate::utils::spawn(async move {
                 runnings_tx.fetch_add(1, Ordering::Relaxed);
                 let start_time = Instant::now();
+                let call_id = tx.original.call_id_header().ok().map(|header| header.value().to_string());
                 let cookie = TransactionCookie::from(&tx.key);
                 let guard = token.clone().drop_guard();
                 select! {
@@ -1702,15 +1703,15 @@ impl SipServer {
                             .unwrap_or_default();
                         match r {
                             Ok(_) => {
-                                debug!(key = %tx.key, source = %source_addr, final_status = %final_status, "transaction processed in {:?}", start_time.elapsed());
+                                debug!(call_id = call_id.as_deref(), key = %tx.key, source = %source_addr, final_status = %final_status, "transaction processed in {:?}", start_time.elapsed());
                             },
                             Err(e) => {
-                                warn!(key = %tx.key, source = %source_addr, final_status = %final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
+                                warn!(call_id = call_id.as_deref(), key = %tx.key, source = %source_addr, final_status = %final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
                             }
                         }
                     }
                     _ = token.cancelled() => {
-                        info!(key = %tx.key, "transaction cancelled");
+                        info!(call_id = call_id.as_deref(), key = %tx.key, "transaction cancelled");
                     }
                 };
                 crate::metrics::transaction::latency_seconds(start_time.elapsed().as_secs_f64());
@@ -1749,6 +1750,7 @@ impl SipServer {
         cookie: TransactionCookie,
         tx: &mut Transaction,
     ) -> Result<()> {
+        let call_id = tx.original.call_id_header().ok().map(|header| header.value().to_string());
         for module in modules.iter() {
             match module
                 .on_transaction_begin(token.clone(), tx, cookie.clone())
@@ -1760,6 +1762,7 @@ impl SipServer {
                 },
                 Err(e) => {
                     warn!(
+                        call_id = call_id.as_deref(),
                         key = %tx.key,
                         module = module.name(),
                         "failed to handle transaction: {}",
@@ -1779,7 +1782,7 @@ impl SipServer {
             match module.on_transaction_end(tx).await {
                 Ok(_) => {}
                 Err(e) => {
-                    warn!(key = %tx.key, "failed to handle transaction: {}", e);
+                    warn!(call_id = call_id.as_deref(), key = %tx.key, "failed to handle transaction: {}", e);
                 }
             }
         }
@@ -2497,6 +2500,43 @@ mod contact_uri_tests {
     use super::*;
     use crate::config::{ClusterPeer, SipContactConfig};
     use rsipstack::sip::HostWithPort;
+
+    #[tokio::test]
+    async fn transaction_log_correlation_preserves_complete_sip_call_id() {
+        use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+
+        let (logs, _log_guard, _interest) = crate::log_capture::LogCapture::start();
+        let (inner, config) = create_test_server().await;
+        let proxy = SipServer {
+            modules: Arc::new(vec![Box::new(crate::proxy::call::CallModule::new(config, inner.clone()))]),
+            inner,
+        };
+        let mut request = create_test_request(rsipstack::sip::Method::Options, "alice", None, "example.test", None);
+        request.headers.unique_push(rsipstack::sip::Header::To(
+            rsipstack::sip::headers::To::new("<sip:alice@example.test>;tag=remote-tag")));
+        let call_id = request.call_id_header().unwrap().value().to_string();
+        let (tx, _endpoint) = create_transaction(request).await;
+        let (sender, incoming) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(tx).unwrap();
+        drop(sender);
+        proxy.handle_incoming(incoming).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !logs.text().contains("transaction processed in") {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("transaction must finish");
+        let text = logs.text();
+        for message in ["call transaction begin", "transaction processed in"] {
+            let line = text.lines().find(|line| line.contains(message)).unwrap();
+            let actual = line.split_whitespace()
+                .find_map(|field| field.strip_prefix("call_id=")).unwrap();
+            assert_eq!(actual.trim_matches('"'), call_id, "{line}");
+        }
+        let found = logs.search(&call_id).await;
+        assert!(found.iter().any(|line| line.contains("call transaction begin")));
+        assert!(found.iter().any(|line| line.contains("transaction processed in")));
+        proxy.stop();
+    }
 
     #[tokio::test]
     async fn incoming_udp_contact_uses_packet_source_and_local_network_policy() -> anyhow::Result<()> {

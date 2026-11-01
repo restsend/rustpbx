@@ -16,6 +16,9 @@ pub mod console;
 pub mod db_report;
 pub mod handler;
 pub mod license;
+#[cfg(test)]
+#[path = "../tests/common/log_capture.rs"]
+pub(crate) mod log_capture;
 pub mod log_reload;
 mod log_search;
 pub mod log_viewer;
