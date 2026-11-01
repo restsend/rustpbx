@@ -2919,3 +2919,128 @@ async fn transcode_recording_preserves_both_directions_g729_pcma() {
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
+
+/// Relay-to-hold must anchor after the newest sampling time, even when the
+/// final arrival on the relay is an older packet from the same source.
+#[tokio::test]
+async fn relay_late_tail_does_not_rewind_paced_hold_clock() {
+    use rustpbx_media::audio_source::ToneAudioSource;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use std::sync::{Arc, Mutex};
+
+    struct Capture {
+        packets: Mutex<Vec<(RtpHeader, Vec<u8>)>>,
+        changed: tokio::sync::Notify,
+    }
+    impl RtpObserver for Capture {
+        fn on_ingress(&self, packet: &RtpPacket, _: std::net::SocketAddr) {
+            self.packets
+                .lock()
+                .unwrap()
+                .push((packet.header.clone(), packet.payload.to_vec()));
+            self.changed.notify_one();
+        }
+    }
+
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.auto_rebridge = false;
+    let capture = Arc::new(Capture {
+        packets: Mutex::new(Vec::new()),
+        changed: tokio::sync::Notify::new(),
+    });
+    h.test_b.pc.add_observer(capture.clone());
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+    let leg = h.mb.leg(LegSide::B).unwrap().clone();
+    let output_ssrc = leg.outbound_audio_ssrc();
+
+    let mut received = Vec::new();
+    for (seq, timestamp, tag) in [(1, 10000, 0x11), (96, 25200, 0x22), (2, 10160, 0x33)] {
+        h.test_a
+            .pc
+            .send_raw_rtp(RtpPacket::new(
+                RtpHeader::new(0, seq, timestamp, 0x1234),
+                vec![tag; 160],
+            ))
+            .await
+            .unwrap();
+        let header = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((header, _)) =
+                    capture
+                        .packets
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(header, payload)| {
+                            header.ssrc == output_ssrc && payload == &vec![tag; 160]
+                        })
+                {
+                    break header.clone();
+                }
+                capture.changed.notified().await;
+            }
+        })
+        .await
+        .expect("each raw relayed payload reaches the real UDP receiver");
+        received.push(header);
+    }
+    assert_eq!(
+        received[1].timestamp.wrapping_sub(received[0].timestamp),
+        15200
+    );
+    assert_eq!(
+        received[2].timestamp.wrapping_sub(received[0].timestamp),
+        160,
+        "initial rewrite fix keeps the late packet's real sampling time"
+    );
+    let high_water = received[1].timestamp;
+    let count_before_hold = capture.packets.lock().unwrap().len();
+    h.mb.unbridge().await.unwrap();
+    leg.play_media(
+        Box::new(ToneAudioSource::new(660, Duration::from_secs(1), 8000).unwrap()),
+        true,
+    )
+    .await
+    .unwrap();
+    let resumed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some((header, _)) = capture
+                .packets
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(count_before_hold)
+                .find(|(header, _)| header.ssrc == output_ssrc)
+            {
+                break header.clone();
+            }
+            capture.changed.notified().await;
+        }
+    })
+    .await
+    .expect("paced hold output reaches the real UDP receiver");
+    eprintln!(
+        "relay currentTS={high_water} lateTS={} pacedTS={} seq={}->{}",
+        received[2].timestamp,
+        resumed.timestamp,
+        received[2].sequence_number,
+        resumed.sequence_number
+    );
+    h.close();
+    assert_eq!(
+        resumed.sequence_number,
+        received[2].sequence_number.wrapping_add(1)
+    );
+    assert_eq!(
+        resumed.timestamp.wrapping_sub(high_water),
+        160,
+        "relay-to-paced must anchor to the output high-water sampling time"
+    );
+}
