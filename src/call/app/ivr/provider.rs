@@ -621,22 +621,55 @@ impl ActionProvider for StepProvider {
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
         let url = self.endpoint_url(Some("start"));
         let start = std::time::Instant::now();
-        let req = self.http_client.post(&url).json(ctx);
-        if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
-            error!(
-                url = %url,
-                error = %e,
-                duration_ms = %start.elapsed().as_millis(),
-                "StepProvider on_session_start failed"
-            );
-        } else {
-            debug!(
-                url = %url,
-                duration_ms = %start.elapsed().as_millis(),
-                "StepProvider on_session_start response"
-            );
+        // Keep the existing startup budget; retries share it rather than borrowing
+        // /step's shorter timeout or extending the caller's initialization wait.
+        let deadline = tokio::time::Instant::now() + crate::http_util::effective_timeout(None);
+        let mut last_err = anyhow::anyhow!("no retry attempted");
+        for attempt in 0..self.retry.max_retries {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let req = self.http_client.post(&url).json(ctx);
+            match crate::http_util::execute_request(req, &self.headers, Some(remaining)).await {
+                Ok(_) => {
+                    debug!(
+                        session_id = %ctx.session_id,
+                        app_execution_id = ctx.app_execution_id,
+                        url = %url,
+                        duration_ms = %start.elapsed().as_millis(),
+                        "StepProvider on_session_start response"
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    error!(
+                        session_id = %ctx.session_id,
+                        app_execution_id = ctx.app_execution_id,
+                        url = %url,
+                        error = %err,
+                        attempt = attempt,
+                        duration_ms = %start.elapsed().as_millis(),
+                        "StepProvider on_session_start failed"
+                    );
+                    // Only transport failures are recoverable here. A provider
+                    // response remains authoritative and keeps its original error.
+                    if err
+                        .downcast_ref::<crate::http_util::HttpStatusError>()
+                        .is_some()
+                    {
+                        return Err(err);
+                    }
+                    last_err = err;
+                }
+            }
+            if attempt + 1 < self.retry.max_retries {
+                let wake =
+                    tokio::time::Instant::now() + Duration::from_millis(self.retry.retry_delay_ms);
+                tokio::time::sleep_until(wake.min(deadline)).await;
+            }
         }
-        Ok(())
+        Err(last_err)
     }
 
     async fn on_session_end_context(
