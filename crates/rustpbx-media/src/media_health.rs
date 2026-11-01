@@ -12,9 +12,9 @@
 //!
 //! The snapshot intentionally separates *pipeline* counters (IngressTap:
 //! packets that reached the forwarding path) from *transport* counters
-//! (ICE/socket level): a growing gap between them localises drops to the
-//! receive pipeline, while `transport_rx == 0` with a wire-selected pair
-//! localises them to the network path.
+//! (accepted RTP after parsing/decryption). A gap can describe the receive
+//! pipeline, but zero accepted RTP cannot establish whether UDP reached the
+//! application; those lower boundaries require separate transport instrumentation.
 
 use serde::Serialize;
 use std::sync::Arc;
@@ -65,9 +65,9 @@ pub struct LegMediaHealth {
     pub ingress_packets: u64,
     /// IngressTap: packets produced toward the peer.
     pub egress_packets: u64,
-    /// Transport-level inbound RTP (socket truth).
+    /// Inbound RTP accepted after parsing/decryption; not raw UDP or NIC reads.
     pub transport_rx_packets: u64,
-    /// Transport-level outbound RTP incl. relayed packets (sender counter).
+    /// Outbound RTP sender accounting, including relay submissions; not peer receipt.
     pub transport_tx_packets: u64,
     /// Deltas over the last sample window (5 s).
     pub ingress_delta: u64,

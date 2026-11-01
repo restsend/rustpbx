@@ -1268,7 +1268,7 @@ impl LegInner {
             _ if prev_was_relay => {
                 self.pc.clear_rtp_rewrite_bridge();
                 if let Some(sender) = audio_rtp_sender(&self.pc)
-                    && sender.packets_sent() > 0
+                    && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
                 {
                     // Adopt both the timestamp AND the sequence space: the
                     // receiver has already consumed the relay's numbers on
@@ -1277,13 +1277,13 @@ impl LegInner {
                     // jitter buffers -> choppy/absent audio after hold).
                     tracing::debug!(
                         leg = %self.id,
-                        wire_ts = sender.last_rtp_timestamp(),
+                        wire_ts = wire_timestamp_high_water,
                         next_seq = sender.next_sequence_number(),
                         "relay -> paced egress: adopting wire timeline"
                     );
                     self.egress
                         .adopt_wire_timeline(
-                            sender.last_rtp_timestamp(),
+                            wire_timestamp_high_water,
                             sender.next_sequence_number(),
                         )
                         .await?;
@@ -1590,11 +1590,13 @@ fn seed_rewrite_options_from_destination(
     if options.initial_sequence_number.is_none() {
         options.initial_sequence_number = Some(sender.next_sequence_number());
     }
-    if options.initial_output_timestamp.is_none() && sender.packets_sent() > 0 {
+    if options.initial_output_timestamp.is_none()
+        && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
+    {
         let clock_rate = sender.params().clock_rate.max(1);
         let step = ((clock_rate as u64 * 20) / 1000) as u32;
         options.initial_output_timestamp =
-            Some(sender.last_rtp_timestamp().wrapping_add(step.max(1)));
+            Some(wire_timestamp_high_water.wrapping_add(step.max(1)));
     }
     options
 }
