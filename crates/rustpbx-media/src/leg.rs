@@ -93,8 +93,15 @@ pub struct LegConfig {
     /// leg carries no video (audio-only call).
     pub video_codecs: Vec<rustrtc::config::VideoCapability>,
     pub rtp_port_range: Option<(u16, u16)>,
-    pub external_ip: Option<String>,
-    pub bind_ip: Option<String>,
+    /// Public addresses to advertise instead of the local ones (1:1 NAT),
+    /// at most one per family (rustrtc `external_ips`).
+    pub external_ips: Vec<std::net::IpAddr>,
+    /// Local addresses to bind on, one socket each; `::` is one socket for
+    /// IPv4 and IPv6 (rustrtc `bind_ips`). Empty: chosen by rustrtc.
+    pub bind_ips: Vec<std::net::IpAddr>,
+    /// Our offers on RTP and SRTP legs put IPv6 in `c=` when the leg has it
+    /// (rustrtc `prefer_ipv6`). Answers follow the offer's family.
+    pub prefer_ipv6: bool,
     pub cname: Option<String>,
     /// Emit comfort noise (instead of digital silence) when the leg's egress
     /// has no source. Defaults to true.
@@ -160,8 +167,9 @@ impl LegConfig {
             }],
             video_codecs: Vec::new(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -1878,12 +1886,9 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         enable_ice_lite: cfg.transport != TransportMode::WebRtc && cfg.enable_ice_lite,
         rtp_start_port,
         rtp_end_port,
-        external_ips: cfg
-            .external_ip
-            .iter()
-            .filter_map(|v| v.parse().ok())
-            .collect(),
-        bind_ips: cfg.bind_ip.iter().filter_map(|v| v.parse().ok()).collect(),
+        external_ips: cfg.external_ips.clone(),
+        bind_ips: cfg.bind_ips.clone(),
+        prefer_ipv6: cfg.prefer_ipv6,
         // Relay-only: advertise (and check) only TURN relay candidates. See
         // `LegConfig::relay_only` for when an operator wants this.
         ice_servers: cfg.ice_servers.clone(),
@@ -1955,7 +1960,11 @@ fn advertised_audio_addr(desc: &SessionDescription) -> Option<String> {
         .or(desc.session.connection.as_deref())?;
     // `c=IN IP4 1.2.3.4` → take the last token (the address).
     let host = conn.split_whitespace().next_back()?;
-    Some(format!("{host}:{}", audio.port))
+    match host.parse::<std::net::IpAddr>() {
+        // `[2001:db8::1]:4000` for IPv6.
+        Ok(ip) => Some(std::net::SocketAddr::new(ip, audio.port).to_string()),
+        Err(_) => Some(format!("{host}:{}", audio.port)),
+    }
 }
 
 pub(crate) fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result<String> {
@@ -2065,8 +2074,9 @@ mod relay_policy_tests {
             }],
             video_codecs: Vec::new(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -2273,18 +2283,46 @@ mod tests {
     async fn leg_config_network_settings_reach_rtc_configuration() {
         let mut cfg = LegConfig::rtp_pcmu();
         cfg.rtp_port_range = Some((46000, 46002));
-        cfg.external_ip = Some("203.0.113.10".to_string());
-        cfg.bind_ip = Some("127.0.0.1".to_string());
+        let ips = |list: &[&str]| -> Vec<std::net::IpAddr> {
+            list.iter().map(|ip| ip.parse().unwrap()).collect()
+        };
+        cfg.external_ips = ips(&["203.0.113.10", "2001:db8::10"]);
+        cfg.bind_ips = ips(&["127.0.0.1", "::1"]);
+        cfg.prefer_ipv6 = true;
         cfg.cname = Some("configured-cname".to_string());
 
         let leg = LegInner::new("configured-leg", &cfg, None).expect("configured RTP leg");
         let rtc = leg.pc().config();
         assert_eq!(rtc.rtp_start_port, Some(46000));
         assert_eq!(rtc.rtp_end_port, Some(46002));
-        assert_eq!(rtc.external_ip.as_deref(), Some("203.0.113.10"));
-        assert_eq!(rtc.bind_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(rtc.external_ips, ips(&["203.0.113.10", "2001:db8::10"]));
+        assert_eq!(rtc.bind_ips, ips(&["127.0.0.1", "::1"]));
+        assert!(rtc.prefer_ipv6);
         assert_eq!(rtc.cname.as_deref(), Some("configured-cname"));
         leg.stop();
+    }
+
+    /// The advertised media address in diagnostics: `[ip]:port` for IPv6.
+    #[test]
+    fn advertised_audio_addr_brackets_ipv6() {
+        let sdp = |c: &str| {
+            SessionDescription::parse(
+                SdpType::Offer,
+                &format!(
+                    "v=0\r\no=- 1 1 {c}\r\ns=-\r\nc={c}\r\nt=0 0\r\n\
+                     m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+                ),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            advertised_audio_addr(&sdp("IN IP6 2001:db8::1")).as_deref(),
+            Some("[2001:db8::1]:4000")
+        );
+        assert_eq!(
+            advertised_audio_addr(&sdp("IN IP4 192.0.2.1")).as_deref(),
+            Some("192.0.2.1:4000")
+        );
     }
 
     #[test]
@@ -2543,7 +2581,7 @@ mod tests {
             let mut secure_cfg = LegConfig::rtp_pcmu();
             secure_cfg.transport = transport;
             secure_cfg.call_id = Some("secure-session".into());
-            secure_cfg.bind_ip = Some("127.0.0.1".into());
+            secure_cfg.bind_ips = vec!["127.0.0.1".parse().unwrap()];
             let offerer = LegInner::new("secure-caller", &secure_cfg, None).unwrap();
             let answerer = LegInner::new("secure-callee", &secure_cfg, None).unwrap();
             sdp_logs.lock().clear();
@@ -2584,12 +2622,15 @@ mod tests {
     #[test]
     fn rtp_leg_uses_configured_network_constraints() {
         let mut cfg = LegConfig::rtp_pcmu();
-        cfg.external_ip = Some("203.0.113.10".to_string());
+        cfg.external_ips = vec!["203.0.113.10".parse().unwrap()];
         cfg.rtp_port_range = Some((20000, 20100));
 
         let rtc = build_rtc_config(&cfg);
 
-        assert_eq!(rtc.external_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(
+            rtc.external_ips,
+            vec!["203.0.113.10".parse::<std::net::IpAddr>().unwrap()]
+        );
         assert_eq!(rtc.rtp_start_port, Some(20000));
         assert_eq!(rtc.rtp_end_port, Some(20100));
     }
@@ -2617,8 +2658,9 @@ mod tests {
             }],
             video_codecs: Vec::new(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: Some("webrtc-test".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -2706,8 +2748,9 @@ mod tests {
             }],
             video_codecs: negotiate::tests::test_video_codecs(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: Some("video-test".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -2772,8 +2815,9 @@ mod tests {
             }],
             video_codecs: negotiate::tests::test_video_codecs(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: Some("video-answer".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -2889,8 +2933,9 @@ mod tests {
             ],
             video_codecs: Vec::new(),
             rtp_port_range: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             cname: Some("dtmf-remote-pt".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
@@ -3005,8 +3050,9 @@ mod p24_uac_test {
                 rtx_payload_type: None,
             }],
             rtp_port_range: Some((20000, 20100)),
-            external_ip: Some("127.0.0.1".to_string()),
-            bind_ip: Some("127.0.0.1".to_string()),
+            external_ips: vec!["127.0.0.1".parse().unwrap()],
+            bind_ips: vec!["127.0.0.1".parse().unwrap()],
+            prefer_ipv6: false,
             cname: Some("repro".to_string()),
             comfort_noise: false,
             comfort_noise_level_db: -35.0,

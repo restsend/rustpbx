@@ -226,8 +226,8 @@ impl TestUa {
             if media_mode == MediaMode::Srtp {
                 // SDES direct mode: pin the advertised c-line/bind address so
                 // loopback e2e media can flow without ICE.
-                rtc_config.external_ip = Some("127.0.0.1".to_string());
-                rtc_config.bind_ip = Some("127.0.0.1".to_string());
+                rtc_config.external_ips = vec!["127.0.0.1".parse().unwrap()];
+                rtc_config.bind_ips = vec!["127.0.0.1".parse().unwrap()];
             }
             if let Some(caps) = webrtc_audio_caps {
                 let mut media_caps = rustrtc::MediaCapabilities::default();

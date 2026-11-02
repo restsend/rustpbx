@@ -597,15 +597,14 @@ impl SipSession {
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
                 .with_enable_latching(media.enable_latching)
                 .with_probation_max_packets(media.probation_max_packets)
-                .with_external_ip(external_ip)
+                .with_external_ips(external_ip.parse().ok().into_iter().collect())
                 // Plain-RTP builder (default mode): honor the global ICE-lite
                 // knob; WebRTC is not involved on this path.
                 .with_ice_lite(media.ice_lite)
                 .with_cname(server.rtc_cname.clone());
-        let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
-            media_track.with_bind_ip(bind_ip)
-        } else {
-            media_track
+        let media_track = match media.bind_ip.as_deref().map(str::parse) {
+            Some(Ok(bind_ip)) => media_track.with_bind_ips(vec![bind_ip]),
+            _ => media_track,
         }
         .build();
 

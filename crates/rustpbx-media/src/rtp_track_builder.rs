@@ -11,8 +11,9 @@ use crate::negotiate;
 pub struct RtpTrackBuilder {
     track_id: String,
     cancel_token: Option<CancellationToken>,
-    external_ip: Option<String>,
-    bind_ip: Option<String>,
+    external_ips: Vec<std::net::IpAddr>,
+    bind_ips: Vec<std::net::IpAddr>,
+    prefer_ipv6: bool,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     mode: TransportMode,
@@ -33,8 +34,9 @@ impl RtpTrackBuilder {
         Self {
             track_id,
             cancel_token: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             rtp_start_port: None,
             rtp_end_port: None,
             mode: TransportMode::Rtp,
@@ -73,13 +75,24 @@ impl RtpTrackBuilder {
         self
     }
 
-    pub fn with_external_ip(mut self, addr: String) -> Self {
-        self.external_ip = Some(addr);
+    /// Public addresses to advertise, at most one per family (rustrtc
+    /// `external_ips`).
+    pub fn with_external_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.external_ips = ips;
         self
     }
 
-    pub fn with_bind_ip(mut self, addr: String) -> Self {
-        self.bind_ip = Some(addr);
+    /// Local addresses to bind on (rustrtc `bind_ips`). Not used on WebRTC
+    /// tracks.
+    pub fn with_bind_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.bind_ips = ips;
+        self
+    }
+
+    /// IPv6 in the `c=` of our offers when we have it (rustrtc
+    /// `prefer_ipv6`).
+    pub fn with_prefer_ipv6(mut self, prefer: bool) -> Self {
+        self.prefer_ipv6 = prefer;
         self
     }
 
@@ -161,10 +174,10 @@ impl RtpTrackBuilder {
                 .collect()
         };
 
-        let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
-            self.bind_ip
+        let bind_ips = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
+            self.bind_ips
         } else {
-            None
+            Vec::new()
         };
 
         let config = RtcConfiguration {
@@ -181,12 +194,9 @@ impl RtpTrackBuilder {
             enable_ice_lite: self.mode != TransportMode::WebRtc && self.enable_ice_lite,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
-            external_ips: self
-                .external_ip
-                .iter()
-                .filter_map(|v| v.parse().ok())
-                .collect(),
-            bind_ips: bind_ip.iter().filter_map(|v| v.parse().ok()).collect(),
+            external_ips: self.external_ips,
+            bind_ips,
+            prefer_ipv6: self.prefer_ipv6,
             enable_latching: self.enable_latching,
             probation_max_packets: self.probation_max_packets,
             media_capabilities: Some(rustrtc::config::MediaCapabilities {

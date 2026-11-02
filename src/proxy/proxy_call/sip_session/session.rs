@@ -800,14 +800,15 @@ impl SipSession {
             codecs,
             video_codecs,
             rtp_port_range,
-            external_ip: self.context.dialplan.media.external_ip.clone(),
+            external_ips: parse_ips(self.context.dialplan.media.external_ip.as_deref()),
             // WebRTC must gather host candidates across interfaces. A fixed
             // SIP/RTP bind address is only appropriate for RTP/SDES legs.
-            bind_ip: if is_webrtc {
-                None
+            bind_ips: if is_webrtc {
+                Vec::new()
             } else {
-                self.context.dialplan.media.bind_ip.clone()
+                parse_ips(self.context.dialplan.media.bind_ip.as_deref())
             },
+            prefer_ipv6: false,
             cname: Some(self.server.rtc_cname.clone()),
             comfort_noise: self.context.dialplan.media.comfort_noise,
             comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
@@ -14533,4 +14534,12 @@ mod consult_state_marker_tests {
         let phase = SipSession::consult_state_marker_from_headers(&headers);
         assert_eq!(phase.as_deref(), Some("talk"), "Other-form header also matches");
     }
+}
+
+/// The address of a media setting (`external_ip`, `bind_ip`) as a list for
+/// the media legs: empty when unset or not an IP.
+fn parse_ips(ip: Option<&str>) -> Vec<std::net::IpAddr> {
+    ip.and_then(|ip| ip.trim().parse().ok())
+        .into_iter()
+        .collect()
 }

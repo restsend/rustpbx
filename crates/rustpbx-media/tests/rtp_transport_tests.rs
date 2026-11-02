@@ -248,7 +248,7 @@ fn rtc_config(transport: TransportMode, codec: &CodecInfo) -> RtcConfiguration {
     }
     RtcConfiguration {
         transport_mode: transport,
-        bind_ip: Some("127.0.0.1".into()),
+        bind_ips: vec!["127.0.0.1".parse().unwrap()],
         // host-only ICE: no STUN/TURN → fast localhost gathering
         ice_servers: vec![],
         enable_latching: true,
