@@ -6022,16 +6022,21 @@ mod tests {
         use std::sync::Mutex;
 
         let responses = Arc::new(Mutex::new(responses.into_iter()));
-        let app = Router::new().route(
-            "/ivr/step",
-            post(move |Json(_body): Json<serde_json::Value>| {
-                let resp = {
-                    let mut it = responses.lock().unwrap();
-                    it.next().unwrap_or(serde_json::json!({"type": "hangup"}))
-                };
-                async move { Json(resp) }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/ivr/step",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let resp = {
+                        let mut it = responses.lock().unwrap();
+                        it.next().unwrap_or(serde_json::json!({"type": "hangup"}))
+                    };
+                    async move { Json(resp) }
+                }),
+            )
+            // The provider POSTs a start notification before the first /step
+            // (and fail-fasts on 4xx) — the mock must accept it without
+            // consuming a scripted response.
+            .route("/ivr/step/start", post(|| async { axum::http::StatusCode::OK }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         crate::utils::spawn(async move {
@@ -9584,6 +9589,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_step_provider_start_total_deadline_stops_without_step() {
+        // mock 时钟是进程级的——与其他 pause/advance 使用者互斥（否则并行
+        // 测试的 advance 会提前烧掉本测试的 2s 真实窗口）。
+        let _clock = crate::utils::test_time_lock();
         let entered = Arc::new(Notify::new());
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler_entered = entered.clone();
@@ -9618,7 +9626,9 @@ mod tests {
             Box::new(StepIvrApp::with_provider(Box::new(provider))),
             context.clone(),
         );
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        // 30s：仅是防挂死的上界——正常毫秒级到达；满载并行跑全量时
+        // （3700+ 测试）2s 真实窗口会被 CPU 争用击穿（实测 0.05s 即超时）。
+        tokio::time::timeout(Duration::from_secs(30), entered.notified())
             .await
             .unwrap();
         // Pause only after real network admission; advancing before it would race I/O.
