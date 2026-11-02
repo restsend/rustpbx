@@ -1131,6 +1131,7 @@ impl SipSession {
         CallSessionRecordSnapshot {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
+            hangup_time: self.meta.hangup_time,
             last_error: self.meta.last_error.clone(),
             root_session_id: self.meta.root_session_id.clone(),
             invite_final_status: self.meta.invite_final_status,

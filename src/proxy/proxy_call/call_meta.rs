@@ -45,6 +45,10 @@ pub struct CallMeta {
     pub agent_leg_seq: u32,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
+    /// When the caller was hung up (first one wins): its BYE/CANCEL to us, or
+    /// our BYE to it. The CDR `end_time` — teardown can take far longer (a
+    /// BYE awaiting its reply, a late ACK), and that wait is not call time.
+    pub hangup_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     /// Which dialog sent the FIRST BYE of the terminal hangup — attribution
     /// context for the RWI `call_hangup.hangup_by` normalization. `ByCallee`

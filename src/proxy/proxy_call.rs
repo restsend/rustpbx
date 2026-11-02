@@ -270,6 +270,7 @@ impl CallSessionBuilder {
         let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
             ring_time: None,
             answer_time: None,
+            hangup_time: None,
             last_error: Some((code.clone(), reason)),
             root_session_id: None,
             invite_final_status: Some(u16::from(code)),

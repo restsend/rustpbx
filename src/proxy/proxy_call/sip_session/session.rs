@@ -2075,6 +2075,10 @@ impl SipSession {
             self.server
                 .active_call_registry
                 .touch_heartbeat(&self.context.session_id);
+            // BYE to the caller: the call ends now, however long it takes.
+            if self.pending_hangup.contains(&self.caller_dialog_id()) {
+                self.mark_call_ending();
+            }
             for dialog_id in self.pending_hangup.drain() {
                 let dialog = self
                     .server
@@ -4471,6 +4475,8 @@ impl SipSession {
                 // earlier root cause (for example RTP timeout or autohangup).
                 match reason {
                     TerminatedReason::UacBye => {
+                        // BYE received from the caller: the call ends now.
+                        self.mark_call_ending();
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
                             self.meta.hangup_by_side = Some("local".to_string());
@@ -8599,6 +8605,13 @@ impl SipSession {
         self.callee_event_tx = None;
 
         // Collect ALL active dialog IDs to hang up: pending set + caller dialog + callee dialogs.
+        if self
+            .caller_dialog
+            .as_ref()
+            .is_some_and(|d| !d.state().is_terminated())
+        {
+            self.mark_call_ending();
+        }
         let mut dialogs_to_hangup = self.pending_hangup.clone();
         dialogs_to_hangup.insert(self.caller_dialog_id());
         for dialog_id in self.callee_dialogs.iter().map(|e| e.key().clone()) {
@@ -12045,6 +12058,14 @@ impl SipSession {
     ///
     /// Returns `false` when the leg does not exist (no phantom legs are
     /// created; callers surface the failure explicitly).
+    /// Stamp `CallMeta::hangup_time` (first call wins): the caller is hung up
+    /// now, however long the teardown takes.
+    pub(super) fn mark_call_ending(&mut self) {
+        if self.meta.hangup_time.is_none() {
+            self.meta.hangup_time = Some(Instant::now());
+        }
+    }
+
     pub fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
             let prev_state = leg.state;

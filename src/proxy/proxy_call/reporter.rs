@@ -55,6 +55,15 @@ impl CallReporter {
                 + Duration::from_std(at.duration_since(self.context.start_time)).unwrap_or_default()
         });
         let call_was_accepted = snapshot.answer_time.is_some();
+        // The call ended when the hangup started, not when teardown finished.
+        let end_time = snapshot
+            .hangup_time
+            .map(|ht| {
+                start_time
+                    + Duration::from_std(ht.duration_since(self.context.start_time))
+                        .unwrap_or_default()
+            })
+            .map_or(now, |end| answer_time.map_or(end, |answer| end.max(answer)));
 
         // The CDR status must reflect the INVITE transaction's final status and
         // never be changed by later signaling (BYE, re-INVITE failures, transfer
@@ -351,7 +360,7 @@ impl CallReporter {
             start_time,
             ring_time,
             answer_time,
-            end_time: now,
+            end_time,
             caller: caller.clone(),
             callee: callee.clone(),
             status_code,
@@ -928,6 +937,7 @@ mod tests {
         CallSessionRecordSnapshot {
             ring_time: None,
             answer_time: None,
+            hangup_time: None,
             last_error: None,
             root_session_id: Some("root-sess".into()),
             invite_final_status: None,

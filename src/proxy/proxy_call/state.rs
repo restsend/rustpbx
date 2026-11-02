@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 pub struct CallSessionRecordSnapshot {
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
+    /// See `CallMeta::hangup_time`; `None` ends the record at report time.
+    pub hangup_time: Option<Instant>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     /// Root session id for the whole logical call (first INVITE Call-ID,
     /// inherited across transfers; `None` = this session is the root).
