@@ -1,5 +1,16 @@
 use super::*;
 
+/// Settings 全局是进程级的：本模块内有用例改写 `header_mode`（Rfc7989），
+/// 有用例断言 Native 行为——并行交错会让后者读到错误模式（间歇红）。
+/// 本模块的 settings 依赖用例一律在此串行锁下执行。
+static SETTINGS_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_settings_serial() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {
     inherited_session_id_session_with_enabled(header_id, uui_id, true).await
 }
@@ -78,6 +89,7 @@ async fn inherited_session_id_session_with_enabled(
 
 #[tokio::test]
 async fn session_id_rfc_padding_preserves_original_root_without_truncating_other_ids() {
+    let _settings_serial = lock_settings_serial();
     let short = "0b9e6c1e1b404e8f";
     let padded = format!("{short:0>32}");
     // The UUI carries the original root; absent or unrelated UUI must never
@@ -104,6 +116,9 @@ async fn session_id_rfc_padding_preserves_original_root_without_truncating_other
 
 #[tokio::test]
 async fn session_id_native_inherited_length_survives_outgoing_boundary() {
+    // 断言 Native 行为（build_wire_header 读进程级 settings）——必须与
+    // Rfc7989 改写用例串行。
+    let _settings_serial = lock_settings_serial();
     let short = "0b9e6c1e1b404e8f";
     let session = inherited_session_id_session(short, Some(short)).await;
     assert_eq!(session.session_hook_ctx().logical_session_id(), short);
@@ -122,6 +137,7 @@ async fn session_id_native_inherited_length_survives_outgoing_boundary() {
 
 #[tokio::test]
 async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
+    let _settings_serial = lock_settings_serial();
     use crate::call::session_id::{
         SessionIdHeaderMode, SessionIdSettings, init_settings, settings,
     };

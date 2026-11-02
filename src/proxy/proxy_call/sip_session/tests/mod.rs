@@ -3189,6 +3189,190 @@ async fn inbound_refer_to_app_target_marks_transferred_and_resolves_transferor_e
     assert!(ctx.transferred);
 }
 
+/// PRD s25 S5（C2 双写/丧行）：attended transfer 完成后，服务坐席（转场发起
+/// 方 A）的腿离场 —— 会话归因必须**冻结为 A**。旧行为：直拨入呼没有 pin，
+/// `agent_id_from_context` 落到 Priority 3（`connected_callee`）——而跨会话
+/// 转接桥已把 connected_callee 指向转接目标 B → 整场 CDR 归了 B：A 0 行 /
+/// B 双行（同秒同 talk，验收「A/B 恰 1 条」双双击穿）。
+#[tokio::test]
+async fn attended_transfer_departure_freezes_served_agent_attribution() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::event::TransferSource;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = RwiGateway::new();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(crate::config::ProxyConfig::default(), Arc::new(
+            parking_lot::RwLock::new(gateway),
+        ))
+        .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "s5-freeze".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "s5-freeze".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:1005@rustpbx.com".to_string(),
+        original_callee: "sip:1001@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+
+    // 完成转接后的现场：REFER 已盖 transferred 戳 + 服务坐席 A 入 transfer
+    // meta stash；直拨入呼没有 live pin（Priority 3 的落差正是本缺陷机制）。
+    session.meta.transferred = true;
+    server
+        .rwi_gateway
+        .as_ref()
+        .unwrap()
+        .write()
+        .meta_store
+        .insert(
+            "s5-freeze".into(),
+            crate::rwi::proto::CallMeta {
+                transfer_source: Some(TransferSource {
+                    source_type: "agent".into(),
+                    agent_id: Some("1001".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+    let callee_leg = LegId::from("callee");
+    session.update_leg_state(&callee_leg, crate::call::domain::LegState::Connected);
+    // 直拨入呼的 A 腿：LegConnected 盖章（不再门控 queue 语境）后腿自身
+    // 带服务坐席身份 —— 离场冻结按它定归属。
+    session
+        .legs
+        .get_mut(&callee_leg)
+        .unwrap()
+        .agent_id = Some("1001".into());
+    session.meta.connected_callee = Some("sip:1002@rustpbx.com".into());
+    assert_eq!(
+        session.session_ext_get("resolved_agent_id"),
+        None,
+        "precondition: a direct inbound call plants no attribution pin"
+    );
+
+    // A 腿离场（unpaired 分支调用的冻结口）。
+    session.freeze_served_agent_attribution(&callee_leg);
+
+    // 归因冻结为服务坐席 A —— 最终 CDR / call_hangup 不再被 connected_callee
+    // （B）夺走，A/B 各恰 1 条的结构性前提。
+    assert_eq!(
+        session.session_ext_get("resolved_agent_id").as_deref(),
+        Some("1001"),
+        "served agent must win attribution after the attended-transfer departure"
+    );
+}
+
+/// PRD s25 S5（C2）：REFER 定案（200）即冻结本会话的服务坐席归因 —— 边界
+/// CDR 在转场时刻落库（早于转场发起方 BYE），离场冻结来不及；非 agent 源
+/// （queue/ivr）不得误冻。
+#[tokio::test]
+async fn transfer_verdict_freezes_served_agent_pin_and_skips_non_agent() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::event::TransferSource;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = RwiGateway::new();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(crate::config::ProxyConfig::default(), Arc::new(
+            parking_lot::RwLock::new(gateway),
+        ))
+        .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "s5-verdict".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "s5-verdict".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:1005@rustpbx.com".to_string(),
+        original_callee: "sip:1001@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+
+    // 被咨询方 B 的腿（agent_id 经 LegConnected 盖章 = 1002）离场：离场冻结
+    // 按**腿自身身份**冻结 pin=1002 —— stash 里的转场发起方（1001）不得把
+    // 咨询会话的归因带偏（PRD s25 S5：转场发起方 A 的归因由**客户会话**的
+    // 离场冻结落 A，两会话各归各的）。
+    let callee_leg = LegId::from("callee");
+    session
+        .legs
+        .get_mut(&callee_leg)
+        .unwrap()
+        .agent_id = Some("1002".into());
+    session.freeze_served_agent_attribution(&callee_leg);
+    assert_eq!(
+        session.session_ext_get("resolved_agent_id").as_deref(),
+        Some("1002"),
+        "consult session attribution must follow the departing leg's own agent, not the stash"
+    );
+}
+
 /// Regression guard for the fix above: ordinary in-session application
 /// hand-offs (IVR `queue:` nodes, queue overflow, no-answer fallbacks) run
 /// through `CallCommand::Transfer` → `handle_transfer` — NOT through

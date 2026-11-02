@@ -17,6 +17,7 @@ async fn assert_hold_recording_audio(
     peer_id: &str,
     peer_codec: audio_codec::CodecType,
     peer_pt: u8,
+    held_id: &str,
 ) {
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::negotiate::CodecInfo;
@@ -95,25 +96,45 @@ async fn assert_hold_recording_audio(
     assert!(started.success, "{started:?}");
     let caller_tap = caller.ingress_tap();
     let peer_tap = peer.ingress_tap();
+    let held_leg = LegId::from(held_id);
+    let held_leg_media = owner.media_leg(&held_leg).unwrap();
+    let held_tap = held_leg_media.ingress_tap();
     let mut caller_encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
     let mut peer_encoder = audio_codec::create_encoder(peer_codec);
+    // The hold music egress is encoded in the HELD leg's negotiated codec —
+    // for the callee-held case that is the dynamic PT the tap must decode
+    // profile-aware (regression kept from the former callee-dynamic test).
+    let (held_codec, held_pt) = if held_id == "caller" {
+        (audio_codec::CodecType::PCMU, 0u8)
+    } else {
+        (peer_codec, peer_pt)
+    };
+    let mut moh_encoder = audio_codec::create_encoder(held_codec);
     let addr = "127.0.0.1:40100".parse().unwrap();
-    for (phase, level) in [-4000i16, -8000, -12000].into_iter().enumerate() {
+    // Per-feed levels (1600 samples each): left lane = Caller channel,
+    // right lane = Callee channel.
+    //   phase 0 (bridged):   customer -4000 (L), agent voice -6000 (R)
+    //   phase 1 (held):      customer leak -5000 (dropped), agent leak -8000
+    //                        (dropped), MOH -9000 on the held leg's lane
+    //   phase 2 (unbridged): customer -12000 (L), agent voice -7000 (R)
+    //   consult speech:      -20000, never captured
+    for phase in 0..3usize {
+        let level = [-4000i16, -8000, -12000][phase];
         if phase > 0 {
             let command = if phase == 1 {
                 CallCommand::Hold {
-                    leg_id: LegId::from("caller"),
+                    leg_id: held_leg.clone(),
                     music: None,
                 }
             } else {
                 CallCommand::Unhold {
-                    leg_id: LegId::from("caller"),
+                    leg_id: held_leg.clone(),
                 }
             };
             let result = owner.execute_command(command, None).await;
             assert!(result.success, "{result:?}");
             assert_eq!(
-                owner.legs.get(&LegId::from("caller")).unwrap().state,
+                owner.legs.get(&held_leg).unwrap().state,
                 if phase == 1 {
                     LegState::Hold
                 } else {
@@ -122,38 +143,61 @@ async fn assert_hold_recording_audio(
             );
             assert_eq!(owner.bridge().unwrap().is_bridged(), phase == 2);
         }
-        for packet_index in 0..10u16 {
-            let seq = phase as u16 * 10 + packet_index;
-            let packet = |pt, payload| {
-                RtpPacket::new(RtpHeader::new(pt, seq, u32::from(seq) * 160, 1234), payload)
-            };
+        let seq_base = (phase * 30) as u16;
+        let pkt = |pt: u8, seq: u16, payload: Vec<u8>| {
+            RtpPacket::new(RtpHeader::new(pt, seq, u32::from(seq) * 160, 1234), payload)
+        };
+        // Customer uplink (caller leg ingress) — flows in every phase,
+        // including the hold window (the bridge must not leak it in).
+        for i in 0..10u16 {
+            let level = if phase == 1 { -5000i16 } else { level };
             caller_tap.on_ingress(
-                &packet(0, caller_encoder.encode(&[6000; 160]).to_vec()),
+                &pkt(0, seq_base + i, caller_encoder.encode(&[level; 160]).to_vec()),
                 addr,
             );
-            if phase == 1 {
+        }
+        if phase == 1 {
+            // Agent-side live mic (peer leg ingress) during the hold window —
+            // dropped under the hold-music-only routes.
+            for i in 0..10u16 {
                 peer_tap.on_ingress(
-                    &packet(peer_pt, peer_encoder.encode(&[level; 160]).to_vec()),
-                    addr,
-                );
-                if peer_id != "callee" {
-                    owner
-                        .media_leg(&LegId::from("callee"))
-                        .unwrap()
-                        .ingress_tap()
-                        .on_ingress(
-                            &packet(0, caller_encoder.encode(&[-20000; 160]).to_vec()),
-                            addr,
-                        );
-                }
-            } else {
-                caller_tap.on_egress(
-                    &packet(0, caller_encoder.encode(&[level; 160]).to_vec()),
+                    &pkt(
+                        peer_pt,
+                        seq_base + 10 + i,
+                        peer_encoder.encode(&[-8000i16; 160]).to_vec(),
+                    ),
                     addr,
                 );
             }
+            // MOH the server plays AT the held party (held leg egress) —
+            // the only audio the hold window keeps.
+            for i in 0..10u16 {
+                held_tap.on_egress(
+                    &pkt(
+                        held_pt,
+                        seq_base + 20 + i,
+                        moh_encoder.encode(&[-9000i16; 160]).to_vec(),
+                    ),
+                    addr,
+                );
+            }
+        } else {
+            // Agent voice downlink (caller leg egress, bridged) — Callee lane.
+            for i in 0..10u16 {
+                let level = if phase == 0 { -6000i16 } else { -7000i16 };
+                caller_tap.on_egress(
+                    &pkt(0, seq_base + 10 + i, caller_encoder.encode(&[level; 160]).to_vec()),
+                    addr,
+                );
+            }
+        }
+        for i in 0..10u16 {
             consult.ingress_tap().on_ingress(
-                &packet(0, caller_encoder.encode(&[-20000; 160]).to_vec()),
+                &pkt(
+                    0,
+                    seq_base + 20 + i,
+                    caller_encoder.encode(&[-20000i16; 160]).to_vec(),
+                ),
                 addr,
             );
         }
@@ -184,45 +228,72 @@ async fn assert_hold_recording_audio(
     assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
     assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 2);
     let samples = audio_codec::create_decoder(audio_codec::CodecType::PCMU).decode(&wav[44..]);
+    let left: Vec<_> = samples.iter().step_by(2).copied().collect();
     let right: Vec<_> = samples.iter().skip(1).step_by(2).copied().collect();
-    for level in [-4000i16, -8000, -12000] {
-        let count = right
-            .iter()
+    let count_near = |lane: &[i16], level: i16| {
+        lane.iter()
             .filter(|sample| (i32::from(**sample) - i32::from(level)).abs() < 500)
-            .count();
-        assert!(
-            count >= 1600,
-            "B channel lost phase {level}: only {count} matching samples"
-        );
-    }
-    assert!(
-        right.iter().all(|sample| *sample > -15000),
-        "private/previous-peer speech leaked into B"
-    );
-    assert!(
-        samples
-            .iter()
-            .step_by(2)
-            .filter(|sample| **sample > 5000)
             .count()
-            >= 4800,
-        "A channel must preserve the caller across all phases"
+    };
+    // Customer lane (Caller): bridged phases intact, hold window = MOH only
+    // when the caller is the held party; the hold-window live mic is gone.
+    assert!(count_near(&left, -4000) >= 1600, "caller pre-hold voice lost");
+    assert!(count_near(&left, -12000) >= 1600, "caller post-hold voice lost");
+    assert_eq!(
+        count_near(&left, -5000),
+        0,
+        "hold-window caller mic must stay out of the recording (Q2.A)"
+    );
+    assert_eq!(count_near(&left, -8000), 0, "agent hold-window mic leaked into caller lane");
+    assert_eq!(
+        count_near(&left, -9000),
+        if held_id == "caller" { 1600 } else { 0 },
+        "MOH rides the held party's lane only"
+    );
+    // Agent lane (Callee): bridged phases intact; hold window carries no
+    // live mic and no MOH unless the callee is the held party.
+    assert!(count_near(&right, -6000) >= 1600, "agent pre-hold voice lost");
+    assert!(count_near(&right, -7000) >= 1600, "agent post-hold voice lost");
+    assert_eq!(
+        count_near(&right, -8000),
+        0,
+        "hold-window agent mic must stay out of the recording (Q2.A)"
+    );
+    assert_eq!(
+        count_near(&right, -9000),
+        if held_id == "caller" { 0 } else { 1600 },
+        "MOH rides the held party's lane only"
+    );
+    // Private consult speech never enters either lane.
+    assert_eq!(count_near(&left, -20000), 0, "private speech leaked into A");
+    assert_eq!(count_near(&right, -20000), 0, "private/previous-peer speech leaked into B");
+    // The recording stays continuous (bridged voice on both lanes).
+    assert!(
+        left.iter().filter(|sample| sample.abs() > 3000).count() >= 3200,
+        "caller lane must preserve the customer across the hold window"
     );
 }
 
+/// xlsx 表(2) P13（Q2.A 口径）：保持期录音只留保持音 —— 客户被保持时，
+/// 录音在保持窗内只有 MOH（落在被保持方声道），双方 live mic 与咨询腿
+/// 私语一概不入录音。
 #[tokio::test]
-async fn hold_recording_dynamic_agent_keeps_both_channels_without_private_speech() {
+async fn hold_recording_keeps_hold_music_only_without_live_mics_or_private_speech() {
     assert_hold_recording_audio(
         "33333333-3333-4333-8333-333333333333",
         audio_codec::CodecType::PCMU,
         0,
+        "caller",
     )
     .await;
 }
 
+/// 被保持腿为坐席侧时的镜像语义：MOH 落 Callee 声道，且动态 PT（PCMA/96）
+/// 的 MOH egress 必须按协商 profile 正确解码进录音（前 callee-dynamic 用例
+/// 的回归价值在新路由下保留）。
 #[tokio::test]
-async fn hold_recording_decodes_callee_dynamic_payload_in_caller_format() {
-    assert_hold_recording_audio("callee", audio_codec::CodecType::PCMA, 96).await;
+async fn hold_recording_callee_held_routes_hold_music_and_decodes_dynamic_payload() {
+    assert_hold_recording_audio("callee", audio_codec::CodecType::PCMA, 96, "callee").await;
 }
 
 struct FailingFinalizeRecorder;

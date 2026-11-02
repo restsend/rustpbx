@@ -8,6 +8,7 @@ pub mod audio_source;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
+pub mod ingress_stall;
 pub mod ingress_tap;
 pub mod leg;
 pub mod leg_id;

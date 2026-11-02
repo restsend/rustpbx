@@ -749,6 +749,12 @@ impl SipSession {
                 .media
                 .relay_ready_timeout_secs
                 .map(std::time::Duration::from_secs),
+            ingress_stall_warn_secs: self
+                .context
+                .dialplan
+                .media
+                .ingress_stall_warn_secs
+                .unwrap_or(crate::media::ingress_stall::DEFAULT_INGRESS_STALL_WARN_SECS),
         }
     }
 
@@ -3014,6 +3020,67 @@ impl SipSession {
     /// Started once per caller peer; exits when its DTMF sender is dropped.
     fn spawn_dtmf_forwarder(&self) {
         self.spawn_leg_dtmf_forwarder(&LegId::from("caller"));
+        self.spawn_leg_ingress_stall_forwarder(&LegId::from("caller"));
+    }
+
+    /// Forward per-leg inbound-RTP stall edges to the CDR/RWI error path as
+    /// `proxy.ingress_stalled` (once per leg; re-arming is a no-op). The
+    /// watcher on the leg covers every phase of the leg's life — including
+    /// the pre-bridge IVR/queue wait the bridge health monitor cannot
+    /// observe — and the condition is disjoint from `proxy.media_stalled`
+    /// (which requires lifetime RX == 0): this watcher only arms after the
+    /// leg HAS received media, so a leg can never trigger both codes.
+    pub(crate) fn spawn_leg_ingress_stall_forwarder(
+        &self,
+        id: &LegId,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let peer = self.media_leg(id)?;
+        if !peer.arm_ingress_stall_forwarder() {
+            return None;
+        }
+        let mut rx = peer.subscribe_ingress_stall();
+        let leg_id = peer.id().to_string();
+        let session_id = self.context.session_id.clone();
+        let cmd_tx = self.cmd_tx.clone();
+        Some(crate::utils::spawn(async move {
+            let mut reported = false;
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        // Resume edges stay in the watcher's own log line;
+                        // only the stall edge is a CDR/RWI-worthy condition.
+                        if ev.kind != crate::media::ingress_stall::IngressStallKind::Stalled
+                            || reported
+                        {
+                            continue;
+                        }
+                        reported = true;
+                        let detail = serde_json::to_value(&ev).ok();
+                        warn!(
+                            session_id = %session_id,
+                            leg_id = %leg_id,
+                            "reporting proxy.ingress_stalled (once per leg)"
+                        );
+                        if let Some(tx) = &cmd_tx {
+                            let _ = tx.try_send(CallCommand::ReportCallError {
+                                stage: "proxy".to_string(),
+                                app: "proxy".to_string(),
+                                code: "proxy.ingress_stalled".to_string(),
+                                severity: crate::call_errors::ErrSeverity::Warn,
+                                message: format!(
+                                    "Inbound media stalled on leg {} after {} received packets",
+                                    leg_id, ev.lifetime_accepted
+                                ),
+                                sip_status: None,
+                                detail,
+                            });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
     }
 
     fn accepts_application_input(binding: &RwLock<Option<LegId>>, leg_id: &str) -> bool {
@@ -3560,6 +3627,12 @@ impl SipSession {
             ),
             transferred: self.meta.transferred,
             leg_role: self.meta.dial_leg_role.clone(),
+            owns_statistics: crate::proxy::proxy_call::session_hooks::owns_statistics_at_birth(
+                self.meta.child_leg_role.is_some(),
+                self.meta.child_leg_role.as_deref(),
+                self.meta.root_session_id.as_deref(),
+                &self.context.session_id,
+            ),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             extensions: self.extensions.clone(),
@@ -3599,6 +3672,36 @@ impl SipSession {
         // Hooks may have resolved + published the agent attribution — make it
         // visible to event enrichment before the caller emits `call_ringing`.
         self.sync_agent_context_to_rwi_meta();
+    }
+
+    /// Attended-transfer departure: the session's agent leg is leaving
+    /// (consult → complete transfer) — freeze THE LEG'S OWN agent identity as
+    /// the session's attribution pin, so the final CDR/`call_hangup` stays
+    /// with the agent who actually served this session. Without this,
+    /// `agent_id_from_context` falls through to Priority 3
+    /// (`connected_callee`), which the cross-session transfer bridge repoints
+    /// at the OTHER party — the served agent's row vanished / was
+    /// double-counted (PRD s25 S5: A 0 rows / B duplicate rows).
+    ///
+    /// Keyed to the leg's own `agent_id` (stamped at LegConnected for every
+    /// agent call — queue and direct alike): the consult session's departing
+    /// leg freezes ITS agent (B), the customer session's departing leg freezes
+    /// ITS agent (A) — the stash-based fallback mis-attributed B's session to
+    /// the transferor. Fires only when the leg has a confirmed agent identity.
+    fn freeze_served_agent_attribution(&mut self, leg_id: &LegId) {
+        let served_agent = self
+            .legs
+            .get(leg_id)
+            .and_then(|leg| leg.agent_id.clone())
+            .filter(|agent| !agent.is_empty());
+        if let Some(agent) = served_agent {
+            Self::set_pinned_agent_id(&self.extensions, &agent);
+            info!(
+                session_id = %self.id,
+                agent = %agent,
+                "served agent attribution frozen at transfer departure"
+            );
+        }
     }
 
     fn transferred_agent_context(
@@ -6620,6 +6723,7 @@ impl SipSession {
         self.update_leg_state(leg, crate::call::domain::LegState::Connected);
         if let Some(peer) = self.media_leg(leg) {
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
         }
         Ok(())
     }
@@ -6754,6 +6858,12 @@ impl SipSession {
                     .as_ref()
                     .and_then(|leg| self.transferred_agent_context(leg))
                 {
+                    // PRD s25 S5：转场离场坐席 = 本会话的实际服务坐席 —— 先把
+                    // 归因冻结进 live pin（CDR/call_hangup 归属不变），再发
+                    // on_agent_disconnected。
+                    self.freeze_served_agent_attribution(
+                        terminated_leg.as_ref().expect("checked above"),
+                    );
                     for hook in self.server.session_hooks.iter() {
                         hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
                     }
@@ -9626,6 +9736,25 @@ impl SipSession {
         // leg-scoped RWI event for it carries `leg_role: "agent"`. Idempotent.
         self.stamp_caller_agent_identity().await;
         self.meta.connected_callee = callee.clone();
+        // PRD s25 S5（C2）：入呼应答腿盖章服务坐席身份 —— 直拨入呼不经
+        // queue 派发的 LegConnected 盖章点，离场冻结
+        //（`freeze_served_agent_attribution`）按腿自身身份定归属，缺章则
+        // 完成转接后归因漂到转接目标（A 0 行 / B 双行）。
+        if let Some(ref callee_uri) = callee
+            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
+            && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
+            && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+            && let Some(leg) = self.legs.get_mut(&leg_id)
+            && leg.agent_id.is_none()
+        {
+            info!(
+                session_id = %self.id,
+                leg_id = %leg_id,
+                agent = %agent,
+                "inbound answer: served agent stamped on the connected leg"
+            );
+            leg.agent_id = Some(agent);
+        }
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
         // "hung up while still waiting" even after this leg terminates.
@@ -10197,6 +10326,8 @@ impl SipSession {
                 }
             }
             peer.pause_rtp_timeout();
+            // The held peer legitimately stops sending — suppress stall edges.
+            peer.set_ingress_quiet_expected(true);
             if let Some(music) = music {
                 let path = match &music {
                     crate::call::domain::MediaSource::File { path } => path.clone(),
@@ -10255,6 +10386,7 @@ impl SipSession {
             // Restoring the route replaces hold playback with live media.
             // A separate stop could silence a relay that is already active.
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
             // Same logical-pair recovery as handle_unhold: direct-dialed
             // calls never populate the logical bridge, and an app-exit
             // unhold is an explicit resume request.
@@ -14281,6 +14413,7 @@ impl SipSession {
                         }
                         if let Some(peer) = self.media_leg(&caller) {
                             peer.resume_rtp_timeout();
+                            peer.set_ingress_quiet_expected(false);
                         }
                         self.meta.connected_callee_dialog_id =
                             self.legs.get_dialog(&leg_id).map(|d| d.id());
@@ -14308,7 +14441,18 @@ impl SipSession {
                     // primary one. Gated to queue context so direct (non-
                     // queue) calls keep deriving the agent from parties.
                     let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
-                    if self.in_queue_context() {
+                    // PRD s25 S5（C2）：盖章不再门控 queue 语境 —— 直拨 agent
+                    // 呼叫的腿同样带身份，离场冻结
+                    //（`freeze_served_agent_attribution`）按腿自身身份定归属。
+                    // 会话 pin 写入仍门控 queue 语境（直拨归因由 Priority 3
+                    // 兜底，保持既有语义）。
+                    if let Some(leg) = self.legs.get_mut(&leg_id) {
+                        leg.agent_id = leg_agent_id.clone();
+                    } else {
+                        // PRD s25 S5（C2）：直拨 agent 呼叫的腿同样盖章 ——
+                        // 离场冻结（`freeze_served_agent_attribution`）按腿
+                        // 自身身份定归属，没盖章的腿无从冻结。pin 写入仍
+                        // 门控 queue 语境（直拨归因由 Priority 3 兜底）。
                         if let Some(leg) = self.legs.get_mut(&leg_id) {
                             leg.agent_id = leg_agent_id.clone();
                         }
@@ -15403,7 +15547,10 @@ impl SipSession {
             }
             if let Some(peer) = self.media_leg(leg_id) {
                 match new_state {
-                    LegState::Hold => peer.pause_rtp_timeout(),
+                    LegState::Hold => {
+                        peer.pause_rtp_timeout();
+                        peer.set_ingress_quiet_expected(true);
+                    }
                     LegState::Connected => peer.resume_rtp_timeout(),
                     _ => {}
                 }
@@ -17474,6 +17621,7 @@ impl SipSession {
             }
         }
         peer.pause_rtp_timeout();
+        peer.set_ingress_quiet_expected(true);
         let music = music.or_else(|| self.resolve_hold_music(&[]));
         let source = match &music {
             Some(crate::call::domain::MediaSource::File { path })
@@ -17513,40 +17661,34 @@ impl SipSession {
         Ok(())
     }
 
-    /// While held, record the selected parties' ingress rather than MOH.
+    /// While held, the recording keeps only the hold music (xlsx 表(2) P13,
+    /// Q2.A 口径「保持期录音只留保持音」): both parties' live mics stay out
+    /// of the hold window — speech during hold is not call content — and the
+    /// held party's own lane continues with what they actually hear (the MOH
+    /// egress). This replaces the earlier keep-live-mics tradeoff: the held
+    /// window previously recorded both mics, which surfaced the far party's
+    /// voice in the agent's recording while they were supposed to be on hold.
+    /// Consult/private legs keep their (None, None) routes — the privacy
+    /// property of `hold_recording_*_without_private_speech` is preserved.
     pub(crate) fn apply_hold_recording_routes(&self) {
         let caller_id = LegId::from("caller");
-        // The selected pair survives unbridge. Direct-dial calls may only
-        // have the media pair; a different logical pair must not reuse it.
-        let pair = if self.bridge.legs.len() == 2 {
-            self.bridge.legs.clone()
-        } else {
-            self.bridge()
-                .map(|bridge| {
-                    [bridge.leg(LegSide::A), bridge.leg(LegSide::B)]
-                        .into_iter()
-                        .flatten()
-                        .map(|leg| leg.id().clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
-        let selected_peer = pair
-            .iter()
-            .find(|id| **id != caller_id && pair.contains(&caller_id));
-        // Disable old B sources before enabling the selected peer.
-        for (id, _) in self.legs.iter() {
-            if let Some(leg) = self.media_leg(id) {
-                let channel = (*id == caller_id)
-                    .then_some(crate::media::media_recorder::CaptureChannel::Caller);
-                leg.ingress_tap().set_capture_route(channel, None);
+        for (id, leg) in self.legs.iter() {
+            let Some(media) = self.media_leg(id) else {
+                continue;
+            };
+            if leg.state == LegState::Hold {
+                // Held party: drop their mic (ingress), keep the music they
+                // hear (egress) on their own lane so the recording timeline
+                // mirrors their experience (voice → MOH → voice).
+                let lane = if *id == caller_id {
+                    crate::media::media_recorder::CaptureChannel::Caller
+                } else {
+                    crate::media::media_recorder::CaptureChannel::Callee
+                };
+                media.ingress_tap().set_capture_route(None, Some(lane));
+            } else {
+                media.ingress_tap().set_capture_route(None, None);
             }
-        }
-        if let Some(peer) = selected_peer.and_then(|id| self.media_leg(id)) {
-            peer.ingress_tap().set_capture_route(
-                Some(crate::media::media_recorder::CaptureChannel::Callee),
-                None,
-            );
         }
     }
 
@@ -17612,6 +17754,7 @@ impl SipSession {
             }
             if let Some(peer) = self.media_leg(&leg_id) {
                 peer.resume_rtp_timeout();
+                peer.set_ingress_quiet_expected(false);
             }
             return Ok(());
         }
@@ -17648,6 +17791,7 @@ impl SipSession {
         }
         if let Some(peer) = self.media_leg(&leg_id) {
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
         }
         self.update_leg_state(&leg_id, LegState::Connected);
         if !self.server.session_hooks.is_empty() {

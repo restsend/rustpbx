@@ -1011,16 +1011,7 @@ impl RecordingUploadManager {
                 )],
             )
             .await;
-            if let Err(err) = tokio::fs::remove_file(&pending.path).await {
-                warn!(
-                    path = %pending.path.display(),
-                    %err,
-                    "failed to remove local recording after upload"
-                );
-            } else {
-                let marker = crate::callrecord::upload_failed_marker_path(&pending.path);
-                let _ = tokio::fs::remove_file(marker).await;
-            }
+            settle_uploaded_local(policy.effective_keep_local_days(), &pending.path).await;
         }
     }
 }
@@ -1032,6 +1023,92 @@ pub struct RecordingRetryWorker {
     runtime: Arc<RecordingUploadRuntime>,
     /// See [`RecordingUploadHook::db`] — trace patches for retried uploads.
     db: Option<sea_orm::DatabaseConnection>,
+}
+
+/// Post-upload local file settlement. `[recording].keep_local_days > 0`
+/// defers deletion to the retry worker's retention sweep; `0` removes the
+/// file immediately (historical behaviour). The failure marker is dropped
+/// either way — the upload succeeded, so a stale marker would only block
+/// later sweeps.
+async fn settle_uploaded_local(keep_local_days: u32, path: &Path) {
+    let marker = crate::callrecord::upload_failed_marker_path(Path::new(path));
+    let _ = tokio::fs::remove_file(marker).await;
+    if keep_local_days > 0 {
+        return;
+    }
+    if let Err(err) = tokio::fs::remove_file(path).await {
+        warn!(
+            path = %path.display(),
+            %err,
+            "failed to remove local recording after upload"
+        );
+    }
+}
+
+/// Retention sweep for `[recording].keep_local_days`: remove local WAV
+/// files older than `cutoff` that carry no `.upload_failed`
+/// marker (marker = still pending retry — never swept). Files that were
+/// never attempted within the window would only exist if the upload
+/// pipeline died entirely; the failure-marker check plus the retry
+/// worker's own failure markers keep that edge observable.
+async fn sweep_uploaded_locals(root: &Path, cutoff: std::time::Duration) -> Result<()> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            // Hidden files = bookkeeping (`.upload_failed.*` markers, editor
+            // droppings) — never candidates and never swept: deleting a
+            // marker first would unguard its media file.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+            {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("wav") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let Ok(age) = modified.elapsed() else {
+                continue;
+            };
+            if age < cutoff {
+                continue;
+            }
+            let marker = crate::callrecord::upload_failed_marker_path(&path);
+            if marker.exists() {
+                continue;
+            }
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {
+                    info!(
+                        path = %path.display(),
+                        cutoff_secs = cutoff.as_secs(),
+                        "recording local retention sweep removed uploaded file"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        %err,
+                        "recording local retention sweep failed to remove file"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl RecordingRetryWorker {
@@ -1110,6 +1187,16 @@ impl RecordingRetryWorker {
                 );
             }
         }
+        // §3.2.5 归档保留：上传成功后本地文件保留 `keep_local_days` 天再清理
+        // （0 = 上传成功即删，历史行为）。仍带失败标记的文件（重试中）永不
+        // 清扫；local/sipflow 类型无上传 worker，保留期由部署侧磁盘管理。
+        let keep_local_days = policy.effective_keep_local_days();
+        if keep_local_days > 0 {
+            let cutoff = std::time::Duration::from_secs(u64::from(keep_local_days) * 86_400);
+            if let Err(err) = sweep_uploaded_locals(&root, cutoff).await {
+                warn!(%err, "recording local retention sweep failed");
+            }
+        }
         Ok(())
     }
 
@@ -1173,7 +1260,7 @@ impl RecordingRetryWorker {
                 if latency > policy.effective_upload_sla_secs() as f64 {
                     crate::metrics::recording::upload_sla_breach(dest);
                 }
-                let _ = tokio::fs::remove_file(&source).await;
+                settle_uploaded_local(policy.effective_keep_local_days(), &source).await;
                 let _ = tokio::fs::remove_file(marker_path).await;
                 info!(
                     path = %source.display(),
@@ -2045,21 +2132,14 @@ impl CallRecordHook for RecordingUploadHook {
                                     let extra = media.extra.get_or_insert_with(HashMap::new);
                                     extra.insert("uploadUrl".to_string(), json!(url));
                                 }
-                                // Only delete local file after a successful remote upload.
-                                if let Err(err) = tokio::fs::remove_file(&path).await {
-                                    warn!(
-                                        call_id = %record.call_id,
-                                        path,
-                                        %err,
-                                        "failed to remove local recording after upload"
-                                    );
-                                } else {
-                                    // Drop companion failure marker if a prior attempt left one.
-                                    let marker = crate::callrecord::upload_failed_marker_path(
-                                        Path::new(&path),
-                                    );
-                                    let _ = tokio::fs::remove_file(marker).await;
-                                }
+                                // Only delete local file after a successful remote upload —
+                                // unless `[recording].keep_local_days` defers cleanup to the
+                                // retry worker's retention sweep.
+                                settle_uploaded_local(
+                                    policy.effective_keep_local_days(),
+                                    std::path::Path::new(path.as_str()),
+                                )
+                                .await;
                                 segment_summaries.push(json!({
                                     "path": path,
                                     "track_id": track_id,
@@ -2871,6 +2951,40 @@ mod tests {
         assert!(parsed.get("address").is_some());
         assert!(parsed.get("duration_ms").is_some());
         assert!(parsed.get("error").is_some());
+    }
+
+    /// §3.2.5 归档保留（keep_local_days）：清扫只删「超过保留窗且无失败
+    /// 标记」的 WAV——带标记（重试中）永不删、非 WAV 不删；cutoff 反向
+    /// （窗口极长）时什么都不删。
+    #[tokio::test]
+    async fn retention_sweep_removes_only_uploaded_old_wav_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("20261101");
+        tokio::fs::create_dir_all(&sub).await.expect("mkdir");
+        tokio::fs::write(sub.join("old.wav"), b"x").await.expect("write");
+        tokio::fs::write(sub.join("pending.wav"), b"x").await.expect("write");
+        tokio::fs::write(dir.path().join("notes.txt"), b"x").await.expect("write");
+        let pending_marker = crate::callrecord::upload_failed_marker_path(&sub.join("pending.wav"));
+        tokio::fs::write(&pending_marker, b"{}").await.expect("write marker");
+
+        // cutoff = 0：一切超过保留窗 → 无标记的 WAV 被清扫，带标记/非 WAV 保留。
+        sweep_uploaded_locals(dir.path(), std::time::Duration::from_secs(0))
+            .await
+            .expect("sweep");
+        assert!(!sub.join("old.wav").exists(), "old uploaded wav swept");
+        assert!(
+            sub.join("pending.wav").exists(),
+            "pending (failure marker present) must never be swept"
+        );
+        assert!(dir.path().join("notes.txt").exists(), "non-wav files untouched");
+        assert!(pending_marker.exists(), "pending marker kept with its file");
+
+        // 反向：窗口极长（10 天）→ 什么都不删。
+        tokio::fs::write(sub.join("old2.wav"), b"x").await.expect("write");
+        sweep_uploaded_locals(dir.path(), std::time::Duration::from_secs(86_400 * 10))
+            .await
+            .expect("sweep");
+        assert!(sub.join("old2.wav").exists(), "long window sweeps nothing");
     }
 
     #[tokio::test]

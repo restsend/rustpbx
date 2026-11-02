@@ -1367,8 +1367,20 @@ struct LegSampleDelta {
     fraction_lost: u8,
 }
 
-fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelta {
-    let Some(cur) = cur else {
+/// True for the FIRST health tick of a bridge: `prev` is still `None`, so
+/// `leg_delta` falls back to a zero baseline and yields LIFETIME counters
+/// (packets since each leg was created) instead of a 5s window. Those
+/// lifetime values must never drive anomaly reporting or telemetry — the
+/// caller leg's lifetime RX against a callee born seconds ago is a
+/// guaranteed false `rx_idrop` (production incident 2026-10-29: a caller
+/// with ~3.8k lifetime packets surfaced as `rx_idrop=3787` on the first
+/// tick, masquerading as a 5s-window burst). Use the first tick purely as
+/// the baseline; true windowed deltas start on the next tick.
+fn is_baseline_health_tick(prev_a: Option<&LegSample>, prev_b: Option<&LegSample>) -> bool {
+    prev_a.is_none() || prev_b.is_none()
+}
+
+fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelta {    let Some(cur) = cur else {
         return LegSampleDelta::default();
     };
     let prev = prev.cloned().unwrap_or_default();
@@ -1611,6 +1623,14 @@ fn spawn_bridge_stats_task(
             // Use scheduled ticks: wake-up jitter must not skip a full health period.
             if tick.duration_since(last_health) < Duration::from_secs(5) { continue; }
             last_health = tick;
+            // First health tick of a bridge: `prev` is still None, so
+            // `leg_delta` falls back to zero and yields LIFETIME counters
+            // (packets since each leg was created), not a 5s window. Those
+            // lifetime values must not drive anomaly reporting (caller
+            // lifetime vs a callee born seconds ago is a guaranteed false
+            // `rx_idrop`) or telemetry (a huge phantom burst). Use this tick
+            // purely as the baseline; true windowed deltas start next tick.
+            let baseline_tick = is_baseline_health_tick(prev_a.as_ref(), prev_b.as_ref());
             let da = leg_delta(sa.as_ref(), prev_a.as_ref());
             let db = leg_delta(sb.as_ref(), prev_b.as_ref());
 
@@ -1652,10 +1672,13 @@ fn spawn_bridge_stats_task(
                 0.0
             };
 
-            crate::telemetry::MediaTelemetry::record_rx(rx_packets_d, rx_lost_d, rx_idrop_d);
-            crate::telemetry::MediaTelemetry::record_tx(tx_packets_d, tx_lost_d, 0);
+            if !baseline_tick {
+                crate::telemetry::MediaTelemetry::record_rx(rx_packets_d, rx_lost_d, rx_idrop_d);
+                crate::telemetry::MediaTelemetry::record_tx(tx_packets_d, tx_lost_d, 0);
+            }
 
-            let anomalous = rx_idrop_d > 0 || rx_loss_pct >= 1.0 || tx_loss_pct >= 1.0;
+            let anomalous = !baseline_tick
+                && (rx_idrop_d > 0 || rx_loss_pct >= 1.0 || tx_loss_pct >= 1.0);
             if anomalous && rx_packets_d + tx_packets_d > 0 {
                 info!(
                     bridge_id = %session_id,
@@ -2123,6 +2146,38 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
+
+    #[test]
+    fn baseline_health_tick_gates_anomaly_and_telemetry() {
+        // First tick: prev never captured → lifetime deltas → no anomaly
+        // report, no telemetry. Second tick on: real windowed deltas flow.
+        let sample = LegSample {
+            audio_packet_samples: None,
+            ingress: 3787,
+            egress: 7607,
+            transport_rx: 3787,
+            transport_tx: 7607,
+            sr_packet_count: 0,
+            sr_ssrc: 0,
+            has_sr: false,
+            jitter_us: 0,
+            rtt_us: 0,
+            fraction_lost: 0,
+            recording_queue_drops: 0,
+            ingress_quality: None,
+            ingress_recovery: None,
+        };
+        assert!(is_baseline_health_tick(None, Some(&sample)));
+        assert!(is_baseline_health_tick(Some(&sample), None));
+        assert!(is_baseline_health_tick(None, None));
+        assert!(!is_baseline_health_tick(Some(&sample), Some(&sample)));
+
+        // The lifetime delta the baseline tick would produce: exactly what
+        // must NOT reach the anomaly report / telemetry.
+        let delta = leg_delta(Some(&sample), None);
+        assert_eq!(delta.ingress, 3787);
+        assert_eq!(delta.transport_rx, 3787);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_quality_disabled_restores_health_sampling_cadence() {
@@ -2682,6 +2737,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
         };
         let mut mb = MediaBridge::new("s7");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -2749,6 +2805,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
         };
         let mut mb = MediaBridge::new("s-video-rtcp");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -2816,6 +2873,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
         };
 
         let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -2905,6 +2963,7 @@ mod tests {
                         comfort_noise_level_db: -35.0,
                         enable_latching: true,
                         probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
                     };
                     let rtp_opus_cfg = LegConfig {
                         volume_stats: Default::default(),
@@ -2932,6 +2991,7 @@ mod tests {
                         comfort_noise_level_db: -35.0,
                         enable_latching: true,
                         probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
                     };
 
                     let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -3017,6 +3077,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
         };
         let rtp_pcmu_cfg = LegConfig {
             volume_stats: crate::volume_stats::VolumeStatsConfig { enabled: true },
@@ -3046,6 +3107,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            ingress_stall_warn_secs: 0,
         };
 
         // Leg A: WebRTC answerer whose remote (10.0.0.1) never connects, so its

@@ -831,6 +831,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         enable_latching: true,
         probation_max_packets: None,
         relay_ready_timeout: None,
+            ingress_stall_warn_secs: 0,
     };
     let mut mb = MediaBridge::new("it-rtp-webrtc");
     let a = LegInner::new("a", &cfg, None).unwrap();

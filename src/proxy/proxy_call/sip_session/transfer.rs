@@ -1010,6 +1010,9 @@ impl SipSession {
             if customer_leg != previous_media_leg {
                 if let Some(leg) = customer_leg {
                     if let Some(task) = self.spawn_leg_dtmf_forwarder(&leg) {
+                        self.legs.push_task(leg.clone(), task);
+                    }
+                    if let Some(task) = self.spawn_leg_ingress_stall_forwarder(&leg) {
                         self.legs.push_task(leg, task);
                     }
                 }

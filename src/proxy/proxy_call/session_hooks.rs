@@ -117,6 +117,12 @@ pub struct CallSessionContext {
     /// so agent today-metrics can keep these self-dialed sub-call legs out
     /// of the counters; it never shapes the call lifecycle.
     pub leg_role: Option<String>,
+    /// §C2 单写者不变量（2026-11-01 定案）：每个 `cc_calls.call_id` 恰一个
+    /// 统计写者 = **铸造该 id 的会话**（出生时盖章，见
+    /// [`owns_statistics_at_birth`]）。收养者（Adopted，从 cluster peer 收到
+    /// 既有 id 的腿实例）不落统计行——行由铸造者写，本实例只承载腿。
+    /// `leg=` intent 数据不进统计层（留在 meta 服务事件/UI）。
+    pub owns_statistics: bool,
     /// Call direction: `"inbound"` or `"outbound"`.
     pub direction: String,
     /// ISO-8601 timestamp when the session was created (before ringing).
@@ -157,6 +163,7 @@ impl Clone for CallSessionContext {
             caller: self.caller.clone(),
             callee: self.callee.clone(),
             connected_callee: self.connected_callee.clone(),
+            owns_statistics: self.owns_statistics,
             queue_name: self.queue_name.clone(),
             skill_group_id: self.skill_group_id.clone(),
             transferred: self.transferred,
@@ -278,5 +285,54 @@ pub trait CallSessionHook: Send + Sync {
         _app_execution_id: Option<u64>,
     ) -> Option<IvrExecCompletion> {
         None
+    }
+}
+
+/// §C2 单写者不变量（PRD s25 S5，2026-11-01 定案）：每个 `cc_calls.call_id`
+/// 恰一个统计写者 = **铸造该 id 的会话**。
+///
+/// 出生事实判定（不引入新标记——全部由既有出生盖章字段推导）：
+/// `from_peer && 已声明 leg intent && 继承的 root id 成为了本会话的
+/// session_id` ⟺ 本会话**收养**了别人的 id（cluster child，Adopted）→
+/// **不拥有**统计行（false），行由铸造者写。其余一切形态（普通两方呼叫、
+/// 设备自拨 consult/transfer 腿、并行腿守卫退化为铸造新 id 的情形）→
+/// **铸造者**（true），照常落行。
+///
+/// 返回值即 `CallSessionContext::owns_statistics`。
+pub(crate) fn owns_statistics_at_birth(
+    from_peer: bool,
+    declared_role: Option<&str>,
+    inherited_root: Option<&str>,
+    session_id: &str,
+) -> bool {
+    !matches!(
+        (from_peer, declared_role, inherited_root),
+        (true, Some(_), Some(root)) if root == session_id
+    )
+}
+
+#[cfg(test)]
+mod owns_statistics_tests {
+    use super::*;
+
+    /// 出生事实判定矩阵：peer 收养（含 intent 各值）= Adopted；并行腿守卫
+    /// （root 存活，id 铸造为全新）= Minted；非 peer（含设备自拨 consult/
+    /// transfer 腿，走 dial_leg_role 信任缝）= Minted。
+    #[test]
+    fn ownership_at_birth_matrix() {
+        // cluster peer 收养：session_id == 继承的 root。
+        assert!(!owns_statistics_at_birth(true, Some("agent"), Some("root-x"), "root-x"));
+        assert!(!owns_statistics_at_birth(true, Some("consult"), Some("root-x"), "root-x"));
+        assert!(!owns_statistics_at_birth(true, Some("transfer"), Some("root-x"), "root-x"));
+
+        // 并行腿守卫：peer 声明了 intent，但 root 已在本节点存活 → 收养退化为
+        // 铸造全新 id（session_id != root）→ 铸造者。
+        assert!(owns_statistics_at_birth(true, Some("agent"), Some("root-x"), "fresh-1"));
+
+        // 非 peer（外部 INVITE 无法伪造 child 身份——信任缝）：即使带 Session-ID。
+        assert!(owns_statistics_at_birth(false, Some("consult"), Some("root-x"), "root-x"));
+
+        // peer 但未声明 leg intent（legacy 混版本）：不收养 → 铸造者。
+        assert!(owns_statistics_at_birth(true, None, Some("root-x"), "root-x"));
     }
 }
