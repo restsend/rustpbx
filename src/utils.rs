@@ -747,3 +747,21 @@ mod tests {
         assert!(err.contains("WAV") && err.contains("MP3"), "got: {}", err);
     }
 }
+
+/// 测试专用：tokio 的 mock 时钟（`time::pause()/advance()`）是**进程级**
+/// 资源——任何一个测试的暂停/快进都会改变其他并行测试的定时器行为。
+/// 所有操纵 mock 时钟的测试必须持有此串行锁：
+///
+/// ```ignore
+/// let _g = crate::utils::test_time_lock();
+/// tokio::time::pause();
+/// ...
+/// ```
+#[cfg(test)]
+pub fn test_time_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}

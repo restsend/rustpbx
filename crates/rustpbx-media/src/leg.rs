@@ -135,6 +135,8 @@ pub struct LegConfig {
     /// [`crate::ingress_stall::IngressStallEvent`] for the session to report
     /// as `proxy.ingress_stalled`. `0` disables the watcher. Defaults to 10.
     pub ingress_stall_warn_secs: u64,
+    /// Logical call root; the local call_id remains independently searchable.
+    pub root_session_id: Option<String>,
 }
 
 impl LegConfig {
@@ -164,6 +166,7 @@ impl LegConfig {
             relay_ready_timeout: None,
             call_id: None,
             ingress_stall_warn_secs: crate::ingress_stall::DEFAULT_INGRESS_STALL_WARN_SECS,
+            root_session_id: None,
             volume_stats: Default::default(),
             quality_stats: Default::default(),
         }
@@ -248,6 +251,7 @@ pub struct LegInner {
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
+    pub(crate) packet_diagnostics: Mutex<Option<crate::packet_diagnostics::LegPacketDiagnostics>>,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -488,6 +492,7 @@ impl LegInner {
             ingress_stall_task: Mutex::new(None),
             ingress_stall_forwarder_armed: std::sync::atomic::AtomicBool::new(false),
             ingress_quiet_expected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            packet_diagnostics: Mutex::new(None),
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
@@ -569,6 +574,7 @@ impl LegInner {
             );
             *leg.ingress_stall_task.lock() = Some(handle);
         }
+        Self::start_packet_diagnostics(&leg, cfg);
         Ok(leg)
     }
 
@@ -984,7 +990,7 @@ impl LegInner {
             _ if prev_was_relay => {
                 self.pc.clear_rtp_rewrite_bridge();
                 if let Some(sender) = audio_rtp_sender(&self.pc)
-                    && sender.packets_sent() > 0
+                    && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
                 {
                     // Adopt both the timestamp AND the sequence space: the
                     // receiver has already consumed the relay's numbers on
@@ -993,13 +999,13 @@ impl LegInner {
                     // jitter buffers -> choppy/absent audio after hold).
                     tracing::debug!(
                         leg = %self.id,
-                        wire_ts = sender.last_rtp_timestamp(),
+                        wire_ts = wire_timestamp_high_water,
                         next_seq = sender.next_sequence_number(),
                         "relay -> paced egress: adopting wire timeline"
                     );
                     self.egress
                         .adopt_wire_timeline(
-                            sender.last_rtp_timestamp(),
+                            wire_timestamp_high_water,
                             sender.next_sequence_number(),
                         )
                         .await?;
@@ -1030,6 +1036,7 @@ impl LegInner {
             .map(|pair| pair.remote.address.to_string());
         crate::leg_stats::LegQualityReport {
             side,
+            packet_diagnostics: self.packet_diagnostic_snapshot(),
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
                 leg_id: self.id.to_string(),
                 egress_mode: crate::media_health::MediaEgressMode::PcmPacing,
@@ -1230,6 +1237,10 @@ impl LegInner {
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
+        if let Some(state) = self.packet_diagnostics.lock().as_mut() {
+            state.sample(self, true);
+            if let Some(task) = state.task.take() { task.abort(); }
+        }
         self.disarm_rtp_timeout();
         self.egress.stop();
         self.ingress_stall_cancel.cancel();
@@ -1303,11 +1314,13 @@ fn seed_rewrite_options_from_destination(
     if options.initial_sequence_number.is_none() {
         options.initial_sequence_number = Some(sender.next_sequence_number());
     }
-    if options.initial_output_timestamp.is_none() && sender.packets_sent() > 0 {
+    if options.initial_output_timestamp.is_none()
+        && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
+    {
         let clock_rate = sender.params().clock_rate.max(1);
         let step = ((clock_rate as u64 * 20) / 1000) as u32;
         options.initial_output_timestamp =
-            Some(sender.last_rtp_timestamp().wrapping_add(step.max(1)));
+            Some(wire_timestamp_high_water.wrapping_add(step.max(1)));
     }
     options
 }
@@ -1676,6 +1689,7 @@ mod relay_policy_tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -2206,6 +2220,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2293,6 +2308,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2357,6 +2373,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2463,6 +2480,7 @@ mod tests {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2579,6 +2597,7 @@ mod p24_uac_test {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
             call_id: None,
+            root_session_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2647,6 +2666,7 @@ mod ice_lite_tests {
     fn rtp_cfg(enable_ice_lite: bool) -> LegConfig {
         LegConfig {
             call_id: None,
+            root_session_id: None,
             enable_ice_lite,
             ..LegConfig::rtp_pcmu()
         }
@@ -2740,6 +2760,7 @@ mod ice_lite_tests {
     async fn build_rtc_config_forces_ice_lite_off_for_webrtc() {
         let cfg = LegConfig {
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::WebRtc,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
@@ -2753,6 +2774,7 @@ mod ice_lite_tests {
         assert!(rtc_rtp.enable_ice_lite, "RTP legs honor the flag");
         let rtc_srtp = build_rtc_config(&LegConfig {
             call_id: None,
+            root_session_id: None,
             transport: TransportMode::Srtp,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
