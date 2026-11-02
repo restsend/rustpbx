@@ -7,8 +7,9 @@
 //! loss%. Live bridge count is maintained by register/unregister.
 //!
 //! Buckets follow send/receive directions at the system level:
-//! - `rx`: what this process received from peers (transport RX), loss estimated
-//!   from the remote Sender Report, internal drops = received but not forwarded.
+//! - `rx`: what this process received from peers (transport RX), loss from the
+//!   inbound RTP sequence counters (RFC 3550 A.3), internal drops = received
+//!   but not forwarded.
 //! - `tx`: what this process sent to peers (egress), loss from RTCP RR fraction
 //!   lost reported by receivers, internal drops = dropped before egress.
 

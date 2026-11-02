@@ -1300,9 +1300,6 @@ struct LegSample {
     egress: u64,
     transport_rx: u64,
     transport_tx: u64,
-    sr_packet_count: u64,
-    sr_ssrc: u32,
-    has_sr: bool,
     jitter_us: u64,
     rtt_us: u64,
     fraction_lost: u8,
@@ -1311,7 +1308,7 @@ struct LegSample {
     ingress_recovery: Option<std::time::Instant>,
 }
 
-async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
+async fn sample_leg(leg: &Leg) -> LegSample {
     let tap = leg.stats();
     let rtcp = leg.rtcp_stats().snapshot();
     // Wire-level outbound RTP: sum the audio senders' counters (includes
@@ -1324,32 +1321,32 @@ async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
         .filter_map(|t| t.sender())
         .map(|s| s.packets_sent() as u64)
         .sum();
+    // Sequence-number-based inbound counters (RFC 3550 §A.3). Always sampled:
+    // the 5s health loss figure is derived from them.
     let mut ingress_quality = None;
-    if quality {
-        let receiver = leg.pc().get_transceivers().into_iter()
-            .find(|transceiver| transceiver.kind() == MediaKind::Audio)
-            .and_then(|transceiver| transceiver.receiver());
-        if let (Some(receiver), Some(codec)) = (receiver, leg.negotiated().and_then(|profile| profile.audio)) {
-            if codec.clock_rate != 0 {
-                let ssrc = receiver.ssrc();
-                match leg.pc().get_stats().await {
-                    Ok(report) => {
-                        ingress_quality = report.entries.iter().find(|entry|
-                            entry.kind == rustrtc::stats::StatsKind::InboundRtp
-                            && entry.values.get("ssrc").and_then(serde_json::Value::as_u64) == Some(ssrc as u64))
-                            .and_then(|entry| {
-                                let received = entry.values.get("packetsReceived")?.as_u64()?;
-                                Some(IngressSample {
-                                    ssrc, clock_rate: codec.clock_rate,
-                                    received,
-                                    lost: entry.values.get("packetsLost")?.as_i64()?,
-                                    jitter_ms: (received > 1).then_some(
-                                        entry.values.get("jitter")?.as_f64()? * 1000.0 / codec.clock_rate as f64),
-                                })
-                            });
-                    }
-                    Err(error) => warn!(leg_id = %leg.id(), %error, "failed to sample inbound media quality"),
+    let receiver = leg.pc().get_transceivers().into_iter()
+        .find(|transceiver| transceiver.kind() == MediaKind::Audio)
+        .and_then(|transceiver| transceiver.receiver());
+    if let (Some(receiver), Some(codec)) = (receiver, leg.negotiated().and_then(|profile| profile.audio)) {
+        if codec.clock_rate != 0 {
+            let ssrc = receiver.ssrc();
+            match leg.pc().get_stats().await {
+                Ok(report) => {
+                    ingress_quality = report.entries.iter().find(|entry|
+                        entry.kind == rustrtc::stats::StatsKind::InboundRtp
+                        && entry.values.get("ssrc").and_then(serde_json::Value::as_u64) == Some(ssrc as u64))
+                        .and_then(|entry| {
+                            let received = entry.values.get("packetsReceived")?.as_u64()?;
+                            Some(IngressSample {
+                                ssrc, clock_rate: codec.clock_rate,
+                                received,
+                                lost: entry.values.get("packetsLost")?.as_i64()?,
+                                jitter_ms: (received > 1).then_some(
+                                    entry.values.get("jitter")?.as_f64()? * 1000.0 / codec.clock_rate as f64),
+                            })
+                        });
                 }
+                Err(error) => warn!(leg_id = %leg.id(), %error, "failed to sample inbound media quality"),
             }
         }
     }
@@ -1361,9 +1358,6 @@ async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
         egress: tap.egress_packets,
         transport_rx: leg.pc().received_rtp_packets(),
         transport_tx,
-        sr_packet_count: rtcp.sr_packet_count,
-        sr_ssrc: rtcp.sr_ssrc,
-        has_sr: rtcp.has_sr,
         jitter_us: rtcp.jitter_us,
         rtt_us: rtcp.rtt_us,
         fraction_lost: rtcp.fraction_lost,
@@ -1378,36 +1372,52 @@ struct LegSampleDelta {
     egress: u64,
     transport_rx: u64,
     transport_tx: u64,
-    sr: u64,
+    /// Inbound packets the window should have carried (sequence-number span).
+    rx_expected: u64,
+    /// Inbound packets missing from that span.
+    rx_lost: u64,
     jitter_us: u64,
     rtt_us: u64,
     fraction_lost: u8,
+}
+
+/// Inbound `(expected, lost)` for the window from the receiver's
+/// sequence-number counters. Both counters cover the same span, so the ratio
+/// is exact whatever the sampling cadence — unlike the remote Sender Report
+/// packet count, whose randomized interval never lines up with our window.
+/// A missing previous sample or a new SSRC starts a fresh stream: the
+/// cumulative counters are themselves the window. Late packets can lower the
+/// cumulative loss; that window reports none.
+fn ingress_loss_delta(cur: Option<&IngressSample>, prev: Option<&IngressSample>) -> (u64, u64) {
+    let Some(cur) = cur else {
+        return (0, 0);
+    };
+    let (received, lost) = match prev {
+        Some(prev) if prev.ssrc == cur.ssrc && cur.received >= prev.received => {
+            (cur.received - prev.received, cur.lost - prev.lost)
+        }
+        _ => (cur.received, cur.lost),
+    };
+    let lost = lost.max(0) as u64;
+    (received + lost, lost)
 }
 
 fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelta {
     let Some(cur) = cur else {
         return LegSampleDelta::default();
     };
+    let (rx_expected, rx_lost) = ingress_loss_delta(
+        cur.ingress_quality.as_ref(),
+        prev.and_then(|prev| prev.ingress_quality.as_ref()),
+    );
     let prev = prev.cloned().unwrap_or_default();
-    // SR packet count is only meaningful once a Sender Report has arrived.
-    // If the remote SSRC changed (stream restart / audio↔video SR flip) the
-    // cumulative counter resets, so treat the window as "fresh stream" instead
-    // of computing a bogus huge delta.
-    let sr = if cur.has_sr {
-        if cur.sr_ssrc != 0 && prev.sr_ssrc != 0 && cur.sr_ssrc != prev.sr_ssrc {
-            cur.sr_packet_count
-        } else {
-            cur.sr_packet_count.saturating_sub(prev.sr_packet_count)
-        }
-    } else {
-        0
-    };
     LegSampleDelta {
         ingress: cur.ingress.saturating_sub(prev.ingress),
         egress: cur.egress.saturating_sub(prev.egress),
         transport_rx: cur.transport_rx.saturating_sub(prev.transport_rx),
         transport_tx: cur.transport_tx.saturating_sub(prev.transport_tx),
-        sr,
+        rx_expected,
+        rx_lost,
         jitter_us: cur.jitter_us,
         rtt_us: cur.rtt_us,
         fraction_lost: cur.fraction_lost,
@@ -1477,8 +1487,8 @@ fn spawn_bridge_stats_task(
                 let mut g = legs_shared.lock();
                 if finishing { std::mem::take(&mut *g) } else { (g.0.clone(), g.1.clone()) }
             };
-            let mut sa = if let Some(leg) = &la { Some(sample_leg(leg, config.enabled).await) } else { None };
-            let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg, config.enabled).await) } else { None };
+            let mut sa = if let Some(leg) = &la { Some(sample_leg(leg).await) } else { None };
+            let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg).await) } else { None };
             // A closed leg has no inbound transport reading, not a counter
             // reset: keep the last cumulative rx (teardown stops legs before
             // the sampler's final pass). Sender-side tx survives close.
@@ -1638,8 +1648,7 @@ fn spawn_bridge_stats_task(
                 }
             }
             if finishing { break; }
-            // Preserve the existing 5s health/telemetry cadence and SR
-            // reconciliation; fast samples must not invent SR bursts.
+            // Preserve the existing 5s health/telemetry cadence.
             // Use scheduled ticks: wake-up jitter must not skip a full health period.
             if tick.duration_since(last_health) < Duration::from_secs(5) { continue; }
             last_health = tick;
@@ -1655,8 +1664,8 @@ fn spawn_bridge_stats_task(
 
             // ── rx bucket (system received) ──
             let rx_packets_d = da.transport_rx + db.transport_rx;
-            let rx_expected_d = da.sr + db.sr;
-            let rx_lost_d = rx_expected_d.saturating_sub(rx_packets_d);
+            let rx_expected_d = da.rx_expected + db.rx_expected;
+            let rx_lost_d = da.rx_lost + db.rx_lost;
             // Internal drops: received on one leg but not emitted on the
             // peer leg (rustrtc mpsc/SPSC saturation, relay stall, ...).
             // Relay-only (see `relay_mode`).
@@ -1693,9 +1702,11 @@ fn spawn_bridge_stats_task(
                     bridge_id = %session_id,
                     relay = relay_mode,
                     a_ingress = da.ingress, a_egress = da.egress, a_rx = da.transport_rx,
+                    a_rx_lost = da.rx_lost,
                     a_jitter = fmt_ms(da.jitter_us), a_rtt = fmt_ms(da.rtt_us),
                     a_flost = format!("{:.1}%", da.fraction_lost as f64 / 255.0 * 100.0),
                     b_ingress = db.ingress, b_egress = db.egress, b_rx = db.transport_rx,
+                    b_rx_lost = db.rx_lost,
                     b_jitter = fmt_ms(db.jitter_us), b_rtt = fmt_ms(db.rtt_us),
                     b_flost = format!("{:.1}%", db.fraction_lost as f64 / 255.0 * 100.0),
                     rx_packets = rx_packets_d,
@@ -2158,6 +2169,36 @@ mod tests {
     use super::*;
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
+
+    fn ingress_sample(ssrc: u32, received: u64, lost: i64) -> IngressSample {
+        IngressSample { ssrc, clock_rate: 8000, received, lost, jitter_ms: None }
+    }
+
+    /// The window loss comes from the receiver's own sequence counters, so a
+    /// loss-free stream reports zero however the remote RTCP timing falls.
+    #[test]
+    fn ingress_loss_delta_uses_sequence_counters() {
+        let prev = ingress_sample(7, 1000, 0);
+        assert_eq!(ingress_loss_delta(Some(&ingress_sample(7, 1250, 0)), Some(&prev)), (250, 0));
+        assert_eq!(ingress_loss_delta(Some(&ingress_sample(7, 1245, 5)), Some(&prev)), (250, 5));
+    }
+
+    #[test]
+    fn ingress_loss_delta_fresh_stream_uses_cumulative_counters() {
+        // First sample: the cumulative counters are the window.
+        assert_eq!(ingress_loss_delta(Some(&ingress_sample(7, 500, 2)), None), (502, 2));
+        // New SSRC: the old stream's counters do not apply.
+        let prev = ingress_sample(7, 5000, 40);
+        assert_eq!(ingress_loss_delta(Some(&ingress_sample(9, 100, 1)), Some(&prev)), (101, 1));
+        assert_eq!(ingress_loss_delta(None, Some(&prev)), (0, 0));
+    }
+
+    /// Late packets lower the cumulative loss; that window reports none.
+    #[test]
+    fn ingress_loss_delta_late_recovery_reports_no_loss() {
+        let prev = ingress_sample(7, 1000, 10);
+        assert_eq!(ingress_loss_delta(Some(&ingress_sample(7, 1250, 4)), Some(&prev)), (250, 0));
+    }
 
     /// Leak regression for the spawned monitors (they are no longer visible
     /// to the session-side TaskGuard counter): both monitor tasks must
