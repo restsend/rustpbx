@@ -233,6 +233,9 @@ pub struct RecordingPolicy {
     /// `record start` actions, giving separate IVR / agent segments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_start_except: Vec<String>,
+    /// Delete the recording of a call that was never answered (only early
+    /// media was captured) instead of keeping and uploading it. Default false.
+    pub discard_unanswered: Option<bool>,
     pub filename_pattern: Option<String>,
     /// Live file output rate in Hz; explicit values select resampled PCM WAV.
     pub samplerate: Option<u32>,
@@ -396,6 +399,7 @@ impl RecordingPolicy {
             enabled: self.enabled.unwrap_or(false),
             auto_start: self.auto_start.unwrap_or(true),
             auto_start_at: self.auto_start_at.unwrap_or_default(),
+            discard_unanswered: self.discard_unanswered.unwrap_or(false),
             recording_type: self.effective_recording_type(),
             stereo_swap: self.stereo_swap.unwrap_or(false),
             stereo_mode: self.stereo_mode,

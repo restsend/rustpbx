@@ -452,6 +452,9 @@ media goes: `local` / `http` / `s3` write a WAV (uploaded by `[recording]`);
 `[sipflow.upload].media`). SIP signalling is captured whenever `[sipflow]` is
 configured. `auto_start_at = "media"` (default) installs the recorder after the
 first caller-media setup; use `"answer"` to wait for the final 200.
+`discard_unanswered = true` deletes the WAV recording of a call that was never
+answered (early media only) instead of keeping and uploading it; SipFlow
+captures are not affected.
 
 #### Option 1: Full SipFlow (RTP + SIP)
 

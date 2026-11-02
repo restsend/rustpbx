@@ -1424,6 +1424,9 @@ impl CallModule {
                 if !overrides.auto_start_except.is_empty() {
                     merged.auto_start_except = overrides.auto_start_except.clone();
                 }
+                if overrides.discard_unanswered.is_some() {
+                    merged.discard_unanswered = overrides.discard_unanswered;
+                }
                 if overrides.filename_pattern.is_some() {
                     merged.filename_pattern = overrides.filename_pattern.clone();
                 }
@@ -1582,6 +1585,7 @@ impl CallModule {
         dialplan.recording.enabled = true;
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
         dialplan.recording.auto_start_at = policy.auto_start_at.unwrap_or_default();
+        dialplan.recording.discard_unanswered = policy.discard_unanswered.unwrap_or(false);
         dialplan.recording.recording_type = recording_type;
         dialplan
     }

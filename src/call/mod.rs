@@ -840,6 +840,8 @@ pub struct CallRecordingConfig {
     pub auto_start: bool,
     /// Signaling point at which automatic recording installs its backend.
     pub auto_start_at: RecordingAutoStartAt,
+    /// Delete the recording of an unanswered call; nothing is uploaded.
+    pub discard_unanswered: bool,
     /// Where media is captured: `local`/`http`/`s3` → WAV file; `sipflow` →
     /// SipflowRecorder. SIP signalling always goes to `[sipflow]` when configured.
     pub recording_type: RecordingType,
@@ -869,6 +871,7 @@ impl CallRecordingConfig {
             option: None,
             auto_start: true,
             auto_start_at: RecordingAutoStartAt::default(),
+            discard_unanswered: false,
             recording_type: RecordingType::Local,
             stereo_swap: false,
             stereo_mode: None,
@@ -1365,6 +1368,7 @@ impl Dialplan {
                 "enabled": recording.enabled,
                 "auto_start": recording.auto_start,
                 "auto_start_at": recording.auto_start_at,
+                "discard_unanswered": recording.discard_unanswered,
                 "recording_type": recording.recording_type,
                 "stereo_swap": recording.stereo_swap,
             },

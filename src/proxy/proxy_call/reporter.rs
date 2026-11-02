@@ -216,7 +216,7 @@ impl CallReporter {
             .root_session_id
             .clone()
             .unwrap_or_else(|| self.context.session_id.clone());
-        let (recorder, mut metadata_map) = collect_recording_artifacts(
+        let (mut recorder, mut metadata_map) = collect_recording_artifacts(
             &snapshot,
             &root_session,
             self.context.dialplan.recording.enabled,
@@ -227,6 +227,9 @@ impl CallReporter {
                 .as_ref()
                 .map(|o| o.recorder_file.as_str()),
         );
+        if !call_was_accepted && self.context.dialplan.recording.discard_unanswered {
+            discard_recordings(&self.context.session_id, &mut recorder, &mut metadata_map);
+        }
         // Copy values from cookie to extras_map
         // (Removed as TransactionCookie no longer has values)
 
@@ -514,6 +517,27 @@ fn collect_recording_artifacts(
     }
 
     (recorder, metadata_map)
+}
+
+/// `[recording] discard_unanswered`: delete an unanswered call's recording
+/// files and leave them out of the record, so nothing is uploaded or linked.
+fn discard_recordings(
+    session_id: &str,
+    recorder: &mut Vec<CallRecordMedia>,
+    metadata: &mut HashMap<String, serde_json::Value>,
+) {
+    for media in recorder.drain(..) {
+        match fs::remove_file(&media.path) {
+            Ok(()) => {
+                tracing::info!(session_id, path = %media.path, "discarded recording of unanswered call")
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(session_id, path = %media.path, error = %e, "failed to discard recording of unanswered call")
+            }
+        }
+    }
+    metadata.remove("recording_segments");
 }
 
 fn enrich_error_metadata(
@@ -1050,5 +1074,56 @@ mod tests {
         }];
         let (recorder, _) = collect_recording_artifacts(&snapshot, "root", false, None);
         assert!(recorder.is_empty());
+    }
+
+    /// `[recording] discard_unanswered`: an unanswered call's recording file
+    /// is deleted and left out of the record, so nothing is uploaded or
+    /// linked; an answered call keeps it.
+    #[tokio::test]
+    async fn test_discard_unanswered_recording() {
+        use crate::call::{DialDirection, Dialplan};
+        use crate::media::recorder::RecorderOption;
+        use crate::proxy::tests::common::{create_test_request, create_test_server};
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+        use rsipstack::sip::Method;
+
+        let (server, _) = create_test_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        for answered in [false, true] {
+            let path = dir.path().join(format!("call-{answered}.wav"));
+            std::fs::write(&path, b"RIFF-recording").unwrap();
+            let request = create_test_request(Method::Invite, "alice", None, "rustpbx.com", None);
+            let mut dialplan =
+                Dialplan::new(format!("discard-{answered}"), request, DialDirection::Inbound);
+            dialplan.recording.enabled = true;
+            dialplan.recording.discard_unanswered = true;
+            dialplan.recording.option = Some(RecorderOption {
+                recorder_file: path.display().to_string(),
+                ..Default::default()
+            });
+            let (mut session, _handle, _commands) =
+                build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+            if answered {
+                session.meta.answer_time = Some(std::time::Instant::now());
+            }
+            let (sender, mut records) = tokio::sync::mpsc::channel(1);
+            let reporter = CallReporter {
+                server: server.clone(),
+                context: session.context.clone(),
+                call_record_sender: Some(sender),
+            };
+            reporter.report(session.record_snapshot());
+            let record = records.recv().await.unwrap();
+            session.cancel_token.cancel();
+
+            if answered {
+                assert_eq!(record.recorder.len(), 1, "an answered call keeps its recording");
+                assert!(path.exists());
+            } else {
+                assert!(record.recorder.is_empty(), "nothing left to upload");
+                assert!(record.details.recording_url.is_none());
+                assert!(!path.exists(), "the unanswered recording is deleted");
+            }
+        }
     }
 }

@@ -434,7 +434,7 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 
 ### 场景 D：合规录音
 
-`[recording].enabled` 启用媒体采集。`[recording].type` 选择媒体去向：`local` / `http` / `s3` 写入 WAV（由 `[recording]` 上传）；`sipflow` 将 RTP 写入 `[sipflow]` 后端（由 `[sipflow.upload].media` 上传）。只要配置了 `[sipflow]` 就会采集 SIP 信令。`auto_start_at = "media"`（默认值）在第一次完成主叫媒体设置后安装录音器；使用 `"answer"` 则等待最终的 200 响应。
+`[recording].enabled` 启用媒体采集。`[recording].type` 选择媒体去向：`local` / `http` / `s3` 写入 WAV（由 `[recording]` 上传）；`sipflow` 将 RTP 写入 `[sipflow]` 后端（由 `[sipflow.upload].media` 上传）。只要配置了 `[sipflow]` 就会采集 SIP 信令。`auto_start_at = "media"`（默认值）在第一次完成主叫媒体设置后安装录音器；使用 `"answer"` 则等待最终的 200 响应。`discard_unanswered = true` 会删除未接通通话（仅有早期媒体）的 WAV 录音，不保留也不上传；不影响 SipFlow 采集。
 
 #### 方案 1：完整 SipFlow（RTP + SIP）
 
