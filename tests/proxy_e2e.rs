@@ -82,5 +82,11 @@ mod test_ivr_transfer_handoff_e2e;
 #[path = "proxy_e2e/test_trunk_nat_fix_e2e.rs"]
 mod test_trunk_nat_fix_e2e;
 
+#[path = "proxy_e2e/raw_trunk_caller.rs"]
+mod raw_trunk_caller;
+
 #[path = "proxy_e2e/test_cdr_end_at_hangup.rs"]
 mod test_cdr_end_at_hangup;
+
+#[path = "proxy_e2e/test_early_dialog_bye.rs"]
+mod test_early_dialog_bye;

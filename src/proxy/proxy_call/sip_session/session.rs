@@ -1845,7 +1845,10 @@ impl SipSession {
                         timeout = tokio::time::sleep(Self::CALLER_REJECTION_ACK_TIMEOUT).boxed();
                         continue;
                     }
-                    if !server_dialog_clone.state().is_terminated() {
+                    // Keyed on the INVITE, not the dialog: a caller BYE on the
+                    // early dialog terminates it before any final response, and
+                    // that INVITE still needs its 487 (RFC 3261 §15.1.2).
+                    if Self::invite_unanswered(tx) {
                         if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
                             warn!(session_id = %session_id, error = %e, "Failed to reply 487 on cancel");
                         }
@@ -1855,7 +1858,7 @@ impl SipSession {
                 _ = &mut timeout => {
                     warn!(session_id = %session_id, "Call setup timed out");
                     cancel_token.cancel();
-                    if !server_dialog_clone.state().is_terminated() {
+                    if Self::invite_unanswered(tx) {
                         if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
                             warn!(session_id = %session_id, error = %e, "Failed to reply 487 on setup timeout");
                         }
@@ -1868,6 +1871,13 @@ impl SipSession {
         Ok(())
     }
 
+
+    /// The caller's INVITE has no final response yet, so it still awaits one.
+    fn invite_unanswered(tx: &rsipstack::transaction::transaction::Transaction) -> bool {
+        tx.last_response.as_ref().is_none_or(|resp| {
+            resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Provisional
+        })
+    }
 
     /// This node's identity for home-proxy self detection — must match the
     /// address the registrar stamps as `home_proxy` (see `route_via_home_proxy`).
