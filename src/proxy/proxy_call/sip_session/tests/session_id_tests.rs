@@ -6,6 +6,12 @@ use super::*;
 /// the Rfc7989 seed another test installed).
 static SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// 本模块的 settings 依赖用例一律在此串行锁下执行（即 `SETTINGS_LOCK`，
+/// 与显式 seed/restore 的用例互斥，避免并行交错读到错误模式）。
+fn lock_settings_serial() -> parking_lot::MutexGuard<'static, ()> {
+    SETTINGS_LOCK.lock()
+}
+
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {
     inherited_session_id_session_with_enabled(header_id, uui_id, true).await
 }
@@ -84,6 +90,7 @@ async fn inherited_session_id_session_with_enabled(
 
 #[tokio::test]
 async fn session_id_rfc_padding_preserves_original_root_without_truncating_other_ids() {
+    let _settings_serial = lock_settings_serial();
     let short = "0b9e6c1e1b404e8f";
     let padded = format!("{short:0>32}");
     // The UUI carries the original root; absent or unrelated UUI must never
@@ -111,6 +118,8 @@ async fn session_id_rfc_padding_preserves_original_root_without_truncating_other
 #[tokio::test]
 async fn session_id_native_inherited_length_survives_outgoing_boundary() {
     use crate::call::session_id::{SessionIdHeaderMode, init_settings, settings};
+    // 断言 Native 行为（build_wire_header 读进程级 settings）——必须与
+    // Rfc7989 改写用例串行，因此显式 seed 而不是依赖环境默认。
     let _guard = SETTINGS_LOCK.lock();
     // Deterministic Native mode regardless of test scheduling order.
     struct RestoreSettings(crate::call::session_id::SessionIdSettings);
@@ -143,6 +152,7 @@ async fn session_id_native_inherited_length_survives_outgoing_boundary() {
 
 #[tokio::test]
 async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
+    let _settings_serial = lock_settings_serial();
     use crate::call::session_id::{
         SessionIdHeaderMode, SessionIdSettings, init_settings, settings,
     };

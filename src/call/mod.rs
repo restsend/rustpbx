@@ -979,6 +979,15 @@ pub struct MediaConfig {
     /// Unset = 30s; 0 disables periodic snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    /// Per-leg inbound-RTP stall watcher (`proxy.ingress_stalled`): when a
+    /// leg that HAS received media goes silent this many seconds — ANY
+    /// phase, including the pre-bridge IVR/queue wait the bridge health
+    /// monitor cannot see — a WARN fires and a CDR/RWI error edge is
+    /// reported once per leg. The companion `proxy.media_stalled` only
+    /// covers "bridge leg never received anything". Unset = 10s; 0 disables
+    /// the watcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_stall_warn_secs: Option<u64>,
     #[serde(default)]
     pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
     pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
@@ -1017,6 +1026,7 @@ impl MediaConfig {
             relay_ready_timeout_secs: None,
             stall_detect_secs: None,
             media_trace_interval_secs: None,
+            ingress_stall_warn_secs: None,
             quality_stats: Default::default(),
             volume_stats: Default::default(),
             inband_dtmf: Default::default(),
@@ -1075,6 +1085,11 @@ impl MediaConfig {
 
     pub fn with_media_trace_interval_secs(mut self, secs: Option<u64>) -> Self {
         self.media_trace_interval_secs = secs;
+        self
+    }
+
+    pub fn with_ingress_stall_warn_secs(mut self, secs: Option<u64>) -> Self {
+        self.ingress_stall_warn_secs = secs;
         self
     }
 

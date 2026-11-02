@@ -116,17 +116,17 @@ pub(crate) struct TapStats {
 
 const AUDIO_PACKET_SAMPLES: usize = 4;
 
-/// Bounded plaintext packet evidence, without retaining audio bytes.
+/// Plaintext packet evidence, without retaining audio bytes.
 /// Payload hashes are comparable only within the same process/build.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct AudioPacketSample {
-    ssrc: u32,
-    payload_type: u8,
-    sequence: u16,
-    timestamp: u32,
-    payload_bytes: usize,
-    payload_hash: String,
-    peer_addr: std::net::SocketAddr,
+    pub(crate) ssrc: u32,
+    pub(crate) payload_type: u8,
+    pub(crate) sequence: u16,
+    pub(crate) timestamp: u32,
+    pub(crate) payload_bytes: usize,
+    pub(crate) payload_hash: String,
+    pub(crate) peer_addr: std::net::SocketAddr,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -135,6 +135,14 @@ pub(crate) struct AudioPacketSamples {
     // The transport observer runs before SRTP protection and socket sending.
     // These samples cannot establish wire delivery, even when hashes match.
     egress_attempts: VecDeque<AudioPacketSample>,
+}
+
+impl AudioPacketSamples {
+    /// Most recent inbound packet seen by this observer (diagnostics anchor
+    /// for stall watchers: "last evidence before the wire went quiet").
+    pub(crate) fn last_ingress(&self) -> Option<&AudioPacketSample> {
+        self.ingress.back()
+    }
 }
 
 /// Plaintext observer for one leg: stats + DTMF detection + recording.

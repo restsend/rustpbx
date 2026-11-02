@@ -10,6 +10,7 @@ pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
 pub mod inband_dtmf;
+pub mod ingress_stall;
 pub mod ingress_tap;
 pub mod leg;
 pub mod leg_id;

@@ -833,6 +833,12 @@ impl SipSession {
                 .media
                 .relay_ready_timeout_secs
                 .map(std::time::Duration::from_secs),
+            ingress_stall_warn_secs: self
+                .context
+                .dialplan
+                .media
+                .ingress_stall_warn_secs
+                .unwrap_or(crate::media::ingress_stall::DEFAULT_INGRESS_STALL_WARN_SECS),
         }
     }
 
@@ -2643,6 +2649,67 @@ impl SipSession {
     /// Started once per caller peer; exits when its DTMF sender is dropped.
     pub(crate) fn spawn_dtmf_forwarder(&self) {
         self.spawn_leg_dtmf_forwarder(&LegId::from("caller"));
+        self.spawn_leg_ingress_stall_forwarder(&LegId::from("caller"));
+    }
+
+    /// Forward per-leg inbound-RTP stall edges to the CDR/RWI error path as
+    /// `proxy.ingress_stalled` (once per leg; re-arming is a no-op). The
+    /// watcher on the leg covers every phase of the leg's life — including
+    /// the pre-bridge IVR/queue wait the bridge health monitor cannot
+    /// observe — and the condition is disjoint from `proxy.media_stalled`
+    /// (which requires lifetime RX == 0): this watcher only arms after the
+    /// leg HAS received media, so a leg can never trigger both codes.
+    pub(crate) fn spawn_leg_ingress_stall_forwarder(
+        &self,
+        id: &LegId,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let peer = self.media_leg(id)?;
+        if !peer.arm_ingress_stall_forwarder() {
+            return None;
+        }
+        let mut rx = peer.subscribe_ingress_stall();
+        let leg_id = peer.id().to_string();
+        let session_id = self.context.session_id.clone();
+        let cmd_tx = self.cmd_tx.clone();
+        Some(crate::utils::spawn(async move {
+            let mut reported = false;
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        // Resume edges stay in the watcher's own log line;
+                        // only the stall edge is a CDR/RWI-worthy condition.
+                        if ev.kind != crate::media::ingress_stall::IngressStallKind::Stalled
+                            || reported
+                        {
+                            continue;
+                        }
+                        reported = true;
+                        let detail = serde_json::to_value(&ev).ok();
+                        warn!(
+                            session_id = %session_id,
+                            leg_id = %leg_id,
+                            "reporting proxy.ingress_stalled (once per leg)"
+                        );
+                        if let Some(tx) = &cmd_tx {
+                            let _ = tx.try_send(CallCommand::ReportCallError {
+                                stage: "proxy".to_string(),
+                                app: "proxy".to_string(),
+                                code: "proxy.ingress_stalled".to_string(),
+                                severity: crate::call_errors::ErrSeverity::Warn,
+                                message: format!(
+                                    "Inbound media stalled on leg {} after {} received packets",
+                                    leg_id, ev.lifetime_accepted
+                                ),
+                                sip_status: None,
+                                detail,
+                            });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
     }
 
     fn accepts_application_input(binding: &RwLock<Option<LegId>>, leg_id: &str) -> bool {
@@ -3131,6 +3198,12 @@ impl SipSession {
             ),
             transferred: self.meta.transferred,
             leg_role: self.meta.dial_leg_role.clone(),
+            owns_statistics: crate::proxy::proxy_call::session_hooks::owns_statistics_at_birth(
+                self.meta.child_leg_role.is_some(),
+                self.meta.child_leg_role.as_deref(),
+                self.meta.root_session_id.as_deref(),
+                &self.context.session_id,
+            ),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             extensions: self.extensions.clone(),
@@ -3190,7 +3263,37 @@ impl SipSession {
         self.refresh_rwi_meta();
     }
 
-    pub fn transferred_agent_context(
+    /// Attended-transfer departure: the session's agent leg is leaving
+    /// (consult → complete transfer) — freeze THE LEG'S OWN agent identity as
+    /// the session's attribution pin, so the final CDR/`call_hangup` stays
+    /// with the agent who actually served this session. Without this,
+    /// `agent_id_from_context` falls through to Priority 3
+    /// (`connected_callee`), which the cross-session transfer bridge repoints
+    /// at the OTHER party — the served agent's row vanished / was
+    /// double-counted (PRD s25 S5: A 0 rows / B duplicate rows).
+    ///
+    /// Keyed to the leg's own `agent_id` (stamped at LegConnected for every
+    /// agent call — queue and direct alike): the consult session's departing
+    /// leg freezes ITS agent (B), the customer session's departing leg freezes
+    /// ITS agent (A) — the stash-based fallback mis-attributed B's session to
+    /// the transferor. Fires only when the leg has a confirmed agent identity.
+    fn freeze_served_agent_attribution(&mut self, leg_id: &LegId) {
+        let served_agent = self
+            .legs
+            .get(leg_id)
+            .and_then(|leg| leg.agent_id.clone())
+            .filter(|agent| !agent.is_empty());
+        if let Some(agent) = served_agent {
+            Self::set_pinned_agent_id(&self.extensions, &agent);
+            info!(
+                session_id = %self.id,
+                agent = %agent,
+                "served agent attribution frozen at transfer departure"
+            );
+        }
+    }
+
+    fn transferred_agent_context(
         &self,
         leg_id: &LegId,
     ) -> Option<crate::proxy::proxy_call::session_hooks::CallSessionContext> {
@@ -5580,6 +5683,7 @@ impl SipSession {
         self.update_leg_state(leg, crate::call::domain::LegState::Connected);
         if let Some(peer) = self.media_leg(leg) {
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
         }
         Ok(())
     }
@@ -5778,6 +5882,12 @@ impl SipSession {
                     .as_ref()
                     .and_then(|leg| self.transferred_agent_context(leg))
                 {
+                    // PRD s25 S5：转场离场坐席 = 本会话的实际服务坐席 —— 先把
+                    // 归因冻结进 live pin（CDR/call_hangup 归属不变），再发
+                    // on_agent_disconnected。
+                    self.freeze_served_agent_attribution(
+                        terminated_leg.as_ref().expect("checked above"),
+                    );
                     for hook in self.server.session_hooks.iter() {
                         hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
                     }
@@ -8051,6 +8161,25 @@ impl SipSession {
         // leg-scoped RWI event for it carries `leg_role: "agent"`. Idempotent.
         self.stamp_caller_agent_identity().await;
         self.meta.connected_callee = callee.clone();
+        // PRD s25 S5（C2）：入呼应答腿盖章服务坐席身份 —— 直拨入呼不经
+        // queue 派发的 LegConnected 盖章点，离场冻结
+        //（`freeze_served_agent_attribution`）按腿自身身份定归属，缺章则
+        // 完成转接后归因漂到转接目标（A 0 行 / B 双行）。
+        if let Some(ref callee_uri) = callee
+            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
+            && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
+            && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+            && let Some(leg) = self.legs.get_mut(&leg_id)
+            && leg.agent_id.is_none()
+        {
+            info!(
+                session_id = %self.id,
+                leg_id = %leg_id,
+                agent = %agent,
+                "inbound answer: served agent stamped on the connected leg"
+            );
+            leg.agent_id = Some(agent);
+        }
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
         // "hung up while still waiting" even after this leg terminates.
@@ -8470,7 +8599,6 @@ impl SipSession {
     }
 
     // ── Hold/Unhold propagation helpers ──
-
 
 
 
@@ -11229,6 +11357,7 @@ impl SipSession {
                         }
                         if let Some(peer) = self.media_leg(&caller) {
                             peer.resume_rtp_timeout();
+                            peer.set_ingress_quiet_expected(false);
                         }
                         self.meta.connected_callee_dialog_id =
                             self.legs.get_dialog(&leg_id).map(|d| d.id());
@@ -11255,8 +11384,19 @@ impl SipSession {
                     // sequential fallback dialed a different agent than the
                     // primary one. Gated to queue context so direct (non-
                     // queue) calls keep deriving the agent from parties.
-                    let leg_agent_id = self.leg_agent_id(&leg_id, Some(agent_uri)).await;
-                    if self.in_queue_context() {
+                    let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    // PRD s25 S5（C2）：盖章不再门控 queue 语境 —— 直拨 agent
+                    // 呼叫的腿同样带身份，离场冻结
+                    //（`freeze_served_agent_attribution`）按腿自身身份定归属。
+                    // 会话 pin 写入仍门控 queue 语境（直拨归因由 Priority 3
+                    // 兜底，保持既有语义）。
+                    if let Some(leg) = self.legs.get_mut(&leg_id) {
+                        leg.agent_id = leg_agent_id.clone();
+                    } else {
+                        // PRD s25 S5（C2）：直拨 agent 呼叫的腿同样盖章 ——
+                        // 离场冻结（`freeze_served_agent_attribution`）按腿
+                        // 自身身份定归属，没盖章的腿无从冻结。pin 写入仍
+                        // 门控 queue 语境（直拨归因由 Priority 3 兜底）。
                         if let Some(leg) = self.legs.get_mut(&leg_id) {
                             leg.agent_id = leg_agent_id.clone();
                         }
@@ -12164,7 +12304,10 @@ impl SipSession {
             }
             if let Some(peer) = self.media_leg(leg_id) {
                 match new_state {
-                    LegState::Hold => peer.pause_rtp_timeout(),
+                    LegState::Hold => {
+                        peer.pause_rtp_timeout();
+                        peer.set_ingress_quiet_expected(true);
+                    }
                     LegState::Connected => peer.resume_rtp_timeout(),
                     _ => {}
                 }
@@ -14113,12 +14256,8 @@ impl SipSession {
                 Err(anyhow!("Failed to send OPTIONS ping: {}", e))
             }
         }
+
     }
-
-
-
-
-
 }
 
 impl Drop for SipSession {
@@ -14225,8 +14364,6 @@ impl Drop for SipSession {
 
         // RWI cleanup is owned by the CallRecord guard created by the reporter
         // above, or by the originate task for UAC sessions without a reporter.
-    }
-}
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

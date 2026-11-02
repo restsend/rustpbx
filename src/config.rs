@@ -323,6 +323,13 @@ pub struct RecordingPolicy {
     /// Default 600 (10 minutes). Breaches increment a Prometheus counter.
     #[serde(default)]
     pub upload_sla_secs: Option<u64>,
+    /// Keep the local recording file for N days **after a successful upload**
+    /// before cleanup (acceptance §3.2.5 归档: 上传后本地保留 10 天). `0`
+    /// (default) = delete immediately on upload success (historical
+    /// behaviour). Files still pending upload (`.upload_failed` marker
+    /// present) are never swept. Sweep runs on the retry worker cycle.
+    #[serde(default)]
+    pub keep_local_days: Option<u32>,
     /// System-managed outbound ringback stage: when true, every originate
     /// call records its pre-answer slice (`segment_type = "ringing"`) without
     /// needing the per-request `record` option, and the slice is KEPT when the
@@ -473,6 +480,12 @@ impl RecordingPolicy {
     /// Hangup/fail → upload-success SLA window (default 10 minutes).
     pub fn effective_upload_sla_secs(&self) -> u64 {
         self.upload_sla_secs.unwrap_or(600).max(1)
+    }
+
+    /// Local retention (days) after a successful upload before cleanup.
+    /// `0` = delete immediately on upload success (historical behaviour).
+    pub fn effective_keep_local_days(&self) -> u32 {
+        self.keep_local_days.unwrap_or(0)
     }
 
     /// Whether the system-managed outbound ringback stage should be recorded

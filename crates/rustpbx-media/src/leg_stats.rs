@@ -188,6 +188,27 @@ impl LegRtcpStats {
             rtt_valid: self.rtt_valid.load(Ordering::Relaxed),
         }
     }
+
+    /// Seconds since the last RTCP report was processed from the remote, or
+    /// `None` when no report ever arrived. The inbound-RTP stall watcher
+    /// pairs this with a frozen accepted-RTP counter: an ADVANCING RTCP age
+    /// (staying small) while RTP is frozen means the peer is alive and
+    /// suppressing media (VAD / silence suppression), while a growing age
+    /// means the remote's whole stream went quiet.
+    pub fn last_report_age_secs(&self) -> Option<f64> {
+        if self.report_count.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let observed = self.report_observed_at_micros.load(Ordering::Relaxed);
+        if observed == 0 {
+            return None;
+        }
+        let unix_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_micros() as u64)
+            .unwrap_or_default();
+        Some(unix_now.saturating_sub(observed) as f64 / 1_000_000.0)
+    }
 }
 
 /// Tracks SR send timestamps so RTT can be computed from incoming Receiver

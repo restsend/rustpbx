@@ -474,6 +474,14 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # retry_max_attempts = 30
 # upload_sla_secs = 600      # 10-minute completion SLA
 #
+# Keep the local WAV for N days after a successful upload before cleanup
+# (acceptance §3.2.5 归档: 上传后本地保留 10 天). 0 = delete immediately on
+# upload success (historical behaviour). The retention sweep runs on the
+# retry worker cycle and never touches files still pending retry (failure
+# marker present). Applies to http/s3 uploads only — local/sipflow
+# deployments manage disk retention themselves.
+# keep_local_days = 10
+#
 # type = "local" archival layout under path:
 # subdir = "daily"   # default — {path}/YYYYMMDD/{file}
 # # subdir = "hourly"  # {path}/YYYYMMDD/HH/{file}

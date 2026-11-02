@@ -400,6 +400,7 @@ mod tests {
             });
         }
         let ctx = CallSessionContext {
+                      owns_statistics: true,
             leg_generation: None,
             session_id: "test-session".into(),
             root_session_id: None,
@@ -422,6 +423,7 @@ mod tests {
         let hook = IvrExecHook;
         let ext = SessionExtensions::new();
         let ctx = CallSessionContext {
+                      owns_statistics: true,
             leg_generation: None,
             session_id: "test-session".into(),
             root_session_id: None,

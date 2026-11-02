@@ -18,8 +18,7 @@ rand = "0.10"
 rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.2-rc" }
 rustpbx-sipflow = { path = "../rustpbx-sipflow", version = "0.5.2-rc" }
 rustpbx-record-common = { path = "../rustpbx-record-common", version = "0.5.2-rc" }
-# Temporary until official rustrtc provides the packet diagnostics APIs.
-rustrtc = { package = "fork-rustrtc", version = "=0.4.20-preview", features = ["diagnostics"] }
+rustrtc = "0.4.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53", features = ["fs", "io-util", "sync"] }
@@ -33,6 +32,7 @@ tokio = { version = "1.53", features = ["test-util"] }
 tempfile = "3.27.0"
 criterion = "0.5"
 chrono = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "mixer"
