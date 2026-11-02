@@ -238,6 +238,12 @@ pub struct TrunkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ring_time: Option<u32>,
 
+    /// Per-trunk maximum call duration in seconds, counted from the start of
+    /// the call; the call is hung up when it is reached. With limits on both
+    /// the source and the destination trunk, the shorter one applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_call_duration: Option<u32>,
+
     /// Opt-in failure conditions used when a route permits sequential failover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RetryPolicy>,
@@ -599,6 +605,7 @@ impl Default for TrunkConfig {
             did_numbers: Vec::new(),
             ringback: None,
             max_ring_time: None,
+            max_call_duration: None,
             retry_policy: None,
             diversion_headers: None,
             history_info: None,

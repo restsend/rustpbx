@@ -90,3 +90,6 @@ mod test_cdr_end_at_hangup;
 
 #[path = "proxy_e2e/test_early_dialog_bye.rs"]
 mod test_early_dialog_bye;
+
+#[path = "proxy_e2e/test_trunk_max_call_duration.rs"]
+mod test_trunk_max_call_duration;

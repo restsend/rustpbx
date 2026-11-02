@@ -735,6 +735,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         did_numbers: vec![],
         ringback: None,
         max_ring_time: None,
+        max_call_duration: None,
         retry_policy: None,
         diversion_headers: model
             .metadata

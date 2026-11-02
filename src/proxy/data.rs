@@ -1345,6 +1345,10 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         disabled: Some(!model.is_active),
         max_calls: model.max_concurrent.map(|v| v as u32),
         max_cps: model.max_cps.map(|v| v as u32),
+        max_call_duration: model
+            .max_call_duration
+            .filter(|secs| *secs > 0)
+            .map(|secs| secs as u32),
         weight: None,
         transport,
         id: Some(model.id),
@@ -2583,6 +2587,27 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert!(trunk.ringback.is_none(), "no metadata → no ringback");
+    }
+
+    /// The `max_call_duration` column reaches the trunk; 0 means no limit.
+    #[test]
+    fn convert_trunk_maps_max_call_duration() {
+        let model = |secs| sip_trunk::Model {
+            id: 1,
+            name: "limited".to_string(),
+            sip_server: Some("sip:203.0.113.52:5060".to_string()),
+            max_call_duration: secs,
+            ..Default::default()
+        };
+        let limit = |secs| {
+            convert_trunk(model(secs))
+                .expect("should convert")
+                .1
+                .max_call_duration
+        };
+        assert_eq!(limit(Some(3600)), Some(3600));
+        assert_eq!(limit(Some(0)), None);
+        assert_eq!(limit(None), None);
     }
 
     /// `metadata.sbc.nat_fix` (no dedicated column) must reach the trunk.

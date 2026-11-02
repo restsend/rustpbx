@@ -35,6 +35,11 @@ impl Drop for Harness {
 
 impl Harness {
     pub(crate) async fn start() -> Result<Self> {
+        Self::start_with_trunk(|_| {}).await
+    }
+
+    /// `start`, with the caller's trunk adjusted by `configure`.
+    pub(crate) async fn start_with_trunk(configure: impl FnOnce(&mut TrunkConfig)) -> Result<Self> {
         let caller = UdpSocket::bind("127.0.0.1:0").await?;
         let caller_port = caller.local_addr()?.port();
         let port = portpicker::pick_unused_port().expect("free port");
@@ -47,14 +52,13 @@ impl Harness {
         ]);
         config.media_proxy = MediaProxyMode::None;
         config.ensure_user = Some(false);
-        config.trunks.insert(
-            "carrier".to_string(),
-            TrunkConfig {
-                dest: format!("sip:127.0.0.1:{caller_port}"),
-                inbound_hosts: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            },
-        );
+        let mut trunk = TrunkConfig {
+            dest: format!("sip:127.0.0.1:{caller_port}"),
+            inbound_hosts: vec!["127.0.0.1".to_string()],
+            ..Default::default()
+        };
+        configure(&mut trunk);
+        config.trunks.insert("carrier".to_string(), trunk);
 
         let user_backend = MemoryUserBackend::new(None);
         for user in test_helpers::standard_test_users() {

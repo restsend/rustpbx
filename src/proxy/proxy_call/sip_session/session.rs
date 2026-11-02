@@ -2245,14 +2245,21 @@ impl SipSession {
 
                 // RTP timeout handled via MediaBridge callback → cmd channel
 
-                _ = &mut max_duration_sleep => {
+                _ = &mut max_duration_sleep, if !self.cancel_token.is_cancelled() => {
                     warn!(session_id = %self.id,
                         session_id = %self.context.session_id,
                         max_duration = ?self.context.dialplan.max_call_duration,
                         "Max call duration exceeded, terminating session"
                     );
-                    self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                    self.cancel_token.cancel();
+                    // Hang up through the normal path so both legs get their
+                    // BYE (or CANCEL / final response) now, not after the
+                    // cancel drain.
+                    self.handle_hangup(&HangupCommand::local(
+                        "max_call_duration",
+                        Some(CallRecordHangupReason::Autohangup),
+                        None,
+                    ))
+                    .await;
                 }
 
                 // Liveness tick: keep the registry heartbeat fresh.
