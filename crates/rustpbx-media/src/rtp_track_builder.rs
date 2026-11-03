@@ -181,8 +181,12 @@ impl RtpTrackBuilder {
             enable_ice_lite: self.mode != TransportMode::WebRtc && self.enable_ice_lite,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
-            external_ip: self.external_ip,
-            bind_ip,
+            external_ips: self
+                .external_ip
+                .iter()
+                .filter_map(|v| v.parse().ok())
+                .collect(),
+            bind_ips: bind_ip.iter().filter_map(|v| v.parse().ok()).collect(),
             enable_latching: self.enable_latching,
             probation_max_packets: self.probation_max_packets,
             media_capabilities: Some(rustrtc::config::MediaCapabilities {

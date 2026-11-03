@@ -1889,8 +1889,12 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         enable_ice_lite: cfg.transport != TransportMode::WebRtc && cfg.enable_ice_lite,
         rtp_start_port,
         rtp_end_port,
-        external_ip: cfg.external_ip.clone(),
-        bind_ip: cfg.bind_ip.clone(),
+        external_ips: cfg
+            .external_ip
+            .iter()
+            .filter_map(|v| v.parse().ok())
+            .collect(),
+        bind_ips: cfg.bind_ip.iter().filter_map(|v| v.parse().ok()).collect(),
         // Relay-only: advertise (and check) only TURN relay candidates. See
         // `LegConfig::relay_only` for when an operator wants this.
         ice_servers: cfg.ice_servers.clone(),

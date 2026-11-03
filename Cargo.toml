@@ -125,8 +125,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.7.14"
 audio-codec = "0.4.13"
-# Temporary until official rustrtc provides the packet diagnostics APIs.
-rustrtc = { package = "fork-rustrtc", version = "=0.4.20-preview", features = ["diagnostics"] }
+rustrtc = "0.5.1"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
