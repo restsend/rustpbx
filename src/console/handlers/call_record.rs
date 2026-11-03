@@ -578,13 +578,13 @@ async fn read_record_archived_flow(
             resolve_archived_artifact_path(location, record.started_at)
         };
         let mut part = match read_archived_jsonl_flow(
-            record,
-            &resolved,
-            detail,
-            state.http_client(),
-            &callrecord_storage_root(state),
-        )
-        .await {
+                record,
+                &resolved,
+                detail,
+                state.http_client(),
+                &callrecord_storage_root(state),
+            )
+            .await {
             Ok(part) => part,
             Err(error) => return Some(Err(error)),
         };

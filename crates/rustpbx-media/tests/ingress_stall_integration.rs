@@ -9,7 +9,6 @@ use std::time::Duration;
 use rustpbx_media::audio_source::ToneAudioSource;
 use rustpbx_media::ingress_stall::{IngressStallEvent, IngressStallKind};
 use rustpbx_media::leg::{Leg, LegConfig, LegInner};
-use rustrtc::rtp::{RtpHeader, RtpPacket};
 use rustrtc::sdp::SdpType;
 
 /// Hand-rolled 20ms PCMU frame (v=2, pt=0) — fed straight into the leg's

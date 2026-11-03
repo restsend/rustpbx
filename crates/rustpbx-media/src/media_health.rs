@@ -14,7 +14,7 @@
 //! packets that reached the forwarding path) from *transport* counters
 //! (accepted RTP after parsing/decryption). A gap can describe the receive
 //! pipeline, but zero accepted RTP cannot establish whether UDP reached the
-//! application. The per-leg packet-stage snapshot provides those lower boundaries.
+//! application.
 
 use serde::Serialize;
 use std::sync::Arc;

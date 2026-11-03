@@ -152,7 +152,6 @@ async fn session_id_native_inherited_length_survives_outgoing_boundary() {
 
 #[tokio::test]
 async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
-    let _settings_serial = lock_settings_serial();
     use crate::call::session_id::{
         SessionIdHeaderMode, SessionIdSettings, init_settings, settings,
     };

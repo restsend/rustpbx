@@ -249,7 +249,6 @@ impl MediaBridge {
     /// Monitor RTP activity for each selected peer and forward compatibility
     /// DTMF events. The transport counter advances before fast-path forwarding.
     fn wire_leg(&mut self, side: LegSide, leg: &Leg) {
-        leg.set_packet_diagnostic_bridge(Arc::downgrade(&self.legs_shared));
         // Cancel any prior monitor task for this side first (e.g. after a
         // transfer / REFER replaced the leg) so old tasks don't leak and keep
         // the old PeerConnection / IngressTap / RTP timeout state alive.
@@ -2284,9 +2283,6 @@ mod tests {
             egress: 7607,
             transport_rx: 3787,
             transport_tx: 7607,
-            sr_packet_count: 0,
-            sr_ssrc: 0,
-            has_sr: false,
             jitter_us: 0,
             rtt_us: 0,
             fraction_lost: 0,

@@ -959,23 +959,6 @@ impl SipSession {
         (handle, cmd_rx)
     }
 
-    /// Create the capture queue and task before constructing caller leg A.
-    /// The sender becomes immutable state on the leg's plaintext RTP tap.
-    /// Recording capture is attached to the caller peer so a call can
-    /// start recording on demand at any later stage (IVR node, agent
-    /// connect, API command) even when no recording policy enabled it.
-    /// Without an installed recorder the task simply discards the tapped
-    /// packets, so the idle cost is a single lightweight task per session.
-    fn setup_recording_capture(
-        &mut self,
-    ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
-        let _media_runtime_guard = crate::utils::media_enter();
-        // Match the recorder's target so enabling its logs also enables call context.
-        let sender = tracing::info_span!(target: "rustpbx_media::recorder", "recording", session_id = %self.id)
-            .in_scope(|| self.media.recording.setup_recorder_task())?;
-        Ok(Some(sender))
-    }
-
     /// Auto-start live transcription when `[proxy.transcript.remote]
     /// auto_start = true` **or** the dialplan carries a per-call
     /// [`TranscriptionPlan`]. Best-effort: failures are logged, never fatal.
@@ -3293,7 +3276,7 @@ impl SipSession {
         }
     }
 
-    fn transferred_agent_context(
+    pub fn transferred_agent_context(
         &self,
         leg_id: &LegId,
     ) -> Option<crate::proxy::proxy_call::session_hooks::CallSessionContext> {
@@ -8166,9 +8149,9 @@ impl SipSession {
         //（`freeze_served_agent_attribution`）按腿自身身份定归属，缺章则
         // 完成转接后归因漂到转接目标（A 0 行 / B 双行）。
         if let Some(ref callee_uri) = callee
-            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
             && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
             && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+            && let Some(agent) = self.leg_agent_id(&leg_id, Some(callee_uri)).await
             && let Some(leg) = self.legs.get_mut(&leg_id)
             && leg.agent_id.is_none()
         {
@@ -11384,7 +11367,7 @@ impl SipSession {
                     // sequential fallback dialed a different agent than the
                     // primary one. Gated to queue context so direct (non-
                     // queue) calls keep deriving the agent from parties.
-                    let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    let leg_agent_id = self.leg_agent_id(&leg_id, Some(agent_uri)).await;
                     // PRD s25 S5（C2）：盖章不再门控 queue 语境 —— 直拨 agent
                     // 呼叫的腿同样带身份，离场冻结
                     //（`freeze_served_agent_attribution`）按腿自身身份定归属。
@@ -11392,14 +11375,6 @@ impl SipSession {
                     // 兜底，保持既有语义）。
                     if let Some(leg) = self.legs.get_mut(&leg_id) {
                         leg.agent_id = leg_agent_id.clone();
-                    } else {
-                        // PRD s25 S5（C2）：直拨 agent 呼叫的腿同样盖章 ——
-                        // 离场冻结（`freeze_served_agent_attribution`）按腿
-                        // 自身身份定归属，没盖章的腿无从冻结。pin 写入仍
-                        // 门控 queue 语境（直拨归因由 Priority 3 兜底）。
-                        if let Some(leg) = self.legs.get_mut(&leg_id) {
-                            leg.agent_id = leg_agent_id.clone();
-                        }
                     }
                     if let Some(ref id) = leg_agent_id
                         && Some(id.as_str()) != self.pinned_agent_id().as_deref()
@@ -14256,8 +14231,12 @@ impl SipSession {
                 Err(anyhow!("Failed to send OPTIONS ping: {}", e))
             }
         }
-
     }
+
+
+
+
+
 }
 
 impl Drop for SipSession {
@@ -14364,6 +14343,8 @@ impl Drop for SipSession {
 
         // RWI cleanup is owned by the CallRecord guard created by the reporter
         // above, or by the originate task for UAC sessions without a reporter.
+    }
+}
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

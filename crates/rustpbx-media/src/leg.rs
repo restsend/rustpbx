@@ -136,8 +136,6 @@ pub struct LegConfig {
     /// runs the Goertzel detector whenever the leg negotiates NO
     /// telephone-event; `on` forces it alongside RFC 2833; `off` disables it.
     pub inband_dtmf: InbandDtmfMode,
-    /// Logical call root; the local call_id remains independently searchable.
-    pub root_session_id: Option<String>,
     /// Per-leg inbound-RTP stall watcher threshold in seconds (see
     /// `crate::ingress_stall`). When a leg that HAS received media goes
     /// silent this long, the watcher logs a WARN and publishes an
@@ -175,7 +173,6 @@ impl LegConfig {
             relay_ready_timeout: None,
             call_id: None,
             inband_dtmf: InbandDtmfMode::Auto,
-            root_session_id: None,
             ingress_stall_warn_secs: crate::ingress_stall::DEFAULT_INGRESS_STALL_WARN_SECS,
             root_session_id: None,
             volume_stats: Default::default(),
@@ -275,7 +272,6 @@ pub struct LegInner {
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
-    pub(crate) packet_diagnostics: Mutex<Option<crate::packet_diagnostics::LegPacketDiagnostics>>,
 }
 
 /// DTMF sink bookkeeping on the shared analysis tap.
@@ -569,7 +565,6 @@ impl LegInner {
             ingress_stall_task: Mutex::new(None),
             ingress_stall_forwarder_armed: std::sync::atomic::AtomicBool::new(false),
             ingress_quiet_expected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            packet_diagnostics: Mutex::new(None),
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             inband_dtmf_mode: AtomicU8::new(InbandDtmfMode::Auto.to_u8()),
@@ -657,7 +652,6 @@ impl LegInner {
             );
             *leg.ingress_stall_task.lock() = Some(handle);
         }
-        Self::start_packet_diagnostics(&leg, cfg);
         Ok(leg)
     }
 
@@ -1398,7 +1392,6 @@ impl LegInner {
         let remote_addr = self.remote_media_addr();
         crate::leg_stats::LegQualityReport {
             side,
-            packet_diagnostics: self.packet_diagnostic_snapshot(),
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
                 leg_id: self.id.to_string(),
                 egress_mode: crate::media_health::MediaEgressMode::PcmPacing,
@@ -1599,10 +1592,6 @@ impl LegInner {
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
-        if let Some(state) = self.packet_diagnostics.lock().as_mut() {
-            state.sample(self, true);
-            if let Some(task) = state.task.take() { task.abort(); }
-        }
         self.disarm_rtp_timeout();
         self.egress.stop();
         // Tear the shared analysis tap down synchronously (Drop cancels its

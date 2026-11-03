@@ -22,7 +22,6 @@ pub mod mixer;
 pub mod negotiate;
 pub mod pcm_analysis_tap;
 pub mod quality_stats;
-pub mod packet_diagnostics;
 pub mod recorder;
 pub mod rtc_track;
 pub mod rtp_track_builder;

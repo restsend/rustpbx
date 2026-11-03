@@ -30,6 +30,7 @@ url = "2.5.8"
 [dev-dependencies]
 tokio = { version = "1.53", features = ["test-util"] }
 tempfile = "3.27.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = "0.5"
 chrono = "0.4"
 

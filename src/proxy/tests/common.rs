@@ -608,7 +608,8 @@ pub async fn outbound_failure_with(
             .with_targets(DialStrategy::Sequential(vec![Location {
                 aor: format!("sip:customer@{target_addr}").parse().unwrap(),
                 ..Default::default()
-            }]))
+            }
+            .into()]))
             .with_media(
                 crate::call::MediaConfig::new()
                     .with_proxy_mode(crate::config::MediaProxyMode::None),

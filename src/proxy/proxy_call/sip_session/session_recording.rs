@@ -23,7 +23,9 @@ impl SipSession {
         &mut self,
     ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
         let _media_runtime_guard = crate::utils::media_enter();
-        let sender = self.media.recording.setup_recorder_task()?;
+        // Match the recorder's target so enabling its logs also enables call context.
+        let sender = tracing::info_span!(target: "rustpbx_media::recorder", "recording", session_id = %self.id)
+            .in_scope(|| self.media.recording.setup_recorder_task())?;
         Ok(Some(sender))
     }
 

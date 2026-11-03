@@ -37,6 +37,8 @@ impl SipSession {
                 }
             }
             peer.pause_rtp_timeout();
+            // The held peer legitimately stops sending — suppress stall edges.
+            peer.set_ingress_quiet_expected(true);
             if let Some(music) = music {
                 let path = match &music {
                     crate::call::domain::MediaSource::File { path } => path.clone(),
@@ -95,6 +97,7 @@ impl SipSession {
             // Restoring the route replaces hold playback with live media.
             // A separate stop could silence a relay that is already active.
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
             // Same logical-pair recovery as handle_unhold: direct-dialed
             // calls never populate the logical bridge, and an app-exit
             // unhold is an explicit resume request.
@@ -574,6 +577,8 @@ impl SipSession {
             }
         }
         peer.pause_rtp_timeout();
+        // The held peer legitimately stops sending — suppress stall edges.
+        peer.set_ingress_quiet_expected(true);
         let music = music.or_else(|| self.resolve_hold_music(&[]));
         let source = match &music {
             Some(crate::call::domain::MediaSource::File { path })
@@ -688,6 +693,7 @@ impl SipSession {
             }
             if let Some(peer) = self.media_leg(&leg_id) {
                 peer.resume_rtp_timeout();
+                peer.set_ingress_quiet_expected(false);
             }
             return Ok(());
         }
@@ -724,6 +730,7 @@ impl SipSession {
         }
         if let Some(peer) = self.media_leg(&leg_id) {
             peer.resume_rtp_timeout();
+            peer.set_ingress_quiet_expected(false);
         }
         self.update_leg_state(&leg_id, LegState::Connected);
         if !self.server.session_hooks.is_empty() {
