@@ -9,10 +9,11 @@
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
 
-// Test-only in-memory registry stub.
-#[cfg(test)]
+// Test-only in-memory registry stub; also exposed to the e2e-testing
+// harness (proxy::tests), which compiles outside cfg(test).
+#[cfg(any(test, feature = "e2e-testing"))]
 pub mod memory;
-#[cfg(test)]
+#[cfg(any(test, feature = "e2e-testing"))]
 pub use memory::MemoryRegistry;
 
 // ===================================================================
