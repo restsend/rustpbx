@@ -542,19 +542,59 @@ service_account = "/etc/rustpbx/firebase-service-account.json"
 # pn-param; list it here. With a single [[proxy.push.fcm]] entry every fcm
 # device is served by it regardless of pn-param.
 aliases = ["123456789012"]
+
+[[proxy.push.apns]]
+key = "/etc/rustpbx/AuthKey_ABC123DEFG.p8"
+key_id = "ABC123DEFG"
+team_id = "DEF123GHIJ"
+# bundle_ids = ["com.example.phone"]  # apps this key pushes to; empty: any
 ```
 
 The service account needs permission to send FCM messages (e.g. the
 "Firebase Cloud Messaging API Admin" role) in the Firebase project the app is
 built with (its `google-services.json`).
 
+### APNs (iOS)
+
+One `[[proxy.push.apns]]` entry serves both APNs environments: devices that
+register with `pn-provider=apns` go to production, `pn-provider=apns.dev`
+(development builds) to the sandbox. Make the key in the Apple Developer
+account (Certificates, Identifiers & Profiles > Keys, with "Apple Push
+Notifications service"). It is a `.p8` file that can be downloaded once.
+RustPBX signs a provider token (JWT) with it and renews it every 50 minutes.
+
+Devices register the way Linphone does:
+
+- `pn-param=<team ID>.<bundle ID>.voip&remote`
+- `pn-prid=<VoIP token>:voip&<remote token>:remote`
+
+The RFC 8599 form with a single token (`pn-param=<team>.<bundle>.voip`,
+`pn-prid=<token>`) also works.
+
+- Calls send a VoIP push (PushKit, topic `<bundle ID>.voip`). The payload
+  holds `aps.call-id`, which Linphone uses to show the call in CallKit.
+- Binding refreshes send a background push (`content-available`) to the
+  remote token. iOS requires the app to report a CallKit call for every VoIP
+  push, so RustPBX never uses one for a refresh. A device without a remote
+  token gets no refresh pushes; iOS also limits background pushes to a few
+  per hour.
+- A device without a VoIP token is registered without push: a call could not
+  wake it.
+- Key selection: the entry whose `bundle_ids` lists the app, else the entry
+  of the device's team ID with no `bundle_ids`. When only one entry is
+  configured and it has no `bundle_ids`, it serves every APNs device. This
+  is necessary for Linphone apps that do not set a team ID: they send the
+  placeholder `ABCD1234`.
+- `BadDeviceToken` usually means that the environment is wrong: a sandbox
+  token registered with `apns`, or the other way round.
+
 Notes:
 
-- Only `fcm` is implemented. Contacts naming another provider (e.g. `apns`)
-  register as ordinary bindings, or get 555 with
+- `fcm`, `apns` and `apns.dev` are implemented. Contacts naming another
+  provider register as ordinary bindings, or get 555 with
   `reject_unsupported_provider = true`.
-- A push token that FCM reports as `UNREGISTERED` (app uninstalled) is
-  forgotten.
+- A push token that FCM reports as `UNREGISTERED`, or that APNs answers with
+  410 (`Unregistered`), is forgotten (the app was uninstalled).
 - Only INVITEs wake devices; SIP MESSAGE to a sleeping device is not
   pushed.
 - Device state lives on the node that handled the REGISTER; cluster

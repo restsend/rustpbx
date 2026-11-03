@@ -15,7 +15,8 @@
 //!   binding-refresh REGISTER, then sent on the fresh flow.
 //!
 //! Bindings are kept alive by pushing devices shortly before they expire
-//! (§5.5). [`fcm`] implements Firebase Cloud Messaging (HTTP v1).
+//! (§5.5). [`fcm`] implements Firebase Cloud Messaging (HTTP v1), [`apns`]
+//! the Apple Push Notification service.
 
 use crate::call::Location;
 use crate::config::PushConfig;
@@ -33,6 +34,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+pub mod apns;
 pub mod dial;
 pub mod fcm;
 pub mod registry;
@@ -223,7 +225,15 @@ impl PushService {
     ) -> Result<Self> {
         let mut providers: Vec<Arc<dyn PushProvider>> = Vec::new();
         if !config.fcm.is_empty() {
-            providers.push(Arc::new(fcm::FcmProvider::from_config(&config.fcm, http)?));
+            providers.push(Arc::new(fcm::FcmProvider::from_config(
+                &config.fcm,
+                http.clone(),
+            )?));
+        }
+        if !config.apns.is_empty() {
+            for provider in apns::ApnsProvider::from_config(&config.apns, http)? {
+                providers.push(Arc::new(provider));
+            }
         }
         if providers.is_empty() {
             warn!("push notifications enabled but no provider is configured");
@@ -767,6 +777,11 @@ mod tests {
             [[push.fcm]]
             service_account = "/etc/rustpbx/sa.json"
             aliases = ["123456789012"]
+            [[push.apns]]
+            key = "/etc/rustpbx/AuthKey_KEY1234567.p8"
+            key_id = "KEY1234567"
+            team_id = "TEAM123456"
+            bundle_ids = ["app.akiles.phone"]
             "#,
         )
         .expect("config");
@@ -778,6 +793,13 @@ mod tests {
         assert_eq!(push.refresh_before_secs, 300);
         assert_eq!(push.fcm[0].service_account, "/etc/rustpbx/sa.json");
         assert_eq!(push.fcm[0].aliases, vec!["123456789012".to_string()]);
+        assert_eq!(push.apns[0].key_id, "KEY1234567");
+        assert_eq!(push.apns[0].team_id, "TEAM123456");
+        assert_eq!(
+            push.apns[0].bundle_ids,
+            vec!["app.akiles.phone".to_string()]
+        );
+        assert_eq!(push.apns[0].api_url, None);
     }
 
     #[test]
