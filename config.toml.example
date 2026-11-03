@@ -329,6 +329,10 @@ type = "extension"
 # [[proxy.push.fcm]]
 # service_account = "/etc/rustpbx/firebase-service-account.json"
 # aliases = ["123456789012"]  # Firebase project number (Linphone's pn-param)
+# [[proxy.push.apns]]          # iOS: pn-provider apns (production) and apns.dev (sandbox)
+# key = "/etc/rustpbx/AuthKey_ABC123DEFG.p8"
+# key_id = "ABC123DEFG"
+# team_id = "DEF123GHIJ"
 
 # HTTP Token Auth Backend — one-shot token auth via external HTTP service.
 # Add token_header to any HTTP user backend to enable one-shot registration.

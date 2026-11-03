@@ -1568,6 +1568,10 @@ pub struct PushConfig {
     /// Firebase Cloud Messaging projects (`pn-provider=fcm`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fcm: Vec<FcmProjectConfig>,
+    /// Apple Push Notification service keys (`pn-provider=apns` and
+    /// `apns.dev`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apns: Vec<ApnsKeyConfig>,
 }
 
 impl Default for PushConfig {
@@ -1581,6 +1585,7 @@ impl Default for PushConfig {
             reject_unsupported_provider: false,
             include_caller_info: false,
             fcm: Vec::new(),
+            apns: Vec::new(),
         }
     }
 }
@@ -1613,6 +1618,34 @@ pub struct FcmProjectConfig {
     /// Override the FCM API base URL (default `https://fcm.googleapis.com`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
+}
+
+/// One APNs authentication key able to send pushes (`[[proxy.push.apns]]`).
+///
+/// A key signs provider tokens (JWT, ES256) for every app of its team, in
+/// both the production (`apns`) and the sandbox (`apns.dev`) environment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ApnsKeyConfig {
+    /// Path to the key file (`AuthKey_<key_id>.p8`) from the Apple Developer
+    /// account, with the "Apple Push Notifications service" capability.
+    pub key: String,
+    /// The 10-character key ID.
+    pub key_id: String,
+    /// The 10-character team ID that owns the key.
+    pub team_id: String,
+    /// Bundle IDs of the apps this key pushes to. Empty: any app of
+    /// `team_id`, or any app at all when this is the only APNs key (Linphone
+    /// sends the placeholder team ID `ABCD1234` unless the app sets one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundle_ids: Vec<String>,
+    /// Override the production API base URL (default
+    /// `https://api.push.apple.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// Override the sandbox API base URL (default
+    /// `https://api.sandbox.push.apple.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_api_url: Option<String>,
 }
 
 /// Global recovery for Step IVR when the external provider cannot continue.

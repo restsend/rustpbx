@@ -395,7 +395,7 @@ impl ServiceAccount {
     }
 }
 
-fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+pub(super) fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
     let body: String = pem
         .lines()
         .map(str::trim)
