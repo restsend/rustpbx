@@ -93,3 +93,6 @@ mod test_early_dialog_bye;
 
 #[path = "proxy_e2e/test_trunk_max_call_duration.rs"]
 mod test_trunk_max_call_duration;
+
+#[path = "proxy_e2e/test_unmatched_bye.rs"]
+mod test_unmatched_bye;

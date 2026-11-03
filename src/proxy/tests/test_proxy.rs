@@ -870,7 +870,8 @@ async fn cross_node_wss_bye_with_locator(
             reached_phone.is_err(),
             "a client or untrusted source must not relay BYE to the phone"
         );
-        assert_eq!(response, StatusCode::OK);
+        // B has no dialog for it: the orphan-BYE reply.
+        assert_eq!(response, StatusCode::CallTransactionDoesNotExist);
         return;
     }
     let expected = match &phone_behavior {

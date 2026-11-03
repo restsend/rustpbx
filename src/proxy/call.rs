@@ -2551,11 +2551,14 @@ impl CallModule {
                     }
                 }
                 // Peers retransmit BYE if we already tore the dialog down. Answer
-                // with 200 so endpoints clear; other methods stay silent at debug.
-                // Only do this after cluster lookup failed (or single-node).
+                // 481, which ends the dialog on their side (RFC 3261 §15.1.1);
+                // other methods stay silent at debug. Only do this after cluster
+                // lookup failed (or single-node).
                 if matches!(tx.original.method, rsipstack::sip::Method::Bye) {
-                    info!(%dialog_id, "BYE with no matching dialog; replying 200 so peer clears");
-                    let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;
+                    info!(%dialog_id, "BYE with no matching dialog; replying 481 so peer clears");
+                    let _ = tx
+                        .reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
+                        .await;
                 } else if tx.original.method == rsipstack::sip::Method::Refer {
                     tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist).await?;
                 } else {
