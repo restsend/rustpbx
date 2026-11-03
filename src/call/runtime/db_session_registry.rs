@@ -9,19 +9,24 @@
 //!   never per-session.  Scoping to live ids means a ghost row (session whose
 //!   unregister failed or that never terminated) stops being refreshed and is
 //!   reclaimed by the sweeper instead of being kept alive forever.
-//! - SWEA sweeper runs one `DELETE WHERE last_updated_at < cutoff` per minute,
-//!   using the `idx_cluster_sessions_updated` index, plus an age-based cut
-//!   `DELETE WHERE started_at < now - max_age` that bounds any possible ghost
-//!   regardless of heartbeat freshness.
+//! - SWEA sweeper deletes stale rows once per minute in bounded batches: ids
+//!   are selected with a non-locking read, then deleted by primary key with
+//!   deadlock retry (a plain range `DELETE` takes next-key/gap locks under
+//!   REPEATABLE READ and deadlocks against concurrent `register` upserts and
+//!   other nodes' sweepers).  The age-based cut `started_at < now - max_age`
+//!   bounds any possible ghost regardless of heartbeat freshness.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QuerySelect, Set};
 #[cfg(test)]
-use sea_orm::{PaginatorTrait, QueryOrder};
+use sea_orm::PaginatorTrait;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
+    Set,
+};
 use tokio::task::JoinHandle;
 
 use super::{RegistryError, SessionInfo, SessionRegistry, SessionRegistryRef};
@@ -30,6 +35,28 @@ use crate::utils;
 
 /// SWEA sweeper cadence.
 const SWEEPER_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rows deleted per sweep transaction. Bounded chunks keep each DELETE a
+/// short record-lock transaction instead of an index-range scan.
+const SWEEP_BATCH_SIZE: usize = 500;
+
+/// Upper bound on batches per column per sweep tick, so a pathological
+/// backlog cannot pin the sweeper task forever.
+const SWEEP_MAX_BATCHES: usize = 200;
+
+/// Retries for a chunk that lost an InnoDB deadlock race (MySQL 1213 /
+/// SQLSTATE 40001, Postgres 40P01). The victim is rolled back instantly, so
+/// retrying the same chunk is always safe.
+const SWEEP_DEADLOCK_RETRIES: u32 = 3;
+
+/// Classify a deadlocked statement: the transaction was chosen as victim and
+/// rolled back immediately — the statement can simply be retried. Matches
+/// MySQL ("1213 (40001): Deadlock found when trying to get lock") and
+/// Postgres (SQLSTATE 40P01, "deadlock detected").
+fn is_deadlock(error: &sea_orm::DbErr) -> bool {
+    let text = error.to_string();
+    text.contains("40001") || text.to_ascii_lowercase().contains("deadlock")
+}
 
 /// [`SessionRegistry`] backed by the shared cluster database.
 pub struct DbSessionRegistry {
@@ -98,17 +125,84 @@ impl DbSessionRegistry {
         let now = chrono::Utc::now();
         let freshness_cutoff =
             now - chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::hours(1));
-        Entity::delete_many()
-            .filter(Column::LastUpdatedAt.lt(freshness_cutoff))
-            .exec(&self.db)
-            .await?;
+        self.sweep_stale(
+            Column::LastUpdatedAt,
+            freshness_cutoff,
+            SWEEP_BATCH_SIZE,
+            SWEEP_MAX_BATCHES,
+        )
+        .await?;
 
         let age_cutoff =
             now - chrono::Duration::from_std(self.max_age).unwrap_or(chrono::Duration::hours(12));
-        Entity::delete_many()
-            .filter(Column::StartedAt.lt(age_cutoff))
-            .exec(&self.db)
-            .await?;
+        self.sweep_stale(
+            Column::StartedAt,
+            age_cutoff,
+            SWEEP_BATCH_SIZE,
+            SWEEP_MAX_BATCHES,
+        )
+        .await
+    }
+
+    /// Delete rows whose `column` is older than `cutoff`, in bounded batches.
+    ///
+    /// A plain `DELETE WHERE column < cutoff` scans the index range and, under
+    /// REPEATABLE READ, takes next-key/gap locks across it — which deadlocks
+    /// against concurrent `register` upserts (insert-intention locks into the
+    /// locked gap) and against other nodes' sweepers scanning the same range.
+    /// Instead, select one batch of ids with a non-locking read, then delete
+    /// them by primary key (record locks only), re-checking staleness inside
+    /// the DELETE so a row refreshed between select and delete survives. A
+    /// chunk that still loses a deadlock race retries with backoff instead of
+    /// failing — and reporting a `db_write_failed` event for — the sweep.
+    async fn sweep_stale(
+        &self,
+        column: Column,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        batch_size: usize,
+        max_batches: usize,
+    ) -> Result<(), sea_orm::DbErr> {
+        for _ in 0..max_batches {
+            let ids: Vec<String> = Entity::find()
+                .select_only()
+                .column(Column::CallId)
+                .filter(column.lt(cutoff))
+                .order_by_asc(column)
+                .limit(batch_size as u64)
+                .into_tuple::<String>()
+                .all(&self.db)
+                .await?;
+            if ids.is_empty() {
+                return Ok(());
+            }
+            let mut attempt = 0u32;
+            loop {
+                let result = Entity::delete_many()
+                    .filter(Column::CallId.is_in(ids.clone()))
+                    .filter(column.lt(cutoff))
+                    .exec(&self.db)
+                    .await;
+                match result {
+                    Ok(_) => break,
+                    Err(error) if attempt < SWEEP_DEADLOCK_RETRIES && is_deadlock(&error) => {
+                        attempt += 1;
+                        // Tiny deterministic jitter so concurrent nodes retry
+                        // at different moments instead of lock-stepping.
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos())
+                            .unwrap_or(0);
+                        let delay =
+                            25u64 * (1 << std::cmp::Ord::min(attempt, 4)) + u64::from(nanos % 20);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if ids.len() < batch_size {
+                return Ok(());
+            }
+        }
         Ok(())
     }
 }
@@ -609,5 +703,50 @@ mod tests {
     async fn health_check_ok() {
         let r = reg().await;
         assert!(r.health_check().await.is_ok());
+    }
+
+    /// The chunked sweeper must drain more stale rows than one batch holds —
+    /// exercising the select-ids → delete-by-pk loop with a batch size
+    /// smaller than the backlog — while leaving fresh rows untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_stale_drains_more_rows_than_one_batch() {
+        let (r, db) = reg_short().await;
+
+        for i in 0..5 {
+            let call_id = format!("stale-{i}");
+            r.register(&info(&call_id, "node-old")).await.unwrap();
+            // TTL is 60s in this fixture → 120s ago is stale by freshness.
+            backdate_row(&db, &call_id, 120, 120).await;
+        }
+        r.register(&info("fresh", "node-1")).await.unwrap();
+
+        // Batch of 2 against a backlog of 5 → three select/delete rounds.
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
+        r.sweep_stale(Column::LastUpdatedAt, cutoff, 2, 50)
+            .await
+            .unwrap();
+
+        for i in 0..5 {
+            assert!(
+                r.lookup(&format!("stale-{i}")).await.is_none(),
+                "stale-{i} must be swept across batch boundaries"
+            );
+        }
+        assert!(r.lookup("fresh").await.is_some());
+    }
+
+    #[test]
+    fn deadlock_classification_matches_victim_errors() {
+        let mysql = sea_orm::DbErr::Custom(
+            "error returned from database: 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"
+                .into(),
+        );
+        assert!(is_deadlock(&mysql));
+        let postgres = sea_orm::DbErr::Custom(
+            "error returned from database: 40P01: deadlock detected".into(),
+        );
+        assert!(is_deadlock(&postgres));
+        let transient = sea_orm::DbErr::Custom("connection refused".into());
+        assert!(!is_deadlock(&transient));
     }
 }
