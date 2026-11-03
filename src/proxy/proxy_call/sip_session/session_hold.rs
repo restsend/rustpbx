@@ -613,40 +613,34 @@ impl SipSession {
         Ok(())
     }
 
-    /// While held, record the selected parties' ingress rather than MOH.
+    /// While held, the recording keeps only the hold music (xlsx 表(2) P13,
+    /// Q2.A 口径「保持期录音只留保持音」): both parties' live mics stay out
+    /// of the hold window — speech during hold is not call content — and the
+    /// held party's own lane continues with what they actually hear (the MOH
+    /// egress). This replaces the earlier keep-live-mics tradeoff: the held
+    /// window previously recorded both mics, which surfaced the far party's
+    /// voice in the agent's recording while they were supposed to be on hold.
+    /// Consult/private legs keep their (None, None) routes — the privacy
+    /// property of `hold_recording_*_without_private_speech` is preserved.
     pub(crate) fn apply_hold_recording_routes(&self) {
         let caller_id = LegId::from("caller");
-        // The selected pair survives unbridge. Direct-dial calls may only
-        // have the media pair; a different logical pair must not reuse it.
-        let pair = if self.bridge.legs.len() == 2 {
-            self.bridge.legs.clone()
-        } else {
-            self.bridge()
-                .map(|bridge| {
-                    [bridge.leg(LegSide::A), bridge.leg(LegSide::B)]
-                        .into_iter()
-                        .flatten()
-                        .map(|leg| leg.id().clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
-        let selected_peer = pair
-            .iter()
-            .find(|id| **id != caller_id && pair.contains(&caller_id));
-        // Disable old B sources before enabling the selected peer.
-        for (id, _) in self.legs.iter() {
-            if let Some(leg) = self.media_leg(id) {
-                let channel = (*id == caller_id)
-                    .then_some(crate::media::media_recorder::CaptureChannel::Caller);
-                leg.ingress_tap().set_capture_route(channel, None);
+        for (id, leg) in self.legs.iter() {
+            let Some(media) = self.media_leg(id) else {
+                continue;
+            };
+            if leg.state == LegState::Hold {
+                // Held party: drop their mic (ingress), keep the music they
+                // hear (egress) on their own lane so the recording timeline
+                // mirrors their experience (voice → MOH → voice).
+                let lane = if *id == caller_id {
+                    crate::media::media_recorder::CaptureChannel::Caller
+                } else {
+                    crate::media::media_recorder::CaptureChannel::Callee
+                };
+                media.ingress_tap().set_capture_route(None, Some(lane));
+            } else {
+                media.ingress_tap().set_capture_route(None, None);
             }
-        }
-        if let Some(peer) = selected_peer.and_then(|id| self.media_leg(id)) {
-            peer.ingress_tap().set_capture_route(
-                Some(crate::media::media_recorder::CaptureChannel::Callee),
-                None,
-            );
         }
     }
 
