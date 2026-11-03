@@ -624,7 +624,10 @@ async fn test_db_locator_unregister_with_address_protects_fresh_registration() {
 
     // Simulate the stale close event for the *previous* connection that used
     // the same NAT address. This must NOT delete the just-registered row.
-    let removed = locator.unregister_with_address(&destination).await.unwrap();
+    let removed = locator
+        .unregister_with_address(&destination, &|_| false)
+        .await
+        .unwrap();
     assert!(
         removed.is_none(),
         "fresh registration (< grace window) must not be removed by unregister_with_address"

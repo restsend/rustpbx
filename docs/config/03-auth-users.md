@@ -487,3 +487,79 @@ between `[sso.jwt]` and `[proxy.jwt_auth]` so tokens issued/relayed by the SSO
 broker are accepted on the SIP (`X-Auth-Token`) and WebSocket (`?token=`)
 chains unchanged. Stateful-free by design — cluster-safe with identical node
 secrets, no shared storage.
+
+## Push Notifications for Mobile Apps (RFC 8599)
+
+Mobile apps such as Linphone cannot keep a SIP connection open while the OS
+suspends or kills them. With `[proxy.push]` configured, RustPBX wakes them for
+incoming calls with a push notification, following RFC 8599:
+
+1. The app registers a Contact carrying `pn-provider`, `pn-prid` (its push
+   token) and `pn-param`. RustPBX records the device (persisted in the
+   `rustpbx_push_devices` table, so it survives restarts) and grants the
+   binding up to `max_expires` instead of `max_registrar_expires`. The 200 OK
+   carries `Feature-Caps: *;+sip.pns="fcm"`.
+2. When the app's connection closes (the OS suspended or killed it), its
+   binding stays registered: the device is asleep, not gone. Every lookup —
+   direct calls, routes, queues, transfers, API-originated calls — still
+   finds it, so none of them needs to know about push. (No `offline`
+   locator event is emitted for it either.)
+3. Every INVITE RustPBX sends passes through one place that recognizes push
+   devices (by the `pn-*` parameters of the Request-URI, or by the INVITE
+   going to a push device's connection). If the device's connection is
+   down, RustPBX pushes it and holds the INVITE until the app sends its
+   binding-refresh REGISTER, then delivers it on the new connection. If the
+   device does not re-register within `wakeup_timeout_secs`, that INVITE
+   fails with 480; other devices of the callee ring in parallel meanwhile.
+4. If the connection looks alive (or the device uses UDP, whose liveness is
+   unknown), the INVITE is sent right away and the device is pushed as well
+   (`push_connected`): if it re-registers on a new connection before
+   answering (the old one was half-open), the INVITE follows it.
+5. Shortly before a binding expires (`refresh_before_secs`), RustPBX pushes
+   the device so it re-registers (RFC 8599 §5.5).
+
+Push messages use the payload keys Flexisip sends (`call-id`, `loc-key`,
+`send-time`, ...), so stock Linphone handles them: `call-id` is the Call-ID
+of the INVITE the device is about to receive.
+
+```toml
+[proxy]
+tcp_port = 5060   # or tls_port: push devices should not register over UDP
+
+[proxy.push]
+# enabled = true
+# wakeup_timeout_secs = 30          # how long a call waits for a pushed device
+# max_expires = 604800              # binding lifetime cap for push devices (7 days)
+# refresh_before_secs = 300         # push devices this long before expiry; 0 disables
+# push_connected = true             # also push devices that look connected
+# reject_unsupported_provider = false  # 555 instead of registering without push
+# include_caller_info = false       # caller URI/name in the payload (seen by the PNS)
+
+[[proxy.push.fcm]]
+service_account = "/etc/rustpbx/firebase-service-account.json"
+# project_id = "my-app"             # defaults to the service account's project_id
+# Linphone sends the Firebase project *number* (gcm_defaultSenderId) as
+# pn-param; list it here. With a single [[proxy.push.fcm]] entry every fcm
+# device is served by it regardless of pn-param.
+aliases = ["123456789012"]
+```
+
+The service account needs permission to send FCM messages (e.g. the
+"Firebase Cloud Messaging API Admin" role) in the Firebase project the app is
+built with (its `google-services.json`).
+
+Notes:
+
+- Only `fcm` is implemented. Contacts naming another provider (e.g. `apns`)
+  register as ordinary bindings, or get 555 with
+  `reject_unsupported_provider = true`.
+- A push token that FCM reports as `UNREGISTERED` (app uninstalled) is
+  forgotten.
+- Only INVITEs wake devices; SIP MESSAGE to a sleeping device is not
+  pushed.
+- Device state lives on the node that handled the REGISTER; cluster
+  deployments should route a user's calls through the same node.
+- `[proxy.push]` is read at startup; changes need a restart.
+- Metrics: `rustpbx_push_notifications_total{provider,kind,result}`,
+  `rustpbx_push_wakeups_total{result}`,
+  `rustpbx_push_wakeup_latency_seconds`.

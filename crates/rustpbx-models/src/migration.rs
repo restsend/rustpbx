@@ -43,6 +43,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::m20261012_000001_config_entries_mediumtext::Migration),
             Box::new(super::m20261026_000001_extension_voicemail_default_off::Migration),
             Box::new(super::add_sip_trunk_register_username::Migration),
+            Box::new(super::push_device::Migration),
             // The queue addon migration is registered in the addon's own migrator.
         ]
     }
