@@ -1631,7 +1631,7 @@ mod tests {
     #[tokio::test]
     async fn playback_after_relay_marks_once_and_reuses_local_timeline() {
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
-        let peer_pc = PeerConnection::new(rustrtc::RtcConfiguration::default());
+        let peer_pc = PeerConnection::new(rustrtc::RtcConfiguration::webrtc());
         let pipe = EgressPipeline::start_with_gate(
             sender,
             pcmu_codec(),

@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 use crate::egress::EgressSource;
 use crate::ingress_tap::{DtmfEvent, PacketDirection};
 use crate::leg::Leg;
-use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
+use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec, TransportMode};
 
 /// Which side of the 2-party bridge a leg occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -452,10 +452,10 @@ impl MediaBridge {
         // video but share no codec, degrade to the transcoding path: audio
         // still flows (decode → re-encode) and video stops entirely.
         let video_mismatch = !pa.video.is_empty() && !pb.video.is_empty() && video_match.is_none();
-        let a_transport = la.pc().config().transport_mode.clone();
-        let b_transport = lb.pc().config().transport_mode.clone();
-        let has_webrtc_leg = a_transport == rustrtc::TransportMode::WebRtc
-            || b_transport == rustrtc::TransportMode::WebRtc;
+        let a_transport = TransportMode::of(la.pc().config());
+        let b_transport = TransportMode::of(lb.pc().config());
+        let has_webrtc_leg =
+            a_transport == TransportMode::WebRtc || b_transport == TransportMode::WebRtc;
 
         // Idempotent re-bridge: same codec pair on an already-active route is
         // a no-op (avoid rebuilding decoders / re-arming the relay).
@@ -1762,7 +1762,7 @@ fn spawn_bridge_stats_task(
              -> Option<crate::media_health::LegMediaHealth> {
                 let leg = leg.as_ref()?;
                 let sample = sample.as_ref()?;
-                let transport_mode = format!("{:?}", leg.pc().config().transport_mode);
+                let transport_mode = format!("{:?}", TransportMode::of(leg.pc().config()));
                 let audio = leg
                     .negotiated()
                     .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
@@ -1879,8 +1879,8 @@ fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sy
 /// audio-level, transport-cc, mid) use the ids it negotiated with us, which a
 /// SIP peer never agreed to, plain RTP or SDES-SRTP alike: only a WebRTC
 /// destination keeps them (and gets its own sdes:mid stamped).
-fn strip_extensions_toward(destination: &rustrtc::TransportMode) -> bool {
-    *destination != rustrtc::TransportMode::WebRtc
+fn strip_extensions_toward(destination: &TransportMode) -> bool {
+    *destination != TransportMode::WebRtc
 }
 
 /// Rewrite rules for one direction of audio relay: the audio catch-all rule
@@ -2267,7 +2267,7 @@ mod tests {
     /// peers (plain RTP and SDES-SRTP) never negotiated the source's ids.
     #[test]
     fn relay_strips_extensions_toward_non_webrtc_legs() {
-        use rustrtc::TransportMode;
+        use crate::TransportMode;
         assert!(strip_extensions_toward(&TransportMode::Rtp));
         assert!(strip_extensions_toward(&TransportMode::Srtp));
         assert!(!strip_extensions_toward(&TransportMode::WebRtc));
@@ -2843,7 +2843,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -2913,7 +2913,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -2983,7 +2983,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -3075,7 +3075,7 @@ mod tests {
                         ice_servers: Vec::new(),
                         relay_only: false,
                         enable_ice_lite: false,
-                        transport: rustrtc::TransportMode::WebRtc,
+                        transport: TransportMode::WebRtc,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
                             codec: audio_codec::CodecType::Opus,
@@ -3105,7 +3105,7 @@ mod tests {
                         ice_servers: Vec::new(),
                         relay_only: false,
                         enable_ice_lite: false,
-                        transport: rustrtc::TransportMode::Rtp,
+                        transport: TransportMode::Rtp,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
                             codec: audio_codec::CodecType::Opus,
@@ -3193,7 +3193,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 0,
                 codec: audio_codec::CodecType::PCMU,
@@ -3225,7 +3225,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::Rtp,
+            transport: TransportMode::Rtp,
             codecs: vec![CodecInfo {
                 payload_type: 0,
                 codec: audio_codec::CodecType::PCMU,
@@ -3256,6 +3256,7 @@ mod tests {
             t=0 0\r\n\
             m=audio 5000 UDP/TLS/RTP/SAVPF 0\r\n\
             a=rtpmap:0 PCMU/8000\r\n\
+            a=rtcp-mux\r\n\
             a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
             a=setup:actpass\r\n\
             a=ice-ufrag:uv50\r\n\

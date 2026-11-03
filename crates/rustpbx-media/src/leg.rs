@@ -24,7 +24,7 @@ use audio_codec::CodecType;
 use parking_lot::Mutex;
 use rustrtc::{
     IceServer, IceTransportPolicy, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
-    SessionDescription, TransportMode,
+    SessionDescription,
     config::BufferDropStrategy,
     media::MediaKind,
     media::track::sample_track,
@@ -42,7 +42,7 @@ use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
 use crate::leg_id::LegId;
 use crate::leg_stats::{LegRtcpStats, SrTimeTracker, spawn_rtcp_listener};
 use crate::media_recorder::RecorderSender;
-use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
+use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile, TransportMode};
 
 /// Outcome of a [`PlaybackHandle`]'s play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +117,7 @@ pub struct LegConfig {
     /// handshake (see `dialplan.media.relay_only`). Defaults to false.
     pub relay_only: bool,
     /// Advertise `a=ice-lite` in this leg's offer/answer SDP (rustrtc
-    /// `enable_ice_lite`). The leg runs as a Controlled ICE-lite agent:
+    /// `Connectivity::IceLite`). The leg runs as a Controlled ICE-lite agent:
     /// it starts no connectivity checks and answers the remote full-ICE
     /// peer's checks. Applied in `TransportMode::Rtp` and `Srtp` — WebRTC
     /// legs always run full ICE, so `build_rtc_config` forces it off for
@@ -735,8 +735,8 @@ impl LegInner {
     /// Plain RTP or SDES: direct UDP, where egress follows the latch.
     pub fn is_direct_rtp(&self) -> bool {
         matches!(
-            self.pc.config().transport_mode,
-            rustrtc::TransportMode::Rtp | rustrtc::TransportMode::Srtp
+            TransportMode::of(self.pc.config()),
+            TransportMode::Rtp | TransportMode::Srtp
         )
     }
 
@@ -807,7 +807,7 @@ impl LegInner {
             session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id,
             sdp_bytes = sdp.len(),
-            transport = ?self.pc.config().transport_mode,
+            transport = ?TransportMode::of(self.pc.config()),
             "leg SDP offer created",
         );
         Ok(sdp)
@@ -823,7 +823,7 @@ impl LegInner {
             leg = %self.id,
             sdp_type = ?sdp_type,
             sdp_bytes = remote.len(),
-            transport = ?self.pc.config().transport_mode,
+            transport = ?TransportMode::of(self.pc.config()),
             "leg SDP applied",
         );
         let desc = SessionDescription::parse(sdp_type, remote)
@@ -846,8 +846,8 @@ impl LegInner {
         // direct UDP like plain RTP and their SRTP packets keep the clear
         // RTP header, so latching works identically there. WebRTC legs
         // resolve their address via ICE and are excluded.
-        if (self.pc.config().transport_mode == rustrtc::TransportMode::Rtp
-            || self.pc.config().transport_mode == rustrtc::TransportMode::Srtp)
+        if (TransportMode::of(self.pc.config()) == TransportMode::Rtp
+            || TransportMode::of(self.pc.config()) == TransportMode::Srtp)
             && self.pc.config().enable_latching
         {
             for transceiver in self.pc.get_transceivers() {
@@ -1305,8 +1305,8 @@ impl LegInner {
                 // defer the arming to a background task and return
                 // immediately. RTP-mode transports are created during SDP
                 // application and are ready synchronously.
-                let has_webrtc_peer = self.pc.config().transport_mode == TransportMode::WebRtc
-                    || peer_pc.config().transport_mode == TransportMode::WebRtc;
+                let has_webrtc_peer = TransportMode::of(self.pc.config()) == TransportMode::WebRtc
+                    || TransportMode::of(peer_pc.config()) == TransportMode::WebRtc;
                 let ready_timeout = self
                     .relay_ready_timeout
                     .unwrap_or(WEBRTC_RELAY_READY_TIMEOUT);
@@ -1762,9 +1762,9 @@ async fn wait_and_arm_rewrite_relay(
     video_payload_types: &[u8],
 ) -> Result<()> {
     let arm_started = std::time::Instant::now();
-    let webrtc_pc = if source_pc.config().transport_mode == TransportMode::WebRtc {
+    let webrtc_pc = if TransportMode::of(source_pc.config()) == TransportMode::WebRtc {
         Some(source_pc)
-    } else if destination_pc.config().transport_mode == TransportMode::WebRtc {
+    } else if TransportMode::of(destination_pc.config()) == TransportMode::WebRtc {
         Some(destination_pc)
     } else {
         None
@@ -1869,21 +1869,11 @@ async fn wait_and_arm_rewrite_relay(
 }
 
 fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
-    let sdp_compatibility = match cfg.transport {
-        rustrtc::TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
-        rustrtc::TransportMode::Rtp | rustrtc::TransportMode::Srtp => {
-            rustrtc::config::SdpCompatibilityMode::LegacySip
-        }
-    };
     let (rtp_start_port, rtp_end_port) = cfg
         .rtp_port_range
         .map(|(start, end)| (Some(start), Some(end)))
         .unwrap_or((None, None));
     RtcConfiguration {
-        transport_mode: cfg.transport.clone(),
-        // ICE-lite applies to direct (RTP and SDES-SRTP) legs; WebRTC must
-        // keep full ICE (browsers require connectivity checks + DTLS).
-        enable_ice_lite: cfg.transport != TransportMode::WebRtc && cfg.enable_ice_lite,
         rtp_start_port,
         rtp_end_port,
         external_ips: cfg.external_ips.clone(),
@@ -1905,13 +1895,6 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         // SDP carries a private `c=` (e.g. Linphone without STUN).
         enable_latching: cfg.enable_latching,
         probation_max_packets: cfg.probation_max_packets,
-        // Plain SIP/RTP peers (and SDES-SRTP trunks) do not understand BUNDLE:
-        // they expect one distinct UDP port per m-line, no `a=rtcp-mux` and no
-        // `a=mid`. Without this a plain-RTP audio+video leg emits an offer with
-        // audio and video sharing a single port + rtcp-mux (WebRTC-style), which
-        // strict SIP video phones reject with 488 Not Acceptable Here. This
-        // mirrors the legacy `RtpTrackBuilder` path (rtp_track_builder.rs).
-        sdp_compatibility,
         // ICE pre-ready buffering: packets are buffered only until the RTP
         // transport is set up, and DropOldest means depth stays tiny in steady
         // state. 500 reserved ~5x the rustrtc default (100) and is almost never
@@ -1928,7 +1911,11 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
             application: None,
             image: vec![],
         }),
-        ..Default::default()
+        // RTP and SDES-SRTP legs: `RtcConfiguration::sip()`, a port per kind
+        // of media for peers without BUNDLE, RTCP multiplexing only when the
+        // peer offers or accepts it. ICE-lite applies to these legs only;
+        // WebRTC legs keep full ICE (browsers need connectivity checks).
+        ..cfg.transport.rtc_configuration(cfg.enable_ice_lite)
     }
 }
 
@@ -2830,16 +2817,18 @@ mod tests {
         let leg = LegInner::new("answerer", &cfg, None).expect("answerer leg");
 
         // Minimal WebRTC offer with audio + video m-lines (what a browser
-        // sends: sendrecv, video with an SSRC).
+        // sends: BUNDLE, rtcp-mux, sendrecv, video with an SSRC).
         let offer = "v=0\r\n\
             o=- 1 2 IN IP4 127.0.0.1\r\n\
             s=-\r\n\
             c=IN IP4 127.0.0.1\r\n\
             t=0 0\r\n\
+            a=group:BUNDLE 0 1\r\n\
             m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
             a=rtpmap:111 opus/48000/2\r\n\
             a=mid:0\r\n\
             a=sendrecv\r\n\
+            a=rtcp-mux\r\n\
             a=setup:actpass\r\n\
             a=ice-ufrag:uv50\r\n\
             a=ice-pwd:ib8b\r\n\
@@ -2849,6 +2838,7 @@ mod tests {
             a=rtpmap:98 VP8/90000\r\n\
             a=mid:1\r\n\
             a=sendrecv\r\n\
+            a=rtcp-mux\r\n\
             a=setup:actpass\r\n\
             a=ice-ufrag:uv50\r\n\
             a=ice-pwd:ib8b\r\n\
@@ -3021,10 +3011,11 @@ mod p24_uac_test {
 
     /// Field-report repro fingerprint: recording-anchored MediaBridge builds
     /// plain-RTP legs via `LegInner` (not `RtpTrackBuilder`). The offer must be
-    /// acceptable to strict SIP softphones — no BUNDLE/rtcp-mux, distinct
-    /// ports, and no `m=application` datachannel.
+    /// acceptable to strict SIP softphones without BUNDLE and rtcp-mux: a
+    /// distinct port per m-line (RFC 8843 §7.2), an RTCP port with the
+    /// rtcp-mux offer (RFC 5761 §5.1.1), and no `m=application` datachannel.
     #[tokio::test]
-    async fn plain_rtp_av_offer_must_be_legacy_sip_compatible() {
+    async fn plain_rtp_av_offer_works_without_bundle_and_rtcp_mux() {
         let cfg = LegConfig {
             volume_stats: Default::default(),
             quality_stats: Default::default(),
@@ -3066,12 +3057,13 @@ mod p24_uac_test {
         let offer = leg.create_offer().await.expect("offer");
         println!("plain RTP A/V offer:\n{offer}");
         assert!(
-            !offer.contains("a=group:BUNDLE"),
-            "BUNDLE causes 488 on strict SIP phones:\n{offer}"
+            !offer.contains("a=bundle-only"),
+            "a peer without BUNDLE rejects bundle-only m-lines:\n{offer}"
         );
-        assert!(
-            !offer.contains("a=rtcp-mux"),
-            "rtcp-mux causes 488 on strict SIP phones:\n{offer}"
+        assert_eq!(
+            offer.matches("a=rtcp-mux").count(),
+            offer.matches("a=rtcp:").count(),
+            "a peer without rtcp-mux needs an RTCP port on each m-line:\n{offer}"
         );
         assert!(
             !offer.contains("m=application"),
@@ -3096,6 +3088,7 @@ mod p24_uac_test {
 #[cfg(test)]
 mod ice_lite_tests {
     use super::*;
+    use rustrtc::Connectivity;
 
     fn rtp_cfg(enable_ice_lite: bool) -> LegConfig {
         LegConfig {
@@ -3235,12 +3228,17 @@ mod ice_lite_tests {
             ..LegConfig::rtp_pcmu()
         };
         let rtc = build_rtc_config(&cfg);
-        assert!(
-            !rtc.enable_ice_lite,
+        assert_eq!(
+            rtc.connectivity,
+            Connectivity::Ice,
             "WebRTC legs must keep full ICE regardless of the flag"
         );
         let rtc_rtp = build_rtc_config(&rtp_cfg(true));
-        assert!(rtc_rtp.enable_ice_lite, "RTP legs honor the flag");
+        assert_eq!(
+            rtc_rtp.connectivity,
+            Connectivity::IceLite,
+            "RTP legs honor the flag"
+        );
         let rtc_srtp = build_rtc_config(&LegConfig {
             call_id: None,
             root_session_id: None,
@@ -3248,7 +3246,11 @@ mod ice_lite_tests {
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
         });
-        assert!(rtc_srtp.enable_ice_lite, "SDES/Srtp legs honor the flag");
+        assert_eq!(
+            rtc_srtp.connectivity,
+            Connectivity::IceLite,
+            "SDES/Srtp legs honor the flag"
+        );
     }
 
     /// The `RtpTrackBuilder` path (used for callee legs and REFER offers)
@@ -3260,6 +3262,6 @@ mod ice_lite_tests {
             .with_ice_lite(true)
             .build();
         let pc = track.get_peer_connection().await.expect("pc");
-        assert!(!pc.config().enable_ice_lite);
+        assert_eq!(pc.config().connectivity, Connectivity::Ice);
     }
 }

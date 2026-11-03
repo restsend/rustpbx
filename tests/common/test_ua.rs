@@ -217,12 +217,12 @@ impl TestUa {
         media_mode: MediaMode,
     ) -> Self {
         let webrtc_pc = if media_mode != MediaMode::None {
-            let mut rtc_config = rustrtc::RtcConfiguration::default();
-            rtc_config.transport_mode = match media_mode {
-                MediaMode::WebRtc => rustrtc::TransportMode::WebRtc,
-                MediaMode::Srtp => rustrtc::TransportMode::Srtp,
-                MediaMode::None => rustrtc::TransportMode::Rtp,
-            };
+            let mut rtc_config = match media_mode {
+                MediaMode::WebRtc => rustpbx::media::TransportMode::WebRtc,
+                MediaMode::Srtp => rustpbx::media::TransportMode::Srtp,
+                MediaMode::None => rustpbx::media::TransportMode::Rtp,
+            }
+            .rtc_configuration(false);
             if media_mode == MediaMode::Srtp {
                 // SDES direct mode: pin the advertised c-line/bind address so
                 // loopback e2e media can flow without ICE.

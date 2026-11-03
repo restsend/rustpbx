@@ -12,7 +12,7 @@ struct LegData {
     leg: Leg,
     dialog: Option<Dialog>,
     media_leg: Option<crate::media::leg::Leg>,
-    transport: Option<rustrtc::TransportMode>,
+    transport: Option<crate::media::TransportMode>,
     answer: Option<String>,
     has_video: bool,
     tasks: Vec<JoinHandle<()>>,
@@ -113,11 +113,11 @@ impl LegRegistry {
         }
     }
 
-    pub fn get_transport(&self, id: &LegId) -> Option<rustrtc::TransportMode> {
+    pub fn get_transport(&self, id: &LegId) -> Option<crate::media::TransportMode> {
         self.legs.get(id).and_then(|d| d.transport.clone())
     }
 
-    pub fn set_transport(&mut self, id: LegId, transport: rustrtc::TransportMode) {
+    pub fn set_transport(&mut self, id: LegId, transport: crate::media::TransportMode) {
         if let Some(data) = self.legs.get_mut(&id) {
             data.transport = Some(transport);
         }
@@ -125,13 +125,13 @@ impl LegRegistry {
 
     pub fn caller_is_webrtc(&self) -> bool {
         self.get_transport(&LegId::new("caller"))
-            .map(|t| t == rustrtc::TransportMode::WebRtc)
+            .map(|t| t == crate::media::TransportMode::WebRtc)
             .unwrap_or(false)
     }
 
     pub fn callee_is_webrtc(&self) -> bool {
         self.get_transport(&LegId::new("callee"))
-            .map(|t| t == rustrtc::TransportMode::WebRtc)
+            .map(|t| t == crate::media::TransportMode::WebRtc)
             .unwrap_or(false)
     }
 

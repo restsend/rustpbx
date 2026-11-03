@@ -1766,28 +1766,28 @@ fn test_sdp_transport_mode_classification() {
     // Plain RTP
     assert_eq!(
         SipSession::sdp_transport_mode("m=audio 1000 RTP/AVP 8 0\r\na=sendrecv\r\n"),
-        rustrtc::TransportMode::Rtp
+        crate::media::TransportMode::Rtp
     );
     // SDES-SRTP via RTP/SAVP profile (Twilio-style)
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 1000 RTP/SAVP 0 8 101\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
         ),
-        rustrtc::TransportMode::Srtp
+        crate::media::TransportMode::Srtp
     );
     // SDES-SRTP advertised only via a=crypto
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 1000 RTP/AVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
         ),
-        rustrtc::TransportMode::Srtp
+        crate::media::TransportMode::Srtp
     );
     // WebRTC (ICE + DTLS) takes precedence even if a crypto line is present
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ice-ufrag:x\r\na=fingerprint:sha-256 AA\r\n"
         ),
-        rustrtc::TransportMode::WebRtc
+        crate::media::TransportMode::WebRtc
     );
 }
 
@@ -5810,6 +5810,7 @@ m=audio 4000 UDP/TLS/RTP/SAVPF 111 101\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:0\r\n\
 a=sendrecv\r\n\
+a=rtcp-mux\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
 a=rtpmap:101 telephone-event/48000\r\n\
 a=setup:actpass\r\n\
@@ -5820,6 +5821,7 @@ m=video 4001 UDP/TLS/RTP/SAVPF 96 98\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:1\r\n\
 a=sendrecv\r\n\
+a=rtcp-mux\r\n\
 a=rtpmap:96 H264/90000\r\n\
 a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
 a=rtpmap:98 VP8/90000\r\n\
@@ -6004,8 +6006,8 @@ async fn ensure_caller_leg_answers_sdes_srtp_offer_with_crypto() {
         .media_leg(&LegId::from("caller"))
         .expect("caller media leg");
     assert_eq!(
-        caller_leg.pc().config().transport_mode,
-        rustrtc::TransportMode::Srtp,
+        crate::media::TransportMode::of(caller_leg.pc().config()),
+        crate::media::TransportMode::Srtp,
         "SAVP offer must produce an Srtp caller leg"
     );
 
@@ -6092,6 +6094,7 @@ t=0 0\r\n\
 m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=sendrecv\r\n\
+a=rtcp-mux\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
 a=setup:actpass\r\n\
 a=ice-ufrag:uv50\r\n\
@@ -6100,6 +6103,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 m=video 4001 UDP/TLS/RTP/SAVPF 96\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=sendrecv\r\n\
+a=rtcp-mux\r\n\
 a=rtpmap:96 H264/90000\r\n\
 a=setup:actpass\r\n\
 a=ice-ufrag:uv50\r\n\
@@ -9105,7 +9109,7 @@ async fn consult_media_preserves_peers_body() {
         consult_info.source_leg = Some(LegId::from("callee"));
         session.legs.insert(consult.clone(), consult_info);
         let (peer, offer) = session
-            .create_leg_peer(&consult, rustrtc::TransportMode::Rtp)
+            .create_leg_peer(&consult, crate::media::TransportMode::Rtp)
             .await
             .unwrap();
         session.legs.set_media_leg(&consult, peer.clone());
@@ -11519,8 +11523,27 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup_body() {
     serving.await.unwrap();
 }
 
-#[tokio::test]
-async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
+#[test]
+fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
+    // Same DEBUG-build frame depth as
+    // consult_media_preserves_peers_across_bridge_and_explicit_mixer: the
+    // bridge setup poll chain needs ~2.5MB, more than the libtest thread
+    // stack (verified: overflows at 2MB).
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("added-legs runtime")
+                .block_on(added_legs_require_explicit_bridge_and_allow_removed_ids_body())
+        })
+        .expect("spawn added-legs test thread")
+        .join()
+        .expect("added-legs test body panicked");
+}
+
+async fn added_legs_require_explicit_bridge_and_allow_removed_ids_body() {
     use crate::call::{DialDirection, Dialplan, MediaConfig};
     use crate::config::MediaProxyMode;
     use crate::media::leg::{LegConfig, LegInner};

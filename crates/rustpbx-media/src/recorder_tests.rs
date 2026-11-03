@@ -1133,7 +1133,7 @@ mod recorder_advanced_tests {
                 channels: 1,
             }),
             dtmf_pts: vec![101],
-            transport: rustrtc::TransportMode::Rtp,
+            transport: crate::TransportMode::Rtp,
         });
 
         let mut encoder = create_encoder(CodecType::Opus);
