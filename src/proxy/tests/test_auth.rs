@@ -523,6 +523,7 @@ async fn test_guest_call_allowed_extension() {
         ignore_out_of_dialog_request: true,
         locator_events: None,
         locator_event_lock: Arc::new(tokio::sync::Mutex::new(())),
+        push: None,
         sipflow_config: Arc::new(ArcSwap::new(Arc::new(None))),
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),

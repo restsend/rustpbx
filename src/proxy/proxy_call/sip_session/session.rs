@@ -6641,7 +6641,6 @@ impl SipSession {
             .is_enabled();
 
         // Build INVITE options for every target
-        let dialog_layer = self.server.dialog_layer.clone();
         let fork_cancel = CancellationToken::new();
         let mut fork_set = FuturesUnordered::new();
         let state_tx = self.callee_event_tx.clone().ok_or_else(|| {
@@ -6657,7 +6656,7 @@ impl SipSession {
             }
 
             let leg_id_str = format!("fork-{idx}");
-            let (invite_option, callee_uri, _callee_call_id, _routed_via_home_proxy) = match self
+            let (invite_option, _callee_uri, _callee_call_id, _routed_via_home_proxy) = match self
                 .build_target_invite_option(target, Some(&leg_id_str), None)
                 .await
             {
@@ -6669,14 +6668,15 @@ impl SipSession {
             };
 
             let fork_tx = state_tx.clone();
-            let dlg = dialog_layer.clone();
+            let server = self.server.clone();
             let ct = fork_cancel.clone();
 
             let join = crate::utils::spawn(async move {
                 tokio::select! {
                     biased;
-                    result = dlg.do_invite(invite_option, fork_tx) => {
-                        Some((idx, result, callee_uri))
+                    // `sent.callee` follows a pushed device to its fresh binding.
+                    (result, sent) = crate::proxy::push::send_invite(server, invite_option, fork_tx) => {
+                        Some((idx, result, sent.callee))
                     }
                     _ = ct.cancelled() => {
                         None
@@ -6892,10 +6892,13 @@ impl SipSession {
                         "fork_targets_parallel: target errored"
                     );
                     failures += 1;
-                    last_error = into_callee_err(
-                        &StatusCode::ServerInternalError,
-                        Some(format!("Target fork failed: {e}")),
-                    );
+                    last_error = match crate::proxy::push::wakeup_failure_status(&e) {
+                        Some((code, reason)) => into_callee_err(&code, Some(reason)),
+                        None => into_callee_err(
+                            &StatusCode::ServerInternalError,
+                            Some(format!("Target fork failed: {e}")),
+                        ),
+                    };
                 }
                 Ok(None) => {
                     // Fork was cancelled by fork_cancel (another fork won)
@@ -7554,7 +7557,7 @@ impl SipSession {
             self.caller_transport_mode(),
         );
 
-        let (mut invite_option, callee_uri, callee_call_id, _routed_via_home_proxy) = self
+        let (mut invite_option, mut callee_uri, callee_call_id, _routed_via_home_proxy) = self
             .build_target_invite_option(target, None, transfer_headers)
             .await?;
         if let Some(caller) = caller {
@@ -7582,11 +7585,13 @@ impl SipSession {
             )
         })?;
 
-        let dialog_layer = self.server.dialog_layer.clone();
         let mut retry_count = 0;
-        let mut invitation = dialog_layer
-            .do_invite(invite_option.clone(), state_tx.clone())
-            .boxed();
+        let mut invitation = crate::proxy::push::send_invite(
+            self.server.clone(),
+            invite_option.clone(),
+            state_tx.clone(),
+        )
+        .boxed();
         let mut caller_end_check = tokio::time::interval(Duration::from_millis(100));
 
         // No-trying timeout: if the downstream trunk fails to return ANY response
@@ -7653,6 +7658,20 @@ impl SipSession {
                     ));
                 }
                 res = &mut invitation => {
+                    let (res, sent_option) = res;
+                    // A pushed device answers on the binding it re-registered.
+                    if sent_option.callee != invite_option.callee
+                        || sent_option.destination != invite_option.destination
+                    {
+                        callee_uri = sent_option.callee.clone();
+                        invite_option.callee = sent_option.callee;
+                        invite_option.destination = sent_option.destination;
+                        self.meta.callee_peer = invite_option
+                            .destination
+                            .as_ref()
+                            .map(|d| d.addr.to_string())
+                            .or_else(|| Some(callee_uri.host_with_port.to_string()));
+                    }
                     break match res {
                         Ok((dialog, response)) => {
                             if let Some(ref resp) = response {
@@ -7708,9 +7727,12 @@ impl SipSession {
                                                 ));
                                             }
                                             retry_count += 1;
-                                            invitation = dialog_layer
-                                                .do_invite(invite_option.clone(), state_tx.clone())
-                                                .boxed();
+                                            invitation = crate::proxy::push::send_invite(
+                                                self.server.clone(),
+                                                invite_option.clone(),
+                                                state_tx.clone(),
+                                            )
+                                            .boxed();
                                             continue;
                                         }
 
@@ -7729,10 +7751,13 @@ impl SipSession {
                                 ))
                             }
                         }
-                        Err(e) => Err(into_callee_err(
-                            &StatusCode::ServerInternalError,
-                            Some(format!("Invite failed: {}", e)),
-                        )),
+                        Err(e) => match crate::proxy::push::wakeup_failure_status(&e) {
+                            Some((code, reason)) => Err(into_callee_err(&code, Some(reason))),
+                            None => Err(into_callee_err(
+                                &StatusCode::ServerInternalError,
+                                Some(format!("Invite failed: {}", e)),
+                            )),
+                        },
                     };
                 }
 
@@ -13278,6 +13303,7 @@ impl SipSession {
         }
         self.register_dialog_owner(&bleg_call_id).await;
 
+        let server = self.server.clone();
         let dialog_layer = self.server.dialog_layer.clone();
         let active_call_registry = self.server.active_call_registry.clone();
         let leg_id_for_spawn = leg_id.clone();
@@ -13312,7 +13338,8 @@ impl SipSession {
                     return;
                 }
             }
-            let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+            let mut invitation =
+                crate::proxy::push::send_invite(server, invite_option, state_tx).boxed();
 
             let mut result: Result<InviteDialog, String> = Err("not started".to_string());
             let mut answered_guard = None;
@@ -13330,7 +13357,7 @@ impl SipSession {
                         }).await;
                         break;
                     }
-                    r = &mut invitation, if !result.is_ok() => {
+                    (r, _sent) = &mut invitation, if !result.is_ok() => {
                         match r {
                             Ok((dialog, response)) => {
                                 if let Some(ref resp) = response {

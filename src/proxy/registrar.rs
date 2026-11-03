@@ -4,6 +4,9 @@ use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
 use crate::metrics;
 use crate::proxy::locator::{LocatorEvent, locations_without_active_bindings};
+use crate::proxy::push::{
+    ContactPush, PUSH_NOT_SUPPORTED_REASON, PushDevice, PushParams, PushService,
+};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::sip::prelude::HeadersExt;
@@ -120,6 +123,12 @@ impl ParsedContact {
             .iter()
             .find(|p| p.matches("reg-id"))
             .and_then(ContactParam::cloned_value)
+    }
+
+    /// RFC 8599 `+sip.pnsreg` media feature tag: the UA can refresh its
+    /// binding without being woken by a push.
+    fn has_pnsreg(&self) -> bool {
+        self.params.iter().any(|p| p.matches("+sip.pnsreg"))
     }
 
     fn transport(&self) -> Option<Transport> {
@@ -397,6 +406,62 @@ fn escape_display_name(input: &str) -> String {
     super::routing::escape_sip_quoted(input)
 }
 
+/// RFC 8599 §5.6.1 processing of one Contact: the push parameters to honour,
+/// recording the providers to advertise in `Feature-Caps`. `Err` when the
+/// REGISTER must be rejected with 555 (Push Notification Service Not
+/// Supported).
+fn push_decision(
+    push: &PushService,
+    entry: &ParsedContact,
+    feature_caps: &mut Vec<(String, bool)>,
+) -> Result<Option<PushParams>, ()> {
+    let mut advertise =
+        |provider: &str, pnsreg: bool| match feature_caps.iter_mut().find(|(p, _)| p == provider) {
+            Some((_, existing)) => *existing |= pnsreg,
+            None => feature_caps.push((provider.to_string(), pnsreg)),
+        };
+    let reject = push.config().reject_unsupported_provider;
+    match ContactPush::from_uri(entry.uri()) {
+        ContactPush::None => Ok(None),
+        ContactPush::Request(params) => {
+            if push.provider_for(&params).is_some() {
+                advertise(&params.provider, entry.has_pnsreg());
+                Ok(Some(params))
+            } else if reject {
+                Err(())
+            } else {
+                info!(
+                    provider = %params.provider,
+                    param = ?params.param,
+                    "push provider not configured; registering contact without push"
+                );
+                Ok(None)
+            }
+        }
+        // Capability queries (§4.1.5 / §5.6.1.2).
+        ContactPush::Query(Some(provider)) => {
+            if push.supports_provider(&provider) {
+                advertise(&provider, false);
+                Ok(None)
+            } else if reject {
+                Err(())
+            } else {
+                Ok(None)
+            }
+        }
+        ContactPush::Query(None) => {
+            let providers = push.provider_names();
+            if providers.is_empty() && reject {
+                return Err(());
+            }
+            for provider in providers {
+                advertise(&provider, false);
+            }
+            Ok(None)
+        }
+    }
+}
+
 impl RegistrarModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
         let module = RegistrarModule::new(server, config);
@@ -404,6 +469,99 @@ impl RegistrarModule {
     }
     pub fn new(server: SipServerRef, _config: Arc<ProxyConfig>) -> Self {
         Self { server }
+    }
+
+    /// A push device re-registering on a new flow (new Contact) replaces the
+    /// binding of its old flow, so calls are not forked to a dead flow.
+    async fn remove_stale_device_bindings(
+        &self,
+        identity: &str,
+        registered_aor: &Uri,
+        location: &Location,
+        params: &PushParams,
+    ) {
+        let Ok(bindings) = self.server.locator.lookup(registered_aor).await else {
+            return;
+        };
+        let key = location.binding_key();
+        for stale in bindings {
+            if stale.binding_key() == key {
+                continue;
+            }
+            let same_instance =
+                stale.instance_id.is_some() && stale.instance_id == location.instance_id;
+            let same_prid = PushParams::from_uri(&stale.aor)
+                .is_some_and(|p| p.provider == params.provider && p.prid == params.prid);
+            if !same_instance && !same_prid {
+                continue;
+            }
+            let Some(username) = stale.registered_username.clone() else {
+                continue;
+            };
+            let realm = stale.registered_realm.clone();
+            if self
+                .server
+                .locator
+                .get_identifier(&username, realm.as_deref())
+                .await
+                != identity
+            {
+                continue;
+            }
+            debug!(stale = %stale.aor, fresh = %location.aor, "replacing binding of re-registered push device");
+            let _ = self
+                .server
+                .locator
+                .register(
+                    &username,
+                    realm.as_deref(),
+                    Location {
+                        expires: 0,
+                        ..stale
+                    },
+                )
+                .await;
+        }
+    }
+
+    /// Track the binding in the push registry: record a push registration,
+    /// or forget the device when it unregisters or stops asking for push
+    /// (RFC 8599 §4.1.2).
+    async fn update_push_device(
+        push: &PushService,
+        identity: &str,
+        user: &SipUser,
+        registered_aor: &Uri,
+        location: &Location,
+        push_params: Option<PushParams>,
+    ) {
+        match push_params {
+            Some(params) if location.expires > 0 => {
+                let now = crate::proxy::push::registry::now_epoch_secs();
+                push.registry()
+                    .upsert(PushDevice {
+                        identity: identity.to_string(),
+                        username: user.username.clone(),
+                        realm: user.realm.clone(),
+                        aor: registered_aor.to_string(),
+                        contact: location.aor.to_string(),
+                        instance_id: location.instance_id.clone(),
+                        params,
+                        user_agent: location.user_agent.clone(),
+                        expires_at: now + location.expires as i64,
+                        registered_at: now,
+                        refresh_pushed_at: None,
+                        destination: location.destination.clone(),
+                    })
+                    .await;
+            }
+            push_params => {
+                let params = push_params.or_else(|| PushParams::from_uri(&location.aor));
+                push.registry()
+                    .remove_device(identity, location.instance_id.as_deref(), params.as_ref())
+                    .await;
+            }
+        }
     }
 }
 
@@ -530,6 +688,23 @@ impl ProxyModule for RegistrarModule {
             Vec::new()
         };
 
+        // RFC 8599: a `sip.pns` Feature-Caps in the request means a proxy
+        // between us and the UA already handles push for these bindings
+        // (§5.6.1.1), so they are treated as ordinary ones here.
+        let push_handled_upstream = collect_header_values(&tx.original, "Feature-Caps")
+            .iter()
+            .any(|value| value.contains("+sip.pns"));
+        let push = self.server.push.clone().filter(|_| !push_handled_upstream);
+        let push_identity = match &push {
+            Some(_) => Some(
+                self.server
+                    .locator
+                    .get_identifier(&user.username, user.realm.as_deref())
+                    .await,
+            ),
+            None => None,
+        };
+
         let wildcard_count = contact_entries.iter().filter(|c| c.is_wildcard()).count();
         if wildcard_count > 0 {
             if wildcard_count > 1 || contact_entries.len() > 1 {
@@ -553,6 +728,10 @@ impl ProxyModule for RegistrarModule {
 
             // P0: SIP unregistration metrics
             metrics::sip::unregistration(&realm);
+
+            if let (Some(push), Some(identity)) = (&push, &push_identity) {
+                push.registry().remove_identity(identity).await;
+            }
 
             if let Some(locator_events) = &self.server.locator_events {
                 let removed = locations_without_active_bindings(
@@ -590,13 +769,44 @@ impl ProxyModule for RegistrarModule {
             .max_registrar_expires
             .unwrap_or(50);
 
+        // Decide push handling for every Contact before touching the locator,
+        // so a 555 rejection leaves no partial registration behind.
+        let mut feature_caps: Vec<(String, bool)> = Vec::new();
+        let mut contact_push = Vec::with_capacity(contact_entries.len());
+        for entry in &contact_entries {
+            let params = match &push {
+                Some(push) => match push_decision(push, entry, &mut feature_caps) {
+                    Ok(params) => params,
+                    Err(()) => {
+                        info!(contact = %entry.uri(), "rejecting REGISTER: push provider not supported");
+                        metrics::sip::registration_failed(&realm, "push_not_supported");
+                        tx.reply(rsipstack::sip::StatusCode::Other(
+                            555,
+                            PUSH_NOT_SUPPORTED_REASON.to_string(),
+                        ))
+                        .await
+                        .ok();
+                        return Ok(ProxyAction::Abort);
+                    }
+                },
+                None => None,
+            };
+            contact_push.push(params);
+        }
+
         let mut max_contact_expires = 0u32;
-        for entry in contact_entries {
+        for (entry, push_params) in contact_entries.into_iter().zip(contact_push) {
+            // Push bindings must outlive the app's flow, so they get their own
+            // cap instead of `max_registrar_expires`.
+            let cap = match (&push, &push_params) {
+                (Some(push), Some(_)) => push.config().max_expires,
+                _ => max_expires,
+            };
             let expires = entry
                 .expires()
                 .or(global_expires)
                 .unwrap_or(default_expires)
-                .min(max_expires);
+                .min(cap);
             max_contact_expires = max_contact_expires.max(expires);
 
             let destination = match user
@@ -699,6 +909,12 @@ impl ProxyModule for RegistrarModule {
                     }
                 }
             };
+            if let (Some(params), Some(identity)) = (&push_params, &push_identity)
+                && location.expires > 0
+            {
+                self.remove_stale_device_bindings(identity, &registered_aor, &location, params)
+                    .await;
+            }
             match self
                 .server
                 .locator
@@ -711,6 +927,17 @@ impl ProxyModule for RegistrarModule {
             {
                 Ok(_) => {
                     metrics::sip::registration_succeeded(&realm);
+                    if let (Some(push), Some(identity)) = (&push, &push_identity) {
+                        Self::update_push_device(
+                            push,
+                            identity,
+                            &user,
+                            &registered_aor,
+                            &location,
+                            push_params,
+                        )
+                        .await;
+                    }
                     if let Some(locator_events) = &self.server.locator_events {
                         if location.expires == 0 {
                             let removed = locations_without_active_bindings(
@@ -759,6 +986,15 @@ impl ProxyModule for RegistrarModule {
             ));
         }
         response_headers.push(Header::Expires(max_contact_expires.into()));
+        // RFC 8599 §5.4: one Feature-Caps per supported push service.
+        if let Some(push) = &push {
+            for (provider, pnsreg) in &feature_caps {
+                response_headers.push(Header::Other(
+                    "Feature-Caps".into(),
+                    push.feature_caps(provider, *pnsreg),
+                ));
+            }
+        }
 
         tx.reply_with(rsipstack::sip::StatusCode::OK, response_headers, None)
             .await
@@ -783,6 +1019,30 @@ mod tests {
         let rendered = parsed.contact_value(300);
         assert!(rendered.contains("+sip.instance=\"urn:uuid:1234\""));
         assert!(rendered.contains("expires=300"));
+    }
+
+    #[test]
+    fn parse_linphone_push_contact() {
+        let value = "<sip:bob@192.168.1.20:46021;transport=tls;pn-prid=dXyz8:APA91bGx-Q_tok;pn-provider=fcm;pn-param=929724111839;pn-silent=1;pn-timeout=0>;+org.linphone.specs=\"lime,groupchat/1.1,ephemeral/1.1\";+sip.instance=\"<urn:uuid:1a2b3c4d-0000-4000-8000-000000000001>\"";
+        let entries = split_contact_entries(value);
+        assert_eq!(entries.len(), 1, "commas inside quoted params do not split");
+        let parsed = parse_contact_entry(&entries[0]).expect("parse contact");
+        assert_eq!(
+            parsed.instance_id().as_deref(),
+            Some("<urn:uuid:1a2b3c4d-0000-4000-8000-000000000001>")
+        );
+        assert!(!parsed.has_pnsreg());
+        assert_eq!(
+            ContactPush::from_uri(parsed.uri()),
+            ContactPush::Request(PushParams {
+                provider: "fcm".to_string(),
+                prid: "dXyz8:APA91bGx-Q_tok".to_string(),
+                param: Some("929724111839".to_string()),
+            })
+        );
+        let rendered = parsed.contact_value(3600);
+        assert!(rendered.contains("pn-prid=dXyz8:APA91bGx-Q_tok"));
+        assert!(rendered.ends_with(";expires=3600"));
     }
 
     #[test]

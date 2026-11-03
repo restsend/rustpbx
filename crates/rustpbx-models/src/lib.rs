@@ -38,6 +38,7 @@ pub mod frequency_limit;
 pub mod migration;
 pub mod policy;
 pub mod presence;
+pub mod push_device;
 pub mod rbac;
 pub mod routing;
 pub mod sip_trunk;
