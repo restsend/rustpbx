@@ -787,7 +787,6 @@ mod tests {
         .expect("config");
         let push = config.push.expect("push section");
         assert!(push.enabled);
-        assert!(push.push_connected);
         assert_eq!(push.wakeup_timeout_secs, 20);
         assert_eq!(push.max_expires, 604_800);
         assert_eq!(push.refresh_before_secs, 300);

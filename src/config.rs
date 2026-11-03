@@ -1624,9 +1624,9 @@ pub struct LocatorWebhookConfig {
 /// RFC 8599 push notification settings (`[proxy.push]`).
 ///
 /// Lets mobile apps that cannot keep a SIP connection open (e.g. Linphone with
-/// `pn-provider`/`pn-prid`/`pn-param` Contact parameters) receive calls: the
-/// device is woken by a push notification and the INVITE is held until it
-/// re-registers.
+/// `pn-provider`/`pn-prid`/`pn-param` Contact parameters) receive calls: every
+/// call pushes the device. The INVITE goes to its connection when one is open,
+/// and again to each new connection it registers on before it answers.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PushConfig {
     #[serde(default = "default_true")]
@@ -1646,11 +1646,6 @@ pub struct PushConfig {
     /// binding-refresh pushes.
     #[serde(default = "default_push_refresh_before_secs")]
     pub refresh_before_secs: u64,
-    /// Also push devices whose connection still looks alive. A dozing phone can
-    /// sit on a half-open connection; the push wakes it and, if it re-registers
-    /// on a new connection before answering, the INVITE follows it there.
-    #[serde(default = "default_true")]
-    pub push_connected: bool,
     /// Reply 555 (Push Notification Service Not Supported) to a REGISTER naming
     /// a `pn-provider` that is not configured, instead of registering the
     /// contact without push support.
@@ -1676,7 +1671,6 @@ impl Default for PushConfig {
             wakeup_timeout_secs: default_push_wakeup_timeout_secs(),
             max_expires: default_push_max_expires(),
             refresh_before_secs: default_push_refresh_before_secs(),
-            push_connected: true,
             reject_unsupported_provider: false,
             include_caller_info: false,
             fcm: Vec::new(),
