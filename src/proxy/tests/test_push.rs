@@ -26,9 +26,11 @@ use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::uri::{OtherParam, OtherParamValue};
 use rsipstack::sip::{Header, Method, Param, Request, Response, StatusCode, Uri};
 use rsipstack::transaction::EndpointBuilder;
+use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
@@ -212,6 +214,11 @@ struct Phone {
     invites: mpsc::UnboundedReceiver<(DialogId, Request)>,
     /// Local UDP port when registering over UDP instead of TCP.
     udp_port: Option<u16>,
+    /// The phone does not reply to INVITEs (see `launch_silent`).
+    silent: Arc<AtomicBool>,
+    /// INVITEs a silent phone got, unanswered.
+    held: mpsc::UnboundedReceiver<Transaction>,
+    held_kept: Vec<Transaction>,
     _states: rsipstack::dialog::dialog::DialogStateReceiver,
 }
 
@@ -248,6 +255,8 @@ impl Phone {
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
         let (state_tx, states) = dialog_layer.new_dialog_state_channel();
         let (invite_tx, invites) = mpsc::unbounded_channel();
+        let silent = Arc::new(AtomicBool::new(false));
+        let (held_tx, held) = mpsc::unbounded_channel();
 
         let serve_cancel = cancel.clone();
         crate::utils::spawn(async move {
@@ -259,6 +268,7 @@ impl Phone {
 
         let layer = dialog_layer.clone();
         let incoming_cancel = cancel.clone();
+        let silenced = silent.clone();
         crate::utils::spawn(async move {
             loop {
                 let mut tx = tokio::select! {
@@ -278,6 +288,10 @@ impl Phone {
                     crate::utils::spawn(async move {
                         dialog.handle(&mut tx).await.ok();
                     });
+                    continue;
+                }
+                if tx.original.method == Method::Invite && silenced.load(Ordering::Acquire) {
+                    let _ = held_tx.send(tx);
                     continue;
                 }
                 match tx.original.method {
@@ -310,6 +324,9 @@ impl Phone {
             dialog_layer,
             invites,
             udp_port,
+            silent,
+            held,
+            held_kept: Vec::new(),
             _states: states,
         })
     }
@@ -380,6 +397,15 @@ impl Phone {
         Ok(phone)
     }
 
+    /// Start the app on a half-open connection: it registers with push
+    /// parameters, then INVITEs reach it but nothing comes back.
+    async fn launch_silent(server: SocketAddr, prid: &str) -> Result<Self> {
+        let phone = Self::start().await?;
+        phone.silent.store(true, Ordering::Release);
+        phone.register_push(server, INSTANCE, prid).await?;
+        Ok(phone)
+    }
+
     /// Start the app and register with push parameters.
     async fn launch_instance(server: SocketAddr, instance: &str, prid: &str) -> Result<Self> {
         let phone = Self::start().await?;
@@ -404,6 +430,17 @@ impl Phone {
 
     fn kill(&self) {
         self.cancel.cancel();
+    }
+
+    /// The next INVITE a silent phone got. It stays unanswered.
+    async fn next_held_invite(&mut self) -> Result<Request> {
+        let tx = timeout(Duration::from_secs(10), self.held.recv())
+            .await
+            .map_err(|_| anyhow!("phone received no INVITE"))?
+            .ok_or_else(|| anyhow!("phone stopped"))?;
+        let invite = tx.original.clone();
+        self.held_kept.push(tx);
+        Ok(invite)
     }
 
     /// Ring and answer the next incoming INVITE; returns it.
@@ -547,6 +584,79 @@ async fn invite_follows_device_to_its_new_flow() -> Result<()> {
     server.wait_bob_bindings(1).await?;
     let invite = relaunched.answer_next_invite().await?;
     assert_eq!(Some(call_id(&invite)), notification.call_id);
+
+    let (alice, result) = call.await?;
+    let dialog_id = result?;
+    alice.hangup(&dialog_id).await.ok();
+    Ok(())
+}
+
+/// A phone with an open connection gets the INVITE on it at once, and is
+/// pushed too: the server cannot tell a live connection from a half-open one.
+#[tokio::test]
+async fn awake_device_rings_at_once_and_is_pushed_too() -> Result<()> {
+    let mut server = PushTestServer::start(PushConfig {
+        wakeup_timeout_secs: 10,
+        ..Default::default()
+    })
+    .await?;
+
+    let mut phone = Phone::launch(server.tcp_addr, "token-6").await?;
+
+    let alice = server.caller().await?;
+    let call = tokio::spawn(async move {
+        let result = alice.make_call("bob", Some(caller_sdp())).await;
+        (alice, result)
+    });
+
+    let invite = phone.answer_next_invite().await?;
+    let (params, notification) = server.next_push().await?;
+    assert_eq!(params.prid, "token-6");
+    assert_eq!(notification.kind, PushKind::Call);
+    assert_eq!(notification.call_id, Some(call_id(&invite)));
+
+    let (alice, result) = call.await?;
+    let dialog_id = result?;
+    alice.hangup(&dialog_id).await.ok();
+    Ok(())
+}
+
+/// The phone's connection is half-open: the INVITE gets no reply there. The
+/// pushed app registers on a new connection that does not reply either, and
+/// on another, and so on: the INVITE goes again to each new connection, with
+/// the Call-ID of the push, until the phone answers.
+#[tokio::test]
+async fn invite_follows_device_to_every_new_connection() -> Result<()> {
+    let mut server = PushTestServer::start(PushConfig {
+        wakeup_timeout_secs: 10,
+        ..Default::default()
+    })
+    .await?;
+
+    let mut phone = Phone::launch_silent(server.tcp_addr, "token-7").await?;
+
+    let alice = server.caller().await?;
+    let call = tokio::spawn(async move {
+        let result = alice.make_call("bob", Some(caller_sdp())).await;
+        (alice, result)
+    });
+
+    let first = phone.next_held_invite().await?;
+    let (params, notification) = server.next_push().await?;
+    assert_eq!(params.prid, "token-7");
+    assert_eq!(notification.call_id, Some(call_id(&first)));
+
+    let mut silent = vec![phone];
+    for _ in 0..4 {
+        let mut next = Phone::launch_silent(server.tcp_addr, "token-7").await?;
+        let invite = next.next_held_invite().await?;
+        assert_eq!(call_id(&invite), call_id(&first));
+        silent.push(next);
+    }
+    let mut awake = Phone::launch(server.tcp_addr, "token-7").await?;
+    let invite = awake.answer_next_invite().await?;
+    assert_eq!(call_id(&invite), call_id(&first));
+    assert!(server.pushes.try_recv().is_err(), "one push per call");
 
     let (alice, result) = call.await?;
     let dialog_id = result?;

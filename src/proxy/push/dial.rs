@@ -1,10 +1,13 @@
 //! INVITE delivery towards push devices (RFC 8599 §5.6.2).
 //!
 //! Every outgoing INVITE goes through [`send_invite`]. When it is addressed to
-//! a push device, the device is pushed; if the device's flow is down (the app
-//! was suspended or killed), the INVITE is held — the RFC's "SIP Request Push
-//! Bucket" — until the device sends its binding-refresh REGISTER, then sent on
-//! the fresh flow. Whoever built the INVITE (direct call, route, queue,
+//! a push device, the device is always pushed, at once, whatever the state of
+//! its flow. If the flow is up (or UDP), the INVITE goes out on it at the same
+//! time. If the flow is down (the app was suspended or killed), the INVITE is
+//! held — the RFC's "SIP Request Push Bucket" — until the device sends its
+//! binding-refresh REGISTER. Each time the device registers on a new flow
+//! before it replies to the INVITE, the INVITE is sent again there, with the
+//! same Call-ID. Whoever built the INVITE (direct call, route, queue,
 //! transfer, ...) needs no knowledge of push.
 
 use super::{
@@ -49,9 +52,10 @@ pub async fn send_invite(
 enum Mode {
     /// The device's flow is down: hold the INVITE until it re-registers.
     AwaitRegistration,
-    /// The flow looks alive: send the INVITE now and push as well (a dozing
-    /// phone can sit on a half-open flow). If the device re-registers on
-    /// another flow before responding, the INVITE moves there.
+    /// The flow looks alive (or is UDP): send the INVITE now. The device is
+    /// pushed too: a dozing phone can sit on a half-open flow. If the device
+    /// re-registers on another flow before responding, the INVITE moves
+    /// there.
     DialAndPush,
 }
 
@@ -77,8 +81,7 @@ impl PushDial {
         let device = service.device_for_invite(&option.callee, option.destination.as_ref())?;
         let mode = match option.destination.as_ref().map(|d| service.flow_state(d)) {
             Some(FlowState::Down) => Mode::AwaitRegistration,
-            _ if service.config().push_connected => Mode::DialAndPush,
-            _ => return None,
+            _ => Mode::DialAndPush,
         };
         let watch = RegistrationWatch {
             rx: server.locator_events.as_ref()?.subscribe(),
@@ -273,8 +276,6 @@ impl RegistrationWatch {
     }
 }
 
-/// How many times one INVITE may follow a device to a new flow.
-const MAX_RETARGETS: usize = 3;
 const WAKEUP_FAILED: &str = "Pushed device did not re-register";
 
 async fn invite_with_push(
@@ -301,7 +302,6 @@ async fn invite_with_push(
         }
     }
 
-    let mut retargets = 0;
     loop {
         let responded = Arc::new(AtomicBool::new(false));
         let tracked_tx = track_responses(&dialog_layer, state_tx.clone(), responded.clone());
@@ -311,8 +311,7 @@ async fn invite_with_push(
 
         // Without a destination the INVITE is routed by URI (e.g. via a
         // cluster home proxy); there is no flow to follow.
-        let can_follow = retargets < MAX_RETARGETS && current.is_some();
-        if !can_follow {
+        if current.is_none() {
             return (invite.await, option);
         }
         let result = tokio::select! {
@@ -328,7 +327,6 @@ async fn invite_with_push(
                     // Dropping the unanswered INVITE abandons it (rsipstack
                     // CANCELs it if a provisional response ever shows up).
                     retarget(&mut option, &fresh);
-                    retargets += 1;
                     continue;
                 }
                 None => invite.await,
@@ -343,7 +341,6 @@ async fn invite_with_push(
             );
             if let Some(fresh) = push.await_registration().await {
                 retarget(&mut option, &fresh);
-                retargets += 1;
                 continue;
             }
         }

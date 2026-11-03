@@ -506,15 +506,18 @@ incoming calls with a push notification, following RFC 8599:
    locator event is emitted for it either.)
 3. Every INVITE RustPBX sends passes through one place that recognizes push
    devices (by the `pn-*` parameters of the Request-URI, or by the INVITE
-   going to a push device's connection). If the device's connection is
-   down, RustPBX pushes it and holds the INVITE until the app sends its
-   binding-refresh REGISTER, then delivers it on the new connection. If the
-   device does not re-register within `wakeup_timeout_secs`, that INVITE
-   fails with 480; other devices of the callee ring in parallel meanwhile.
-4. If the connection looks alive (or the device uses UDP, whose liveness is
-   unknown), the INVITE is sent right away and the device is pushed as well
-   (`push_connected`): if it re-registers on a new connection before
-   answering (the old one was half-open), the INVITE follows it.
+   going to a push device's connection). An INVITE to a push device always
+   pushes it at once, whether its connection looks alive or not: a phone can
+   sit on a half-open connection that the server cannot tell from a live one.
+   The push carries the Call-ID of the INVITE.
+4. If the device's connection is open (or the device uses UDP, whose
+   liveness is unknown), the INVITE is sent on it right away. If the
+   connection is down, the INVITE is held until the app sends its
+   binding-refresh REGISTER. Each time the device registers on a new
+   connection before it replies, the INVITE is sent again there, with the
+   same Call-ID (the unanswered one is dropped). If the device does not
+   re-register within `wakeup_timeout_secs` of the push, a held INVITE fails
+   with 480; other devices of the callee ring in parallel meanwhile.
 5. Shortly before a binding expires (`refresh_before_secs`), RustPBX pushes
    the device so it re-registers (RFC 8599 §5.5).
 
@@ -531,7 +534,6 @@ tcp_port = 5060   # or tls_port: push devices should not register over UDP
 # wakeup_timeout_secs = 30          # how long a call waits for a pushed device
 # max_expires = 604800              # binding lifetime cap for push devices (7 days)
 # refresh_before_secs = 300         # push devices this long before expiry; 0 disables
-# push_connected = true             # also push devices that look connected
 # reject_unsupported_provider = false  # 555 instead of registering without push
 # include_caller_info = false       # caller URI/name in the payload (seen by the PNS)
 
