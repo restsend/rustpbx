@@ -510,42 +510,6 @@ impl RecordingPolicy {
     }
 }
 
-/// `[release]` section: where release/version-management artifacts are stored
-/// plus the lifetime of on-demand presigned download URLs. Metadata itself
-/// lives in a single `release.toml` managed through the generated-config
-/// store (file or `config_entry` table), not in a dedicated DB table.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ReleaseConfig {
-    /// Artifact storage backend. Defaults to the local `storage/releases`
-    /// directory; configure `type = "s3"` to upload packages to an
-    /// S3-compatible bucket.
-    #[serde(default)]
-    pub storage: Option<StorageConfig>,
-    /// Lifetime in seconds of presigned download URLs generated on demand for
-    /// S3-uploaded artifacts. Defaults to 86400 (24h); the SigV4 signature
-    /// caps validity at 7 days, so larger values are clamped.
-    #[serde(default)]
-    pub signed_url_expiry_secs: Option<u64>,
-    /// Local directory for client telemetry bodies (`POST {api_prefix}/report`).
-    /// Defaults to `storage/telemetry`. Bodies are deliberately kept on local
-    /// disk (not the artifact storage engine): ingestion must succeed even
-    /// while S3 / other subsystems are down.
-    #[serde(default)]
-    pub telemetry_dir: Option<String>,
-}
-
-impl ReleaseConfig {
-    /// Lifetime of presigned release download URLs, clamped to the SigV4
-    /// 7-day maximum.
-    pub fn effective_signed_url_expiry_secs(&self) -> u64 {
-        const DEFAULT_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
-        self.signed_url_expiry_secs
-            .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
-            .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
-    }
-
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -641,10 +605,6 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
-    /// Release/version management: artifact storage + presign expiry. See
-    /// [`ReleaseConfig`].
-    #[serde(default)]
-    pub release: Option<ReleaseConfig>,
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
     /// SSO login broker (commerce builds only). Handlers are mounted only
@@ -2689,7 +2649,6 @@ impl Default for Config {
             demo_mode: false,
             storage: None,
             sipflow: None,
-            release: None,
             licenses: None,
             #[cfg(feature = "commerce")]
             sso: None,

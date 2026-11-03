@@ -9,7 +9,7 @@ use serde_json::json;
 use std::fs;
 use toml_edit::{DocumentMut, Item, Table};
 
-pub(crate) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+pub fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
         Json(json!({
@@ -36,7 +36,7 @@ pub(crate) fn internal_error(msg: impl Into<String>) -> Response {
     json_error(StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
-pub(crate) fn ok_json(data: serde_json::Value) -> Response {
+pub fn ok_json(data: serde_json::Value) -> Response {
     (StatusCode::OK, Json(data)).into_response()
 }
 

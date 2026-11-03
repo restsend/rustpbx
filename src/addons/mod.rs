@@ -364,6 +364,19 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Return console API routes that must stay reachable WITHOUT
+    /// authentication (e.g. desktop update-client checks and telemetry
+    /// ingestion). Merged under the api prefix but OUTSIDE the
+    /// api_auth_middleware / csrf_guard layers, so each addon owns its own
+    /// abuse protection on these routes (body limits, rate limiting).
+    #[cfg(feature = "console")]
+    fn console_public_api_routes(
+        &self,
+        _state: &ConsoleState,
+    ) -> Option<Router<Arc<ConsoleState>>> {
+        None
+    }
+
     /// Return a phone auth token validator for the API auth middleware.
     /// Only the first non-None result across all addons is used.
     #[cfg(feature = "console")]

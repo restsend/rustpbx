@@ -372,6 +372,29 @@ impl AddonRegistry {
         routers
     }
 
+    /// Collect public (unauthenticated) console API routes from enabled addons
+    /// (same enablement rule as [`Self::get_console_api_routes`]).
+    ///
+    /// The caller mounts them under the api prefix WITHOUT the
+    /// api_auth_middleware / csrf_guard layers.
+    #[cfg(feature = "console")]
+    pub fn get_console_public_api_routes(
+        &self,
+        state: &crate::console::ConsoleState,
+        config: &crate::config::Config,
+    ) -> Vec<axum::Router<Arc<crate::console::ConsoleState>>> {
+        let mut routers = Vec::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) && !addon.console_api_always_mounted() {
+                continue;
+            }
+            if let Some(r) = addon.console_public_api_routes(state) {
+                routers.push(r);
+            }
+        }
+        routers
+    }
+
     /// Ask every compiled-in addon to promote cookie extensions onto `dialplan`.
     /// Independent of `[proxy].addons` enablement — matches prior
     /// `cfg(feature = "addon-…")` behavior for CDR early-reject paths.
