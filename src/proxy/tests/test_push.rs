@@ -5,6 +5,7 @@
 
 use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig, create_test_sdp, create_test_sdp_answer};
+use super::wait::wait_until;
 use crate::config::PushConfig;
 use crate::proxy::{
     locator::MemoryLocator,
@@ -33,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 const INSTANCE: &str = "7c5d2a3e-0000-4000-8000-0000000000b0";
@@ -119,12 +120,17 @@ impl PushTestServer {
                 _ = server.serve() => {}
             }
         });
-        sleep(Duration::from_millis(200)).await;
+        let tcp_addr: SocketAddr = format!("127.0.0.1:{tcp_port}").parse()?;
+        wait_until(Duration::from_secs(5), || async {
+            tokio::net::TcpStream::connect(tcp_addr).await.is_ok()
+        })
+        .await
+        .map_err(|_| anyhow!("server does not listen on {tcp_addr}"))?;
 
         Ok(Self {
             server: server_ref,
             udp_addr: format!("127.0.0.1:{udp_port}").parse()?,
-            tcp_addr: format!("127.0.0.1:{tcp_port}").parse()?,
+            tcp_addr,
             pushes,
             cancel,
         })
@@ -160,29 +166,28 @@ impl PushTestServer {
     async fn wait_bob_asleep(&self, expected: usize) -> Result<()> {
         let push = self.server.push.clone().expect("push service");
         let aor = Uri::try_from("sip:bob@127.0.0.1").unwrap();
-        for _ in 0..50 {
+        wait_until(Duration::from_secs(5), || async {
             let bindings = self.server.locator.lookup(&aor).await.unwrap_or_default();
-            if bindings.len() == expected
+            bindings.len() == expected
                 && bindings.iter().all(|binding| {
                     binding
                         .destination
                         .as_ref()
                         .is_some_and(|d| push.flow_state(d) == FlowState::Down)
                 })
-            {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        Err(anyhow!("bob is not asleep with {expected} binding(s)"))
+        })
+        .await
+        .map_err(|_| anyhow!("bob is not asleep with {expected} binding(s)"))
     }
 
     async fn wait_bob_bindings(&self, expected: usize) -> Result<()> {
-        for _ in 0..50 {
-            if self.bob_bindings().await == expected {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(100)).await;
+        if wait_until(Duration::from_secs(5), || async {
+            self.bob_bindings().await == expected
+        })
+        .await
+        .is_ok()
+        {
+            return Ok(());
         }
         Err(anyhow!(
             "bob has {} bindings, expected {expected}",
@@ -688,7 +693,15 @@ async fn invite_waits_for_device_when_its_flow_is_dead() -> Result<()> {
     });
 
     server.next_push().await?;
-    sleep(Duration::from_millis(1500)).await;
+    // The server's dialogs: the caller's, plus the INVITE to the dead
+    // address until Timer B ends it.
+    let dialogs = &server.server.dialog_layer;
+    wait_until(Duration::from_secs(5), || async { dialogs.len() == 2 })
+        .await
+        .map_err(|_| anyhow!("INVITE to the dead address not sent"))?;
+    wait_until(Duration::from_secs(5), || async { dialogs.len() == 1 })
+        .await
+        .map_err(|_| anyhow!("INVITE to the dead address did not time out"))?;
     let mut relaunched = Phone::launch(server.tcp_addr, "token-5").await?;
     relaunched.answer_next_invite().await?;
 
@@ -740,9 +753,14 @@ async fn caller_cancel_releases_held_invite() -> Result<()> {
     let alice = server.caller().await?;
     let call = tokio::spawn(async move { alice.make_call("bob", Some(caller_sdp())).await });
     server.next_push().await?;
+    assert_eq!(server.server.active_call_registry.count(), 1);
     // Dropping the pending INVITE makes the caller send CANCEL.
     call.abort();
-    sleep(Duration::from_millis(500)).await;
+    wait_until(Duration::from_secs(5), || async {
+        server.server.active_call_registry.count() == 0
+    })
+    .await
+    .map_err(|_| anyhow!("the cancelled call did not end"))?;
 
     let mut relaunched = Phone::launch(server.tcp_addr, "token-6").await?;
     assert!(
