@@ -868,6 +868,300 @@ impl SipSession {
         None
     }
 
+    /// Role-aware blind-transfer intercept for CC-attributed sessions.
+    ///
+    /// Invariant (standard REFER semantics): the TRANSFEROR exits, and the
+    /// transferor's bridge PEER is handed to the target. "Customer" is not a
+    /// concept of its own here — it is exactly the transferor's peer: the
+    /// agent's peer on agent-DIALED (outbound) calls, the queue customer on
+    /// inbound ones. The legacy B2BUA path below instead anchors on the
+    /// `caller` SLOT (replaces the caller's peer, re-INVITEs the caller),
+    /// which only coincides with that invariant when the caller happens to
+    /// be the transferor's peer — and inverts the parties on agent-dialed
+    /// calls.
+    ///
+    /// When the session carries CC attribution, every blind
+    /// `CallCommand::Transfer` means "the agent transferor exits, its peer
+    /// is handed to the target", whatever positional `leg_id` the emitter
+    /// passed (RWI hard-codes `"caller"`, the console adapter `"callee"` —
+    /// after the `resolve_transfer_leg` remap the original intent is
+    /// unrecoverable, so the decision must be role-based). The transferor is
+    /// resolved by role (`resolve_cc_agent_leg`), never by slot name.
+    ///
+    /// `None` = the session shape does not call for it (no CC attribution,
+    /// or unresolvable legs): the caller falls through to the legacy path
+    /// untouched, so non-CC sessions keep their existing behavior.
+    async fn peer_handoff_transfer_if_attributed(
+        &mut self,
+        target: &str,
+        headers: &HashMap<String, String>,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Option<Result<()>> {
+        let attributed = self.pinned_agent_id().is_some()
+            || self.session_ext_get("agent_id").is_some()
+            || self.legs.iter().any(|(_, leg)| leg.agent_id.is_some());
+        if !attributed {
+            return None;
+        }
+        // The transferor: the CC-attributed AGENT leg, regardless of which
+        // slot it occupies (caller on agent-dialed calls, callee/dynamic on
+        // queue-dispatched ones).
+        let agent_leg = self.resolve_cc_agent_leg()?;
+        if !self
+            .legs
+            .get(&agent_leg)
+            .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+        {
+            return None;
+        }
+        // The transferee: the transferor's bridge peer (`resolve_cc_customer_leg`
+        // is that computation — the CC API's historical name for it).
+        if self.resolve_cc_customer_leg(&agent_leg).is_none() {
+            return None;
+        }
+        info!(session_id = %self.id, %agent_leg,
+            "blind transfer: role-aware intercept — transferor (agent) exits, its peer is handed to the target");
+        let result = self
+            .run_customer_blind_transfer(
+                agent_leg,
+                target.to_string(),
+                headers.clone(),
+                false,
+                callee_state_rx,
+            )
+            .await;
+        Some(if result.success {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                result
+                    .message
+                    .unwrap_or_else(|| "peer-handoff transfer failed".to_string())
+            ))
+        })
+    }
+
+    /// Blind transfer with the transferor's PEER kept on the call, shared by
+    /// the CC API (`CallCommand::BlindTransferCustomer`) and the role-aware
+    /// intercept ([`Self::peer_handoff_transfer_if_attributed`]). The
+    /// transferor (`agent_leg`) is released; the target is handed the peer's
+    /// dialog in-session (app targets) or dialed as an independent leg
+    /// anchored on the peer (SIP targets). Body moved verbatim from the
+    /// `BlindTransferCustomer` command arm.
+    pub(super) async fn run_customer_blind_transfer(
+        &mut self,
+        agent_leg: LegId,
+        target: String,
+        headers: HashMap<String, String>,
+        application_only: bool,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> crate::call::runtime::CommandResult {
+        // Feature-code targets (`*82<ivr>` / `*81<sg>` / `*83<room>`)
+        // resolve through the quick-route resolver exactly like the
+        // SIP REFER path (`resolve_refer_app_target`), so the API and
+        // the softphone share one target vocabulary.
+        let target = {
+            let raw = target.trim();
+            let user = raw
+                .split('@')
+                .next()
+                .unwrap_or(raw)
+                .trim_start_matches("sip:")
+                .trim_start_matches("tel:")
+                .trim()
+                .to_string();
+            if user.is_empty() {
+                target
+            } else if let Some(resolver) = self.server.quick_route_resolver.as_ref() {
+                resolver.resolve_quick_target(&user).await.unwrap_or(target)
+            } else {
+                target
+            }
+        };
+        info!(session_id = %self.id, target = %target, application_only,
+            "Customer blind transfer requested");
+        let mut target = target;
+        let mut prepared_route = None;
+        let route_enabled = self.route_originated_enabled();
+        // An application-only transfer (CC API "hand the customer to
+        // an application") resolves Application routes even when
+        // `route_originated_calls` is off — that flag governs routing
+        // of originated calls and plain transfer dialing, not the
+        // explicit application handoff (e2e: http transfer to a
+        // survey IVR must match its route rule with routing off).
+        let route_lookup_enabled = route_enabled || application_only;
+        if route_lookup_enabled
+            && let TransferTarget::Sip { uri, .. } = parse_transfer_target(&target)
+        {
+            let target_uri = match rsipstack::sip::Uri::try_from(
+                crate::call::build_sip_uri(
+                    &uri,
+                    &self.server.proxy_config.load().select_realm(""),
+                )
+                .as_str(),
+            ) {
+                Ok(uri) => uri,
+                Err(error) => {
+                    return crate::call::runtime::CommandResult::failure(error.to_string())
+                }
+            };
+            let user = target_uri
+                .user()
+                .map(|user| user.to_string())
+                .unwrap_or_default();
+            let caller = match self.context.dialplan.caller.as_ref() {
+                Some(caller) => caller,
+                None => {
+                    return crate::call::runtime::CommandResult::failure(
+                        "Transfer has no caller identity".to_string(),
+                    )
+                }
+            };
+            let context = self
+                .transfer_app_route_context(&user, HashMap::new(), &headers)
+                .await;
+            let carried = context
+                .sip_headers
+                .iter()
+                .map(|(name, value)| {
+                    rsipstack::sip::Header::Other(name.clone(), value.clone())
+                })
+                .collect::<Vec<_>>();
+            let routed = match self
+                .resolve_route_point(&target_uri.to_string(), caller, Some(carried))
+                .await
+            {
+                Ok(route) => route,
+                Err(error) => {
+                    return crate::call::runtime::CommandResult::failure(error.to_string())
+                }
+            };
+            match routed {
+                Some(route @ crate::config::RouteResult::Application { .. }) => {
+                    if let Some(agent) = Self::refer_target_cc_agent(&self.server, &user).await
+                    {
+                        target = format!(
+                            "queue:agent:{agent}?refer_to={}",
+                            urlencoding::encode(&user)
+                        );
+                        if let crate::config::RouteResult::Application {
+                            app_params, ..
+                        } = &route
+                        {
+                            if let Some(ivr) = app_params
+                                .as_ref()
+                                .and_then(|params| params.get("file"))
+                                .and_then(|file| file.as_str())
+                                .and_then(Self::ivr_display_name)
+                            {
+                                target.push_str(&format!(
+                                    "&return_app=ivr&return_target={}",
+                                    urlencoding::encode(&ivr)
+                                ));
+                            }
+                        }
+                    } else {
+                        target =
+                            format!("toivr:{user}?refer_to={}", urlencoding::encode(&user));
+                        prepared_route = Some(route);
+                    }
+                }
+                Some(crate::config::RouteResult::Queue { queue, .. }) => {
+                    target = format!(
+                        "queue:{}?refer_to={}",
+                        queue.queue_name,
+                        urlencoding::encode(&user)
+                    );
+                }
+                Some(crate::config::RouteResult::Abort(code, reason)) => {
+                    return crate::call::runtime::CommandResult::failure_with_kind(
+                        format!(
+                            "Transfer route rejected: {} {}",
+                            code.code(),
+                            reason.unwrap_or_default()
+                        ),
+                        crate::call::runtime::CommandFailureKind::InvalidTarget,
+                    );
+                }
+                Some(route @ crate::config::RouteResult::Forward(..)) => {
+                    prepared_route = Some(route);
+                }
+                _ if application_only => {
+                    return crate::call::runtime::CommandResult::failure_with_kind(
+                        "Unresolvable or external transfer target",
+                        crate::call::runtime::CommandFailureKind::InvalidTarget,
+                    );
+                }
+                _ => {}
+            }
+        }
+        if application_only
+            && !route_enabled
+            && matches!(
+                parse_transfer_target(&target),
+                TransferTarget::Sip { .. }
+            )
+        {
+            return crate::call::runtime::CommandResult::failure_with_kind(
+                "Unresolvable or external transfer target",
+                crate::call::runtime::CommandFailureKind::InvalidTarget,
+            );
+        }
+        // Application successor (IVR / queue / route point / …): hand
+        // the call over IN-SESSION. The transferor is the agent leg, so
+        // `handle_blind_transfer` redirects the successor to the
+        // customer (`app_media_leg`).
+        if !matches!(
+            parse_transfer_target(&target),
+            TransferTarget::Sip { .. }
+        ) {
+            let result = self
+                .handle_blind_transfer_with_route(
+                    agent_leg.clone(),
+                    target,
+                    TransferDisposition::PreserveOnFailure,
+                    callee_state_rx,
+                    headers,
+                    prepared_route,
+                )
+                .await;
+            return match result {
+                Ok(()) => {
+                    self.release_api_transfer_agent_leg(&agent_leg).await;
+                    crate::call::runtime::CommandResult::success()
+                }
+                Err(e) => crate::call::runtime::CommandResult::failure(e.to_string()),
+            };
+        }
+
+        // SIP target: dial an INDEPENDENT leg anchored on the customer —
+        // the B2BUA re-dial path (`handle_blind_transfer`) swaps the
+        // `callee` slot and re-INVITEs the caller, which inverts the
+        // customer/agent roles on agent-dialed calls and rejects the
+        // plain-sipbot caller. The dedicated path also routes the
+        // target through `route_transfer_target_leg`, so route-table
+        // queue/application results hand off in-session exactly like
+        // the SIP REFER path instead of dumb-dialling.
+        let Some(customer_leg) = self.resolve_cc_customer_leg(&agent_leg) else {
+            return crate::call::runtime::CommandResult::failure(
+                "No customer leg for a customer-anchored transfer".to_string(),
+            );
+        };
+        match self
+            .handle_customer_blind_transfer_sip(
+                &agent_leg,
+                &customer_leg,
+                &target,
+                &headers,
+                prepared_route,
+            )
+            .await
+        {
+            Ok(()) => crate::call::runtime::CommandResult::success(),
+            Err(error) => crate::call::runtime::CommandResult::failure(error.to_string()),
+        }
+    }
+
     async fn handle_transfer_inner(
         &mut self,
         leg_id: LegId,
@@ -877,6 +1171,22 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         headers: HashMap<String, String>,
     ) -> Result<()> {
+        // Role-aware intercept (standard REFER semantics): the transferor
+        // (the CC-attributed agent leg, whatever slot it occupies) exits,
+        // and the transferor's bridge PEER is handed to the target. The
+        // legacy path below anchors on the `caller` slot instead and
+        // inverts the parties on agent-dialed calls — see
+        // [`Self::peer_handoff_transfer_if_attributed`]. Non-CC sessions
+        // and unresolvable shapes fall through untouched. `AwaitResult`
+        // keeps the legacy outcome-channel semantics.
+        if !attended
+            && disposition != TransferDisposition::AwaitResult
+            && let Some(result) = self
+                .peer_handoff_transfer_if_attributed(&target, &headers, callee_state_rx)
+                .await
+        {
+            return result;
+        }
         let leg_id = if leg_id.as_str() == "callee" { self.resolve_transfer_leg() } else { leg_id };
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {

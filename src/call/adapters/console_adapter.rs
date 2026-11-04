@@ -60,10 +60,11 @@ pub fn console_to_call_command(
             })
         }
 
-        // CC blind transfer moves the customer (callee in inbound B2BUA terms
-        // when the agent is the answered B-leg). Keep cluster-forwarded
-        // Transfer aligned with local `/cc/calls/.../transfer` which uses
-        // `leg_id = "callee"`.
+        // Blind transfer = the agent transferor exits and its bridge PEER is
+        // handed to the target. The leg_id here is only a positional hint —
+        // on CC-attributed sessions the session resolves the transferor by
+        // ROLE (`resolve_cc_agent_leg`) and ignores this value, matching the
+        // local `/cc/calls/.../transfer` outcome.
         CallCommandPayload::Transfer { target, attended } => Ok(CallCommand::Transfer {
             leg_id: LegId::new("callee"),
             target,
