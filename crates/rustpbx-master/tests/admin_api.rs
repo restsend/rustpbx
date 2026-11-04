@@ -5,13 +5,12 @@
 //! already-running guard, and unknown commands.
 
 use rustpbx_master::access::Access;
-use rustpbx_master::admin::{admin_sock_path, AdminState};
+use rustpbx_master::admin::admin_sock_path;
 use rustpbx_master::config::{ConfigSubset, MasterSubset};
 use rustpbx_master::supervisor::{spawn_reaper, SupCore};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::net::UnixStream;
 use tokio::runtime::Handle;
 
 const FAKE_WORKER: &str = env!("CARGO_BIN_EXE_fake-worker");

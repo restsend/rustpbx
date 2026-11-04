@@ -15,7 +15,6 @@
 use rustpbx_master::access::Access;
 use rustpbx_master::config::ConfigSubset;
 use rustpbx_master::supervisor::{spawn_reaper, SupCore};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

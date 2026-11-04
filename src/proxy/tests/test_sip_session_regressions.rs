@@ -1,11 +1,18 @@
+// Compiled both under cfg(test) (imports used by the test bodies) and as
+// part of the test-support feature surface for downstream crates (cc's
+// #[path] consumers), where some imports go unused.
+#[cfg_attr(not(test), allow(unused_imports))]
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config,
     create_test_server_with_config_and_sipflow_backend, create_test_server_with_rwi_gateway,
     create_test_server_with_session_hooks, create_transaction,
 };
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::call::app::{AppInvocationContext, ApplicationContext, CallInfo};
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
 use crate::call::runtime::{AppRuntime, AppRuntimeError, BridgeConfig};
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, FailureAction, MediaConfig, QueueFallbackAction,
     QueuePlan, TransactionCookie,
