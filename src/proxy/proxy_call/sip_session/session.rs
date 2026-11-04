@@ -4414,12 +4414,34 @@ impl SipSession {
                         )
                     })
             } else if self.bypasses_local_media() {
-                self.relay_signaling_only_offer(side, request.method.clone(), &offer_sdp)
+                // Custom-SDP-attribute gate: the relay is otherwise verbatim,
+                // so a disabled trunk strips custom attrs on both the relayed
+                // offer and the relayed answer. Direction alignment is
+                // unaffected (direction attrs are standard and never stripped).
+                let relay_offer = if self.custom_sdp_attrs_passthrough_enabled() {
+                    offer_sdp.clone()
+                } else {
+                    crate::media::sdp_attrs::strip_custom_attrs_sdp(
+                        &offer_sdp,
+                        rustrtc::SdpType::Offer,
+                    )
+                };
+                self.relay_signaling_only_offer(side, request.method.clone(), &relay_offer)
                     .await
                     .map(|(result_status, answer_sdp)| {
                         // Align answer direction for bypass mode
                         let aligned = answer_sdp
-                            .map(|sdp| MediaNegotiator::align_answer_direction_with_offer(&offer_sdp, &sdp));
+                            .map(|sdp| {
+                                let sdp = if self.custom_sdp_attrs_passthrough_enabled() {
+                                    sdp
+                                } else {
+                                    crate::media::sdp_attrs::strip_custom_attrs_sdp(
+                                        &sdp,
+                                        rustrtc::SdpType::Answer,
+                                    )
+                                };
+                                MediaNegotiator::align_answer_direction_with_offer(&offer_sdp, &sdp)
+                            });
                         (result_status, aligned)
                     })
                     .map_err(|e| {
@@ -6362,6 +6384,7 @@ impl SipSession {
         if let Some(enabled) = hints.enable_sipflow {
             plan.enable_sipflow = enabled;
         }
+        plan.passthrough_custom_sdp_attrs = hints.passthrough_custom_sdp_attrs.unwrap_or(true);
         if let Some(busy_wait) = hints.busy_wait.as_ref() {
             plan.busy_wait = Some(busy_wait.to_plan());
         }

@@ -25,6 +25,7 @@ pub mod quality_stats;
 pub mod recorder;
 pub mod rtc_track;
 pub mod rtp_track_builder;
+pub mod sdp_attrs;
 pub mod telemetry;
 pub mod telephone_event;
 pub mod volume_stats;

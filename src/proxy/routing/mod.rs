@@ -213,6 +213,15 @@ pub struct TrunkConfig {
     /// global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ice_lite: Option<bool>,
+    /// Pass-through of custom (non-standard) SDP `a=` attributes across the
+    /// B2BUA. Enabled by default (`None`/`true`): vendor-specific attributes
+    /// from the peer's offer/answer are carried across the rewrite into the
+    /// SDP sent to the other side. `false` strips them in both directions —
+    /// custom attributes from this trunk never reach the peer, and the
+    /// trunk's SDP carries none from the peer. Source and destination trunks
+    /// AND together: either side disabled disables pass-through for the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passthrough_custom_sdp_attrs: Option<bool>,
     /// Per-trunk override of the global `proxy.nat_fix`. When set, SIP
     /// messages received from this trunk's addresses (`inbound_hosts`, `dest`,
     /// `backup_dest`; IP literals only) use this value instead of the global
@@ -600,6 +609,7 @@ impl Default for TrunkConfig {
             external_ip: None,
             bind_ip: None,
             ice_lite: None,
+            passthrough_custom_sdp_attrs: None,
             nat_fix: None,
             profile: None,
             did_numbers: Vec::new(),

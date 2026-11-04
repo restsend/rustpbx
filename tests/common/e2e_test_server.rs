@@ -45,6 +45,11 @@ pub struct E2eTestServerInject {
     /// a seeded `CcAddonState`) to exercise the same injection path.
     pub queue_enricher: Option<Arc<dyn rustpbx::proxy::call::QueueLocationEnricher>>,
     pub bans: Option<Arc<rustpbx::security::BanStore>>,
+    /// Register the `acl` module (opt-in: the ACL default-deny posture would
+    /// break tests that never modeled trunk IPs, so it stays off unless a
+    /// test needs inbound source-trunk resolution — `is_from_trunk_context`
+    /// lives there and attaches the `TrunkContext` the matcher merges).
+    pub register_acl: bool,
 }
 
 
@@ -59,6 +64,7 @@ impl Default for E2eTestServerInject {
             cc_policy_db: None,
             queue_enricher: None,
             bans: None,
+            register_acl: false,
         }
     }
 }
@@ -236,6 +242,17 @@ impl E2eTestServer {
             config.ws_port = base.ws_port;
             config.useragent = base.useragent;
             config.modules = base.modules;
+            if inject.register_acl {
+                // ACL must precede `call`: CallModule::on_transaction_begin
+                // fully processes the INVITE (and returns Abort), so a
+                // trailing acl module never runs and never attaches the
+                // TrunkContext the matcher merges as source-trunk hints.
+                // This mirrors the production module order
+                // (`["acl", "auth", ..., "call"]`).
+                let mut modules = vec!["acl".to_string()];
+                modules.extend(config.modules.clone().unwrap_or_default());
+                config.modules = Some(modules);
+            }
             config.ensure_user = Some(false);
             // Latching: keep the caller's value (ProxyConfig::default() is
             // enabled; constructors that need it off set it explicitly
@@ -244,6 +261,11 @@ impl E2eTestServer {
             let mode = config.media_proxy;
             let (builder, cdr_capture, cancel_token) = Self::base_builder(config, &inject).await?;
             let builder = test_helpers::register_standard_modules(builder);
+            let builder = if inject.register_acl {
+                builder.register_module("acl", rustpbx::proxy::acl::AclModule::create)
+            } else {
+                builder
+            };
             #[allow(unused_mut)]
             let mut builder = match &inject.agent_registry {
                 Some(registry) => builder.with_agent_registry(registry.clone()),

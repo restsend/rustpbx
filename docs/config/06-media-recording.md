@@ -136,6 +136,38 @@ are excluded since they always negotiate full ICE.
 | Trunk opt-out for detected caller | off | `false` | yes | off (trunk wins) |
 | Global rollout | `true` | — | — | `a=ice-lite` everywhere (RTP legs) |
 
+### Custom SDP attribute pass-through (`passthrough_custom_sdp_attrs`)
+
+Trunking peers often attach vendor-specific SDP attributes (e.g.
+`a=x-switch-context`, `a=carrier-id`) to their offers and answers. By default
+rustpbx carries these **custom (non-standard) `a=` attributes across the B2BUA
+rewrite in both directions**: attributes from the caller's INVITE reach the
+trunk's INVITE, and attributes from the trunk's answer reach the caller's
+200 OK. Media-level attributes stay in their media section (sections are
+matched by `a=mid`, falling back to order); session-level attributes stay
+session-level. Standard attributes (`rtpmap`, `fmtp`, `ice-*`, `candidate`,
+direction, …) are never touched by this switch — they follow their own RFC
+semantics.
+
+Two reasons to turn it off per trunk (`passthrough_custom_sdp_attrs = false`):
+
+- The peer rejects calls on unexpected SDP lines (strict parsers).
+- Internal attribute names must not leak towards the peer (or vice versa).
+
+Stripping applies in **both** directions for that trunk: its own custom
+attributes never leave towards the peer, and the SDP it receives carries none
+from the other side. Source and destination trunks AND together — a call
+through a disabled source trunk **or** a disabled destination trunk is
+stripped end to end.
+
+```toml
+[proxy.trunks.strict-pstn]
+dest = "sip:pstn.example.com:5060"
+passthrough_custom_sdp_attrs = false   # default (unset) = pass through
+```
+
+Console: persisted as `metadata.sbc.passthrough_custom_sdp_attrs`.
+
 ### Choosing the right combination (Bug 1 + 2 scenarios)
 
 | Scenario | Server `media_proxy` | Trunk `media_mode` | Trunk `external_ip` | Result |

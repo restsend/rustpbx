@@ -1558,6 +1558,7 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
         && trunk.external_ip.is_none()
         && trunk.bind_ip.is_none()
         && trunk.ice_lite.is_none()
+        && trunk.passthrough_custom_sdp_attrs.is_none()
         && trunk.profile.is_none()
         && trunk.diversion_headers.is_none()
         && trunk.history_info.is_none()
@@ -1613,6 +1614,13 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
     }
     if let Some(ice_lite) = trunk.ice_lite {
         hints.ice_lite = Some(ice_lite);
+    }
+    // Custom SDP attribute pass-through: source and destination trunks both
+    // merge here, so the semantics are AND — a single disabled trunk strips
+    // custom attributes for the whole call. `None` means "default" (enabled).
+    if let Some(passthrough) = trunk.passthrough_custom_sdp_attrs {
+        hints.passthrough_custom_sdp_attrs =
+            Some(hints.passthrough_custom_sdp_attrs.unwrap_or(true) && passthrough);
     }
     // AMD: route hints outrank the trunk (per-field), the trunk fills gaps —
     // the session then overlays `app_params` and falls back to `[proxy] amd`.

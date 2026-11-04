@@ -697,6 +697,12 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 #                                       # Console: Media Options → ICE-Lite). For strict full-ICE
 #                                       # peers (Teams Direct Routing) that never fall back to
 #                                       # plain RTP. false = explicitly off; unset = inherit global.
+# passthrough_custom_sdp_attrs = true   # custom (non-standard) SDP a= attributes cross the B2BUA
+#                                       # (default). false strips them in both directions for this
+#                                       # trunk: its vendor attrs never reach the peer, and SDP
+#                                       # sent to it carries none from the other side. Source and
+#                                       # destination trunks AND together — one disabled trunk
+#                                       # disables pass-through for the whole call.
 # nat_fix = false                       # per-trunk override of [proxy] nat_fix for SIP messages
 #                                       # from this trunk's IPs (inbound_hosts/dest/backup_dest).
 # # Custom headers (X-* / P-* that are not standard SIP headers) copied between

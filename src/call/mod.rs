@@ -1219,6 +1219,11 @@ pub struct Dialplan {
     pub extensions: http::Extensions,
     pub allow_codecs: Vec<CodecType>,
     pub passthrough_failure: bool,
+    /// Custom (non-standard) SDP `a=` attribute pass-through for the active
+    /// target's trunk path — source and destination trunk settings AND'd
+    /// together during routing (`true` when no trunk gate applies, the
+    /// default). Consumed by the media offer/answer rewrite points.
+    pub passthrough_custom_sdp_attrs: bool,
 
     /// Per-session override for routing app/transfer/RWI-originated calls
     /// through the route table. `None` falls back to the global
@@ -1309,6 +1314,7 @@ impl Dialplan {
             extensions: self.extensions.clone(),
             allow_codecs: self.allow_codecs.clone(),
             passthrough_failure: self.passthrough_failure,
+            passthrough_custom_sdp_attrs: self.passthrough_custom_sdp_attrs,
             route_originated_calls: self.route_originated_calls,
             audio_profile: self.audio_profile.clone(),
             busy_wait: self.busy_wait.clone(),
@@ -1511,6 +1517,7 @@ impl Dialplan {
             extensions: http::Extensions::new(),
             allow_codecs: vec![],
             passthrough_failure: false,
+            passthrough_custom_sdp_attrs: true,
             route_originated_calls: None,
             audio_profile: None,
             busy_wait: None,

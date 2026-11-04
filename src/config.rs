@@ -2076,6 +2076,14 @@ pub struct DialplanHints {
     /// console `metadata.sbc.ice_lite`). `Some(true)` forces `a=ice-lite` on
     /// this session's plain-RTP legs; `Some(false)` explicitly disables it.
     pub ice_lite: Option<bool>,
+    /// Custom SDP attribute pass-through gate (from
+    /// `[proxy.trunks.<name>] passthrough_custom_sdp_attrs` or the console
+    /// `metadata.sbc.passthrough_custom_sdp_attrs`). `None`/`true` keeps
+    /// vendor-specific `a=` lines flowing across the B2BUA rewrite in both
+    /// directions; `false` strips them. Source and destination trunks merge
+    /// with AND semantics (`Some(false)` always wins), so a single disabled
+    /// trunk disables pass-through for the whole call.
+    pub passthrough_custom_sdp_attrs: Option<bool>,
     /// Resolved network profile id stamped during routing (from trunk.profile).
     pub network_profile_id: Option<String>,
     /// Per-trunk ringback/early-media audio configuration
@@ -2114,6 +2122,10 @@ impl std::fmt::Debug for DialplanHints {
             .field("external_ip", &self.external_ip)
             .field("bind_ip", &self.bind_ip)
             .field("ice_lite", &self.ice_lite)
+            .field(
+                "passthrough_custom_sdp_attrs",
+                &self.passthrough_custom_sdp_attrs,
+            )
             .field("busy_wait", &self.busy_wait)
             .field("diversion_policy", &self.diversion_policy)
             .field("amd", &self.amd)

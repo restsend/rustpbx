@@ -123,6 +123,25 @@ Console 入口：*中继 → 媒体选项 → ICE-Lite*（存储为 `metadata.sb
 | 对已探测主叫 opt-out | 关 | `false` | 是 | 关闭（中继优先） |
 | 全局开启 | `true` | — | — | 所有 RTP 腿带 `a=ice-lite` |
 
+### 自定义 SDP 属性透传（`passthrough_custom_sdp_attrs`）
+
+中继对端常在 SDP offer/answer 中携带厂商自定义属性（如 `a=x-switch-context`、`a=carrier-id`）。默认（不配置）rustpbx 把这些**非标准 `a=` 属性跨 B2BUA 重写双向透传**：主叫 INVITE 里的属性出现在发给中继的 INVITE 上，中继应答里的属性出现在回给主叫的 200 OK 上。媒体段级属性留在对应媒体段（按 `a=mid` 匹配，无 mid 时按段顺序回退）；会话级属性保持会话级。标准属性（`rtpmap`、`fmtp`、`ice-*`、`candidate`、方向属性等）不受本开关影响，遵循各自的 RFC 语义。
+
+按中继关闭（`passthrough_custom_sdp_attrs = false`）的两个典型动机：
+
+- 对端解析器严格，遇到未知 SDP 行直接拒呼。
+- 内部属性名不允许泄露给对端（或反向）。
+
+关闭对该中继**双向生效**：它自己的自定义属性不出向对端，它收到的 SDP 也不带对端的属性。来源与目标中继取 AND——只要经过的任一中继关闭，整条呼叫链路剥离。
+
+```toml
+[proxy.trunks.strict-pstn]
+dest = "sip:pstn.example.com:5060"
+passthrough_custom_sdp_attrs = false   # 默认（不设置）= 透传
+```
+
+Console：存储为 `metadata.sbc.passthrough_custom_sdp_attrs`。
+
 ### 选择合适的组合（Bug 1 + 2 场景）
 
 | 场景 | 服务器 `media_proxy` | 中继 `media_mode` | 中继 `external_ip` | 结果 |

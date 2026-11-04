@@ -1340,6 +1340,10 @@ impl CallModule {
             if let Some(ice_lite) = hints.ice_lite.take() {
                 dialplan.media.ice_lite = ice_lite;
             }
+            // Custom SDP attribute pass-through: source and destination trunk
+            // settings were already AND'd during hint merging; `None` keeps
+            // the default (pass through).
+            dialplan.passthrough_custom_sdp_attrs = hints.passthrough_custom_sdp_attrs.unwrap_or(true);
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }

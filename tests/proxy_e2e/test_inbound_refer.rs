@@ -471,6 +471,7 @@ async fn test_inbound_refer_to_queue_route() {
                 rwi_gateway: with_gateway.then_some(gateway),
                 #[cfg(feature = "addon-cc")]
                 cc_policy_db: None,
+                register_acl: false,
             },
         )
         .await
