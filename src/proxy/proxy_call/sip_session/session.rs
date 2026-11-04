@@ -5977,6 +5977,15 @@ impl SipSession {
                     })
                 {
                     if let Some(transferor) = pending.transferor.clone() {
+                        // Release the bridge slot before registry removal stops its egress.
+                        if let Some(bridge) = self.bridge_mut()
+                            && bridge.side_for_leg(&transferor).is_some()
+                        {
+                            if let Err(error) = bridge.unbridge().await {
+                                warn!(%transferor, %error, "Failed to unbridge departing transferor");
+                            }
+                            bridge.detach_leg(&transferor);
+                        }
                         self.legs.remove(&transferor);
                     }
                     self.meta.connected_callee_dialog_id = None;
