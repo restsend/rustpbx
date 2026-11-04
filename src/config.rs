@@ -26,6 +26,18 @@ pub const DEFAULT_IVR_MODE: &str = "tree";
 /// Product brand name.
 pub const BRAND_NAME: &str = "RustPBX";
 
+/// Encoding of passwords minted for shared-secret (TURN REST) entries.
+/// - `Base64` (default): padded Base64 over HMAC-SHA1, as issued by coturn.
+/// - `Hex`: lowercase hex over the same digest, as verified by miuturn's
+///   short-term credential manager.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialEncoding {
+    #[default]
+    Base64,
+    Hex,
+}
+
 /// An ICE server with optional settings for issuing temporary browser credentials.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct IceServerConfig {
@@ -36,6 +48,10 @@ pub struct IceServerConfig {
     /// Temporary credential lifetime in seconds; defaults to one hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<u64>,
+    /// Encoding of the minted TURN REST password; defaults to Base64
+    /// (coturn-compatible). Use `hex` when the TURN server is miuturn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<CredentialEncoding>,
 }
 
 impl std::fmt::Debug for IceServerConfig {
@@ -44,8 +60,68 @@ impl std::fmt::Debug for IceServerConfig {
             .field("server", &self.server)
             .field("secrete", &self.secrete.as_ref().map(|_| "[redacted]"))
             .field("lifetime", &self.lifetime)
+            .field("encoding", &self.encoding)
             .finish()
     }
+}
+
+/// Resolve browser ICE configuration from ICE server entries at the given
+/// Unix time (seconds). Static entries are preserved; shared-secret TURN
+/// credentials are minted per call and never cached server-side.
+pub fn mint_ice_servers(entries: &[IceServerConfig], now: u64) -> Result<Vec<IceServer>> {
+    let mut servers = Vec::new();
+    for entry in entries {
+        let Some(secret) = &entry.secrete else {
+            servers.push(entry.server.clone());
+            continue;
+        };
+        use hmac::{Hmac, KeyInit, Mac};
+
+        let turn = &entry.server;
+        let user = turn.username.as_deref().unwrap_or("rustpbx");
+        let lifetime = entry.lifetime.unwrap_or(3600);
+        anyhow::ensure!(!secret.is_empty(), "ice_servers.secrete must not be empty");
+        anyhow::ensure!(
+            turn.credential.is_none(),
+            "ice_servers cannot combine secrete and credential"
+        );
+        anyhow::ensure!(
+            turn.credential_type == rustrtc::IceCredentialType::Password,
+            "ice_servers.secrete requires password credentials"
+        );
+        anyhow::ensure!(
+            !turn.urls.is_empty()
+                && turn.urls.iter().all(|url| {
+                    url.strip_prefix("turn:")
+                        .or_else(|| url.strip_prefix("turns:"))
+                        .is_some_and(|host| !host.is_empty())
+                }),
+            "ice_servers with secrete must contain TURN URLs"
+        );
+        anyhow::ensure!(
+            !user.is_empty() && !user.contains(':'),
+            "ice_servers with secrete require a nonempty username suffix without a colon"
+        );
+        anyhow::ensure!(lifetime > 0, "ice_servers.lifetime must be positive");
+        let expires = now
+            .checked_add(lifetime)
+            .ok_or_else(|| anyhow::anyhow!("ice_servers.lifetime overflows expiry"))?;
+        let username = format!("{}:{}", expires, user);
+        let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())?;
+        mac.update(username.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        // TURN REST passwords use standard padded Base64, as in coturn;
+        // miuturn's short-term credential manager instead verifies hex.
+        let credential = match entry.encoding.unwrap_or_default() {
+            CredentialEncoding::Base64 => {
+                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                STANDARD.encode(digest)
+            }
+            CredentialEncoding::Hex => hex::encode(digest),
+        };
+        servers.push(turn.clone().with_credential(username, credential));
+    }
+    Ok(servers)
 }
 
 #[derive(Parser, Debug)]
@@ -2767,52 +2843,7 @@ impl Config {
     /// Static entries are preserved; shared-secret TURN credentials are minted
     /// per request and are not cached in the server-side RTP configuration.
     pub fn browser_ice_servers(&self, now: u64) -> Result<Vec<IceServer>> {
-        let mut servers = Vec::new();
-        for entry in self.ice_servers.iter().flatten() {
-            let Some(secret) = &entry.secrete else {
-                servers.push(entry.server.clone());
-                continue;
-            };
-            use base64::{Engine as _, engine::general_purpose::STANDARD};
-            use hmac::{Hmac, KeyInit, Mac};
-
-            let turn = &entry.server;
-            let user = turn.username.as_deref().unwrap_or("rustpbx");
-            let lifetime = entry.lifetime.unwrap_or(3600);
-            anyhow::ensure!(!secret.is_empty(), "ice_servers.secrete must not be empty");
-            anyhow::ensure!(
-                turn.credential.is_none(),
-                "ice_servers cannot combine secrete and credential"
-            );
-            anyhow::ensure!(
-                turn.credential_type == rustrtc::IceCredentialType::Password,
-                "ice_servers.secrete requires password credentials"
-            );
-            anyhow::ensure!(
-                !turn.urls.is_empty()
-                    && turn.urls.iter().all(|url| {
-                        url.strip_prefix("turn:")
-                            .or_else(|| url.strip_prefix("turns:"))
-                            .is_some_and(|host| !host.is_empty())
-                    }),
-                "ice_servers with secrete must contain TURN URLs"
-            );
-            anyhow::ensure!(
-                !user.is_empty() && !user.contains(':'),
-                "ice_servers with secrete require a nonempty username suffix without a colon"
-            );
-            anyhow::ensure!(lifetime > 0, "ice_servers.lifetime must be positive");
-            let expires = now
-                .checked_add(lifetime)
-                .ok_or_else(|| anyhow::anyhow!("ice_servers.lifetime overflows expiry"))?;
-            let username = format!("{}:{}", expires, user);
-            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())?;
-            mac.update(username.as_bytes());
-            // TURN REST passwords use standard padded Base64, as in coturn.
-            let credential = STANDARD.encode(mac.finalize().into_bytes());
-            servers.push(turn.clone().with_credential(username, credential));
-        }
-        Ok(servers)
+        mint_ice_servers(self.ice_servers.as_deref().unwrap_or(&[]), now)
     }
 
     pub fn sip_contact_config(&self) -> SipContactConfig {
@@ -3191,6 +3222,53 @@ bucket = "default-recordings"
             let error = config.browser_ice_servers(1000).unwrap_err().to_string();
             assert!(!error.contains("private-secret"));
         }
+    }
+
+    #[test]
+    fn test_turn_rest_hex_encoding_matches_miuturn_short_term() {
+        let settings = |encoding: &str| {
+            format!(
+                r#"
+                urls = ["turn:turn.example.com:3478"]
+                secrete = "interop-secret"
+                username = "rustpbx"
+                lifetime = 3600
+                encoding = "{encoding}"
+                "#
+            )
+        };
+        // miuturn's ShortTermCredentialManager verifies lowercase-hex
+        // HMAC-SHA1 passwords over the same digest that coturn-style Base64
+        // entries carry (see test_turn_rest_ice_servers_match_miuturn).
+        let hex_entry: IceServerConfig = toml::from_str(&settings("hex")).unwrap();
+        let servers = mint_ice_servers(&[hex_entry.clone()], 4_102_441_200).unwrap();
+        assert_eq!(servers[0].username.as_deref(), Some("4102444800:rustpbx"));
+        assert_eq!(
+            servers[0].credential.as_deref(),
+            Some("f9d388a7b9fd0c7cc84fcb8d7d5cfcb4d159a0bb")
+        );
+        // Explicit Base64 stays equivalent to the no-encoding default.
+        let base64_entry: IceServerConfig = toml::from_str(&settings("base64")).unwrap();
+        let default_entry = IceServerConfig {
+            encoding: None,
+            ..hex_entry.clone()
+        };
+        assert_eq!(
+            mint_ice_servers(&[base64_entry], 4_102_441_200).unwrap(),
+            mint_ice_servers(&[default_entry], 4_102_441_200).unwrap()
+        );
+        // The encoding survives a config roundtrip.
+        let config = Config {
+            ice_servers: Some(vec![hex_entry]),
+            ..Config::default()
+        };
+        let saved = toml::to_string(&config).unwrap();
+        assert!(saved.contains("encoding = \"hex\""));
+        let restored: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.browser_ice_servers(4_102_441_200).unwrap(),
+            config.browser_ice_servers(4_102_441_200).unwrap()
+        );
     }
 
     #[test]
