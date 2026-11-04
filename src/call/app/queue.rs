@@ -1102,24 +1102,52 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
-        // Poll the group the call is queued in NOW: after a sequential
-        // overflow switch that is the current stage group, otherwise the
-        // primary group (legacy behavior).
-        let target_group = self
-            .current_group
-            .clone()
-            .or_else(|| self.config.skill_group.clone());
-        let Some(ref sg) = target_group else {
+        // Poll groups in a fixed order:
+        // - Sequential overflow: ONLY the current stage group. The previous
+        //   stage was dequeued at the switch (`queue_left` + group-switch
+        //   accounting) — polling it would resurrect the departed queue.
+        // - Cumulative / Replace: the primary group first, then every group
+        //   whose escalation step already triggered. `check_escalation`
+        //   consumes each step ONE-SHOT (`escalated_groups`) even when the
+        //   widened resolve came back empty (overflow group all busy at the
+        //   trigger), and the escalation timer stops re-arming once every
+        //   step has fired — without widening the poll here, those overflow
+        //   agents would never be offered again even after turning Idle.
+        //   The widened poll is the recovery path for that window.
+        let poll_groups: Vec<String> = if let Some(stage) = self.current_group.clone() {
+            vec![stage]
+        } else {
+            let mut groups = self
+                .config
+                .skill_group
+                .clone()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for group in &self.escalated_groups {
+                if !groups.contains(group) {
+                    groups.push(group.clone());
+                }
+            }
+            groups
+        };
+        if poll_groups.is_empty() {
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
-        };
+        }
         let Some(ref registry) = self.agent_registry else {
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
         };
 
-        let target = format!("skill-group:{}", sg);
         let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
+        // The first group keeps the legacy poll verbatim (exclusion rotation +
+        // targeted self-heal): it is the queue the call is booked under.
+        // Escalated overflow groups are opportunistic widening — plain polls
+        // with the same exclusion rotation, taken only when the first group
+        // came back empty this tick.
+        let mut poll_iter = poll_groups.into_iter();
+        let poll_group = poll_iter.next().expect("poll list is non-empty");
+        let target = format!("skill-group:{}", poll_group);
         let mut uris = registry
             .resolve_target_with_exclusions(
                 &target,
@@ -1146,7 +1174,7 @@ impl QueueApp {
             if !self.targeted_recovery && registry.reconcile_dead_call_bindings().await > 0 {
                 info!(
                     queue = %self.config.name,
-                    skill_group = %sg,
+                    skill_group = %poll_group,
                     "Queue: dead agent bindings healed — re-polling candidates"
                 );
                 uris = registry
@@ -1160,14 +1188,53 @@ impl QueueApp {
                     .await;
             }
         }
+        // Escalated overflow groups (cumulative/replace recovery): offer an
+        // agent from them only after the call's own group had no candidate
+        // this tick. Each keeps its own FIFO gate (plain resolve path).
         if uris.is_empty() {
-            debug!(skill_group = %sg, "Queue: wait retention poll — still no Idle agent");
+            for overflow_group in poll_iter {
+                let overflow_target = format!("skill-group:{}", overflow_group);
+                let mut candidate = registry
+                    .resolve_target_with_exclusions(
+                        &overflow_target,
+                        None,
+                        &self.call_id,
+                        priority,
+                        &self.no_answer_agents,
+                    )
+                    .await;
+                if candidate.is_empty() && !self.no_answer_agents.is_empty() {
+                    candidate = registry
+                        .resolve_target_with_priority(
+                            &overflow_target,
+                            None,
+                            &self.call_id,
+                            priority,
+                        )
+                        .await;
+                    if !candidate.is_empty() {
+                        self.no_answer_agents.clear();
+                    }
+                }
+                if !candidate.is_empty() {
+                    info!(
+                        queue = %self.config.name,
+                        skill_group = %overflow_group,
+                        "Queue: escalated overflow group has an Idle agent — offering"
+                    );
+                    uris = candidate;
+                    break;
+                }
+            }
+        }
+        if uris.is_empty() {
+            debug!(skill_group = %poll_group, "Queue: wait retention poll — still no Idle agent");
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
         }
 
         info!(
-            skill_group = %sg,
+            skill_group = %poll_group,
             agents = uris.len(),
             "Queue: Idle agent available — leaving wait retention"
         );

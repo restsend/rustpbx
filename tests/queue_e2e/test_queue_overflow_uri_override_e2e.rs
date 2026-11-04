@@ -62,18 +62,17 @@ mod overflow_uri_e2e {
         }
     }
 
-    /// Tree IVR: press 1 → transfer to the queue. With `with_overflow` the
-    /// transfer target carries the per-call overflow params; without, it is
-    /// a plain skill-group queue transfer (control scenario).
-    fn ivr_toml(with_overflow: bool) -> String {
-        let queue_target = if with_overflow {
-            format!(
-                "queue:{QUEUE_NAME}?target=skillgroup:{PRIMARY_GROUP}\
-&overflow_group={OVERFLOW_GROUP}&overflow_after=2&overflow_mode=cumulative"
-            )
-        } else {
-            format!("queue:{QUEUE_NAME}?target=skillgroup:{PRIMARY_GROUP}")
-        };
+    /// Tree IVR: press 1 → transfer to the queue. `mode` selects the
+    /// per-call `overflow_mode` URI param; the overflow group/threshold are
+    /// only appended WITH a mode. None = plain skill-group queue transfer
+    /// (the control scenario must carry NO overflow params at all).
+    fn ivr_toml(mode: Option<&str>) -> String {
+        let mut queue_target = format!("queue:{QUEUE_NAME}?target=skillgroup:{PRIMARY_GROUP}");
+        if let Some(mode) = mode {
+            queue_target.push_str(&format!(
+                "&overflow_group={OVERFLOW_GROUP}&overflow_after=2&overflow_mode={mode}"
+            ));
+        }
         // The greeting file does not exist → tree IVR skips playback and
         // waits for DTMF immediately (no TTS / audio dependency in CI).
         format!(
@@ -202,7 +201,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
     /// Start the server with the CC adapter wired to both skill groups
     /// (both with EMPTY `overflow_groups` — the widening can only come
     /// from the URI) and the tree-IVR route.
-    async fn start_harness(port: u16, with_overflow: bool) -> Harness {
+    async fn start_harness(port: u16, mode: Option<&str>) -> Harness {
         let mut cache = SkillGroupTomlCache::default();
         cache.groups.insert(
             PRIMARY_GROUP.to_string(),
@@ -247,9 +246,12 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         let ivr_path = std::env::temp_dir().join(format!(
             "overflow-uri-ivr-{}{}.toml",
             port,
-            if with_overflow { "-ovf" } else { "-plain" }
+            match mode {
+                None => "-plain".to_string(),
+                Some(m) => format!("-{m}"),
+            }
         ));
-        std::fs::write(&ivr_path, ivr_toml(with_overflow)).unwrap();
+        std::fs::write(&ivr_path, ivr_toml(mode)).unwrap();
 
         let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
             proxy_config(port, &ivr_path),
@@ -314,7 +316,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         let _ = tracing_subscriber::fmt().try_init();
 
         let port = portpicker::pick_unused_port().unwrap_or(15080);
-        let harness = start_harness(port, true).await;
+        let harness = start_harness(port, Some("cumulative")).await;
         let proxy_addr = harness.server.proxy_addr;
 
         // agent_sales: primary-group agent — receives the INVITE but NEVER
@@ -433,7 +435,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         let _ = tracing_subscriber::fmt().try_init();
 
         let port = portpicker::pick_unused_port().unwrap_or(15090);
-        let harness = start_harness(port, false).await;
+        let harness = start_harness(port, None).await;
         let proxy_addr = harness.server.proxy_addr;
 
         let mut agent_sales = mk_ua(proxy_addr, "agent_sales", 26030);
@@ -478,6 +480,126 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             l2_event.is_none(),
             "agent_l2 must NEVER be dialed without URI overflow params, got {l2_event:?}"
         );
+
+        let _ = hangup_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
+        sleep(Duration::from_millis(300)).await;
+
+        harness.server.stop();
+    }
+
+    const L2_SEQ_SDP_PORT: u32 = 30103;
+
+    /// Sequential URI overflow (`overflow_mode=sequential&overflow_after=2`):
+    /// the stage switch must (1) CANCEL the primary group's ringing leg,
+    /// (2) dial ONLY the URI overflow group's agent (never re-dial the
+    /// primary), and (3) complete when the overflow agent answers — the full
+    /// "dequeue + re-enqueue" contract, driven purely by URI params.
+    #[tokio::test]
+    async fn test_queue_overflow_uri_sequential_switches_stage_e2e() {
+        let _ = tracing_subscriber::fmt().try_init();
+
+        let port = portpicker::pick_unused_port().unwrap_or(15100);
+        let harness = start_harness(port, Some("sequential")).await;
+        let proxy_addr = harness.server.proxy_addr;
+
+        let mut agent_sales = mk_ua(proxy_addr, "agent_sales", 26040);
+        agent_sales.start().await.unwrap();
+        agent_sales.register().await.unwrap();
+
+        let mut agent_l2 = mk_ua(proxy_addr, "agent_l2", 26041);
+        agent_l2.start().await.unwrap();
+        agent_l2.register().await.unwrap();
+
+        let mut caller = mk_ua(proxy_addr, "caller", 26042);
+        caller.start().await.unwrap();
+
+        let sdp_offer = "v=0\r\n\
+             o=caller 1 0 IN IP4 127.0.0.1\r\ns=caller\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio 30005 RTP/AVP 0 101\r\n\
+             a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            .to_string();
+
+        let t0 = Instant::now();
+        let (hangup_tx, hangup_rx) = tokio::sync::oneshot::channel::<()>();
+        let call_task = tokio::spawn(async move {
+            let dialog_id = caller.make_call(IVR_NUMBER, Some(sdp_offer)).await?;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            caller.send_dtmf_info(&dialog_id, "1").await?;
+            let _ = hangup_rx.await;
+            caller.hangup(&dialog_id).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        // ── Stage 1: primary agent dialed immediately, keeps ringing ──────
+        wait_for_event(&mut agent_sales, t0, Duration::from_secs(8), |e| {
+            matches!(e, TestUaEvent::IncomingCall(_, _))
+        })
+        .await
+        .expect("agent_sales (stage 1) must receive the INVITE");
+
+        // ── Stage switch at overflow_after=2: the primary leg is CANCELLED
+        // first (sequential dequeues the departed stage's legs) ──────────
+        let (terminated_at, _) =
+            wait_for_event(&mut agent_sales, t0, Duration::from_secs(10), |e| {
+                matches!(e, TestUaEvent::CallTerminated(_))
+            })
+            .await
+            .expect("stage switch must cancel the primary agent's ringing leg");
+        assert!(
+            terminated_at >= Duration::from_secs(2),
+            "stage switch must respect the URI overflow_after=2 threshold, fired at {terminated_at:?}"
+        );
+
+        // ── Stage 2: ONLY the overflow agent is dialed ────────────────────
+        let (l2_invite_at, l2_invite) =
+            wait_for_event(&mut agent_l2, t0, Duration::from_secs(8), |e| {
+                matches!(e, TestUaEvent::IncomingCall(_, _))
+            })
+            .await
+            .expect("agent_l2 (stage 2) must receive the INVITE after the switch");
+        assert!(
+            l2_invite_at < Duration::from_secs(6),
+            "stage 2 must dial promptly after the switch, took {l2_invite_at:?}"
+        );
+
+        // The primary agent must NOT be re-dialed for the new stage.
+        assert!(
+            !matches!(
+                agent_sales.process_dialog_events().await,
+                Ok(events) if events.iter().any(|e| matches!(e, TestUaEvent::IncomingCall(_, _)))
+            ),
+            "sequential switch must never re-dial the departed stage's agent"
+        );
+
+        // agent_l2 answers → the call completes on the overflow stage.
+        let TestUaEvent::IncomingCall(l2_dialog, _offer) = l2_invite else {
+            unreachable!("matcher guarantees IncomingCall");
+        };
+        agent_l2
+            .answer_call(&l2_dialog, Some(answer_sdp("agent_l2_seq", L2_SEQ_SDP_PORT)))
+            .await
+            .unwrap();
+        wait_for_event(
+            &mut agent_l2,
+            t0,
+            Duration::from_secs(5),
+            |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == l2_dialog),
+        )
+        .await
+        .expect("agent_l2 leg must be established after answering");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !harness.hook.connected.lock().await.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "on_call_connected must fire once the sequential overflow agent answers"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
 
         let _ = hangup_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;

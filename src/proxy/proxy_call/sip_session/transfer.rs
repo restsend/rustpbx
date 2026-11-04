@@ -588,6 +588,17 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                                 k if k.starts_with("return_") => {
                                     return_query.push((k, decoded));
                                 }
+                                k if k.starts_with("overflow") => {
+                                    // Parse failures must be visible: an old
+                                    // binary or a typo (`overflow_groups=` on a
+                                    // URI that means `overflow_group=`) would
+                                    // otherwise silently disable the overflow
+                                    // behavior the caller explicitly asked for.
+                                    warn!(
+                                        key = %k,
+                                        "Ignoring unrecognized queue overflow query param"
+                                    );
+                                }
                                 _ => {}
                             }
                         }

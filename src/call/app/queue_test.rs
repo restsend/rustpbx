@@ -2918,6 +2918,111 @@ mod tests {
             targets.iter().any(|t| t == "skill-group:stage_b"),
             "retention poll must target the CURRENT stage group, got {targets:?}"
         );
+        assert!(
+            targets
+                .iter()
+                .all(|t| t != "skill-group:support"),
+            "after a sequential switch the departed stage must NEVER be polled again, got {targets:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Cumulative escalation consumes its step ONE-SHOT even when the widened
+    /// resolve came back empty (overflow group all busy at the trigger), and
+    /// the escalation timer stops re-arming after the last step. The
+    /// wait-retention poll must therefore WIDEN to the escalated overflow
+    /// group: once its agents turn schedulable, the poll offers them instead
+    /// of waiting on the primary group forever. Regression for the
+    /// one-shot-consumption gap ("overflow fired but nobody ever rang").
+    #[tokio::test]
+    async fn test_wait_retention_polls_escalated_group_after_trigger() {
+        use std::sync::Arc;
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        // Overflow resolve AT the trigger returns NOTHING (the group was all
+        // busy). Poll resolves: the 1st wait-retention poll of the primary
+        // group is empty; every later poll returns the overflow agent —
+        // modelling the overflow agent turning Idle after the trigger.
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![], vec!["sip:l2agent@example.com".to_string()]]),
+        );
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-ovf-recovery".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Trigger the escalation: the widened union resolves EMPTY — the step
+        // is consumed, the timer stops, and NO leg is dialed from it.
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            registry.escalation_calls.lock().unwrap().len(),
+            1,
+            "escalation fired exactly once"
+        );
+        assert!(
+            registry
+                .escalation_include_primary
+                .lock()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(false),
+            "cumulative widening must include the primary group"
+        );
+        stack.drain_cmds();
+
+        // Wait-retention poll: primary group still empty → the widened poll
+        // hits the escalated overflow group and offers its now-idle agent.
+        stack.timeout("queue_retry");
+        let mut dial = None;
+        for _ in 0..4 {
+            match stack.next_cmd(2000).await {
+                Some(cmd) => {
+                    if matches!(&cmd, CallCommand::LegAdd { target, .. }
+                        if target.contains("l2agent@example.com"))
+                    {
+                        dial = Some(cmd);
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let dial = dial.expect("overflow agent must be offered from the escalated group");
+        assert!(
+            matches!(&dial, CallCommand::LegAdd { target, .. }
+                if target.contains("l2agent@example.com")),
+            "wait retention must dial the escalated overflow group's agent, got {dial:?}"
+        );
+        let targets = registry.resolve_targets.lock().unwrap().clone();
+        assert!(
+            targets.iter().any(|t| t == "skill-group:support_l2"),
+            "retention poll must widen to the escalated overflow group, got {targets:?}"
+        );
+        assert!(
+            targets.first().map(String::as_str) == Some("skill-group:support"),
+            "the call's own group must still be polled first, got {targets:?}"
+        );
 
         stack.cancel();
         let _ = stack.join().await;
