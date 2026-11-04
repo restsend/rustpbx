@@ -1,6 +1,53 @@
 use audio_codec::CodecType;
-use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription, TransportMode};
+use rustrtc::{
+    Attribute, Connectivity, Keying, MediaKind, RtcConfiguration, SdpType, SessionDescription,
+};
 use std::collections::{HashMap, HashSet};
+
+/// The kind of media transport of a leg. rustrtc configures it with
+/// `connectivity` and `keying`: see [`TransportMode::rtc_configuration`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportMode {
+    /// A WebRTC peer: full ICE, DTLS-SRTP.
+    WebRtc,
+    /// A SIP peer with SDES-SRTP (`a=crypto`, RTP/SAVP).
+    Srtp,
+    /// A SIP peer with plain RTP (RTP/AVP).
+    Rtp,
+}
+
+impl TransportMode {
+    /// The mode of a peer connection, from its keying.
+    pub fn of(config: &RtcConfiguration) -> Self {
+        match config.keying {
+            Keying::Dtls => TransportMode::WebRtc,
+            Keying::Sdes => TransportMode::Srtp,
+            Keying::None => TransportMode::Rtp,
+        }
+    }
+
+    /// The rustrtc configuration for a peer of this kind. `ice_lite` makes
+    /// RTP and SRTP legs ICE-lite agents; WebRTC legs always run full ICE.
+    pub fn rtc_configuration(&self, ice_lite: bool) -> RtcConfiguration {
+        let connectivity = if ice_lite {
+            Connectivity::IceLite
+        } else {
+            Connectivity::Sdp
+        };
+        match self {
+            TransportMode::WebRtc => RtcConfiguration::webrtc(),
+            TransportMode::Srtp => RtcConfiguration {
+                connectivity,
+                keying: Keying::Sdes,
+                ..RtcConfiguration::sip()
+            },
+            TransportMode::Rtp => RtcConfiguration {
+                connectivity,
+                ..RtcConfiguration::sip()
+            },
+        }
+    }
+}
 
 /// Detect the transport mode implied by an SDP body.
 ///
@@ -9,7 +56,7 @@ use std::collections::{HashMap, HashSet};
 /// - otherwise → Rtp (plain `RTP/AVP`)
 ///
 /// Used by [`crate::leg::Leg`] construction to pick the right
-/// `RtcConfiguration.transport_mode` before the PeerConnection is created.
+/// [`TransportMode`] before the PeerConnection is created.
 pub fn detect_transport(sdp: &str) -> TransportMode {
     if sdp.contains("a=fingerprint") || sdp.contains("a=setup:") {
         TransportMode::WebRtc
@@ -154,7 +201,7 @@ pub struct NegotiatedLegProfile {
     /// ingress tap must listen on every one of these.
     pub dtmf_pts: Vec<u8>,
     /// Transport mode for this leg (RTP or WebRTC/SRTP).
-    pub transport: rustrtc::TransportMode,
+    pub transport: TransportMode,
 }
 
 impl Default for NegotiatedLegProfile {
@@ -164,7 +211,7 @@ impl Default for NegotiatedLegProfile {
             video: Vec::new(),
             dtmf: None,
             dtmf_pts: Vec::new(),
-            transport: rustrtc::TransportMode::Rtp,
+            transport: TransportMode::Rtp,
         }
     }
 }
@@ -514,7 +561,7 @@ impl MediaNegotiator {
             video,
             dtmf,
             dtmf_pts: extracted.dtmf.iter().map(|c| c.payload_type).collect(),
-            transport: rustrtc::TransportMode::Rtp,
+            transport: TransportMode::Rtp,
         }
     }
 

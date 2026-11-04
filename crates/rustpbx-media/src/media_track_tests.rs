@@ -1,5 +1,5 @@
 use super::*;
-use rustrtc::TransportMode;
+use crate::TransportMode;
 
 #[tokio::test]
 async fn test_media_track_webrtc_mode_basic() {
@@ -58,7 +58,7 @@ async fn test_media_track_rtp_with_external_ip() {
     let track = RtpTrackBuilder::new("test-track-rtp-ext-ip".to_string())
         .with_mode(TransportMode::Rtp)
         .with_rtp_range(30000, 30100)
-        .with_external_ip("203.0.113.1".to_string())
+        .with_external_ips(vec!["203.0.113.1".parse().unwrap()])
         .build();
 
     let offer = track.local_description().await;

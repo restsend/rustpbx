@@ -251,7 +251,7 @@ impl TestUa {
         webrtc_audio_caps: Option<Vec<rustrtc::config::AudioCapability>>,
     ) -> Self {
         let webrtc_pc = if config.webrtc {
-            let mut rtc_config = rustrtc::RtcConfiguration::default();
+            let mut rtc_config = rustrtc::RtcConfiguration::webrtc();
             if let Some(caps) = webrtc_audio_caps {
                 let mut media_caps = rustrtc::MediaCapabilities::default();
                 media_caps.audio = caps;
@@ -2990,7 +2990,8 @@ a=setup:actpass
 a=ice-ufrag:abcd
 a=ice-pwd:efghijklmnopqrstuvwxyz
 a=rtpmap:111 opus/48000/2
-a=sendrecv"#;
+a=sendrecv
+a=rtcp-mux"#;
 
             {
                 let caller_handle = crate::utils::spawn({

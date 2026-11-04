@@ -81,7 +81,7 @@ impl SipSession {
         &mut self,
         side: LegSide,
         sdp: &str,
-        transport: rustrtc::TransportMode,
+        transport: crate::media::TransportMode,
     ) -> Result<()> {
         let codecs = crate::media::negotiate::MediaNegotiator::extract_codec_params(sdp).audio;
         // Answerer legs need a video transceiver whenever the remote offer
@@ -158,7 +158,7 @@ impl SipSession {
         // an offered PT such as 96 on both m-lines is valid and avoids a
         // needless PT change during a SIP re-INVITE.
         let mut target_video_caps = offered_caps.to_vec();
-        if target_leg.pc().config().transport_mode == rustrtc::TransportMode::WebRtc {
+        if crate::media::TransportMode::of(target_leg.pc().config()) == crate::media::TransportMode::WebRtc {
             let occupied_audio_payload_types = target_leg
                 .pc()
                 .config()
@@ -801,13 +801,13 @@ impl SipSession {
     /// - `WebRtc` when it carries ICE + DTLS (`a=ice-ufrag` + `a=fingerprint`),
     /// - `Srtp` for SDES-SRTP (`RTP/SAVP` profile or an `a=crypto` line) without DTLS,
     /// - `Rtp` otherwise (plain `RTP/AVP`).
-    pub(crate) fn sdp_transport_mode(sdp: &str) -> rustrtc::TransportMode {
+    pub(crate) fn sdp_transport_mode(sdp: &str) -> crate::media::TransportMode {
         if sdp.contains("a=ice-ufrag") && sdp.contains("a=fingerprint") {
-            rustrtc::TransportMode::WebRtc
+            crate::media::TransportMode::WebRtc
         } else if sdp.contains("RTP/SAVP") || sdp.contains("a=crypto") {
-            rustrtc::TransportMode::Srtp
+            crate::media::TransportMode::Srtp
         } else {
-            rustrtc::TransportMode::Rtp
+            crate::media::TransportMode::Rtp
         }
     }
 

@@ -276,7 +276,7 @@ async fn dtmf_bus_fans_out_digit() {
 /// detect_transport correctly classifies SDP bodies.
 #[test]
 fn detect_transport_classification() {
-    use rustrtc::TransportMode;
+    use rustpbx_media::TransportMode;
     assert_eq!(
         negotiate::detect_transport("m=audio 1234 RTP/AVP 0\r\n"),
         TransportMode::Rtp
@@ -812,7 +812,7 @@ async fn rtp_timeout_fires_on_inactive_b_leg() {
 /// out the same way as an RTP leg.
 #[tokio::test]
 async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
-    use rustrtc::TransportMode;
+    use rustpbx_media::TransportMode;
 
     let cfg = LegConfig {
         volume_stats: Default::default(),
@@ -831,8 +831,9 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         }],
         video_codecs: Vec::new(),
         rtp_port_range: None,
-        external_ip: None,
-        bind_ip: None,
+        external_ips: Vec::new(),
+        bind_ips: Vec::new(),
+        prefer_ipv6: false,
         cname: Some("rtp-timeout-webrtc".to_string()),
         comfort_noise: true,
         comfort_noise_level_db: -35.0,

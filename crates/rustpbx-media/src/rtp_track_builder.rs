@@ -1,18 +1,19 @@
 use audio_codec::CodecType;
 use rustrtc::{
-    IceServer, IceTransportPolicy, RtcConfiguration, TransportMode, config::BufferDropStrategy,
+    IceServer, IceTransportPolicy, RtcConfiguration, config::BufferDropStrategy,
     config::VideoCapability,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::RtcTrack;
 use crate::negotiate;
+use crate::{RtcTrack, TransportMode};
 
 pub struct RtpTrackBuilder {
     track_id: String,
     cancel_token: Option<CancellationToken>,
-    external_ip: Option<String>,
-    bind_ip: Option<String>,
+    external_ips: Vec<std::net::IpAddr>,
+    bind_ips: Vec<std::net::IpAddr>,
+    prefer_ipv6: bool,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     mode: TransportMode,
@@ -21,9 +22,9 @@ pub struct RtpTrackBuilder {
     enable_latching: bool,
     probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
-    /// Answer/offer SDP advertises `a=ice-lite` (rustrtc `enable_ice_lite`).
-    /// Meaningful in Rtp and Srtp mode — WebRTC legs always run full ICE and
-    /// the flag is ignored there (forced off in `build`).
+    /// Answer/offer SDP advertises `a=ice-lite` (rustrtc
+    /// `Connectivity::IceLite`). Meaningful in Rtp and Srtp mode — WebRTC legs
+    /// always run full ICE and the flag is ignored there.
     enable_ice_lite: bool,
     cname: Option<String>,
 }
@@ -33,8 +34,9 @@ impl RtpTrackBuilder {
         Self {
             track_id,
             cancel_token: None,
-            external_ip: None,
-            bind_ip: None,
+            external_ips: Vec::new(),
+            bind_ips: Vec::new(),
+            prefer_ipv6: false,
             rtp_start_port: None,
             rtp_end_port: None,
             mode: TransportMode::Rtp,
@@ -73,13 +75,24 @@ impl RtpTrackBuilder {
         self
     }
 
-    pub fn with_external_ip(mut self, addr: String) -> Self {
-        self.external_ip = Some(addr);
+    /// Public addresses to advertise, at most one per family (rustrtc
+    /// `external_ips`).
+    pub fn with_external_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.external_ips = ips;
         self
     }
 
-    pub fn with_bind_ip(mut self, addr: String) -> Self {
-        self.bind_ip = Some(addr);
+    /// Local addresses to bind on (rustrtc `bind_ips`). Not used on WebRTC
+    /// tracks.
+    pub fn with_bind_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.bind_ips = ips;
+        self
+    }
+
+    /// IPv6 in the `c=` of our offers when we have it (rustrtc
+    /// `prefer_ipv6`).
+    pub fn with_prefer_ipv6(mut self, prefer: bool) -> Self {
+        self.prefer_ipv6 = prefer;
         self
     }
 
@@ -129,13 +142,6 @@ impl RtpTrackBuilder {
     }
 
     pub fn build(self) -> RtcTrack {
-        let sdp_compatibility = match self.mode {
-            TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
-            TransportMode::Rtp | TransportMode::Srtp => {
-                rustrtc::config::SdpCompatibilityMode::LegacySip
-            }
-        };
-
         let has_turn_server = self.ice_servers.iter().any(|server| {
             server.urls.iter().any(|url| {
                 let u = url.trim_start().to_ascii_lowercase();
@@ -161,10 +167,10 @@ impl RtpTrackBuilder {
                 .collect()
         };
 
-        let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
-            self.bind_ip
+        let bind_ips = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
+            self.bind_ips
         } else {
-            None
+            Vec::new()
         };
 
         let config = RtcConfiguration {
@@ -174,19 +180,11 @@ impl RtpTrackBuilder {
             } else {
                 IceTransportPolicy::All
             },
-            transport_mode: self.mode.clone(),
-            // ICE-lite is for direct (RTP and SDES-SRTP) legs; WebRTC legs must
-            // keep full ICE (browsers require connectivity checks + DTLS), so
-            // the flag is forced off for that mode here.
-            enable_ice_lite: self.mode != TransportMode::WebRtc && self.enable_ice_lite,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
-            external_ips: self
-                .external_ip
-                .iter()
-                .filter_map(|v| v.parse().ok())
-                .collect(),
-            bind_ips: bind_ip.iter().filter_map(|v| v.parse().ok()).collect(),
+            external_ips: self.external_ips,
+            bind_ips,
+            prefer_ipv6: self.prefer_ipv6,
             enable_latching: self.enable_latching,
             probation_max_packets: self.probation_max_packets,
             media_capabilities: Some(rustrtc::config::MediaCapabilities {
@@ -196,7 +194,6 @@ impl RtpTrackBuilder {
                 image: vec![],
             }),
             ssrc_start: rand::random::<u32>(),
-            sdp_compatibility,
             cname: self.cname,
             buffer_drop_strategy: BufferDropStrategy::DropOldest,
             // 500 reserved ~95KB per leg that is almost never reached; 100
@@ -204,7 +201,9 @@ impl RtpTrackBuilder {
             // cuts per-leg reserved memory (~150MB across 1600 legs).
             rtp_buffer_capacity: 100,
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
-            ..Default::default()
+            // ICE-lite is for direct (RTP and SDES-SRTP) legs only; WebRTC
+            // legs keep full ICE (browsers require connectivity checks + DTLS).
+            ..self.mode.rtc_configuration(self.enable_ice_lite)
         };
 
         if self.video_capabilities.is_empty() {
@@ -218,7 +217,7 @@ impl RtpTrackBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
+    use rustrtc::{IceServer, IceTransportPolicy};
 
     /// CSV 功能清单 L41/L42: the built WebRTC track must switch
     /// `ice_transport_policy` to `Relay` when a `turn:`/`turns:` server is
