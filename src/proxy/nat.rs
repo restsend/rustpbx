@@ -21,6 +21,11 @@ use super::routing::TrunkConfig;
 /// global switch on the list is a blacklist (messages from those trunks are
 /// left alone), with it off a whitelist (only those trunks are fixed). The
 /// list is replaced on every trunk reload via [`NatInspector::update_trunks`].
+///
+/// Messages carrying a Record-Route/Route set are left alone as well: the
+/// dialog path is pinned by the route set, so the Contact is consumed only
+/// by the peer's last-hop proxy — the one that advertised the route and can
+/// reach the (possibly private) address itself. Rewriting it buys nothing.
 #[derive(Clone)]
 pub struct NatInspector {
     enabled: bool,
@@ -84,6 +89,21 @@ impl NatInspector {
         }
     }
 
+    /// A Record-Route/Route header means a route set already pins the dialog's
+    /// hop-by-hop path: every in-dialog request is delivered along it and the
+    /// Contact is consumed only by the last-hop proxy on the peer's side.
+    /// That proxy advertised the route exactly so it can reach the (possibly
+    /// private) Contact itself — rewriting it to the observed source would
+    /// not improve reachability, so the NAT fix is skipped.
+    fn has_route_set(headers: &rsipstack::sip::Headers) -> bool {
+        headers.iter().any(|h| {
+            matches!(
+                h,
+                rsipstack::sip::Header::RecordRoute(_) | rsipstack::sip::Header::Route(_)
+            )
+        })
+    }
+
     fn fix_contact_header(
         &self,
         header_value: &mut String,
@@ -106,6 +126,13 @@ fn fix_nated_contact_in_request(
     // REGISTER Contact identifies the binding across reconnects; the registrar
     // stores the reachable transport flow separately as its destination.
     if req.method != rsipstack::sip::Method::Invite {
+        return false;
+    }
+
+    // A Record-Route/Route set already governs in-dialog routing: the peer's
+    // last-hop proxy reaches its own private Contact itself, rewriting the
+    // header buys nothing.
+    if NatInspector::has_route_set(&req.headers) {
         return false;
     }
 
@@ -310,7 +337,7 @@ impl MessageInspector for NatInspector {
                         | rsipstack::sip::StatusCodeKind::Successful
                 );
 
-            if is_target_forming {
+            if is_target_forming && !NatInspector::has_route_set(&resp.headers) {
                 for header in resp.headers.iter_mut() {
                     if let rsipstack::sip::Header::Contact(contact) = header {
                         let mut val = contact.value().to_string();
@@ -762,6 +789,76 @@ mod tests {
         assert_eq!(
             contact_line(&req),
             "Contact: <sip:41111112222@10.10.10.10:15060>"
+        );
+    }
+
+    /// A Record-Route/Route set pins the dialog path — the peer's last-hop
+    /// proxy can reach its own private Contact, so the fix is skipped even
+    /// though the Via carries the received/rport NAT signal.
+    #[test]
+    fn test_fix_nated_contact_record_route_pins_dialog_path() {
+        for extra in [
+            "Record-Route: <sip:sbc.carrier.example;lr>\r\n",
+            "Route: <sip:upstream.carrier.example;lr>\r\n",
+        ] {
+            let raw = format!(
+                concat!(
+                    "INVITE sip:79900123456@203.0.113.52 SIP/2.0\r\n",
+                    "Via: SIP/2.0/UDP 10.10.10.10:15060;rport=15060;received=198.51.100.24;branch=z9hG4bKrr\r\n",
+                    "Call-ID: rr@voltecall\r\n",
+                    "From: <sip:41111112222@10.10.10.10>;tag=aTNjBN8v\r\n",
+                    "To: <sip:79900123456@203.0.113.52>\r\n",
+                    "CSeq: 7 INVITE\r\n",
+                    "{}",
+                    "Contact: <sip:41111112222@10.10.10.10:15060>\r\n",
+                    "Content-Length: 0\r\n",
+                    "\r\n"
+                ),
+                extra
+            );
+            let rsipstack::sip::SipMessage::Request(mut req) =
+                rsipstack::sip::SipMessage::try_from(raw).unwrap()
+            else {
+                panic!("expected request")
+            };
+            assert!(
+                !super::fix_nated_contact_in_request(&mut req, None),
+                "extra header {extra} should pin the dialog path"
+            );
+            assert_eq!(
+                contact_line(&req),
+                "Contact: <sip:41111112222@10.10.10.10:15060>"
+            );
+        }
+    }
+
+    /// Same on the response side: a 200 OK carrying Record-Route keeps its
+    /// private Contact (normally rewritten to the observed source address).
+    #[test]
+    fn test_nat_fix_leaves_response_with_record_route_untouched() {
+        let raw = concat!(
+            "SIP/2.0 200 OK\r\n",
+            "Via: SIP/2.0/UDP 198.51.100.24:15060;rport=15060;received=198.51.100.24;branch=z9hG4bKrrresp\r\n",
+            "Call-ID: rr-resp@voltecall\r\n",
+            "From: <sip:alice@198.51.100.23>;tag=aTNjBN8v\r\n",
+            "To: <sip:79900123456@203.0.113.52>;tag=df598941\r\n",
+            "CSeq: 7 INVITE\r\n",
+            "Record-Route: <sip:sbc.carrier.example;lr>\r\n",
+            "Contact: <sip:41111112222@10.10.10.10:15060>\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let msg = SipMessage::try_from(raw).unwrap();
+        let from: SipAddr = rsipstack::sip::HostWithPort::try_from("198.51.100.24:15060")
+            .unwrap()
+            .into();
+
+        let text = NatInspector::default()
+            .after_received(msg, Some(&from))
+            .to_string();
+        assert!(
+            text.contains("Contact: <sip:41111112222@10.10.10.10:15060>"),
+            "{text}"
         );
     }
 }
