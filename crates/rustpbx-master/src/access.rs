@@ -73,6 +73,7 @@ pub struct AccessMetrics {
     pub tcp_forwarded: AtomicU64,
     pub tcp_no_route_drops: AtomicU64,
     pub tcp_forward_errors: AtomicU64,
+    pub tcp_sniffed: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +188,19 @@ impl Access {
         }
     }
 
-    /// Spawn TCP/HTTP accept loops: forward fd to accepting generation.
+    /// Spawn TCP/HTTP accept loops: forward fd to the routing-decided generation.
+    ///
+    /// Decision ladder (P0/P1):
+    /// * `SipTcp`: sniff the first message's Call-ID (MSG_PEEK — the bytes
+    ///   stay in the socket for the worker) → generation owning that dialog
+    ///   → ConnTable peer affinity → current gen;
+    /// * `SipTls`: ConnTable peer affinity → current gen (TLS hides the
+    ///   first message; peer affinity is what survives reconnects);
+    /// * `Http`/`HttpTls`: current gen — affinity would stick browser REST
+    ///   traffic to a draining generation; ws continuity is the relay's job;
+    /// * when the ladder has no answer AND the flip window is open
+    ///   (`current = None`): fall back to the most-active generation
+    ///   (`[master] tcp_fallback`, default on) instead of dropping.
     pub fn spawn_tcp_forward(
         &self,
         addr: SocketAddr,
@@ -198,16 +211,46 @@ impl Access {
         let listener = tokio::net::TcpListener::from_std(std_listener)?;
         let core = self.core.clone();
         let metrics = self.metrics.clone();
+        let sniff_enabled = core.cfg.master.tcp_callid_sniff();
+        let fallback_enabled = core.cfg.master.tcp_fallback();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((sock, peer)) => {
-                        let local = sock.local_addr().unwrap_or(addr);
-                        let Some(gen_link) = core.current_gen_link().await else {
+                        // ── routing ladder ──
+                        let mut generation = match kind {
+                            crate::access::ControlStreamKind::SipTcp if sniff_enabled => {
+                                match sniff_call_id(&sock).await {
+                                    Some(cid) => {
+                                        metrics.tcp_sniffed.fetch_add(1, Ordering::Relaxed);
+                                        core.route_gen(Some(&cid)).await
+                                    }
+                                    None => None,
+                                }
+                            }
+                            crate::access::ControlStreamKind::SipTls => conn_kind_for(kind)
+                                .and_then(|k| core.conns.owner(k, &peer)),
+                            _ => None,
+                        };
+                        // Current generation (None during the flip window).
+                        if generation.is_none() {
+                            generation = core.route_gen(None).await;
+                        }
+                        // Flip window fallback: most-active generation.
+                        if generation.is_none() && fallback_enabled {
+                            generation = core.fallback_gen().await;
+                        }
+                        let Some(generation) = generation else {
                             metrics.tcp_no_route_drops.fetch_add(1, Ordering::Relaxed);
                             drop(sock);
                             continue;
                         };
+                        let Some(gen_link) = core.gen_link(generation).await else {
+                            metrics.tcp_no_route_drops.fetch_add(1, Ordering::Relaxed);
+                            drop(sock);
+                            continue;
+                        };
+                        let local = sock.local_addr().unwrap_or(addr);
                         let Ok(std_sock) = sock.into_std() else { continue };
                         let _ = std_sock.set_nonblocking(false);
                         let sent = gen_link.control.send_with_fd(
@@ -239,6 +282,47 @@ impl Access {
             }
         });
         Ok(())
+    }
+}
+
+/// ControlStreamKind → the ConnKind its worker-reported connections use.
+fn conn_kind_for(kind: ControlStreamKind) -> Option<rustpbx_master_ipc::ConnKind> {
+    match kind {
+        ControlStreamKind::SipTcp => Some(rustpbx_master_ipc::ConnKind::SipTcp),
+        ControlStreamKind::SipTls => Some(rustpbx_master_ipc::ConnKind::SipTls),
+        // Worker ws/wss conns report as ConnKind::Ws/Wss; an Http/HttpTls
+        // accept never matches them (affinity is not applied to HTTP).
+        _ => None,
+    }
+}
+
+/// Peek the first SIP message off a freshly accepted TCP connection and
+/// extract its Call-ID. `MSG_PEEK` semantics: the bytes stay in the kernel
+/// buffer for the worker. `peek` re-returns the whole buffer each call, so
+/// the window grows until the message's headers are complete. Bounded
+/// (64 KB / 2 s) — a silent peer still gets forwarded (down the ladder)
+/// instead of stalling the accept loop.
+async fn sniff_call_id(sock: &tokio::net::TcpStream) -> Option<String> {
+    const MAX_PEEK: usize = 64 * 1024;
+    const STEP: std::time::Duration = std::time::Duration::from_millis(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut size = 2048usize;
+    loop {
+        let mut buf = vec![0u8; size];
+        let n = tokio::time::timeout_at(deadline, sock.peek(&mut buf)).await.ok()?.ok()?;
+        if n == 0 {
+            return None; // peer closed before speaking
+        }
+        if let Some(cid) = crate::sip_scan::extract_call_id(&buf[..n]) {
+            return Some(cid);
+        }
+        if n >= MAX_PEEK || size >= MAX_PEEK {
+            return None;
+        }
+        // Either the buffer is full of a partial message (grow) or we've
+        // drained what's buffered and must wait for more segments.
+        size = (size * 2).min(MAX_PEEK);
+        tokio::time::sleep(STEP).await;
     }
 }
 

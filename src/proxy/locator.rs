@@ -17,6 +17,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     future::Future,
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
@@ -415,6 +416,12 @@ pub struct DialogTargetLocator {
     locator: Arc<Box<dyn Locator>>,
     local_addrs: Vec<SipAddr>,
     cluster_enabled: bool,
+    /// Worker-mode cross-gen relay. When resolved targets are stream
+    /// transports whose real connection lives in ANOTHER generation, a
+    /// virtual relay connection is created here so the subsequent
+    /// `transport_layer.lookup` finds it (rsipstack client transactions
+    /// without a held connection do exactly one lookup after `locate`).
+    worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
 }
 
 impl DialogTargetLocator {
@@ -423,12 +430,40 @@ impl DialogTargetLocator {
         locator: Arc<Box<dyn Locator>>,
         local_addrs: Vec<SipAddr>,
         cluster_enabled: bool,
+        worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
     ) -> Box<dyn TargetLocator> {
         Box::new(Self {
             locator,
             local_addrs,
             cluster_enabled,
+            worker_relay,
         }) as Box<dyn TargetLocator>
+    }
+
+    /// Worker mode: make the destination dialable across generations. For a
+    /// stream-transport destination with no LOCAL real connection, create
+    /// the virtual relay connection (idempotent; the real-conn case is
+    /// detected inside and skipped). UDP and non-worker modes are untouched.
+    async fn ensure_dialable_cross_gen(&self, dest: &SipAddr) {
+        use rsipstack::sip::transport::Transport;
+        let Some(relay) = &self.worker_relay else { return };
+        let Some(transport) = dest.r#type else { return };
+        let kind = match transport {
+            Transport::Tcp => rustpbx_master_ipc::ConnKind::SipTcp,
+            Transport::Tls => rustpbx_master_ipc::ConnKind::SipTls,
+            Transport::Ws => rustpbx_master_ipc::ConnKind::Ws,
+            Transport::Wss => rustpbx_master_ipc::ConnKind::Wss,
+            _ => return,
+        };
+        // Registered destinations carry the client's ip:port; a domain host
+        // is not a relayable flow (real remote server — rsipstack dials it).
+        let peer = match &dest.addr.host {
+            rsipstack::sip::Host::IpAddr(ip) => {
+                SocketAddr::new(*ip, dest.addr.port.map(|p| p.0).unwrap_or(0))
+            }
+            _ => return,
+        };
+        relay.ensure_virtual_conn(kind, peer).await;
     }
 
     fn is_local_home_proxy(&self, home_proxy: &SipAddr) -> bool {
@@ -492,6 +527,14 @@ impl DialogTargetLocator {
 #[async_trait]
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
+        let dest = self.locate_inner(uri).await?;
+        self.ensure_dialable_cross_gen(&dest).await;
+        Ok(dest)
+    }
+}
+
+impl DialogTargetLocator {
+    async fn locate_inner(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         let locs = self.locator.lookup(uri).await;
         if let Ok(locs) = &locs
             && !locs.is_empty()
@@ -1163,7 +1206,7 @@ mod tests {
     use rsipstack::sip::HostWithPort;
     use rsipstack::sip::transport::Transport;
     use rsipstack::transport::SipAddr;
-    use std::time::Duration;
+    
 
     // ── shared helper unit tests ────────────────────────────────────────
 
@@ -1530,7 +1573,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true, None);
         let result = target_locator.locate(&target_uri).await.unwrap();
         assert_eq!(
             result, home_proxy,
@@ -1571,7 +1614,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&gruu_uri).await.unwrap();
 
         assert_eq!(result, destination);
@@ -1629,7 +1672,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         // The BYE Request-URI is the .invalid contact
         let result = target_locator.locate(&contact_uri).await.unwrap();
@@ -1680,7 +1723,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         // Lookup by canonical AoR — uri.host (rustpbx.com) != home_proxy.addr.
         let result = target_locator.locate(&canonical_aor).await.unwrap();
@@ -1733,7 +1776,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         let result = target_locator.locate(&contact_uri).await.unwrap();
         assert_eq!(
@@ -1775,7 +1818,7 @@ mod tests {
             .unwrap();
 
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1816,7 +1859,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1875,7 +1918,7 @@ mod tests {
             rsipstack::EndpointBuilder::new()
                 .with_cancel_token(cancel.clone())
                 .with_inspector(Box::new(NatInspector::new(true)))
-                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false))
+                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false, None))
                 .build(),
         );
         let serving = {
@@ -2054,7 +2097,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&dialog_contact).await.unwrap();
 
         assert_eq!(
@@ -2110,7 +2153,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&exact_contact).await.unwrap();
 
         assert_eq!(
@@ -2183,7 +2226,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,

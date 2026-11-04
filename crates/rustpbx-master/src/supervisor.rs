@@ -5,11 +5,13 @@
 //! atomically on `Ready`, and the old one drains its dialogs before exiting.
 
 use crate::config::{ConfigSubset, RtpSlice};
+use crate::conn_table::{ConnTable, Metrics as ConnMetrics};
 use crate::dialogs::{DialogTable, Metrics};
-use rustpbx_master_ipc::frame::{DataWriter, FrameKind};
+use rustpbx_master_ipc::frame::{unpack_conn_kind, DataWriter, FrameKind};
 use rustpbx_master_ipc::link::ControlFrame;
-use rustpbx_master_ipc::{ControlMessage, ControlSender, LinkHandle};
-use std::collections::HashMap;
+use rustpbx_master_ipc::{ConnKind, ControlMessage, ControlSender, LinkHandle};
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,10 +108,28 @@ pub struct SupCore {
     /// Extra environment for spawned workers (tests set e.g. FAKE_DRAIN_SECS).
     pub worker_env: Vec<(String, String)>, 
     pub dialogs: Arc<DialogTable>,
+    /// Live SIP connections per generation (worker ConnUp/ConnDown reports):
+    /// accept-time affinity + relay routing target resolution.
+    pub conns: Arc<ConnTable>,
+    /// `(ConnKind, peer) → generations holding a virtual relay connection`
+    /// toward that real connection. Drives the `ConnClosed` fan-out when the
+    /// real connection (or its whole generation) dies.
+    relay_pairs: Mutex<HashMap<(u8, SocketAddr), HashSet<u32>>>,
     pub udp_sockets: Mutex<HashMap<u16, Arc<tokio::net::UdpSocket>>>,
     pub stats: SupervisorStats,
+    pub relay_stats: RelayStats,
     pub shutting_down: AtomicBool,
     state: AsyncMutex<SupState>,
+}
+
+/// Cross-gen relay counters (admin status / metrics).
+#[derive(Debug, Default)]
+pub struct RelayStats {
+    pub to_conn_routed: AtomicU64,
+    pub to_conn_no_route: AtomicU64,
+    pub to_dialog_routed: AtomicU64,
+    pub to_dialog_no_route: AtomicU64,
+    pub conn_closed_fanout: AtomicU64,
 }
 
 impl SupCore {
@@ -123,10 +143,18 @@ impl SupCore {
             cfg.master.max_dialog_entries(),
             Arc::new(Metrics::default()),
         ));
+        let conns = Arc::new(ConnTable::new(
+            cfg.master.max_conn_entries(),
+            std::time::Duration::from_secs(cfg.master.conn_ttl_secs()),
+            Arc::new(ConnMetrics::default()),
+        ));
         Ok(Arc::new(Self {
             dialogs,
+            conns,
+            relay_pairs: Mutex::new(HashMap::new()),
             udp_sockets: Mutex::new(udp_sockets),
             stats: SupervisorStats::default(),
+            relay_stats: RelayStats::default(),
             shutting_down: AtomicBool::new(false),
             state: AsyncMutex::new(SupState {
                 gens: HashMap::new(),
@@ -185,6 +213,14 @@ impl SupCore {
             "current_generation": st.current,
             "generations": gens,
             "dialog_entries": self.dialogs.len(),
+            "conn_entries": self.conns.len(),
+            "relay": {
+                "to_conn_routed": self.relay_stats.to_conn_routed.load(Ordering::Relaxed),
+                "to_conn_no_route": self.relay_stats.to_conn_no_route.load(Ordering::Relaxed),
+                "to_dialog_routed": self.relay_stats.to_dialog_routed.load(Ordering::Relaxed),
+                "to_dialog_no_route": self.relay_stats.to_dialog_no_route.load(Ordering::Relaxed),
+                "conn_closed_fanout": self.relay_stats.conn_closed_fanout.load(Ordering::Relaxed),
+            },
             "counters": {
                 "upgrades_started": self.stats.upgrades_started.load(Ordering::Relaxed),
                 "upgrades_ok": self.stats.upgrades_ok.load(Ordering::Relaxed),
@@ -448,6 +484,13 @@ impl SupCore {
                         external: None,
                     });
                 }
+                // Mirror rebuild: dialogs owned by OTHER generations, so this
+                // worker can route messages read from its real connections
+                // (mirror hit on a foreign gen → relay; miss → local).
+                let snapshot = self.mirror_snapshot_for(generation);
+                if !snapshot.is_empty() {
+                    let _ = link.control.send(ControlMessage::MirrorSnapshot { entries: snapshot });
+                }
                 Ok(())
             }
             Some(_) => Err(SupError::UnknownGeneration(generation)),
@@ -595,6 +638,165 @@ impl SupCore {
         }
     }
 
+    // ── connection ownership + cross-gen relay hub ──
+
+    /// Accept-time fallback target when no routing information applies
+    /// (flip window `current = None`): the live generation carrying the most
+    /// active dialogs — traffic lands where the work is, instead of being
+    /// dropped on the floor.
+    pub async fn fallback_gen(&self) -> Option<u32> {
+        let st = self.state.lock().await;
+        st.gens
+            .iter()
+            .filter(|(_, g)| g.link.is_some())
+            .max_by_key(|(_, g)| g.active_dialogs)
+            .map(|(id, _)| *id)
+    }
+
+    pub fn on_conn_up(
+        &self,
+        generation: u32,
+        conn_id: u64,
+        kind: ConnKind,
+        peer: SocketAddr,
+        _local: SocketAddr,
+    ) {
+        self.conns.upsert(kind, peer, conn_id, generation);
+    }
+
+    pub async fn on_conn_down(&self, conn_id: u64) {
+        if let Some((kind, peer)) = self.conns.remove_by_conn_id(conn_id) {
+            self.fan_out_conn_closed(kind, &peer).await;
+        }
+    }
+
+    pub fn on_relay_pair_open(&self, generation: u32, kind: ConnKind, peer: SocketAddr) {
+        let mut pairs = self.lock_pairs();
+        pairs.entry((kind.as_u8(), peer)).or_default().insert(generation);
+    }
+
+    pub fn on_relay_pair_close(&self, generation: u32, kind: ConnKind, peer: SocketAddr) {
+        let mut pairs = self.lock_pairs();
+        if let Some(holders) = pairs.get_mut(&(kind.as_u8(), peer)) {
+            holders.remove(&generation);
+            if holders.is_empty() {
+                pairs.remove(&(kind.as_u8(), peer));
+            }
+        }
+    }
+
+    /// The real connection died: every generation holding a virtual relay
+    /// connection toward it must tear its phantom flow down (its locator
+    /// bindings and dialogs hang on it — see `ConnClosed` docs).
+    async fn fan_out_conn_closed(&self, kind: ConnKind, peer: &SocketAddr) {
+        let holders = self.lock_pairs().remove(&(kind.as_u8(), *peer));
+        let Some(holders) = holders else { return };
+        for target_gen in holders {
+            if let Some(link) = self.gen_link(target_gen).await {
+                let _ = link.control.send(ControlMessage::ConnClosed {
+                    kind,
+                    peer: *peer,
+                });
+                self.relay_stats
+                    .conn_closed_fanout
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// DialogUp broadcast: every OTHER live generation learns who owns
+    /// `call_id` (workers keep the mirror to make relay-vs-local decisions).
+    pub async fn broadcast_dialog_announce(&self, owner: u32, call_id: &str) {
+        let links = self.other_links(owner).await;
+        for (_, control) in links {
+            let _ = control.send(ControlMessage::DialogOwnerAnnounce {
+                call_id: call_id.to_string(),
+                generation: owner,
+            });
+        }
+    }
+
+    /// DialogDown broadcast: drop the mirror entry everywhere.
+    pub async fn broadcast_dialog_gone(&self, call_id: &str) {
+        let links = self.other_links(u32::MAX).await;
+        for (_, control) in links {
+            let _ = control.send(ControlMessage::DialogOwnerGone {
+                call_id: call_id.to_string(),
+            });
+        }
+    }
+
+    /// Full mirror for a (re)connecting worker: dialogs owned by others.
+    pub fn mirror_snapshot_for(&self, generation: u32) -> Vec<(String, u32)> {
+        self.dialogs
+            .entries_snapshot()
+            .into_iter()
+            .filter(|(_, g)| *g != generation)
+            .collect()
+    }
+
+    /// Relay hop 1 (dialog gen → conn gen): route by the ConnTable.
+    pub async fn route_relay_to_conn(&self, kind: ConnKind, peer: &SocketAddr, data: &[u8]) {
+        let Some(target) = self.conns.owner(kind, peer) else {
+            self.relay_stats.to_conn_no_route.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if let Some(link) = self.gen_link(target).await {
+            let frame = rustpbx_master_ipc::frame::encode_datagram(
+                FrameKind::RelayDeliver,
+                kind.as_u8() as u16,
+                peer,
+                data,
+            );
+            if link.data.send(frame) {
+                self.relay_stats.to_conn_routed.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.relay_stats.to_conn_no_route.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Relay hop 2 (conn gen → dialog gen): route by the DialogTable using
+    /// the Call-ID scanned out of the message payload.
+    pub async fn route_relay_to_dialog(&self, kind: ConnKind, peer: &SocketAddr, data: &[u8]) {
+        let Some(call_id) = crate::sip_scan::extract_call_id(data) else {
+            self.relay_stats.to_dialog_no_route.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Some(target) = self.dialogs.owner(&call_id) else {
+            self.relay_stats.to_dialog_no_route.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if let Some(link) = self.gen_link(target).await {
+            let frame = rustpbx_master_ipc::frame::encode_datagram(
+                FrameKind::RelayDeliver,
+                kind.as_u8() as u16,
+                peer,
+                data,
+            );
+            if link.data.send(frame) {
+                self.relay_stats.to_dialog_routed.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.relay_stats.to_dialog_no_route.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    async fn other_links(&self, exclude: u32) -> Vec<(u32, ControlSender)> {
+        let st = self.state.lock().await;
+        st.gens
+            .iter()
+            .filter(|(id, _)| **id != exclude)
+            .filter_map(|(id, g)| g.link.as_ref().map(|l| (*id, l.control.clone())))
+            .collect()
+    }
+
+    fn lock_pairs(&self) -> std::sync::MutexGuard<'_, HashMap<(u8, SocketAddr), HashSet<u32>>> {
+        self.relay_pairs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Reaper: clean up after a worker exits; auto-restart on crash.
     pub async fn on_gen_exited(self: &Arc<Self>, generation: u32, code: Option<i32>) {
         let was_draining = {
@@ -605,6 +807,19 @@ impl SupCore {
             }
         };
         self.dialogs.purge_generation(generation);
+        // Its connections are gone with the process: evict from the ConnTable
+        // and tell every generation holding a virtual relay connection toward
+        // one of them (their dialogs must fail fast, not burn timers).
+        for (kind, peer) in self.conns.purge_generation(generation) {
+            self.fan_out_conn_closed(kind, &peer).await;
+        }
+        {
+            let mut pairs = self.lock_pairs();
+            for (_, holders) in pairs.iter_mut() {
+                holders.remove(&generation);
+            }
+            pairs.retain(|_, holders| !holders.is_empty());
+        }
         {
             let mut st = self.state.lock().await;
             st.gens.remove(&generation);
@@ -674,22 +889,35 @@ pub fn spawn_worker_pump(
         accepting: AtomicBool::new(false),
     });
 
-    // UDP outbound: worker datagrams → master → public socket
+    // UDP outbound: worker datagrams → master → public socket. Relay frames
+    // (RelayToConn/RelayToDialog) hop through the hub on the same loop.
     {
         let core = core.clone();
         tokio::spawn(async move {
             while let Some(df) = data_rx.recv().await {
-                if df.kind != FrameKind::UdpDown {
-                    continue;
-                }
-                let sock = core
-                    .udp_sockets
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(&df.listener_id)
-                    .cloned();
-                if let Some(sock) = sock {
-                    let _ = sock.send_to(&df.datagram, df.addr).await;
+                match df.kind {
+                    FrameKind::UdpDown => {
+                        let sock = core
+                            .udp_sockets
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .get(&df.listener_id)
+                            .cloned();
+                        if let Some(sock) = sock {
+                            let _ = sock.send_to(&df.datagram, df.addr).await;
+                        }
+                    }
+                    FrameKind::RelayToConn => {
+                        if let Some(kind) = unpack_conn_kind(df.listener_id) {
+                            core.route_relay_to_conn(kind, &df.addr, &df.datagram).await;
+                        }
+                    }
+                    FrameKind::RelayToDialog => {
+                        if let Some(kind) = unpack_conn_kind(df.listener_id) {
+                            core.route_relay_to_dialog(kind, &df.addr, &df.datagram).await;
+                        }
+                    }
+                    _ => {}
                 }
             }
         });
@@ -727,10 +955,16 @@ pub fn spawn_worker_pump(
                 }
                 ControlMessage::DialogUp { call_id } => {
                     if let Some(g) = current {
-                        pump.on_dialog_up(g, call_id).await;
+                        pump.on_dialog_up(g, call_id.clone()).await;
+                        // Tell every other generation who owns this dialog —
+                        // their relay decisions depend on the mirror.
+                        pump.broadcast_dialog_announce(g, &call_id).await;
                     }
                 }
-                ControlMessage::DialogDown { call_id } => pump.on_dialog_down(call_id).await,
+                ControlMessage::DialogDown { call_id } => {
+                    pump.on_dialog_down(call_id.clone()).await;
+                    pump.broadcast_dialog_gone(&call_id).await;
+                }
                 ControlMessage::Stats { active_dialogs } => {
                     if let Some(g) = current {
                         pump.on_stats(g, active_dialogs).await;
@@ -739,6 +973,22 @@ pub fn spawn_worker_pump(
                 ControlMessage::Snapshot { call_ids } => {
                     if let Some(g) = current {
                         pump.on_snapshot(g, call_ids).await;
+                    }
+                }
+                ControlMessage::ConnUp { conn_id, kind, peer, local } => {
+                    if let Some(g) = current {
+                        pump.on_conn_up(g, conn_id, kind, peer, local);
+                    }
+                }
+                ControlMessage::ConnDown { conn_id } => pump.on_conn_down(conn_id).await,
+                ControlMessage::RelayPairOpen { kind, peer } => {
+                    if let Some(g) = current {
+                        pump.on_relay_pair_open(g, kind, peer);
+                    }
+                }
+                ControlMessage::RelayPairClose { kind, peer } => {
+                    if let Some(g) = current {
+                        pump.on_relay_pair_close(g, kind, peer);
                     }
                 }
                 ControlMessage::Drained => {
@@ -754,4 +1004,285 @@ pub fn spawn_worker_pump(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod hub_tests {
+    use super::*;
+    use crate::config::ConfigSubset;
+    use rustpbx_master_ipc::{socketpair_std, handle_for_end};
+    use std::net::IpAddr;
+
+    fn peer(p: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([10, 0, 0, 1]), p)
+    }
+
+    fn core() -> Arc<SupCore> {
+        SupCore::new(ConfigSubset::default(), Path::new("/tmp/x.toml"), Path::new("/tmp/x.sock"), HashMap::new())
+            .expect("sup core")
+    }
+
+    /// Register a fake generation with a real socketpair link; returns the
+    /// worker-side handle whose control_rx/data_rx receive what the hub sends.
+    async fn add_gen(core: &Arc<SupCore>, id: u32, active_dialogs: u64) -> LinkHandle {
+        let (ca, cb) = socketpair_std().unwrap();
+        let (da, db) = socketpair_std().unwrap();
+        let rx = handle_for_end(ca, da, 64).unwrap();
+        let tx = handle_for_end(cb, db, 64).unwrap();
+        let gl = Arc::new(GenLink {
+            generation: id,
+            control: tx.control_tx.clone(),
+            data: tx.data.clone(),
+            accepting: AtomicBool::new(true),
+        });
+        let mut st = core.state.lock().await;
+        st.gens.insert(id, Generation {
+            rtp: RtpSlice { start: 0, end: 0 },
+            state: GenState::Active,
+            link: Some(gl),
+            pid: None,
+            active_dialogs,
+            adopted: false,
+        });
+        rx
+    }
+
+    #[tokio::test]
+    async fn relay_to_conn_routes_by_conn_table() {
+        let c = core();
+        let mut rx = add_gen(&c, 2, 0).await;
+        c.conns.upsert(ConnKind::Wss, peer(7000), 11, 2);
+        c.route_relay_to_conn(ConnKind::Wss, &peer(7000), b"BYE sip:x SIP/2.0\r\n\r\n").await;
+        let df = tokio::time::timeout(std::time::Duration::from_secs(5), rx.data_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(df.kind, FrameKind::RelayDeliver);
+        assert_eq!(unpack_conn_kind(df.listener_id), Some(ConnKind::Wss));
+        assert_eq!(df.datagram, b"BYE sip:x SIP/2.0\r\n\r\n");
+        assert_eq!(c.relay_stats.to_conn_routed.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_to_conn_without_route_counts_no_route() {
+        let c = core();
+        add_gen(&c, 2, 0).await;
+        c.route_relay_to_conn(ConnKind::Ws, &peer(9999), b"BYE").await;
+        assert_eq!(c.relay_stats.to_conn_no_route.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_to_dialog_routes_by_call_id_scan() {
+        let c = core();
+        let mut rx = add_gen(&c, 5, 0).await;
+        c.dialogs.upsert("cid-9", 5).unwrap();
+        let sip = b"BYE sip:x SIP/2.0\r\nCall-ID: cid-9\r\n\r\n";
+        c.route_relay_to_dialog(ConnKind::Ws, &peer(5000), sip).await;
+        let df = tokio::time::timeout(std::time::Duration::from_secs(5), rx.data_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(df.kind, FrameKind::RelayDeliver);
+        assert_eq!(df.datagram, sip);
+        assert_eq!(c.relay_stats.to_dialog_routed.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn dialog_announce_and_mirror_snapshot() {
+        let c = core();
+        let mut rx1 = add_gen(&c, 1, 0).await;
+        let mut rx2 = add_gen(&c, 2, 0).await;
+        // gen 1 owns the dialog → only gen 2 (the other gen) gets the announce.
+        c.broadcast_dialog_announce(1, "abc").await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx2.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::DialogOwnerAnnounce { call_id: "abc".into(), generation: 1 });
+        c.dialogs.upsert("abc", 1).unwrap();
+        c.dialogs.upsert("other-gen-dialog", 2).unwrap();
+        let mirror = c.mirror_snapshot_for(2);
+        assert_eq!(mirror, vec![("abc".to_string(), 1)]);
+        // GONE is broadcast to every live generation, including the owner.
+        c.broadcast_dialog_gone("abc").await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx1.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::DialogOwnerGone { call_id: "abc".into() });
+    }
+
+    #[tokio::test]
+    async fn conn_down_fans_closed_to_virtual_holders() {
+        let c = core();
+        let mut holder_rx = add_gen(&c, 3, 0).await; // holds a virtual conn
+        let _owner_rx = add_gen(&c, 4, 0).await; // owns the real conn
+        c.on_conn_up(4, 77, ConnKind::Wss, peer(8000), peer(0));
+        c.on_relay_pair_open(3, ConnKind::Wss, peer(8000));
+        c.on_conn_down(77).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), holder_rx.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::ConnClosed { kind: ConnKind::Wss, peer: peer(8000) });
+        assert_eq!(c.relay_stats.conn_closed_fanout.load(Ordering::Relaxed), 1);
+        // The pair registry was consumed — a second down fans nothing.
+        c.on_conn_up(4, 78, ConnKind::Wss, peer(8000), peer(0));
+        c.on_conn_down(78).await;
+        assert_eq!(c.relay_stats.conn_closed_fanout.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn gen_exit_purges_conns_and_fans_out() {
+        let c = core();
+        let mut holder_rx = add_gen(&c, 3, 0).await;
+        let _owner_rx = add_gen(&c, 4, 0).await;
+        c.on_conn_up(4, 90, ConnKind::SipTcp, peer(9000), peer(0));
+        c.on_relay_pair_open(3, ConnKind::SipTcp, peer(9000));
+        c.on_gen_exited(4, Some(0)).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), holder_rx.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::ConnClosed { kind: ConnKind::SipTcp, peer: peer(9000) });
+        assert_eq!(c.conns.owner(ConnKind::SipTcp, &peer(9000)), None);
+    }
+
+    #[tokio::test]
+    async fn fallback_gen_picks_most_active_with_link() {
+        let c = core();
+        add_gen(&c, 1, 4).await;
+        add_gen(&c, 2, 9).await;
+        assert_eq!(c.fallback_gen().await, Some(2));
+        // A generation without a link never wins the fallback.
+        {
+            let mut st = c.state.lock().await;
+            if let Some(g) = st.gens.get_mut(&2) { g.link = None; }
+        }
+        assert_eq!(c.fallback_gen().await, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod pump_wiring_tests {
+    use super::*;
+    use crate::config::ConfigSubset;
+    use rustpbx_master_ipc::{handle_for_end, socketpair_std};
+
+    /// spawn_worker_pump wiring: a worker's DialogUp must (a) update the
+    /// DialogTable and (b) broadcast the announce to every OTHER live
+    /// generation's control channel; DialogDown must broadcast GONE.
+    #[tokio::test]
+    async fn dialog_up_broadcasts_announce_to_other_gens() {
+        let core = SupCore::new(
+            ConfigSubset::default(),
+            Path::new("/tmp/x.toml"),
+            Path::new("/tmp/x.sock"),
+            HashMap::new(),
+        )
+        .expect("sup core");
+        // The "other" generation that must receive the announce.
+        let (ca, cb) = socketpair_std().unwrap();
+        let (da, db) = socketpair_std().unwrap();
+        let mut other_rx = handle_for_end(ca, da, 64).unwrap();
+        let other_tx = handle_for_end(cb, db, 64).unwrap();
+        {
+            let mut st = core.state.lock().await;
+            st.gens.insert(2, Generation {
+                rtp: RtpSlice { start: 0, end: 0 },
+                state: GenState::Active,
+                link: Some(Arc::new(GenLink {
+                    generation: 2,
+                    control: other_tx.control_tx.clone(),
+                    data: other_tx.data.clone(),
+                    accepting: AtomicBool::new(true),
+                })),
+                pid: None,
+                active_dialogs: 0,
+                adopted: false,
+            });
+        }
+        // The reporting worker (gen 1). `worker_tx` is the MASTER-side end the
+        // pump reads; frames must be sent from the OPPOSITE end (`worker_rx`)
+        // to reach the pump's control_rx.
+        let (ca2, cb2) = socketpair_std().unwrap();
+        let (da2, db2) = socketpair_std().unwrap();
+        let mut worker_rx = handle_for_end(ca2, da2, 64).unwrap();
+        let worker_tx = handle_for_end(cb2, db2, 64).unwrap();
+        spawn_worker_pump(core.clone(), Some(1), worker_tx, None);
+
+        let control = worker_rx.control_tx.clone();
+        control
+            .send(ControlMessage::Hello { generation: 1, pid: 42, version: "t".into() })
+            .unwrap();
+        control.send(ControlMessage::DialogUp { call_id: "c-1".into() }).unwrap();
+
+        // The announce lands on gen 2's control channel…
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), other_rx.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::DialogOwnerAnnounce { call_id: "c-1".into(), generation: 1 });
+        // …and the DialogTable learned the owner.
+        assert_eq!(core.dialogs.owner("c-1"), Some(1));
+
+        control.send(ControlMessage::DialogDown { call_id: "c-1".into() }).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), other_rx.control_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::DialogOwnerGone { call_id: "c-1".into() });
+        assert_eq!(core.dialogs.owner("c-1"), None);
+
+        // MirrorSnapshot arrives on Hello (after UdpBind messages — there
+        // are none configured, so it is the first frame the worker sees).
+        let _ = worker_rx.control_rx.recv(); // drain whatever ordering yields
+        // (Hello-time snapshot was empty — dialogs owned by gen 1 are not
+        // mirrored to gen 1; nothing more to assert here.)
+    }
+
+    /// Relay frames from the worker's data channel are routed by the hub:
+    /// RelayToDialog → DialogTable → other gen's data channel.
+    #[tokio::test]
+    async fn relay_to_dialog_frame_flows_through_pump() {
+        let core = SupCore::new(
+            ConfigSubset::default(),
+            Path::new("/tmp/x.toml"),
+            Path::new("/tmp/x.sock"),
+            HashMap::new(),
+        )
+        .expect("sup core");
+        // Dialog owner gen 3.
+        let (ca, cb) = socketpair_std().unwrap();
+        let (da, db) = socketpair_std().unwrap();
+        let mut owner_rx = handle_for_end(ca, da, 64).unwrap();
+        let owner_tx = handle_for_end(cb, db, 64).unwrap();
+        core.dialogs.upsert("cid-relay", 3).unwrap();
+        {
+            let mut st = core.state.lock().await;
+            st.gens.insert(3, Generation {
+                rtp: RtpSlice { start: 0, end: 0 },
+                state: GenState::Active,
+                link: Some(Arc::new(GenLink {
+                    generation: 3,
+                    control: owner_tx.control_tx.clone(),
+                    data: owner_tx.data.clone(),
+                    accepting: AtomicBool::new(true),
+                })),
+                pid: None,
+                active_dialogs: 0,
+                adopted: false,
+            });
+        }
+        // The conn-owner gen 1 relays an in-dialog message. Same end
+        // discipline: drive the pump from the opposite handle's senders.
+        let (ca2, cb2) = socketpair_std().unwrap();
+        let (da2, db2) = socketpair_std().unwrap();
+        let worker_rx = handle_for_end(ca2, da2, 64).unwrap();
+        let worker_tx = handle_for_end(cb2, db2, 64).unwrap();
+        spawn_worker_pump(core.clone(), Some(1), worker_tx, None);
+        let data = worker_rx.data.clone();
+        let sip = b"BYE sip:u@d SIP/2.0\r\nCall-ID: cid-relay\r\n\r\n";
+        let frame = rustpbx_master_ipc::frame::encode_datagram(
+            rustpbx_master_ipc::frame::FrameKind::RelayToDialog,
+            rustpbx_master_ipc::ConnKind::Ws.as_u8() as u16,
+            &"198.51.100.5:40000".parse().unwrap(),
+            sip,
+        );
+        assert!(data.send(frame));
+
+        let df = tokio::time::timeout(std::time::Duration::from_secs(5), owner_rx.data_rx.recv())
+            .await.expect("timeout").expect("closed");
+        assert_eq!(df.kind, rustpbx_master_ipc::frame::FrameKind::RelayDeliver);
+        assert_eq!(
+            rustpbx_master_ipc::frame::unpack_conn_kind(df.listener_id),
+            Some(rustpbx_master_ipc::ConnKind::Ws)
+        );
+        assert_eq!(df.datagram, sip);
+        assert_eq!(core.relay_stats.to_dialog_routed.load(Ordering::Relaxed), 1);
+    }
 }

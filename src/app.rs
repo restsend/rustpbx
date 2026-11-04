@@ -105,6 +105,11 @@ pub struct AppStateInner {
     /// SSE pipeline terminates. `None` when the outbound module is disabled.
     /// Created once at startup — changing `max_concurrent` requires a restart.
     pub outbound_limiter: Option<Arc<tokio::sync::Semaphore>>,
+    /// Worker-mode cross-gen SIP relay + connection reporter. `Some` only in
+    /// `--master` worker processes; filled by `master_link::start_worker_mode`,
+    /// inert until then. Consumed by ws.rs (ConnUp/Down + inbound scan) and
+    /// `DialogTargetLocator` (outbound virtual-conn interception).
+    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -121,6 +126,8 @@ pub struct AppStateBuilder {
     /// Worker mode (`--master`): HTTP/HTTPS are served from fds forwarded by
     /// the master process; do not bind public HTTP listeners here.
     pub no_http_bind: bool,
+    /// Cross-gen relay handle for worker mode (see `AppStateInner.worker_relay`).
+    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
     pub extra_addons: Arc<Vec<Arc<dyn crate::addons::Addon>>>,
 }
 
@@ -238,6 +245,7 @@ impl AppStateBuilder {
             skip_sip_bind: false,
             skip_migrate: false,
             no_http_bind: false,
+            worker_relay: None,
             extra_addons: Arc::new(Vec::new()),
         }
     }
@@ -260,6 +268,13 @@ impl AppStateBuilder {
     /// Worker mode: serve HTTP from master-forwarded fds instead of binding.
     pub fn with_no_http_bind(mut self) -> Self {
         self.no_http_bind = true;
+        self
+    }
+
+    /// Worker mode: inject the cross-gen relay handle (created before the
+    /// app state exists so the endpoint's target locator can hold it).
+    pub fn with_worker_relay(mut self, relay: Arc<crate::master_link::WorkerRelay>) -> Self {
+        self.worker_relay = Some(relay);
         self
     }
 
@@ -704,6 +719,7 @@ impl AppStateBuilder {
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
             cluster_config: std::sync::RwLock::new(config.cluster.clone()),
+            worker_relay: self.worker_relay.clone(),
             outbound_limiter: config
                 .outbound
                 .as_ref()
@@ -1045,12 +1061,20 @@ pub fn with_ws_routes(state: &AppState, mut router: Router) -> Router {
         );
         let endpoint_ref = state.sip_server().inner.endpoint.inner.clone();
         let token = state.token().clone();
+        let worker_relay = state.worker_relay.clone();
         router = router.route(
             ws_handler,
             axum::routing::get(
                 async move |client_ip: ClientAddr, ws: WebSocketUpgrade| -> Response {
                     ws.protocols(["sip"]).on_upgrade(async move |socket| {
-                        sip_ws_handler(token, client_ip, socket, endpoint_ref.clone()).await
+                        sip_ws_handler(
+                            token,
+                            client_ip,
+                            socket,
+                            endpoint_ref.clone(),
+                            worker_relay.clone(),
+                        )
+                        .await
                     })
                 },
             ),

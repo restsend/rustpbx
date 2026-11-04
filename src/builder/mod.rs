@@ -453,7 +453,8 @@ impl AppBuilder {
                 if worker_mode {
                     state_builder = state_builder
                         .with_skip_sip_bind()
-                        .with_no_http_bind();
+                        .with_no_http_bind()
+                        .with_worker_relay(crate::master_link::WorkerRelay::new());
                 }
                 // The master hands each generation a disjoint RTP slice; it
                 // wins over the config file so two generations never share
@@ -547,12 +548,17 @@ impl AppBuilder {
                                 // (run() skips it in worker mode to avoid a
                                 // duplicate-route panic).
                                 let router = crate::app::with_ws_routes(&state, router);
+                                let relay = state
+                                    .worker_relay
+                                    .clone()
+                                    .unwrap_or_else(crate::master_link::WorkerRelay::new);
                                 crate::master_link::start_worker_mode(
                                     link,
                                     cli.worker_gen,
                                     cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock").into(),
                                     state.clone(),
                                     router.clone(),
+                                    relay,
                                 );
                                 router
                             }

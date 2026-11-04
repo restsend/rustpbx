@@ -1,6 +1,7 @@
 pub mod access;
 pub mod admin;
 pub mod config;
+pub mod conn_table;
 pub mod dialogs;
 pub mod admin_client;
 pub mod ipc_server;

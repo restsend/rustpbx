@@ -29,6 +29,19 @@ pub struct MasterSubset {
     pub drain_timeout_secs: Option<u64>,
     /// Dialog-table hard cap (OOM protection; over cap = reject + counter).
     pub max_dialog_entries: Option<usize>,
+    /// Conn-table hard cap (worker-reported live SIP connections).
+    pub max_conn_entries: Option<usize>,
+    /// ConnTable entry TTL (seconds): a worker that stops refreshing (crash
+    /// without ConnDown) has its entries reclaimed on the next touch.
+    pub conn_ttl_secs: Option<u64>,
+    /// Accept-time fd routing for SIP TCP: sniff the first message's
+    /// Call-ID and route to the generation owning that dialog (parity with
+    /// the UDP path). Default on.
+    pub tcp_callid_sniff: Option<bool>,
+    /// When no routing information applies (flip window `current = None`),
+    /// forward new connections to the most-active generation instead of
+    /// dropping them. Default on.
+    pub tcp_fallback: Option<bool>,
 }
 
 impl MasterSubset {
@@ -44,6 +57,25 @@ impl MasterSubset {
     /// Drain window on SIGTERM before the master exits with live generations.
     pub fn drain_timeout_secs(&self) -> u64 {
         self.drain_timeout_secs.unwrap_or(30)
+    }
+
+    /// Default 200k conn entries (~a few tens of MB).
+    pub fn max_conn_entries(&self) -> usize {
+        self.max_conn_entries.unwrap_or(200_000)
+    }
+
+    /// Default 10 minutes: worker ConnUp reports are refreshed implicitly by
+    /// liveness (ConnDown on close); the TTL only reaps crashed workers.
+    pub fn conn_ttl_secs(&self) -> u64 {
+        self.conn_ttl_secs.unwrap_or(600)
+    }
+
+    pub fn tcp_callid_sniff(&self) -> bool {
+        self.tcp_callid_sniff.unwrap_or(true)
+    }
+
+    pub fn tcp_fallback(&self) -> bool {
+        self.tcp_fallback.unwrap_or(true)
     }
 }
 

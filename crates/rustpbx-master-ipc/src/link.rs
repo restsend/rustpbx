@@ -198,7 +198,20 @@ pub fn handle_for_end(
             match control_recv_with_fds(&mut cr) {
                 Ok((payload, fds)) => match decode_control(&payload) {
                     Ok(msg) => { if ctx.blocking_send(ControlFrame { msg, fds }).is_err() { break; } }
-                    Err(e) => { tracing::error!("bad control frame: {e}"); break; }
+                    // Rolling upgrades: a NEWER peer sends control variants this
+                    // side doesn't know. The length-prefixed stream stays
+                    // aligned — skip the frame instead of killing the link
+                    // (an unknown variant must never look like a dead peer).
+                    Err(e) => {
+                        if !fds.is_empty() {
+                            // fds arrived with an undecodable message: close
+                            // them so they don't leak (they were dup'd by
+                            // recvmsg either way).
+                            drop(fds);
+                        }
+                        tracing::debug!("skipping unsupported control frame: {e}");
+                        continue;
+                    }
                 },
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -366,6 +379,29 @@ mod tests {
         hb.control_tx.send(ControlMessage::Hello { generation: 1, pid: 2, version: "t".into() }).unwrap();
         let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ha.control_rx.recv()).await.expect("timeout").expect("closed");
         assert!(matches!(frame.msg, ControlMessage::Hello { generation: 1, .. }));
+    }
+
+    /// Rolling upgrades: an undecodable control frame (unknown variant from a
+    /// newer peer) must NOT kill the reader thread — the link survives and
+    /// the next known frame flows.
+    #[tokio::test]
+    async fn unknown_control_variant_skipped_not_fatal() {
+        use std::io::Write as _;
+        let (ca, mut cb) = socketpair_std().unwrap();
+        let (da, db) = socketpair_std().unwrap();
+        drop(db); // data end unused
+        let mut ha = handle_for_end(ca, da, 16).unwrap();
+        // Write a length-prefixed JSON payload with an unknown variant
+        // directly on the wire (bypassing the typed sender), followed by a
+        // known frame.
+        let bad = br#"{"BrandNewVariantFromTheFuture": {"x": 1}}"#;
+        cb.write_all(&((bad.len() as u32).to_be_bytes())).unwrap();
+        cb.write_all(bad).unwrap();
+        cb.write_all(&encode_control(&ControlMessage::Ready).unwrap()).unwrap();
+        drop(cb); // close the write end so the reader thread (and channel) terminate
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ha.control_rx.recv()).await.expect("timeout").expect("closed");
+        assert_eq!(frame.msg, ControlMessage::Ready);
+        assert!(ha.control_rx.recv().await.is_none(), "no further frames expected");
     }
 
     #[tokio::test]

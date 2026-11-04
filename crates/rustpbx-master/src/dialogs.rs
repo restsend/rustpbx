@@ -71,6 +71,16 @@ impl DialogTable {
     pub fn len(&self) -> usize { self.map.len() }
     pub fn is_empty(&self) -> bool { self.map.is_empty() }
 
+    /// Full snapshot of `(call_id, generation)` pairs — feeds the
+    /// `MirrorSnapshot` pushed to workers on (re)connect so each worker
+    /// knows which OTHER generation owns which dialog (relay decisions).
+    pub fn entries_snapshot(&self) -> Vec<(String, u32)> {
+        self.map
+            .iter()
+            .map(|e| (e.key().clone(), e.value().generation))
+            .collect()
+    }
+
     pub fn purge_generation(&self, generation: u32) -> usize {
         let before = self.map.len();
         self.map.retain(|_, e| e.generation != generation);

@@ -238,6 +238,9 @@ pub struct SipServerBuilder {
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
     session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
+    /// Worker-mode cross-gen relay handle (None outside worker processes).
+    /// Handed to `DialogTargetLocator` for outbound virtual-conn interception.
+    worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
 }
 
 impl SipServerBuilder {
@@ -284,7 +287,16 @@ impl SipServerBuilder {
             cluster_config: None,
             trunk_health: None,
             session_hooks: Vec::new(),
+            worker_relay: None,
         }
+    }
+
+    pub fn with_worker_relay(
+        mut self,
+        relay: Option<Arc<crate::master_link::WorkerRelay>>,
+    ) -> Self {
+        self.worker_relay = relay;
+        self
     }
 
     pub fn with_cluster_peers(mut self, peers: Vec<SocketAddr>) -> Self {
@@ -1018,6 +1030,7 @@ impl SipServerBuilder {
                 locator.clone(),
                 locator_local_addrs,
                 cluster_enabled,
+                self.worker_relay.clone(),
             ))
             .with_transport_inspector(TransportInspectorLocator::new(
                 locator.clone(),
