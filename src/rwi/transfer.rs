@@ -315,10 +315,14 @@ impl TransferController {
             .await
             .ok_or_else(|| ReferTransferResult::InternalError("Call not found".to_string()))?;
 
-        // The transfer command targets the session's caller leg. RWI identifies
-        // calls by their session id (`tx.call_id`), but SipSession legs are
-        // named "caller"/"callee" — passing the call_id as the leg_id would make
-        // `handle_transfer` fail at `require_leg`. The transferee is the caller leg.
+        // RWI identifies calls by their session id (`tx.call_id`), but
+        // SipSession legs are named "caller"/"callee" — passing the call_id
+        // as the leg_id would make `handle_transfer` fail at `require_leg`.
+        // The leg_id here is only a positional hint: on CC-attributed
+        // sessions the role-aware intercept ignores it entirely — standard
+        // REFER semantics: the agent transferor exits, its bridge PEER is
+        // handed to the target. Non-CC sessions keep the legacy
+        // caller-anchored path.
         let leg_id = LegId::new("caller");
         handle
             .send_command(CallCommand::Transfer {

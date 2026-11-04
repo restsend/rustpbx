@@ -3756,7 +3756,27 @@ struct OutboundTransferFixture {
     customer_dialog: DialogId,
 }
 
+/// The transfer command the fixture issues, so the peer-handoff outcome can
+/// be asserted across every emitter vocabulary: the CC API command, and the
+/// positional `CallCommand::Transfer` hints RWI (`"caller"`) and the console
+/// adapter (`"callee"`) send.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutboundTransferCommand {
+    /// CC API `BlindTransferCustomer`.
+    CustomerApi,
+    /// RWI `call.transfer` hard-codes the positional hint `"caller"`.
+    RwiCallerLeg,
+    /// The console adapter hard-codes the positional hint `"callee"`.
+    ConsoleCalleeLeg,
+}
+
 async fn outbound_transfer_fixture() -> OutboundTransferFixture {
+    outbound_transfer_fixture_with(OutboundTransferCommand::CustomerApi).await
+}
+
+async fn outbound_transfer_fixture_with(
+    command: OutboundTransferCommand,
+) -> OutboundTransferFixture {
     use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
     use crate::config::MediaProxyMode;
     use crate::media::leg::{LegConfig, LegInner};
@@ -3843,18 +3863,50 @@ async fn outbound_transfer_fixture() -> OutboundTransferFixture {
     remote.accept();
     session.legs.set_media_leg(&customer, customer_peer);
     session.callee_event_tx = Some(callee_tx);
-    let result = session
-        .execute_command(
-            CallCommand::BlindTransferCustomer {
-                target: "sip:target@127.0.0.1:5099".into(),
-                headers: HashMap::new(),
-                application_only: false,
-                completion: None,
-            },
-            Some(&mut callee_states),
-        )
-        .await;
-    assert!(result.success, "{:?}", result.message);
+    let result = match command {
+        OutboundTransferCommand::CustomerApi => {
+            session
+                .execute_command(
+                    CallCommand::BlindTransferCustomer {
+                        target: "sip:target@127.0.0.1:5099".into(),
+                        headers: HashMap::new(),
+                        application_only: false,
+                        completion: None,
+                    },
+                    Some(&mut callee_states),
+                )
+                .await
+        }
+        OutboundTransferCommand::RwiCallerLeg => {
+            session
+                .execute_command(
+                    CallCommand::Transfer {
+                        leg_id: LegId::from("caller"),
+                        target: "sip:target@127.0.0.1:5099".into(),
+                        attended: false,
+                    },
+                    Some(&mut callee_states),
+                )
+                .await
+        }
+        OutboundTransferCommand::ConsoleCalleeLeg => {
+            session
+                .execute_command(
+                    CallCommand::Transfer {
+                        leg_id: LegId::from("callee"),
+                        target: "sip:target@127.0.0.1:5099".into(),
+                        attended: false,
+                    },
+                    Some(&mut callee_states),
+                )
+                .await
+        }
+    };
+    assert!(
+        result.success,
+        "{command:?} transfer must succeed: {:?}",
+        result.message
+    );
     let target = session
         .legs
         .iter()
@@ -4119,6 +4171,83 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
             assert_eq!(session.legs.get(&target).unwrap().state, LegState::Ended);
         }
     }
+}
+
+/// RWI `call.transfer` hard-codes the positional hint `leg_id = "caller"`.
+/// On an agent-DIALED call the caller IS the agent (the transferor), so the
+/// legacy slot-anchored B2BUA path used to hang up the CUSTOMER and
+/// re-INVITE the agent onto the target — inverting the transfer. The
+/// role-aware intercept must produce the CC API outcome: the transferor is
+/// released and its PEER keeps talking to the target.
+#[tokio::test]
+async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
+    let OutboundTransferFixture {
+        mut session,
+        target,
+        customer_dialog,
+        agent_states: _agent_states,
+        callee_states: _callee_states,
+    } = outbound_transfer_fixture_with(OutboundTransferCommand::RwiCallerLeg).await;
+    let _guard = session.cancel_token.clone().drop_guard();
+    let caller = LegId::from("caller");
+    let customer = LegId::from("callee");
+    assert!(
+        !session.legs.contains_key(&caller),
+        "transferor (agent on the caller leg) must be released"
+    );
+    assert!(
+        session.legs.contains_key(&customer),
+        "the transferor's peer must survive"
+    );
+    assert!(
+        !session.pending_hangup.contains(&customer_dialog),
+        "peer dialog must never receive a BYE"
+    );
+    assert!(session.legs.contains_key(&target), "target leg must be up");
+    assert_eq!(
+        session.legs.get(&target).unwrap().source_leg.as_ref(),
+        Some(&customer),
+        "target must be anchored on the transferor's peer, not the transferor"
+    );
+    assert!(session.meta.transferred, "session must be marked transferred");
+}
+
+/// The console adapter maps `Transfer` to the positional hint
+/// `leg_id = "callee"`, which `resolve_transfer_leg` remaps to the caller's
+/// peer — the CUSTOMER on an agent-dialed call. The legacy path therefore
+/// retired the customer; the role-aware intercept must produce the same
+/// peer-handoff outcome as the CC API path.
+#[tokio::test]
+async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
+    let OutboundTransferFixture {
+        mut session,
+        target,
+        customer_dialog,
+        agent_states: _agent_states,
+        callee_states: _callee_states,
+    } = outbound_transfer_fixture_with(OutboundTransferCommand::ConsoleCalleeLeg).await;
+    let _guard = session.cancel_token.clone().drop_guard();
+    let caller = LegId::from("caller");
+    let customer = LegId::from("callee");
+    assert!(
+        !session.legs.contains_key(&caller),
+        "transferor (agent on the caller leg) must be released"
+    );
+    assert!(
+        session.legs.contains_key(&customer),
+        "the transferor's peer must survive"
+    );
+    assert!(
+        !session.pending_hangup.contains(&customer_dialog),
+        "peer dialog must never receive a BYE"
+    );
+    assert!(session.legs.contains_key(&target), "target leg must be up");
+    assert_eq!(
+        session.legs.get(&target).unwrap().source_leg.as_ref(),
+        Some(&customer),
+        "target must be anchored on the transferor's peer, not the transferor"
+    );
+    assert!(session.meta.transferred, "session must be marked transferred");
 }
 
 /// Same hand-off with the QUEUE-DISPATCHED agent shape: the agent dials into
