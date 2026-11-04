@@ -200,6 +200,18 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Override the built-in WebRTC ICE servers endpoint (browser discovery of
+    /// STUN/TURN configuration, including short-lived TURN REST credentials).
+    ///
+    /// The returned router must register exactly one path, taken from
+    /// `[proxy].ice_servers_path` (default [`crate::config::DEFAULT_ICE_SERVERS_PATH`]).
+    /// When an override exists, core's own static-config handler is skipped
+    /// for that path; the override handler decides its own fallback behavior.
+    /// Only the first non-None result across all enabled addons is used.
+    fn ice_servers_route(&self, _state: AppState) -> Option<Router> {
+        None
+    }
+
     /// Return Sidebar menu items
     fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {
         vec![]

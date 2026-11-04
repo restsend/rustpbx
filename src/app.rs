@@ -1334,12 +1334,19 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/config/phone",
             get(phone_config_handler).with_state(state.clone()),
-        )
-        .route(
+        );
+    // An enabled addon may take over the ICE servers endpoint; when it does,
+    // the addon's router registers the same configured path and core's static
+    // handler is skipped entirely.
+    if let Some(ice_route) = state.addon_registry.get_ice_servers_route(state.clone()) {
+        router = router.merge(ice_route);
+    } else {
+        router = router.route(
             &ice_servers_path,
             get(iceservers_handler).with_state(state.config().clone()),
-        )
-        .merge(state.addon_registry.get_routers(state.clone()));
+        );
+    }
+    router = router.merge(state.addon_registry.get_routers(state.clone()));
     for (addon_id, dir) in state.addon_registry.get_static_mounts(state.config()) {
         let mount_path = format!("{}/{}", static_path, addon_id);
         router = router.nest_service(&mount_path, ServeDir::new(dir));

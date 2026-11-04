@@ -148,6 +148,20 @@ impl AddonRegistry {
         router
     }
 
+    /// The first enabled addon that overrides the ICE servers endpoint, if any.
+    pub fn get_ice_servers_route(&self, state: AppState) -> Option<axum::Router> {
+        let config = state.config();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(r) = addon.ice_servers_route(state.clone()) {
+                return Some(r);
+            }
+        }
+        None
+    }
+
     /// Collect AMI-relative routes from enabled addons (merged under AMI auth).
     pub fn get_ami_routes(&self, state: AppState) -> axum::Router<AppState> {
         let config = state.config();
