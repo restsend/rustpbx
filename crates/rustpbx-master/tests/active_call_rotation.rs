@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Active-call rotation e2e: a REAL rustpbx worker serves a REAL sipbot
 //! call (`sips:echo@probe.rustpbx.com`, answered by a sipbot echo callee).
 //! Mid-call we rotate to a new generation and assert the call survives:

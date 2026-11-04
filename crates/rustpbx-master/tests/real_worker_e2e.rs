@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Real-process e2e: in-process master + real `rustpbx` worker binary +
 //! system `sipbot`-grade raw SIP clients. Verifies:
 //!   1. worker boots under the master and flips to Active

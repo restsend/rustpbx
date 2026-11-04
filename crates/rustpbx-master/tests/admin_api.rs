@@ -79,6 +79,7 @@ fn ok_of(v: &Value) -> Option<bool> {
     v.get("ok").and_then(|x| x.as_bool())
 }
 
+#[cfg(target_os = "linux")] // Release validation requires an ELF worker binary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn admin_status_test_reload_flow() {
     let env = setup_env("admin-flow");

@@ -365,7 +365,7 @@ impl SupCore {
     // Inherited copies of the IPC socketpair keep the control channel "open"
     // after the master dies (the worker never sees EOF → never reconnects),
     // and inherited public-listener fds block the next master's binds.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         // SAFETY: runs in the forked child before exec — only close() is
         // called, which is async-signal-safe. Without this, the worker

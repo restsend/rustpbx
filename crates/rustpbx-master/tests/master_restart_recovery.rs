@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Master-restart recovery e2e: a REAL `rustpbx-master` daemon supervises a
 //! REAL rustpbx worker. The master is SIGKILLed; a fresh master starts on
 //! the same paths. The worker must SURVIVE (same pid), reconnect, and be

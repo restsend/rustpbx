@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Two concurrent calls on two different worker generations:
 //!
 //!  1. gen1 active; echo1 registered (serve #1)
