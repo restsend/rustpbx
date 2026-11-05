@@ -582,6 +582,7 @@ impl AppStateBuilder {
                 let mut builder = SipServerBuilder::new(proxy_config.clone())
                     .with_cluster_config(config.cluster.clone())
                     .with_cluster_peers(cluster_peers)
+                    .with_worker_relay(self.worker_relay.clone())
                     .with_cancel_token(core.token.child_token())
                     .with_callrecord_sender(core.callrecord_sender.clone())
                     .with_rtp_config(config.rtp_config())

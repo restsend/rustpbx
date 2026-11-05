@@ -134,6 +134,7 @@ async fn create_test_server_with_dependencies(
             .with_registration_guard(locator.clone(), locator_event_lock.clone()),
     );
     let server_inner = Arc::new(SipServerInner {
+        worker_relay: None,
         http_client: reqwest::Client::new(),
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         sip_contact_config: ArcSwap::new(Arc::new(SipContactConfig::default())),

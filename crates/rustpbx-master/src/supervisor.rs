@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::debug;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(25);
@@ -708,6 +709,11 @@ impl SupCore {
     /// `call_id` (workers keep the mirror to make relay-vs-local decisions).
     pub async fn broadcast_dialog_announce(&self, owner: u32, call_id: &str) {
         let links = self.other_links(owner).await;
+        if links.is_empty() {
+            debug!(owner, %call_id, "broadcast announce: no other live generations");
+            return;
+        }
+        debug!(owner, %call_id, targets = links.len(), "broadcast announce");
         for (_, control) in links {
             let _ = control.send(ControlMessage::DialogOwnerAnnounce {
                 call_id: call_id.to_string(),

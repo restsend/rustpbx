@@ -52,6 +52,14 @@ fn transport_of_conn_kind(kind: ConnKind) -> Transport {
     }
 }
 
+/// The wire Call-ID portion of a rsipstack DialogId string
+/// (`{call_id}-{local_tag}-{remote_tag}`): everything before the first `-`.
+/// Same rule as the master's `wire_call_id` — the master's DialogTable and
+/// this mirror must derive IDENTICAL bare keys or relay decisions diverge.
+fn wire_call_id_of(dialog_id: &str) -> Option<&str> {
+    dialog_id.split_once('-').map(|(c, _)| c)
+}
+
 /// Injection path into a REAL connection this worker owns (conn-owner side
 /// of the relay): a relayed message from another generation is delivered to
 /// the client through the connection's own write path.
@@ -213,22 +221,57 @@ impl WorkerRelay {
         kind: ConnKind,
         peer: SocketAddr,
     ) -> bool {
+        let Some(live) = self.live() else { return false };
         let Some(call_id) = msg.call_id_header().ok().map(|c| c.value().to_string()) else {
+            debug!(%peer, ?kind, "relay scan: message without Call-ID — local");
             return false;
         };
-        if self.foreign_dialog_owner(&call_id).is_none() {
+        let owner = self.foreign_dialog_owner(&call_id);
+        debug!(%call_id, %peer, ?kind, owner = ?owner, me = live.generation, mirror = live.mirror.len(), "relay scan decision");
+        let Some(owner) = owner else {
             return false;
-        }
+        };
         let raw = msg.to_string();
         if self.relay_inbound(kind, peer, raw.as_bytes()) {
-            debug!(%call_id, %peer, ?kind, "relayed in-dialog message to dialog-owner generation");
+            debug!(%call_id, %peer, ?kind, owner_gen = owner, "relayed in-dialog message to dialog-owner generation");
             true
         } else {
+            warn!(%call_id, %peer, ?kind, "relay inbound: data writer unavailable");
             false
         }
     }
 
-    // ── outbound interception (DialogTargetLocator) ──
+    // ── outbound interception (DialogTargetLocator / session dispatch) ──
+
+    /// Make a resolved destination dialable across generations. For a
+    /// stream-transport destination with no LOCAL real connection, create
+    /// the virtual relay connection (idempotent; the real-conn case is
+    /// detected inside and skipped). UDP and non-worker modes are untouched.
+    ///
+    /// Called from two seams: `DialogTargetLocator::locate` (locator-driven
+    /// sends) and the session dispatch sites that pre-set
+    /// `InviteOption.destination` (which SHORT-CIRCUITS `resolve_target_uri`
+    /// and therefore never consults the locator — session.rs).
+    pub async fn ensure_dialable(&self, dest: &SipAddr) {
+        use rsipstack::sip::transport::Transport;
+        let Some(transport) = dest.r#type else { return };
+        let kind = match transport {
+            Transport::Tcp => ConnKind::SipTcp,
+            Transport::Tls => ConnKind::SipTls,
+            Transport::Ws => ConnKind::Ws,
+            Transport::Wss => ConnKind::Wss,
+            _ => return,
+        };
+        // Registered destinations carry the client's ip:port; a domain host
+        // is not a relayable flow (real remote server — rsipstack dials it).
+        let peer = match &dest.addr.host {
+            rsipstack::sip::Host::IpAddr(ip) => {
+                SocketAddr::new(*ip, dest.addr.port.map(|p| p.0).unwrap_or(0))
+            }
+            _ => return,
+        };
+        self.ensure_virtual_conn(kind, peer).await;
+    }
 
     /// Ensure a virtual relay connection to `(kind, peer)` exists in the
     /// local transport layer so rsipstack lookups find it. No-op when the
@@ -297,22 +340,50 @@ impl WorkerRelay {
 
     // ── master → worker handlers (run_link pumps) ──
 
+    /// Pre-announce a dialog being dispatched: report it to the master's
+    /// DialogTable BEFORE the INVITE hits the wire. The reporter loop polls
+    /// `dialog_layer` at 1s cadence — an echo-fast callee answers within
+    /// milliseconds, and its response arrives at the conn-owner generation
+    /// before the announce does; the conn-owner scan would then miss the
+    /// mirror and drop the response locally. Pre-announcing closes that
+    /// window at the dispatch site (the dialog id is authoritative — if the
+    /// leg dies pre-answer, DialogDown cleans it up).
+    pub fn preannounce_dialog(&self, call_id: &str) {
+        let Some(live) = self.live() else { return };
+        if let Some(control) = live.writers.control() {
+            let _ = control.send(ControlMessage::DialogUp { call_id: call_id.to_string() });
+        }
+    }
+
     fn apply_mirror_announce(&self, call_id: String, generation: u32) {
         let Some(live) = self.live() else { return };
         if generation == live.generation {
             live.mirror.remove(&call_id);
+            if let Some(bare) = wire_call_id_of(&call_id) {
+                live.mirror.remove(bare);
+            }
             return;
         }
         if live.mirror.len() >= live.mirror_cap {
             warn!("dialog-owner mirror hit its cap — clearing (MirrorSnapshot repopulates)");
             live.mirror.clear();
         }
-        live.mirror.insert(call_id, generation);
+        // Dual-key, mirroring the master's DialogTable: announcements carry
+        // the full DialogId (`callid-local-remote`) but the bridge scan looks
+        // up the BARE wire Call-ID — both must resolve to the owner gen.
+        live.mirror.insert(call_id.clone(), generation);
+        if let Some(bare) = wire_call_id_of(&call_id) {
+            live.mirror.insert(bare.to_string(), generation);
+        }
+        debug!(%call_id, %generation, size = live.mirror.len(), me = live.generation, "mirror announce applied");
     }
 
     fn apply_mirror_gone(&self, call_id: &str) {
         let Some(live) = self.live() else { return };
         live.mirror.remove(call_id);
+        if let Some(bare) = wire_call_id_of(call_id) {
+            live.mirror.remove(bare);
+        }
     }
 
     fn apply_mirror_snapshot(&self, entries: Vec<(String, u32)>) {
@@ -334,7 +405,9 @@ impl WorkerRelay {
         let Some(live) = self.live() else { return };
         let key = (kind.as_u8(), peer);
         if let Some(rw) = live.real_writes.get(&key) {
-            if rw.inject(data) {
+            let injected = rw.inject(data);
+            debug!(%peer, ?kind, injected, bytes = data.len(), "relay deliver: real-conn injection");
+            if injected {
                 return;
             }
             // injection failed (conn is dying) — fall through; the virtual
@@ -855,34 +928,45 @@ async fn run_link(
                     // Same semantics as SIGTERM drain: reject new calls, wait
                     // for active dialogs to finish — but do NOT cancel the
                     // runtime token; the master sends Stop when it has seen
-                    // Drained. Runs inline: while draining we deliberately
-                    // stop consuming other control messages.
+                    // Drained.
+                    //
+                    // The wait runs in a SEPARATE task: this pump must keep
+                    // consuming control messages during the drain — the
+                    // cross-gen relay depends on it (DialogOwnerAnnounce /
+                    // ConnClosed for live dialogs still flowing through a
+                    // draining generation). The old inline wait starved the
+                    // pump for the whole drain window and with it every
+                    // relayed response (observed as caller 408 in the e2e).
                     let first = crate::shutdown::initiate();
                     let timeout = state_ctrl.config().graceful_shutdown_timeout();
-                    let sip = state_ctrl.sip_server();
+                    let state_drain = state_ctrl.clone();
+                    let writers_drain = writers.clone();
                     if first {
-                        let active_calls = sip.inner.active_call_registry.count();
+                        let active_calls = state_drain.sip_server().inner.active_call_registry.count();
                         tracing::info!(
                             ?timeout,
                             active_calls,
                             "draining: rejecting new calls, waiting for dialogs to end"
                         );
                     }
-                    let outcome = crate::shutdown::wait_until_drained(
-                        || {
-                            sip.inner.active_call_registry.count() == 0
-                                && !sip.inner.dialog_layer.all_dialog_ids().iter().any(|id| {
-                                    matches!(
-                                        sip.inner.dialog_layer.get_dialog_with(id),
-                                        Some(rsipstack::dialog::dialog::Dialog::Invite(_))
-                                    )
-                                })
-                        },
-                        timeout,
-                    )
-                    .await;
-                    crate::shutdown::log_drain_outcome(outcome);
-                    let _ = writers.control().map(|c| c.send(ControlMessage::Drained));
+                    tokio::spawn(async move {
+                        let sip = state_drain.sip_server().clone();
+                        let outcome = crate::shutdown::wait_until_drained(
+                            || {
+                                sip.inner.active_call_registry.count() == 0
+                                    && !sip.inner.dialog_layer.all_dialog_ids().iter().any(|id| {
+                                        matches!(
+                                            sip.inner.dialog_layer.get_dialog_with(id),
+                                            Some(rsipstack::dialog::dialog::Dialog::Invite(_))
+                                        )
+                                    })
+                            },
+                            timeout,
+                        )
+                        .await;
+                        crate::shutdown::log_drain_outcome(outcome);
+                        let _ = writers_drain.control().map(|c| c.send(ControlMessage::Drained));
+                    });
                 }
                 ControlMessage::Stop { .. } => {
                     tracing::info!("master requested stop");
@@ -949,11 +1033,18 @@ async fn bridge_sip_stream<S>(
     };
     let (to_sip_tx, to_sip_rx) = tokio::sync::mpsc::unbounded_channel();
     let (from_sip_tx, mut from_sip_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Per-flow cancel token — REQUIRED, not optional: rsipstack's dialog
+    // affinity (`resolve_affinity_connection`) treats a connection whose
+    // token is cancelled as dead and falls back to a fresh transport-layer
+    // lookup (where the cross-gen virtual relay connection lives). Without
+    // a token, a dead bridge flow keeps winning affinity and in-dialog
+    // sends die with 503 instead of riding the relay.
+    let bridge_token = CancellationToken::new();
     let conn = match ChannelConnection::create_connection(
         to_sip_rx,
         from_sip_tx,
         sip_addr.clone(),
-        None,
+        Some(bridge_token.clone()),
     )
     .await
     {
@@ -1030,8 +1121,9 @@ async fn bridge_sip_stream<S>(
         }
     }
 
-    // ── teardown: registration first, then drop the channel senders so the
-    // serve loop exits and the transport layer emits Closed (locator unbind).
+    // ── teardown: registration first, then kill the flow token (affinity
+    // dead-marking + serve-loop exit) and drop the channel senders so the
+    // transport layer emits Closed (locator unbind).
     if let Some(r) = relay.as_ref() {
         r.unregister_real_write(kind, peer);
         if let Some(id) = conn_id {
@@ -1039,6 +1131,7 @@ async fn bridge_sip_stream<S>(
         }
     }
     endpoint.transport_layer.remove_connection(&sip_connection);
+    bridge_token.cancel();
     drop(to_sip_tx);
     out_pump.abort();
     writer_task.abort();
@@ -1377,9 +1470,18 @@ mod relay_tests {
         // Another generation owns the dialog → foreign.
         relay.apply_mirror_announce("call-a".into(), 2);
         assert_eq!(relay.foreign_dialog_owner("call-a"), Some(2));
+        // Dual key: the announcement's full DialogId must ALSO resolve by its
+        // bare wire Call-ID (the bridge scan looks up wire Call-IDs). Bare key
+        // rule = everything before the FIRST '-' (same as the master's
+        // wire_call_id).
+        relay.apply_mirror_announce("dlg-abc-123-456".into(), 2);
+        assert_eq!(relay.foreign_dialog_owner("dlg-abc-123-456"), Some(2));
+        assert_eq!(relay.foreign_dialog_owner("dlg"), Some(2));
         // Own generation entries are NOT stored (decisions are local).
         relay.apply_mirror_announce("call-b".into(), 1);
         assert_eq!(relay.foreign_dialog_owner("call-b"), None);
+        relay.apply_mirror_announce("dlg-b-x-y".into(), 1);
+        assert_eq!(relay.foreign_dialog_owner("dlg-b"), None);
         // Snapshot replaces the mirror wholesale and drops self entries.
         relay.apply_mirror_snapshot(vec![
             ("call-a".into(), 2),
@@ -1387,9 +1489,17 @@ mod relay_tests {
         ]);
         assert_eq!(relay.foreign_dialog_owner("call-a"), Some(2));
         assert_eq!(relay.foreign_dialog_owner("call-mine"), None);
-        // Gone removes.
-        relay.apply_mirror_gone("call-a");
-        assert_eq!(relay.foreign_dialog_owner("call-a"), None);
+        // Gone removes both keys.
+        // Realistic shape: wire Call-ID without inner '-', tags appended.
+        let full = "8d9b263f@restsend.com-KtaL-VTy".to_string();
+        relay.apply_mirror_announce(full.clone(), 2);
+        assert_eq!(
+            relay.foreign_dialog_owner("8d9b263f@restsend.com"),
+            Some(2)
+        );
+        relay.apply_mirror_gone(&full);
+        assert_eq!(relay.foreign_dialog_owner(full.as_str()), None);
+        assert_eq!(relay.foreign_dialog_owner("8d9b263f@restsend.com"), None);
     }
 
     /// The relay scan decision must NEVER relay when the message carries no

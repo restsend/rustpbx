@@ -151,6 +151,9 @@ pub struct SipServerInner {
     /// Backend selected by `[cluster].session_registry_backend`; no-op when
     /// cluster is not configured.
     pub session_registry: crate::call::runtime::SessionRegistryRef,
+    /// Worker-mode cross-gen relay (None outside worker processes). Session
+    /// dispatch consults it before pre-setting `InviteOption.destination`.
+    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
     /// Keeps the owning node's sessions alive (single batch update per tick).
     pub session_registry_heartbeat: Option<crate::call::runtime::NodeHeartbeat>,
     /// Trunk health check states (populated by trunk_health background loop).
@@ -1325,6 +1328,7 @@ impl SipServerBuilder {
             cluster_self_addr,
             session_registry,
             session_registry_heartbeat,
+            worker_relay: self.worker_relay.clone(),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
             contact_username: self

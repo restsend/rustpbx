@@ -440,30 +440,13 @@ impl DialogTargetLocator {
         }) as Box<dyn TargetLocator>
     }
 
-    /// Worker mode: make the destination dialable across generations. For a
-    /// stream-transport destination with no LOCAL real connection, create
-    /// the virtual relay connection (idempotent; the real-conn case is
-    /// detected inside and skipped). UDP and non-worker modes are untouched.
+    /// Worker mode: make the destination dialable across generations
+    /// (delegates to the relay's shared seam — also invoked from the session
+    /// dispatch sites which short-circuit this locator entirely).
     async fn ensure_dialable_cross_gen(&self, dest: &SipAddr) {
-        use rsipstack::sip::transport::Transport;
-        let Some(relay) = &self.worker_relay else { return };
-        let Some(transport) = dest.r#type else { return };
-        let kind = match transport {
-            Transport::Tcp => rustpbx_master_ipc::ConnKind::SipTcp,
-            Transport::Tls => rustpbx_master_ipc::ConnKind::SipTls,
-            Transport::Ws => rustpbx_master_ipc::ConnKind::Ws,
-            Transport::Wss => rustpbx_master_ipc::ConnKind::Wss,
-            _ => return,
-        };
-        // Registered destinations carry the client's ip:port; a domain host
-        // is not a relayable flow (real remote server — rsipstack dials it).
-        let peer = match &dest.addr.host {
-            rsipstack::sip::Host::IpAddr(ip) => {
-                SocketAddr::new(*ip, dest.addr.port.map(|p| p.0).unwrap_or(0))
-            }
-            _ => return,
-        };
-        relay.ensure_virtual_conn(kind, peer).await;
+        if let Some(relay) = &self.worker_relay {
+            relay.ensure_dialable(dest).await;
+        }
     }
 
     fn is_local_home_proxy(&self, home_proxy: &SipAddr) -> bool {

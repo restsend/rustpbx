@@ -18,6 +18,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Full-table sweeps are throttled to one per this many lookups: the
+/// per-entry TTL check already returns `None` for expired entries on every
+/// lookup, so the sweep only reclaims memory and must never put an O(entries)
+/// walk on the relay hot path.
+const SWEEP_INTERVAL: u64 = 1024;
+
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub ups: AtomicU64,
@@ -39,6 +45,7 @@ pub struct ConnTable {
     max: usize,
     ttl: Duration,
     metrics: Arc<Metrics>,
+    lookups: AtomicU64,
 }
 
 impl ConnTable {
@@ -49,6 +56,7 @@ impl ConnTable {
             max,
             ttl,
             metrics,
+            lookups: AtomicU64::new(0),
         }
     }
 
@@ -83,16 +91,27 @@ impl ConnTable {
         self.metrics.ups.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Affinity/relay lookup; refreshes the timestamp on hit.
+    /// Affinity/relay lookup. The per-entry TTL check returns `None` for
+    /// expired entries immediately; the full-table sweep is throttled
+    /// (see [`SWEEP_INTERVAL`]) so the hot path stays O(1).
     pub fn owner(&self, kind: ConnKind, peer: &SocketAddr) -> Option<u32> {
         let mut map = self.lock_map();
-        self.sweep_locked(&mut map);
+        let n = self.lookups.fetch_add(1, Ordering::Relaxed);
+        if n % SWEEP_INTERVAL == 0 {
+            self.sweep_locked(&mut map);
+        }
         let entry = map.get_mut(&(kind.as_u8(), *peer))?;
         if entry.seen.elapsed() > self.ttl {
             return None;
         }
         entry.seen = Instant::now();
         Some(entry.generation)
+    }
+
+    /// Force a full-table TTL sweep (tests and admin paths).
+    pub fn sweep_now(&self) {
+        let mut map = self.lock_map();
+        self.sweep_locked(&mut map);
     }
 
     /// Evict by the worker-minted conn_id; returns the evicted key so the
@@ -230,10 +249,13 @@ mod tests {
     }
 
     #[test]
-    fn ttl_expiry_sweeps_on_touch() {
+    fn ttl_expiry_returns_none_and_sweep_reclaims() {
         let t = ConnTable::new(100, Duration::from_millis(0), Arc::new(Metrics::default()));
         t.upsert(ConnKind::Ws, peer(1), 1, 1);
+        // The per-entry TTL check answers None immediately (O(1) hot path)…
         assert_eq!(t.owner(ConnKind::Ws, &peer(1)), None);
+        // …while the (throttled) sweep reclaims the memory.
+        t.sweep_now();
         assert_eq!(t.len(), 0, "sweep must reclaim expired entries");
     }
 
