@@ -72,6 +72,7 @@ tests/bench/
 !scripts/run_full_regression.sh
 todo_lists/
 recordings/
+records/
 e2e-artifacts/
 e2e-screenshots/
 tests/logs/
