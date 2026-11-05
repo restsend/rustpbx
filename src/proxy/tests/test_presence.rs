@@ -339,7 +339,7 @@ async fn test_presence_publish_away_custom_detail_legacy() {
 async fn test_presence_publish_bodyless_renewal() {
     use crate::proxy::cluster_event::EventSource;
     use crate::proxy::presence::PresenceState;
-    use rsipstack::sip::{SipMessage, StatusCode};
+    use rsipstack::sip::StatusCode;
 
     let (server, config) = create_test_server().await;
     let manager = server.presence_manager.clone();
@@ -391,8 +391,7 @@ async fn test_presence_publish_bodyless_renewal() {
             "rustpbx.com",
             Some(300),
         );
-        let (mut tx, endpoint) = create_transaction(request).await;
-        let key = tx.key.clone();
+        let (mut tx, _) = create_transaction(request).await;
         module
             .on_transaction_begin(
                 CancellationToken::new(),
@@ -401,11 +400,8 @@ async fn test_presence_publish_bodyless_renewal() {
             )
             .await
             .unwrap();
-        let finished = endpoint.finished_transactions.get(&key).unwrap();
-        assert!(
-            matches!(finished.as_ref(), Some(SipMessage::Response(r))
-            if r.status_code == StatusCode::OK)
-        );
+        let response = tx.last_response.as_ref().expect("PUBLISH must send a response");
+        assert_eq!(response.status_code, StatusCode::OK);
         let after = manager.get_state("bob");
         assert_eq!(after.status, before.status);
         assert_eq!(after.note, before.note);
@@ -447,8 +443,7 @@ async fn test_presence_publish_bodyless_renewal() {
             "rustpbx.com",
             Some(300),
         );
-        let (mut tx, endpoint) = create_transaction(request).await;
-        let key = tx.key.clone();
+        let (mut tx, _) = create_transaction(request).await;
         module
             .on_transaction_begin(
                 CancellationToken::new(),
@@ -457,11 +452,8 @@ async fn test_presence_publish_bodyless_renewal() {
             )
             .await
             .unwrap();
-        let finished = endpoint.finished_transactions.get(&key).unwrap();
-        assert!(
-            matches!(finished.as_ref(), Some(SipMessage::Response(r))
-            if r.status_code == StatusCode::ConditionalRequestFailed)
-        );
+        let response = tx.last_response.as_ref().expect("PUBLISH must send a response");
+        assert_eq!(response.status_code, StatusCode::ConditionalRequestFailed);
         let after = manager.get_state("bob");
         assert_eq!(after.status, status);
         assert_eq!(after.expires_at, expiry);

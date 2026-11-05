@@ -301,14 +301,14 @@ action = { type = "hangup" }
 async fn test_step_ivr_next_failure_emits_call_error_and_cdr_trace() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
-    // Provider mock: every protocol endpoint fails with 500.
+    // Admit the session so this test reaches /step and exercises its error path.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = Router::new()
         .route("/step", post(mock_provider_error))
-        .route("/fail", post(mock_provider_error))
-        .route("/start", post(mock_provider_error))
-        .route("/end", post(mock_provider_error));
+        .route("/step/fail", post(mock_provider_error))
+        .route("/step/start", post(|| async { StatusCode::OK }))
+        .route("/step/end", post(|| async { StatusCode::OK }));
     let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let capture = WebhookCapture::start().await;

@@ -316,7 +316,7 @@ pub fn create_test_request(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
-    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method: method.clone() };
 
     // Create contact with the same user and host
     let contact_uri = rsipstack::sip::Uri {
@@ -460,7 +460,7 @@ pub fn create_proxy_auth_request_with_nonce(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
-    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method: method.clone() };
 
     // Create contact with the same user and host
     let contact_uri = rsipstack::sip::Uri {

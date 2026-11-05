@@ -14,12 +14,12 @@ use rustpbx::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRul
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
 use crate::common::rtp_utils::RtpReceiver;
 use crate::common::test_helpers::make_sdp;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use crate::common::wait::wait_for_value;
 
 const CALLER_SESSION_ATTR: &str = "a=x-caller-tag:abc123";
 const CALLER_MEDIA_ATTR: &str = "a=x-media-flag:on";
@@ -139,7 +139,6 @@ async fn run_trunk_call(
     carrier.start().await?;
 
     let alice = Arc::new(server.create_ua("alice").await?);
-    sleep(Duration::from_millis(200)).await;
 
     let caller_receiver = RtpReceiver::bind(0).await?;
     let carrier_receiver = RtpReceiver::bind(0).await?;
@@ -150,40 +149,35 @@ async fn run_trunk_call(
         async move { a.make_call("5100123456", Some(sdp)).await }
     });
 
-    let mut carrier_invite_sdp = None;
-    for _ in 0..50 {
-        let events = carrier.process_dialog_events().await?;
-        for event in events {
-            if let TestUaEvent::IncomingCall(id, sdp) = event {
-                carrier_invite_sdp = sdp.clone();
-                carrier
-                    .answer_call(
-                        &id,
-                        Some(carrier_sdp_with_custom_attr(carrier_receiver.port()?)),
-                    )
-                    .await?;
-                break;
-            }
+    let (carrier_dialog_id, carrier_invite_sdp) = wait_for_value(Duration::from_secs(5), || async {
+        match carrier.process_dialog_events().await {
+            Ok(events) => events.into_iter().find_map(|event| match event {
+                TestUaEvent::IncomingCall(id, sdp) => Some(Ok((id, sdp))),
+                _ => None,
+            }),
+            Err(error) => Some(Err(error)),
         }
-        if carrier_invite_sdp.is_some() {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    let carrier_invite_sdp = carrier_invite_sdp.expect("carrier should receive the forwarded call");
+    })
+    .await
+    .expect("carrier should receive the forwarded call")?;
+    let carrier_invite_sdp = carrier_invite_sdp.expect("forwarded call should contain SDP");
+    carrier
+        .answer_call(
+            &carrier_dialog_id,
+            Some(carrier_sdp_with_custom_attr(carrier_receiver.port()?)),
+        )
+        .await?;
 
     // Wait for the 200 OK to reach the caller.
-    let mut caller_answer_sdp = None;
-    if let Ok(Ok(Ok(dialog_id))) = tokio::time::timeout(Duration::from_secs(5), caller).await {
-        for _ in 0..20 {
-            if let Some(sdp) = alice.get_negotiated_answer_sdp(&dialog_id).await {
-                caller_answer_sdp = Some(sdp);
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        alice.hangup(&dialog_id).await.ok();
-    }
+    let dialog_id = tokio::time::timeout(Duration::from_secs(5), caller).await???;
+    let caller_answer_sdp = Some(
+        wait_for_value(Duration::from_secs(2), || {
+            alice.get_negotiated_answer_sdp(&dialog_id)
+        })
+        .await
+        .expect("caller should receive the 200 OK answer"),
+    );
+    alice.hangup(&dialog_id).await?;
 
     server.stop();
     Ok(CallOutcome {

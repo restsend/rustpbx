@@ -6627,16 +6627,15 @@ async fn test_step_provider_start_total_deadline_stops_without_step() {
     tokio::time::pause();
     let paused_at = tokio::time::Instant::now();
     tokio::time::advance(Duration::from_secs(10)).await;
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        context
-            .get_var(IVR_LAST_ERROR_KEY)
-            .unwrap()
-            .contains("timed out")
-    );
-    assert!(tokio::time::Instant::now() - paused_at <= Duration::from_secs(10));
+    // Let the timer driver and HTTP task process the elapsed deadline. A fixed
+    // yield count can finish before the timeout's timer tick has been serviced.
+    let error = crate::proxy::tests::wait::wait_for_value(Duration::from_millis(100), || async {
+        context.get_var(IVR_LAST_ERROR_KEY)
+    })
+    .await
+    .expect("IVR should process the elapsed startup deadline");
+    assert!(error.contains("timed out"), "unexpected startup error: {error}");
+    assert!(tokio::time::Instant::now() - paused_at <= Duration::from_millis(10_100));
     tokio::time::resume();
     finish_startup_fallback(stack).await;
     assert_eq!(

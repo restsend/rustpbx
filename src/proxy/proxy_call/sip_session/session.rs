@@ -3719,7 +3719,7 @@ impl SipSession {
         let response = self
             .send_mid_dialog_request_to_side(
                 target_side,
-                method,
+                method.clone(),
                 headers,
                 Some(offer_body.as_bytes().to_vec()),
             )

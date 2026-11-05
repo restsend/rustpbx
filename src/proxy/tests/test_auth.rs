@@ -691,7 +691,7 @@ fn create_sip_request(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new("test-call-id");
-    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method: method.clone() };
 
     let mut request = rsipstack::sip::Request {
         method,

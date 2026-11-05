@@ -21,7 +21,7 @@ use crate::proxy::presence::{
     MwiSubscriber, PresenceManager, PresenceModule, PresenceState, PresenceStatus, Subscriber,
 };
 use rsipstack::dialog::DialogId;
-use rsipstack::sip::{SipMessage, StatusCode, Uri};
+use rsipstack::sip::{StatusCode, Uri};
 use rsipstack::transaction::key::TransactionRole;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -350,7 +350,7 @@ async fn module_initial_subscribe_sends_ok_for_created_dialog() {
     let (server, config) = create_test_server().await;
     let manager = server.presence_manager.clone();
     let module = PresenceModule::create(server, config).unwrap();
-    let (mut tx, endpoint) = create_transaction(subscribe_to(
+    let (mut tx, _) = create_transaction(subscribe_to(
         "alice",
         "bob",
         "rustpbx.com",
@@ -358,7 +358,6 @@ async fn module_initial_subscribe_sends_ok_for_created_dialog() {
         "presence",
     ))
     .await;
-    let key = tx.key.clone();
 
     module
         .on_transaction_begin(
@@ -369,14 +368,8 @@ async fn module_initial_subscribe_sends_ok_for_created_dialog() {
         .await
         .unwrap();
 
-    let finished = endpoint
-        .finished_transactions
-        .get(&key)
-        .expect("initial SUBSCRIBE must finish with a response");
-    let response = match finished.as_ref() {
-        Some(SipMessage::Response(response)) => response,
-        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
-    };
+    let response = tx.last_response.as_ref()
+        .expect("initial SUBSCRIBE must send a response");
     assert_eq!(response.status_code, StatusCode::OK);
     let response_dialog = DialogId::try_from((response, TransactionRole::Server)).unwrap();
     let subscription = manager.get_subscribers("bob");
@@ -392,7 +385,7 @@ async fn module_subscribe_200_ok_echoes_granted_expires() {
     let (server, config) = create_test_server().await;
     let manager = server.presence_manager.clone();
     let module = PresenceModule::create(server, config).unwrap();
-    let (mut tx, endpoint) = create_transaction(subscribe_to(
+    let (mut tx, _) = create_transaction(subscribe_to(
         "alice",
         "bob",
         "rustpbx.com",
@@ -400,7 +393,6 @@ async fn module_subscribe_200_ok_echoes_granted_expires() {
         "presence",
     ))
     .await;
-    let key = tx.key.clone();
 
     module
         .on_transaction_begin(
@@ -411,14 +403,8 @@ async fn module_subscribe_200_ok_echoes_granted_expires() {
         .await
         .unwrap();
 
-    let finished = endpoint
-        .finished_transactions
-        .get(&key)
-        .expect("initial SUBSCRIBE must finish with a response");
-    let response = match finished.as_ref() {
-        Some(SipMessage::Response(response)) => response,
-        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
-    };
+    let response = tx.last_response.as_ref()
+        .expect("initial SUBSCRIBE must send a response");
     assert_eq!(response.status_code, StatusCode::OK);
     let echoed = response
         .headers
@@ -453,7 +439,7 @@ async fn module_subscribe_expires_capped_by_max_subscription_expires() {
     let (server, config) = create_test_server_with_config(cfg).await;
     let manager = server.presence_manager.clone();
     let module = PresenceModule::create(server, config).unwrap();
-    let (mut tx, endpoint) = create_transaction(subscribe_to(
+    let (mut tx, _) = create_transaction(subscribe_to(
         "alice",
         "bob",
         "rustpbx.com",
@@ -461,7 +447,6 @@ async fn module_subscribe_expires_capped_by_max_subscription_expires() {
         "presence",
     ))
     .await;
-    let key = tx.key.clone();
 
     module
         .on_transaction_begin(
@@ -472,14 +457,8 @@ async fn module_subscribe_expires_capped_by_max_subscription_expires() {
         .await
         .unwrap();
 
-    let finished = endpoint
-        .finished_transactions
-        .get(&key)
-        .expect("initial SUBSCRIBE must finish with a response");
-    let response = match finished.as_ref() {
-        Some(SipMessage::Response(response)) => response,
-        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
-    };
+    let response = tx.last_response.as_ref()
+        .expect("initial SUBSCRIBE must send a response");
     assert_eq!(response.status_code, StatusCode::OK);
     let echoed = response
         .headers

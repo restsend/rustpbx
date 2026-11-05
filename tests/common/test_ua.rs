@@ -1187,7 +1187,7 @@ impl TestUa {
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                _ => return Err(anyhow!("Dialog does not support {} request", method)),
+                (other, _) => return Err(anyhow!("Dialog does not support {} request", other)),
             };
 
             let sdp_answer = if let Some(r) = resp {
