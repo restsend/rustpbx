@@ -9,7 +9,6 @@ use std::time::Duration;
 use rustpbx_media::audio_source::ToneAudioSource;
 use rustpbx_media::ingress_stall::{IngressStallEvent, IngressStallKind};
 use rustpbx_media::leg::{Leg, LegConfig, LegInner};
-use rustrtc::sdp::SdpType;
 
 /// Hand-rolled 20ms PCMU frame (v=2, pt=0) — fed straight into the leg's
 /// RTP transport receive path (`feed_packet`), i.e. a true INBOUND packet
@@ -67,7 +66,7 @@ async fn pair(
     let phone = LegInner::new("phone", phone_cfg, None).unwrap();
     let offer = peer.create_offer().await.unwrap();
     let answer = phone.answer(&offer).await.unwrap();
-    peer.apply_sdp(&answer, SdpType::Answer).await.unwrap();
+    peer.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
     peer.accept();
     phone.accept();
     let rx = peer.subscribe_ingress_stall();

@@ -2620,7 +2620,7 @@ impl SipSession {
                             warn!(session_id = %self.id, "Failed to generate UAC offer for callee leg");
                         }
                     }
-                    if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
+                    if let Err(e) = leg.apply_remote_sdp(&sdp, rustrtc::SdpType::Answer).await {
                         warn!(session_id = %self.id, error = %e, "Failed to apply callee SDP to MediaBridge B leg");
                     }
                 }
@@ -2870,7 +2870,7 @@ impl SipSession {
         // this leg. The final response must still apply its SDP
         // as `Answer` to promote the same peer connection; do not replace or
         // reject the leg merely because early media negotiated it first.
-        if let Err(e) = leg.apply_sdp(answer, rustrtc::SdpType::Answer).await {
+        if let Err(e) = leg.apply_remote_sdp(answer, rustrtc::SdpType::Answer).await {
             // The SIP dialog is already confirmed. If media negotiation cannot
             // complete, terminate it here rather than relying on Drop (which
             // cannot await a BYE transaction).
@@ -4413,7 +4413,7 @@ impl SipSession {
                         self.legs.set_transport(leg_id.clone(), mode);
                         peer
                     };
-                    let answer = peer.apply_sdp(&offer_sdp, rustrtc::SdpType::Offer).await?;
+                    let answer = peer.answer(&offer_sdp).await?;
                     peer.accept();
                     self.legs.set_answer(leg_id.clone(), answer.clone());
                     Ok::<_, anyhow::Error>(MediaNegotiator::align_answer_direction_with_offer(
@@ -5690,7 +5690,7 @@ impl SipSession {
                 ));
             }
             let answer = String::from_utf8_lossy(response.body()).into_owned();
-            peer.apply_sdp(&answer, rustrtc::SdpType::Answer).await?;
+            peer.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await?;
             peer.accept();
             self.legs.set_media_leg(leg, peer);
             self.legs.set_transport(leg.clone(), mode);
@@ -7316,7 +7316,7 @@ impl SipSession {
         let prepared = async {
             let leg = crate::media::create_leg(caller_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
             let answer = leg
-                .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
+                .answer(&caller_offer)
                 .await?;
             Ok::<_, anyhow::Error>((leg, answer))
         }
@@ -9896,7 +9896,7 @@ impl SipSession {
     async fn accept_leg_answer(peer: &crate::media::leg::Leg, sdp: &str) -> Result<()> {
         match peer.pc().signaling_state() {
             rustrtc::SignalingState::HaveLocalOffer => {
-                peer.apply_sdp(sdp, rustrtc::SdpType::Answer).await?;
+                peer.apply_remote_sdp(sdp, rustrtc::SdpType::Answer).await?;
             }
             // The dial task applies the final answer before publishing
             // LegConnected so an immediate re-INVITE sees Stable state.
@@ -11363,7 +11363,7 @@ impl SipSession {
                                 ));
                             }
                             caller_peer
-                                .apply_sdp(
+                                .apply_remote_sdp(
                                     &String::from_utf8_lossy(response.body()),
                                     rustrtc::SdpType::Answer,
                                 )
@@ -13458,7 +13458,7 @@ impl SipSession {
                                 if !body.is_empty() {
                                     info!(session_id = %session_id, %leg_id, "SIP leg early media (183)");
                                     let sdp = String::from_utf8_lossy(body).to_string();
-                                    if let Err(error) = peer.apply_sdp(&sdp, rustrtc::SdpType::Pranswer).await {
+                                    if let Err(error) = peer.apply_remote_sdp(&sdp, rustrtc::SdpType::Pranswer).await {
                                         warn!(%leg_id, %error, "Failed to apply early media SDP");
                                     }
                                 }

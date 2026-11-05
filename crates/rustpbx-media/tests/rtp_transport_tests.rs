@@ -2230,7 +2230,7 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
     h.mb.accept(LegSide::A).await;
 
     // The session's re-INVITE answer changes the A leg's negotiated codec to
-    // PCMA. In the real flow this answer is built outside `Leg::apply_sdp` and
+    // PCMA. In the real flow this answer is built outside `Leg::answer` and
     // surfaced onto the media-bridge leg via `apply_profile_from_sdp`.
     let pcma_answer_sdp = concat!(
         "v=0\r\n",

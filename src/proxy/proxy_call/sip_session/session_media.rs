@@ -289,7 +289,7 @@ impl SipSession {
             .set_local_description(target_offer)
             .map_err(|error| anyhow!("failed to commit opposite-leg video offer: {error}"))?;
         target_leg
-            .apply_sdp(&peer_answer_sdp, rustrtc::SdpType::Answer)
+            .apply_remote_sdp(&peer_answer_sdp, rustrtc::SdpType::Answer)
             .await?;
         target_leg.refresh_observer();
 
@@ -723,7 +723,7 @@ impl SipSession {
                     let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
                     if let Some(callee_leg) = mb.leg(LegSide::B) {
                         let sdp_type = callee_sdp_type;
-                        callee_leg.apply_sdp(callee_sdp_value, sdp_type).await?;
+                        callee_leg.apply_remote_sdp(callee_sdp_value, sdp_type).await?;
                     }
 
                     // Keep the actual sender, egress codec, bridge profile and
@@ -861,7 +861,7 @@ impl SipSession {
         let callee_sdp = Some(callee_sdp_value);
         let caller_answer = if self.media_profile.path == MediaPathMode::Anchored {
             if let Some(peer) = self.media_leg(&LegId::from("callee")) {
-                peer.apply_sdp(callee_sdp.as_deref().unwrap(), callee_sdp_type)
+                peer.apply_remote_sdp(callee_sdp.as_deref().unwrap(), callee_sdp_type)
                     .await?;
             }
             self.ensure_caller_leg().await?;

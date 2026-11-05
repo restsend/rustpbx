@@ -813,11 +813,9 @@ impl LegInner {
         Ok(sdp)
     }
 
-    /// Apply a remote SDP (offer or answer) and return the local SDP to send
-    /// back (an answer when `sdp_type == Offer`, or empty when applying an
-    /// answer as UAC). Also extracts and stores the negotiated profile and
-    /// refreshes the egress codec + DTMF payload types.
-    pub async fn apply_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<String> {
+    /// Apply the peer's SDP. Answers update the negotiated RTP profile.
+    /// Offers leave the local answer to prepare_answer and commit_local_answer.
+    pub async fn apply_remote_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
         debug!(
             session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id,
@@ -831,8 +829,8 @@ impl LegInner {
         if let Some(addr) = advertised_audio_addr(&desc) {
             *self.peer_advertised_addr.lock() = Some(addr);
         }
-        self.pc
-            .set_remote_description(desc)
+        // Keep rustrtc's large negotiation future off the nested SIP call stack.
+        Box::pin(self.pc.set_remote_description(desc))
             .await
             .map_err(|e| anyhow!("set_remote_description failed: {}", e))?;
         // Direct RTP has a transport now; WebRTC may still be waiting for ICE.
@@ -859,35 +857,22 @@ impl LegInner {
             }
         }
 
-        let local_sdp = if sdp_type == SdpType::Offer {
-            // rustrtc gathering pattern: the first create_answer primes ICE
-            // gathering; wait for candidates, then the second includes them.
-            // RTP mode returns instantly; WebRTC/SRTP need the wait.
-            let _ = self.pc.create_answer().await?;
-            self.pc.wait_for_gathering_complete().await;
-            let mut answer = self.pc.create_answer().await?;
-            answer.sdp_type = SdpType::Answer;
-            let local = set_local(&self.pc, answer)?;
-            if let Some(desc) = self.pc.local_description()
-                && let Some(addr) = advertised_audio_addr(&desc)
-            {
-                *self.advertised_addr.lock() = Some(addr);
-            }
-            local
-        } else {
-            // Applying a remote answer (UAC): no local SDP to emit.
-            String::new()
-        };
+        if sdp_type != SdpType::Offer {
+            self.sync_answer_profile(remote, remote).await?;
+        }
+        Ok(())
+    }
 
-        // R1 fix: sync the sender's codec/PT to the negotiated answer.
-        // Extract the profile from the answer SDP: the local answer we just
-        // produced (as UAS), or the remote answer we applied (as UAC).
-        let profile_sdp = if local_sdp.is_empty() {
-            remote
-        } else {
-            local_sdp.as_str()
-        };
-        let profile = negotiate::MediaNegotiator::extract_leg_profile(profile_sdp);
+    /// Build a draft answer to the applied remote offer, ready for editing.
+    pub async fn prepare_answer(&self) -> Result<SessionDescription> {
+        // The first create_answer starts ICE gathering. The second includes its candidates.
+        let _ = self.pc.create_answer().await?;
+        self.pc.wait_for_gathering_complete().await;
+        Ok(self.pc.create_answer().await?)
+    }
+
+    async fn sync_answer_profile(&self, answer: &str, remote: &str) -> Result<()> {
+        let profile = negotiate::MediaNegotiator::extract_leg_profile(answer);
 
         self.sync_negotiated_profile(&profile).await?;
 
@@ -903,12 +888,14 @@ impl LegInner {
             self.tap.set_dtmf_payload_types(all_pts);
         }
 
-        Ok(local_sdp)
+        Ok(())
     }
 
     /// Convenience: apply a remote offer and produce an answer.
     pub async fn answer(&self, remote_offer: &str) -> Result<String> {
-        self.apply_sdp(remote_offer, SdpType::Offer).await
+        self.apply_remote_sdp(remote_offer, SdpType::Offer).await?;
+        let answer = self.prepare_answer().await?;
+        self.commit_local_answer(&answer.to_sdp_string(), SdpType::Answer).await
     }
 
     async fn sync_negotiated_profile(&self, profile: &NegotiatedLegProfile) -> Result<()> {
@@ -1240,8 +1227,22 @@ impl LegInner {
         self.inband_dtmf.lock().generation
     }
 
+    /// Commit the SIP answer after codec and direction selection, then use it for RTP.
+    pub async fn commit_local_answer(&self, sdp: &str, kind: SdpType) -> Result<String> {
+        let answer = set_local(&self.pc, SessionDescription::parse(kind, sdp)?)?;
+        if let Some(desc) = self.pc.local_description()
+            && let Some(addr) = advertised_audio_addr(&desc)
+        {
+            *self.advertised_addr.lock() = Some(addr);
+        }
+        self.refresh_observer();
+        let remote = self.pc.remote_description().map(|desc| desc.to_sdp_string()).unwrap_or_default();
+        self.sync_answer_profile(&answer, &remote).await?;
+        Ok(answer)
+    }
+
     /// Update the leg's negotiated profile and sender from an SDP built outside
-    /// [`Self::apply_sdp`], including peer-selected initial answers and
+    /// [`Self::answer`], including peer-selected initial answers and
     /// re-INVITEs. Keeps `MediaBridge::bridge()` and egress in sync with the
     /// SDP returned to the remote peer.
     pub async fn apply_profile_from_sdp(&self, sdp: &str) -> Result<()> {
@@ -2545,7 +2546,7 @@ mod tests {
         let relay_b = LegInner::new("callee", &cfg, None).unwrap();
         let offer = relay_a.create_offer().await.unwrap();
         let answer = relay_b.answer(&offer).await.unwrap();
-        relay_a.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        relay_a.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
         relay_a.set_egress_source(EgressSource::RewriteRelay {
             peer_pc: relay_b.pc().clone(), options: Default::default(), rules: Vec::new(),
             video_payload_types: Vec::new(), on_arm_failed: None,
@@ -2845,7 +2846,7 @@ mod tests {
             a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n";
 
         let answer = leg
-            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .answer(&offer)
             .await
             .expect("leg answers video offer");
         assert!(
@@ -2950,7 +2951,7 @@ mod tests {
             a=fmtp:101 0-16\r\n";
 
         let _answer = leg
-            .apply_sdp(offer, SdpType::Offer)
+            .answer(offer)
             .await
             .expect("leg answers baresip/sipbot offer");
 
@@ -2963,7 +2964,7 @@ mod tests {
         tap.on_ingress(&pkt, addr);
         let ev = rx
             .try_recv()
-            .expect("DTMF on offered PT 101 must be detected after apply_sdp");
+            .expect("DTMF on offered PT 101 must be detected after answer");
         assert_eq!(ev.digit, '5');
 
         leg.stop();
@@ -2987,11 +2988,10 @@ mod p24_uac_test {
         let answer = format!(
             "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
         );
-        let local = leg
-            .apply_sdp(&answer, SdpType::Answer)
+        leg
+            .apply_remote_sdp(&answer, SdpType::Answer)
             .await
             .expect("apply answer");
-        assert!(local.is_empty());
         let p = leg.negotiated().expect("negotiated profile");
         assert!(
             p.audio.is_some(),
@@ -3116,7 +3116,7 @@ mod ice_lite_tests {
             a=rtpmap:101 telephone-event/8000\r\n\
             a=sendrecv\r\n";
         let answer = leg
-            .apply_sdp(remote_offer, SdpType::Offer)
+            .answer(remote_offer)
             .await
             .expect("apply offer");
         assert!(
@@ -3164,7 +3164,7 @@ mod ice_lite_tests {
             a=candidate:1 1 UDP 2130706431 127.0.0.1 4002 typ host\r\n\
             a=sendrecv\r\n";
         let answer = leg
-            .apply_sdp(remote_offer, SdpType::Offer)
+            .answer(remote_offer)
             .await
             .expect("apply offer");
         for attr in ["a=ice-lite", "a=ice-ufrag", "a=ice-pwd", "a=candidate", "a=crypto"] {
@@ -3204,7 +3204,7 @@ mod ice_lite_tests {
             a=rtpmap:0 PCMU/8000\r\n\
             a=sendrecv\r\n";
         let answer = leg
-            .apply_sdp(remote_offer, SdpType::Offer)
+            .answer(remote_offer)
             .await
             .expect("apply offer");
         assert!(

@@ -3264,7 +3264,7 @@ async fn playable_bridge_with_peer(
         .unwrap();
     let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
-    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+    la.apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .expect("apply answer");
     mb
@@ -7185,7 +7185,7 @@ async fn ingress_stalled_fires_once_per_leg_when_media_stops_after_flowing() {
     let offer = caller.create_offer().await.unwrap();
     let answer = phone.answer(&offer).await.unwrap();
     caller
-        .apply_sdp(&answer, rustrtc::sdp::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::sdp::SdpType::Answer)
         .await
         .unwrap();
     caller.accept();

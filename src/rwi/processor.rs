@@ -1694,10 +1694,7 @@ impl RwiCommandProcessor {
                                                 let early_media = match session.media.bridge.as_ref().and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
                                                 {
                                                     Some(leg) => leg
-                                                        .apply_sdp(
-                                                            &sdp,
-                                                            rustrtc::SdpType::Pranswer,
-                                                        )
+                                                        .apply_remote_sdp(&sdp, rustrtc::SdpType::Pranswer)
                                                         .await,
                                                     None => Err(anyhow::anyhow!(
                                                         "Originate caller MediaBridge A leg is missing"

@@ -1596,7 +1596,7 @@ impl SipSession {
         // callee offer so `prepare_callee_media_offer` creates a
         // fresh B leg (with its own local offer) instead of reusing
         // the previous callee's offer/leg, which would break
-        // apply_sdp(answer) for the transferred-to endpoint.
+        // apply_remote_sdp(answer, Answer) for the transferred-to endpoint.
         self.media.callee_offer = None;
         self.media.callee_offer_cached_webrtc = None;
         let caller = from_user
@@ -3081,7 +3081,7 @@ impl SipSession {
         let pcm_ended_rx = Some(end_rx);
 
         // MediaBridge legs are authoritative for app-anchored calls because
-        // apply_sdp() stores the actual negotiated codec/PT/DTMF profile there.
+        // Answer negotiation stores the actual negotiated codec/PT/DTMF profile there.
         // Keep the session SDP caches as a fallback for legacy peer paths.
         let negotiated_profile = leg.negotiated()
             .or_else(|| {

@@ -2446,8 +2446,8 @@ mod tests {
                         if enabled {
                             let remote = LegInner::new("remote", &leg_config, None).unwrap();
                             let offer = leg.create_offer().await.unwrap();
-                            let answer = remote.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
-                            leg.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+                            let answer = remote.answer(&offer).await.unwrap();
+                            leg.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
                             let local_sender = leg.pc().get_transceivers()[0].sender().unwrap();
                             let remote_sender = remote.pc().get_transceivers()[0].sender().unwrap();
                             let mut rtcp = remote_sender.subscribe_rtcp();
@@ -2692,8 +2692,8 @@ mod tests {
             let peer = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
             let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
             let offer = peer.create_offer().await.unwrap();
-            let answer = remote.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
-            peer.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+            let answer = remote.answer(&offer).await.unwrap();
+            peer.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
             peer.accept();
             remote.accept();
             peers.push(peer);
@@ -2786,7 +2786,6 @@ mod tests {
 
     #[tokio::test]
     async fn rtp_legs_negotiate_and_bridge_fastpath() {
-        use rustrtc::SdpType;
 
         // Two RTP legs negotiate UAC/UAS-style SDP with each other (no DTLS),
         // then the bridge activates the same-codec fast-path relay.
@@ -2796,10 +2795,10 @@ mod tests {
 
         let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
-            .apply_sdp(&a_offer, SdpType::Offer)
+            .answer(&a_offer)
             .await
             .expect("b answers a");
-        a.apply_sdp(&b_answer, SdpType::Answer)
+        a.apply_remote_sdp(&b_answer, rustrtc::SdpType::Answer)
             .await
             .expect("a applies answer");
 
@@ -2830,7 +2829,6 @@ mod tests {
 
     #[tokio::test]
     async fn webrtc_legs_negotiate_and_bridge_fastpath() {
-        use rustrtc::SdpType;
 
         // Two WebRTC (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
         // other. Same codec (opus) → fast-path relay on both legs.
@@ -2870,10 +2868,10 @@ mod tests {
 
         let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
-            .apply_sdp(&a_offer, SdpType::Offer)
+            .answer(&a_offer)
             .await
             .expect("b answers a (webrtc)");
-        a.apply_sdp(&b_answer, SdpType::Answer)
+        a.apply_remote_sdp(&b_answer, rustrtc::SdpType::Answer)
             .await
             .expect("a applies webrtc answer");
 
@@ -2902,7 +2900,6 @@ mod tests {
     /// the RTP relay rules are still installed and both legs report fast-path.
     #[tokio::test]
     async fn webrtc_video_legs_bridge_fastpath_with_rtcp_relay() {
-        use rustrtc::SdpType;
 
         let cfg = LegConfig {
             volume_stats: Default::default(),
@@ -2940,10 +2937,10 @@ mod tests {
 
         let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
-            .apply_sdp(&a_offer, SdpType::Offer)
+            .answer(&a_offer)
             .await
             .expect("b answers a (webrtc video)");
-        a.apply_sdp(&b_answer, SdpType::Answer)
+        a.apply_remote_sdp(&b_answer, rustrtc::SdpType::Answer)
             .await
             .expect("a applies webrtc video answer");
 
@@ -2969,7 +2966,6 @@ mod tests {
 
     #[tokio::test]
     async fn webrtc_rtp_cross_transport_bridge_transcodes() {
-        use rustrtc::SdpType;
 
         // Cross-transport proxy scenario: leg A (WebRTC/opus) negotiates with
         // a WebRTC peer, leg B (RTP/PCMU) negotiates with an RTP peer, then the
@@ -3009,10 +3005,10 @@ mod tests {
         let a2 = LegInner::new("a2", &webrtc_cfg, None).unwrap();
         let a_offer = a.create_offer().await.expect("a offer");
         let a2_answer = a2
-            .apply_sdp(&a_offer, SdpType::Offer)
+            .answer(&a_offer)
             .await
             .expect("a2 answers a");
-        a.apply_sdp(&a2_answer, SdpType::Answer)
+        a.apply_remote_sdp(&a2_answer, rustrtc::SdpType::Answer)
             .await
             .expect("a applies answer");
 
@@ -3020,10 +3016,10 @@ mod tests {
         let b2 = LegInner::new("b2", &LegConfig::rtp_pcmu(), None).unwrap();
         let b_offer = b.create_offer().await.expect("b offer");
         let b2_answer = b2
-            .apply_sdp(&b_offer, SdpType::Offer)
+            .answer(&b_offer)
             .await
             .expect("b2 answers b");
-        b.apply_sdp(&b2_answer, SdpType::Answer)
+        b.apply_remote_sdp(&b2_answer, rustrtc::SdpType::Answer)
             .await
             .expect("b applies answer");
 
@@ -3064,7 +3060,6 @@ mod tests {
                     .build()
                     .expect("runtime");
                 rt.block_on(async {
-                    use rustrtc::SdpType;
 
                     let webrtc_cfg = LegConfig {
                         volume_stats: Default::default(),
@@ -3131,10 +3126,10 @@ mod tests {
                     let a2 = LegInner::new("a2", &webrtc_cfg, None).unwrap();
                     let a_offer = a.create_offer().await.expect("a offer");
                     let a2_answer = a2
-                        .apply_sdp(&a_offer, SdpType::Offer)
+                        .answer(&a_offer)
                         .await
                         .expect("a2 answers a");
-                    a.apply_sdp(&a2_answer, SdpType::Answer)
+                    a.apply_remote_sdp(&a2_answer, rustrtc::SdpType::Answer)
                         .await
                         .expect("a applies answer");
                     drop(a2);
@@ -3143,10 +3138,10 @@ mod tests {
                     let b2 = LegInner::new("b2", &rtp_opus_cfg, None).unwrap();
                     let b_offer = b.create_offer().await.expect("b offer");
                     let b2_answer = b2
-                        .apply_sdp(&b_offer, SdpType::Offer)
+                        .answer(&b_offer)
                         .await
                         .expect("b2 answers b");
-                    b.apply_sdp(&b2_answer, SdpType::Answer)
+                    b.apply_remote_sdp(&b2_answer, rustrtc::SdpType::Answer)
                         .await
                         .expect("b applies answer");
                     drop(b2);
@@ -3180,7 +3175,6 @@ mod tests {
     /// `webrtc_rtp_opus_cross_transport_uses_fast_path`).
     #[tokio::test]
     async fn fastpath_relay_does_not_block_on_unready_webrtc_transport() {
-        use rustrtc::SdpType;
 
         let webrtc_cfg = LegConfig {
             volume_stats: crate::volume_stats::VolumeStatsConfig { enabled: true },
@@ -3263,7 +3257,7 @@ mod tests {
             a=ice-pwd:ib8b\r\n\
             a=candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host\r\n";
         let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
-        a.apply_sdp(webrtc_offer, SdpType::Offer)
+        a.answer(webrtc_offer)
             .await
             .expect("a answers webrtc offer");
         assert!(
@@ -3275,10 +3269,10 @@ mod tests {
         let b2 = LegInner::new("b2", &rtp_pcmu_cfg, None).unwrap();
         let b_offer = b2.create_offer().await.expect("b2 offer");
         let b = LegInner::new("b", &rtp_pcmu_cfg, None).unwrap();
-        let b_answer = b.apply_sdp(&b_offer, SdpType::Offer)
+        let b_answer = b.answer(&b_offer)
             .await
             .expect("b answers rtp offer");
-        b2.apply_sdp(&b_answer, SdpType::Answer).await.expect("RTP peer applies answer");
+        b2.apply_remote_sdp(&b_answer, rustrtc::SdpType::Answer).await.expect("RTP peer applies answer");
         assert!(
             b.negotiated().is_some(),
             "leg B profile should be negotiated"
@@ -3405,7 +3399,6 @@ mod tests {
     /// sine tone; the stream on leg B must emit non-silence PCM.
     #[tokio::test]
     async fn leg_pcm_stream_decodes_bridged_audio() {
-        use rustrtc::SdpType;
 
         let mut mb = MediaBridge::new("pcm-stream");
         let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
@@ -3413,10 +3406,10 @@ mod tests {
 
         let a_offer = a.create_offer().await.expect("a offer");
         let b_answer = b
-            .apply_sdp(&a_offer, SdpType::Offer)
+            .answer(&a_offer)
             .await
             .expect("b answers a");
-        a.apply_sdp(&b_answer, SdpType::Answer)
+        a.apply_remote_sdp(&b_answer, rustrtc::SdpType::Answer)
             .await
             .expect("a applies answer");
 

@@ -2661,7 +2661,7 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
         .media_leg(&LegId::from("caller"))
         .expect("prepared caller A leg");
     caller_leg
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .expect("answer must apply to prepared A leg");
     caller_leg.accept();
@@ -2737,7 +2737,7 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
     let answer = remote.answer(&offer).await.unwrap();
     let caller = session.media_leg(&LegId::from("caller")).unwrap();
     caller
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     session.media_leg(&LegId::from("caller")).unwrap().accept();
@@ -4428,11 +4428,11 @@ async fn outbound_transfer_fixture() -> OutboundTransferFixture {
     let remote = LegInner::new("customer", &LegConfig::rtp_pcmu(), None).unwrap();
     let offer = remote.create_offer().await.unwrap();
     let answer = customer_peer
-        .apply_sdp(&offer, rustrtc::SdpType::Offer)
+        .answer(&offer)
         .await
         .unwrap();
     remote
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     customer_peer.accept();
@@ -4646,7 +4646,7 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
                 .unwrap()
                 .to_sdp_string();
             let answer = target_remote
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             target_remote.accept();
@@ -5699,7 +5699,7 @@ m=audio 41000 RTP/AVP 0\r\n\
 a=sendrecv\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtcp:41001\r\n";
-    leg.apply_sdp(initial_answer, rustrtc::SdpType::Answer)
+    leg.apply_remote_sdp(initial_answer, rustrtc::SdpType::Answer)
         .await
         .expect("initial answer");
 
@@ -8324,11 +8324,11 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     let local = LegInner::new("caller", &cfg, None).unwrap();
     let offer = caller.create_offer().await.unwrap();
     let answer = local
-        .apply_sdp(&offer, rustrtc::SdpType::Offer)
+        .answer(&offer)
         .await
         .unwrap();
     caller
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     session.media.caller_offer = Some(offer);
@@ -8364,7 +8364,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     assert!(session.legs.media_leg(&alice_id).is_some());
     let alice = LegInner::new("remote-alice", &cfg, None).unwrap();
     let answer = alice
-        .apply_sdp(
+        .answer(
             &session
                 .legs
                 .media_leg(&alice_id)
@@ -8372,9 +8372,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
                 .pc()
                 .local_description()
                 .unwrap()
-                .to_sdp_string(),
-            rustrtc::SdpType::Offer,
-        )
+                .to_sdp_string())
         .await
         .unwrap();
     session
@@ -8702,7 +8700,7 @@ async fn bridge_deferred_pair_is_traced_and_activates_once_media_arrives() {
         let offer = local.create_offer().await.unwrap();
         let answer = phone.answer(&offer).await.unwrap();
         local
-            .apply_sdp(&answer, rustrtc::SdpType::Answer)
+            .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
             .await
             .unwrap();
         local.accept();
@@ -8766,7 +8764,7 @@ async fn bridge_deferred_pair_is_traced_and_activates_once_media_arrives() {
     let offer = local.create_offer().await.unwrap();
     let answer = phone.answer(&offer).await.unwrap();
     local
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     local.accept();
@@ -8834,7 +8832,7 @@ async fn conference_merge_resolves_queue_agent_alias_and_delivers_audio() {
         let offer = local.create_offer().await.unwrap();
         let answer = phone.answer(&offer).await.unwrap();
         local
-            .apply_sdp(&answer, rustrtc::SdpType::Answer)
+            .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
             .await
             .unwrap();
         local.accept();
@@ -9077,11 +9075,11 @@ async fn consult_media_preserves_peers_body() {
                 session.media.caller_offer = Some(offer.clone());
             }
             let answer = remote
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             local
-                .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
                 .await
                 .unwrap();
             session.legs.set_answer(LegId::from(name), answer);
@@ -9115,7 +9113,7 @@ async fn consult_media_preserves_peers_body() {
         session.legs.set_media_leg(&consult, peer.clone());
         let remote = LegInner::new("remote-consult", &LegConfig::rtp_pcmu(), None).unwrap();
         let answer = remote
-            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .answer(&offer)
             .await
             .unwrap();
 
@@ -9259,7 +9257,7 @@ async fn consult_media_preserves_peers_body() {
         session
             .media_leg(&consult)
             .unwrap()
-            .apply_sdp(&answer, rustrtc::SdpType::Pranswer)
+            .apply_remote_sdp(&answer, rustrtc::SdpType::Pranswer)
             .await
             .unwrap();
         // Provisional media may connect the requested B-C pair before final answer.
@@ -10291,11 +10289,11 @@ async fn dynamic_hold_resume_targets_current_bridge_pair() {
                 LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
             let offer = remote.create_offer().await.unwrap();
             let answer = local
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             remote
-                .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
                 .await
                 .unwrap();
             local.accept();
@@ -10336,7 +10334,7 @@ async fn dynamic_hold_resume_targets_current_bridge_pair() {
                     .await
                     .unwrap();
                 remote
-                    .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                    .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
                     .await
                     .unwrap();
                 session
@@ -10500,11 +10498,11 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
                 LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
             let offer = remote.create_offer().await.unwrap();
             let answer = local
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             remote
-                .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
                 .await
                 .unwrap();
             if name == "caller" {
@@ -10638,13 +10636,13 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
                 .unwrap()
                 .to_sdp_string();
             let answer = remote
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             remote.accept();
             if outcome == "early_media" {
                 target_peer
-                    .apply_sdp(&answer, rustrtc::SdpType::Pranswer)
+                    .apply_remote_sdp(&answer, rustrtc::SdpType::Pranswer)
                     .await
                     .unwrap();
                 assert!(
@@ -11134,11 +11132,11 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup_body() {
     let caller_remote = LegInner::new("caller-remote", &LegConfig::rtp_pcmu(), None).unwrap();
     let offer = caller_remote.create_offer().await.unwrap();
     let answer = caller
-        .apply_sdp(&offer, rustrtc::SdpType::Offer)
+        .answer(&offer)
         .await
         .unwrap();
     caller_remote
-        .apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     caller.accept();
@@ -11242,10 +11240,8 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup_body() {
     for winner in [&invites[1], &invites[3]] {
         let remote = LegInner::new("winner-remote", &LegConfig::rtp_pcmu(), None).unwrap();
         let answer_sdp = remote
-            .apply_sdp(
-                std::str::from_utf8(&winner.1.body).unwrap(),
-                rustrtc::SdpType::Offer,
-            )
+            .answer(
+                std::str::from_utf8(&winner.1.body).unwrap())
             .await
             .unwrap();
         remote.accept();
@@ -11573,11 +11569,11 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids_body() {
                 LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
             let offer = remote.create_offer().await.unwrap();
             let answer = peer
-                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .answer(&offer)
                 .await
                 .unwrap();
             remote
-                .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
                 .await
                 .unwrap();
             peer.accept();
@@ -12715,11 +12711,11 @@ async fn queue_agent_answer_restores_held_caller_media() {
         let remote = LegInner::new(format!("remote-{id}"), &LegConfig::rtp_pcmu(), None).unwrap();
         let offer = remote.create_offer().await.unwrap();
         let answer = local
-            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .answer(&offer)
             .await
             .unwrap();
         remote
-            .apply_sdp(&answer, rustrtc::SdpType::Answer)
+            .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
             .await
             .unwrap();
         local.accept();
@@ -12809,11 +12805,11 @@ async fn own_side_unhold_restores_media_path_when_bridge_down() {
     let caller_peer = LegInner::new("caller", &cfg, None).unwrap();
     let caller_offer = remote_caller.create_offer().await.unwrap();
     let caller_answer = caller_peer
-        .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
+        .answer(&caller_offer)
         .await
         .unwrap();
     remote_caller
-        .apply_sdp(&caller_answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&caller_answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     session
@@ -12826,11 +12822,11 @@ async fn own_side_unhold_restores_media_path_when_bridge_down() {
     let agent_peer = LegInner::new("agent", &cfg, None).unwrap();
     let agent_offer = remote_agent.create_offer().await.unwrap();
     let agent_answer = agent_peer
-        .apply_sdp(&agent_offer, rustrtc::SdpType::Offer)
+        .answer(&agent_offer)
         .await
         .unwrap();
     remote_agent
-        .apply_sdp(&agent_answer, rustrtc::SdpType::Answer)
+        .apply_remote_sdp(&agent_answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     session.legs.insert(
