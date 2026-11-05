@@ -1715,6 +1715,12 @@
                     return;
                 }
                 const isIncoming = data.originator === 'remote';
+                // JsSIP's minified builds mangle the internal `session.request`
+                // property — the offer body is only reachable through the
+                // documented `newRTCSession` event data. Snapshot it here so
+                // `answerCall` can detect a video offer.
+                session._incomingOfferBody = (data.request && typeof data.request.body === 'string')
+                    ? data.request.body : '';
                 incomingCallDiv.classList.remove('active');
                 const remoteIdentity = session.remote_identity || {};
                 const remoteUser = remoteIdentity.display_name || (remoteIdentity.uri && remoteIdentity.uri.user) || '';
@@ -1811,7 +1817,11 @@
         async function answerCall() {
             if (!currentSession) return;
             log('Answering incoming call');
-            const offerHasVideo = currentSession && currentSession.request && currentSession.request.body && currentSession.request.body.includes('m=video');
+            const rawBody = (currentSession && currentSession._incomingOfferBody !== undefined)
+                ? currentSession._incomingOfferBody
+                : (currentSession && currentSession.request && currentSession.request.body);
+            const bodyText = typeof rawBody === 'string' ? rawBody : (rawBody ? String(rawBody) : '');
+            const offerHasVideo = bodyText.includes('m=video');
             const videoEnabled = offerHasVideo || (enableVideoCheckbox && enableVideoCheckbox.checked);
             let options;
             if (videoEnabled) {

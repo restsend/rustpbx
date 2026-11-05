@@ -509,6 +509,7 @@ impl IngressTap {
             if let Some(channel) = CaptureChannel::from_code(code) {
                 let profile = self.recording_profile.read().clone();
                 if video_capture {
+                    trace!(pt, ?channel, seq = packet.header.sequence_number, "tap: video packet forwarded to recorder");
                     sender.capture_video_with_profile(channel, packet, Some(peer_addr), profile);
                 } else {
                     sender.capture_with_profile(channel, packet, Some(peer_addr), profile);

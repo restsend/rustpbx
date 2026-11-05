@@ -713,6 +713,14 @@ impl MediaNegotiator {
     ) -> anyhow::Result<String> {
         let mut desc = SessionDescription::parse(sdp_type, sdp)
             .map_err(|error| anyhow::anyhow!("failed to parse SDP: {error}"))?;
+        // The session's own mux posture, captured before the mutable video
+        // borrow: BUNDLE grouping, or any audio m-line with `a=rtcp-mux`.
+        let session_mux_posture = desc.session.attributes.iter().any(|a| {
+            a.key == "group" && a.value.as_deref().is_some_and(|v| v.starts_with("BUNDLE"))
+        }) || desc.media_sections.iter().any(|section| {
+            section.kind == rustrtc::MediaKind::Audio
+                && section.attributes.iter().any(|a| a.key == "rtcp-mux")
+        });
         if let Some(video_section) = desc
             .media_sections
             .iter_mut()
@@ -733,6 +741,33 @@ impl MediaNegotiator {
             video_section
                 .attributes
                 .retain(|attr| !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb"));
+
+            // rustrtc renders freshly added video transceivers as `m=video 0`
+            // without `a=rtcp-mux` — even under `RtcpMuxPolicy::Require` —
+            // while the audio m-line carries mux attributes and BUNDLE groups
+            // both m-lines. A BUNDLE member without rtcp-mux is rejected by
+            // browsers on setLocalDescription (`rtcp-mux must be enabled when
+            // BUNDLE is enabled` → JsSIP answers 500). When the session's own
+            // mux posture says BUNDLE/mux, restore the video m-line to an
+            // answerable state: a real port placeholder and `a=rtcp-mux`.
+            // Plain-RTP sessions without mux are left untouched.
+            if session_mux_posture {
+                if video_section.port == 0 {
+                    // SDP placeholder port for ICE-managed media (RFC 3264
+                    // §6; the real transport comes from ICE candidates).
+                    video_section.port = 9;
+                }
+                if !video_section
+                    .attributes
+                    .iter()
+                    .any(|attr| attr.key == "rtcp-mux")
+                {
+                    video_section
+                        .attributes
+                        .push(Attribute::new("rtcp-mux", None));
+                }
+            }
+
             for cap in ordered_caps {
                 video_section.attributes.push(Attribute::new(
                     "rtpmap",
@@ -1291,6 +1326,84 @@ a=rtpmap:96 VP8/90000\r\n";
             .expect("BUNDLE video payload remap");
         assert_eq!(bundle_caps[0].payload_type, 97);
         assert_eq!(bundle_caps[1].payload_type, 98);
+    }
+
+    /// rustrtc renders freshly added video transceivers as `m=video 0`
+    /// without `a=rtcp-mux` even under `RtcpMuxPolicy::Require`, while BUNDLE
+    /// groups the m-line together with a muxed audio section. Browsers reject
+    /// such an offer's answer (`rtcp-mux must be enabled when BUNDLE is
+    /// enabled`) → JsSIP answers 500 and WebRTC video calls never connect.
+    /// The rewrite must restore the mux posture the session already has.
+    #[test]
+    fn bundled_video_mline_is_made_answerable() {
+        // The shape rustrtc's create_offer produces for a callee leg: audio
+        // active with mux attributes, video port 0 without them, BUNDLE over
+        // both mids.
+        let generated_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
+a=rtcp-mux-only\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+m=video 0 UDP/TLS/RTP/SAVPF 102\r\n\
+a=mid:1\r\n\
+a=rtcp-fb:102 nack\r\n";
+        let caps = vec![video_cap(102, "H264", None, &["nack"])];
+
+        let offer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            generated_offer,
+            &caps,
+        )
+        .expect("video offer rewrite");
+
+        assert!(
+            offer.contains("m=video 9 "),
+            "port 0 video m-line must be restored for ICE media, got: {offer}"
+        );
+        let video_section = offer
+            .split("m=video ")
+            .nth(1)
+            .expect("video section present");
+        assert!(
+            video_section.contains("a=rtcp-mux\r\n"),
+            "BUNDLE-grouped video m-line must carry a=rtcp-mux, got: {offer}"
+        );
+    }
+
+    /// Plain-RTP sessions without any mux posture keep their video m-line
+    /// untouched (many SIP peers do not multiplex).
+    #[test]
+    fn non_mux_video_offer_is_left_untouched() {
+        let generated_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 4000 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+m=video 0 RTP/AVP 96\r\n\
+a=rtpmap:96 VP8/90000\r\n";
+        let caps = vec![video_cap(96, "VP8", None, &[])];
+
+        let offer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            generated_offer,
+            &caps,
+        )
+        .expect("video offer rewrite");
+
+        assert!(
+            offer.contains("m=video 0 RTP/AVP"),
+            "no-mux session must keep the rejected port semantics, got: {offer}"
+        );
+        assert!(
+            !offer.contains("a=rtcp-mux"),
+            "must not inject rtcp-mux into a plain-RTP session, got: {offer}"
+        );
     }
 
     /// When every dynamic video payload type (96..=127) is already occupied

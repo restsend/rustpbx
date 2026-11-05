@@ -820,6 +820,30 @@ impl LegInner {
     /// Create and commit an offer SDP (as UAC).
     pub async fn create_offer(&self) -> Result<String> {
         let offer = self.prepare_offer().await?;
+        let mut sdp = offer.to_sdp_string();
+        // rustrtc renders freshly added video transceivers as `m=video 0`
+        // without `a=rtcp-mux` even under `RtcpMuxPolicy::Require` — while
+        // BUNDLE groups the video m-line with a muxed audio one. Browser
+        // peers reject such an answer (`rtcp-mux must be enabled when BUNDLE
+        // is enabled`) → JsSIP replies 500. When this leg advertises video,
+        // finalize the m-line through the same renegotiation seam the rest
+        // of the session uses (port placeholder + mux posture restore).
+        if let Some(caps) = self
+            .pc
+            .config()
+            .media_capabilities
+            .as_ref()
+            .map(|caps| caps.video.as_slice())
+            .filter(|caps| !caps.is_empty())
+        {
+            sdp = negotiate::MediaNegotiator::rewrite_video_capabilities(
+                SdpType::Offer,
+                &sdp,
+                caps,
+            )?;
+        }
+        let offer = SessionDescription::parse(SdpType::Offer, &sdp)
+            .map_err(|e| anyhow!("failed to reparse rewritten offer: {e:?}"))?;
         let sdp = set_local(&self.pc, offer)?;
         if let Some(desc) = self.pc.local_description()
             && let Some(addr) = advertised_audio_addr(&desc)
@@ -839,12 +863,24 @@ impl LegInner {
     /// Apply the peer's SDP. Answers update the negotiated RTP profile.
     /// Offers leave the local answer to prepare_answer and commit_local_answer.
     pub async fn apply_remote_sdp(&self, remote: &str, sdp_type: SdpType) -> Result<()> {
+        let video_mline = SessionDescription::parse(sdp_type, remote).ok().and_then(|desc| {
+            desc.media_sections
+                .iter()
+                .find(|section| section.kind == rustrtc::MediaKind::Video)
+                .map(|section| {
+                    format!(
+                        "port={} dir={:?} fmts={:?}",
+                        section.port, section.direction, section.formats
+                    )
+                })
+        });
         debug!(
             session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id,
             sdp_type = ?sdp_type,
             sdp_bytes = remote.len(),
             transport = ?TransportMode::of(self.pc.config()),
+            video_mline = ?video_mline,
             "leg SDP applied",
         );
         let desc = SessionDescription::parse(sdp_type, remote)

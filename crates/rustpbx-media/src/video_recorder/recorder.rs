@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rustrtc::media::{Depacketizer, H264Depacketizer, MediaKind};
 use rustrtc::rtp::RtpPacket;
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::media_recorder::{
     CaptureChannel, MediaRecorder, RecordingResult, RecorderStatus,
@@ -66,6 +66,18 @@ impl LegMuxState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoPacketKind {
+    /// Audio/DTMF (owned by the WAV artifact in a composite).
+    Audio,
+    /// H264 video — muxed.
+    H264,
+    /// A negotiated video codec this backend cannot mux (VP8 today).
+    OtherVideo,
+    /// Not part of this leg's negotiation.
+    Unknown,
+}
+
 /// Per-leg MP4 video recorder: caller and callee files contain the media
 /// that leg *sent*, mirroring the stereo WAV convention (each side on its
 /// own channel). No audio track: the WAV artifact covers audio (no pure-Rust
@@ -90,17 +102,29 @@ impl Mp4Recorder {
         }
     }
 
-    /// Whether the RTP payload type maps to an H264 negotiation entry.
-    fn is_h264_pt(&self, profile: Option<&NegotiatedLegProfile>, pt: u8) -> bool {
+    /// Classify a captured packet for this backend: audio/DTMF rides the
+    /// composite too (the WAV covers it — silently ignored here), H264 video
+    /// is muxed, other video codecs warn once, anything unknown is skipped.
+    fn classify(
+        &self,
+        profile: Option<&NegotiatedLegProfile>,
+        pt: u8,
+    ) -> VideoPacketKind {
         let Some(profile) = profile else {
-            // Without a profile the session-level guard already ensured H264;
-            // accept and let the NAL parsing validate the payload.
-            return true;
+            // No profile: the session-level guard already ensured the call
+            // negotiated H264; let NAL validation handle the payload.
+            return VideoPacketKind::H264;
         };
-        profile
-            .video
-            .iter()
-            .any(|codec| codec.payload_type == pt && codec.name.eq_ignore_ascii_case("H264"))
+        if profile.audio.as_ref().is_some_and(|a| a.payload_type == pt)
+            || profile.dtmf_pts.contains(&pt)
+        {
+            return VideoPacketKind::Audio;
+        }
+        match profile.video.iter().find(|codec| codec.payload_type == pt) {
+            None => VideoPacketKind::Unknown,
+            Some(codec) if codec.name.eq_ignore_ascii_case("H264") => VideoPacketKind::H264,
+            Some(_) => VideoPacketKind::OtherVideo,
+        }
     }
 
     /// Feed one depacketized frame into the leg's assembler/muxer.
@@ -159,6 +183,13 @@ impl Mp4Recorder {
         {
             warn!(%error, "mp4 recorder write failed");
         } else {
+            trace!(
+                leg = index,
+                ts = frame.rtp_timestamp,
+                keyframe = frame.is_keyframe,
+                bytes = frame.data.len(),
+                "mp4 recorder: frame written"
+            );
             state.frame_count += 1;
         }
     }
@@ -189,17 +220,21 @@ impl MediaRecorder for Mp4Recorder {
     ) -> Result<()> {
         let index = channel_index(channel);
         let pt = packet.header.payload_type;
-        if !self.is_h264_pt(profile, pt) {
-            if !self.legs[index].warned_unsupported {
-                self.legs[index].warned_unsupported = true;
-                if self.options.warn_on_unsupported_codec {
-                    warn!(
-                        pt,
-                        "video recording: non-H264 video codec not muxed (MP4 backend)"
-                    );
+        match self.classify(profile, pt) {
+            VideoPacketKind::Audio | VideoPacketKind::Unknown => return Ok(()),
+            VideoPacketKind::OtherVideo => {
+                if !self.legs[index].warned_unsupported {
+                    self.legs[index].warned_unsupported = true;
+                    if self.options.warn_on_unsupported_codec {
+                        warn!(
+                            pt,
+                            "video recording: non-H264 video codec not muxed (MP4 backend)"
+                        );
+                    }
                 }
+                return Ok(());
             }
-            return Ok(());
+            VideoPacketKind::H264 => {}
         }
         // Address is only carried for diagnostics inside rustrtc.
         let addr = peer_addr.unwrap_or_else(|| "0.0.0.0:0".parse().expect("static addr"));
@@ -287,6 +322,26 @@ impl CompositeMediaRecorder {
     }
 }
 
+/// Recursively flatten a finalize result (and any nested extras) into a
+/// flat artifact list — the primary path first, nested extras after it.
+fn flatten_result(result: RecordingResult, out: &mut Vec<RecordingResult>) {
+    let RecordingResult {
+        path,
+        duration_secs,
+        file_size,
+        extra_files,
+    } = result;
+    out.push(RecordingResult {
+        path,
+        duration_secs,
+        file_size,
+        extra_files: Vec::new(),
+    });
+    for nested in extra_files {
+        flatten_result(nested, out);
+    }
+}
+
 #[async_trait]
 impl MediaRecorder for CompositeMediaRecorder {
     fn file_path(&self) -> Option<&str> {
@@ -344,24 +399,20 @@ impl MediaRecorder for CompositeMediaRecorder {
     }
 
     async fn finalize(mut self: Box<Self>) -> Result<Option<RecordingResult>> {
-        let mut primary: Option<RecordingResult> = None;
-        let mut extras: Vec<RecordingResult> = Vec::new();
+        // Flatten: a child backend (e.g. the MP4 recorder) may itself produce
+        // per-leg extras — every artifact surfaces at the top level, primary
+        // first (first backend with an artifact).
+        let mut flattened: Vec<RecordingResult> = Vec::new();
         for backend in self.backends.into_iter() {
-            let Some(result) = backend.finalize().await? else {
-                continue;
-            };
-            if primary.is_none() {
-                primary = Some(result);
-            } else {
-                extras.push(result);
+            if let Some(result) = backend.finalize().await? {
+                flatten_result(result, &mut flattened);
             }
         }
-        let Some(mut merged) = primary else {
+        let mut iter = flattened.into_iter();
+        let Some(mut merged) = iter.next() else {
             return Ok(None);
         };
-        for extra in extras {
-            merged.extra_files.push(extra);
-        }
+        merged.extra_files.extend(iter);
         Ok(Some(merged))
     }
 }
