@@ -632,7 +632,10 @@ impl MediaNegotiator {
                 clock_rate: c.clock_rate,
                 fmtp: c.fmtp.clone(),
                 rtcp_fbs: c.rtcp_fbs.clone(),
-                rtx_payload_type: None,
+                // Keep the RTX association: browsers pair NACK retransmission
+                // with the `apt` payload type, and dropping it silently
+                // disables loss recovery on every relayed video leg.
+                rtx_payload_type: c.rtx_payload_type,
             });
         }
         caps
@@ -690,12 +693,31 @@ impl MediaNegotiator {
     ) -> anyhow::Result<()> {
         let mut used_payload_types: HashSet<u8> = occupied_payload_types.into_iter().collect();
         for cap in caps {
+            // Primary payload type first. RTX PTs are reserved alongside so
+            // a remapped primary can never land on another codec's rtx slot.
             if used_payload_types.contains(&cap.payload_type) {
                 cap.payload_type = (96..=127)
                     .find(|payload_type| !used_payload_types.contains(payload_type))
                     .ok_or_else(|| anyhow::anyhow!("no free dynamic video payload type"))?;
             }
             used_payload_types.insert(cap.payload_type);
+            // The rtx association follows its primary: when the primary moved
+            // (or the old rtx PT collides with an occupied slot), re-seat the
+            // rtx PT too — the `apt=` fmtp is regenerated from it on rewrite.
+            if let Some(rtx) = cap.rtx_payload_type {
+                if used_payload_types.contains(&rtx) {
+                    cap.rtx_payload_type = Some(
+                        (96..=127)
+                            .find(|payload_type| !used_payload_types.contains(payload_type))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("no free dynamic video payload type")
+                            })?,
+                    );
+                }
+                if let Some(rtx) = cap.rtx_payload_type {
+                    used_payload_types.insert(rtx);
+                }
+            }
         }
         Ok(())
     }
@@ -786,6 +808,21 @@ impl MediaNegotiator {
                     video_section.attributes.push(Attribute::new(
                         "rtcp-fb",
                         Some(format!("{} {}", cap.payload_type, feedback)),
+                    ));
+                }
+                // RTX retransmission association (RFC 4588): the rtx PT rides
+                // the m-line and points at its primary via `apt=`. Without
+                // it browsers cannot retransmit lost packets after NACK,
+                // leaving visible corruption until the next keyframe.
+                if let Some(rtx_pt) = cap.rtx_payload_type {
+                    video_section.formats.push(rtx_pt.to_string());
+                    video_section.attributes.push(Attribute::new(
+                        "rtpmap",
+                        Some(format!("{} rtx/{}", rtx_pt, cap.clock_rate)),
+                    ));
+                    video_section.attributes.push(Attribute::new(
+                        "fmtp",
+                        Some(format!("{} apt={}", rtx_pt, cap.payload_type)),
                     ));
                 }
             }
@@ -1194,6 +1231,18 @@ pub(crate) mod tests {
         }
     }
 
+    fn video_cap_with_rtx(
+        payload_type: u8,
+        rtx_payload_type: u8,
+        codec_name: &str,
+        fmtp: Option<&str>,
+        rtcp_fbs: &[&str],
+    ) -> rustrtc::config::VideoCapability {
+        let mut cap = video_cap(payload_type, codec_name, fmtp, rtcp_fbs);
+        cap.rtx_payload_type = Some(rtx_payload_type);
+        cap
+    }
+
     #[test]
     fn rewrite_video_capabilities_preserves_offer_order() {
         let generated_offer = "v=0\r\n\
@@ -1404,6 +1453,94 @@ a=rtpmap:96 VP8/90000\r\n";
             !offer.contains("a=rtcp-mux"),
             "must not inject rtcp-mux into a plain-RTP session, got: {offer}"
         );
+    }
+
+    /// Caps carrying an rtx association must surface as `a=rtpmap rtx/90000`
+    /// + `a=fmtp apt=` on the rewritten m-line, with the rtx PT riding the
+    /// m-line formats — browsers key NACK retransmission off this trio.
+    #[test]
+    fn rewrite_emits_rtx_association() {
+        let generated_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 102\r\n\
+a=mid:1\r\n\
+a=rtcp-mux\r\n";
+        let caps = vec![video_cap_with_rtx(102, 103, "H264", None, &["nack"])];
+
+        let offer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            generated_offer,
+            &caps,
+        )
+        .expect("video offer rewrite");
+
+        assert!(
+            offer.contains("m=video 9 UDP/TLS/RTP/SAVPF 102 103\r\n"),
+            "rtx PT must ride the m-line formats, got: {offer}"
+        );
+        assert!(offer.contains("a=rtpmap:103 rtx/90000\r\n"), "{offer}");
+        assert!(offer.contains("a=fmtp:103 apt=102\r\n"), "{offer}");
+    }
+
+    /// When a remapped primary's old rtx PT would collide with an occupied
+    /// slot (audio PT), the rtx association moves to a fresh PT instead of
+    /// colliding silently.
+    #[test]
+    fn remap_moves_rtx_when_primary_moves_into_occupied_rtx() {
+        // Primary 96 stays free, but its rtx PT 99 collides with audio PT 99
+        // → rtx must be re-seated; the primary itself never moves.
+        let mut caps = vec![video_cap_with_rtx(96, 99, "H264", None, &[])];
+        MediaNegotiator::remap_bundle_video_payload_types(&mut caps, [99u8])
+            .expect("remap");
+        assert_eq!(caps[0].payload_type, 96, "primary not colliding stays");
+        assert_ne!(
+            caps[0].rtx_payload_type,
+            Some(99),
+            "rtx must move off the occupied audio PT"
+        );
+        assert_ne!(
+            caps[0].rtx_payload_type,
+            Some(96),
+            "rtx must not collide with its own primary"
+        );
+    }
+
+    /// A remapped primary carries its rtx association along: the new primary
+    /// PT must never be re-seated onto another codec's rtx slot, and the
+    /// moved rtx must not collide either.
+    #[test]
+    fn remap_reserves_rtx_slots_against_primary_remap() {
+        // 96 must move (occupied by audio); 97's rtx PT is 96 — after 96
+        // moves away, 97 keeps its rtx; nothing may collide.
+        let mut caps = vec![
+            video_cap_with_rtx(96, 98, "H264", None, &[]),
+            video_cap_with_rtx(97, 96, "VP8", None, &[]),
+        ];
+        MediaNegotiator::remap_bundle_video_payload_types(&mut caps, [96u8])
+            .expect("remap");
+        let pts: Vec<u8> = caps
+            .iter()
+            .flat_map(|cap| [Some(cap.payload_type), cap.rtx_payload_type])
+            .flatten()
+            .collect();
+        let unique: std::collections::HashSet<u8> = pts.iter().copied().collect();
+        assert_eq!(
+            pts.len(),
+            unique.len(),
+            "primary + rtx PTs must be collision-free, got: {pts:?}"
+        );
+        assert!(!pts.contains(&96), "occupied audio PT 96 must not be reused");
+        // First cap's primary moved off 96; its rtx association stays intact.
+        assert_ne!(caps[0].payload_type, 96);
+        assert!(caps[0].rtx_payload_type.is_some());
+        assert!(caps[1].rtx_payload_type.is_some());
     }
 
     /// When every dynamic video payload type (96..=127) is already occupied
