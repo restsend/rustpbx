@@ -10,10 +10,6 @@ use super::prelude::*;
 use super::session::{DialogSide, SipSession};
 
 impl SipSession {
-    pub(crate) async fn get_local_reinvite_pc(&self, leg_id: &LegId) -> Option<rustrtc::PeerConnection> {
-        self.media_leg(leg_id).map(|peer| peer.pc().clone())
-    }
-
     /// Propagate hold to the selected peer: updates leg state, sends a hold re-INVITE
     /// (media bypass) or starts hold music on its peer. `override_music`,
     /// if `Some`, is used instead of the normal header/extension/config chain.
@@ -403,6 +399,17 @@ impl SipSession {
                     }
                 }
             }
+        }
+
+        if let (Some(peer), Some(draft)) = (
+            self.media_leg(&LegId::from("caller")),
+            final_answer.as_deref(),
+        ) && peer.pc().signaling_state() == rustrtc::SignalingState::HaveRemoteOffer {
+            final_answer = Some(peer.commit_local_answer(draft, rustrtc::SdpType::Answer).await?);
+            self.media.answer = final_answer.clone();
+        }
+        if final_answer.is_some() {
+            self.activate_callee_media(false).await?;
         }
 
         if let Some(ref answer_sdp) = final_answer {

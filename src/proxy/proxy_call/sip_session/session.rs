@@ -4413,12 +4413,13 @@ impl SipSession {
                         self.legs.set_transport(leg_id.clone(), mode);
                         peer
                     };
-                    let answer = peer.answer(&offer_sdp).await?;
+                    peer.apply_remote_sdp(&offer_sdp, rustrtc::SdpType::Offer).await?;
+                    let draft = peer.prepare_answer().await?;
+                    let answer = MediaNegotiator::align_answer_direction_with_offer(&offer_sdp, &draft.to_sdp_string());
+                    let answer = peer.commit_local_answer(&answer, rustrtc::SdpType::Answer).await?;
                     peer.accept();
                     self.legs.set_answer(leg_id.clone(), answer.clone());
-                    Ok::<_, anyhow::Error>(MediaNegotiator::align_answer_direction_with_offer(
-                        &offer_sdp, &answer,
-                    ))
+                    Ok::<_, anyhow::Error>(answer)
                 }
                 .await;
                 answer
@@ -7281,8 +7282,11 @@ impl SipSession {
     }
 
     /// Ensure the caller media peer exists independently of a bridge.
-    /// Idempotent — safe to call multiple times.
+    /// Cache a draft for the caller. Commit it when preparing the 183 or 200 response.
     pub(crate) async fn ensure_caller_leg(&mut self) -> Result<()> {
+        if self.media_leg(&LegId::from("caller")).is_some() {
+            return Ok(());
+        }
         let caller_offer = self
             .media
             .caller_offer
@@ -7309,15 +7313,16 @@ impl SipSession {
         let cfg = self.build_leg_config(transport.clone(), codecs, video_codecs);
         let caller_label = "caller";
 
-        if self.media_leg(&LegId::from("caller")).is_some() {
-            return Ok(());
-        }
         let recorder_sender = self.setup_recording_capture()?;
         let prepared = async {
             let leg = crate::media::create_leg(caller_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
-            let answer = leg
-                .answer(&caller_offer)
-                .await?;
+            leg.apply_remote_sdp(&caller_offer, rustrtc::SdpType::Offer).await?;
+            let mut answer = leg.prepare_answer().await?.to_sdp_string();
+            if !self.video_relay_enabled()
+                && let Some(stripped) = crate::media::negotiate::MediaNegotiator::strip_video_from_sdp(&answer)
+            {
+                answer = stripped;
+            }
             Ok::<_, anyhow::Error>((leg, answer))
         }
         .await;
@@ -7332,15 +7337,6 @@ impl SipSession {
         self.legs.set_media_leg(&LegId::from("caller"), leg);
         self.spawn_dtmf_forwarder();
 
-        // Video policy = strip: disable video on the media path — the answer's
-        // video m-line is forced inactive (port 0) so the caller can't send
-        // video the proxy won't relay.
-        let answer = if self.video_relay_enabled() {
-            answer
-        } else {
-            crate::media::negotiate::MediaNegotiator::strip_video_from_sdp(&answer)
-                .unwrap_or(answer)
-        };
         self.media.answer = Some(answer);
 
         // Record the caller transport hint. The callee hint is intentionally
@@ -7800,13 +7796,24 @@ impl SipSession {
                                 early_headers.extend(relayed);
 
                                 if self.media_profile.path == MediaPathMode::Anchored {
-                                    let caller_sdp = match self
-                                        .prepare_caller_answer_from_callee_sdp(
-                                            Some(callee_sdp),
-                                            false,
-                                            rustrtc::SdpType::Pranswer,
-                                        )
-                                        .await
+                                    let caller_sdp = match async {
+                                        let mut caller_sdp = self
+                                            .prepare_caller_answer_from_callee_sdp(
+                                                Some(callee_sdp),
+                                                false,
+                                                rustrtc::SdpType::Pranswer,
+                                            )
+                                            .await?;
+                                        if let (Some(peer), Some(draft)) = (
+                                            self.media_leg(&LegId::from("caller")),
+                                            caller_sdp.as_deref(),
+                                        ) && peer.pc().signaling_state() == rustrtc::SignalingState::HaveRemoteOffer {
+                                            caller_sdp = Some(peer.commit_local_answer(draft, rustrtc::SdpType::Pranswer).await?);
+                                            self.media.answer = caller_sdp.clone();
+                                        }
+                                        self.activate_callee_media(true).await?;
+                                        Ok::<_, anyhow::Error>(caller_sdp)
+                                    }.await
                                     {
                                         Ok(caller_sdp) => caller_sdp,
                                         Err(error) => {
@@ -8266,7 +8273,16 @@ impl SipSession {
             .await;
         self.maybe_autostart_live_transcription("call_answer").await;
 
-        if let Some(answer_sdp) = answer_sdp {
+        if let Some(mut answer_sdp) = answer_sdp {
+            if let Some(peer) = self.media_leg(&LegId::from("caller"))
+                && peer.pc().signaling_state() == rustrtc::SignalingState::HaveRemoteOffer
+            {
+                answer_sdp = peer.commit_local_answer(&answer_sdp, rustrtc::SdpType::Answer).await?;
+                self.media.answer = Some(answer_sdp.clone());
+            }
+            if callee.is_some() {
+                self.activate_callee_media(false).await?;
+            }
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
             headers.extend(relayed_headers);
@@ -8422,7 +8438,7 @@ impl SipSession {
 
 
 
-    async fn build_local_answer_from_pc(
+    async fn prepare_local_answer(
         pc: &rustrtc::PeerConnection,
         offer_sdp: &str,
         video_caps: Option<&[rustrtc::VideoCapability]>,
@@ -8461,12 +8477,7 @@ impl SipSession {
             answer
         };
 
-        pc.set_local_description(answer)
-            .map_err(|e| anyhow!("Failed to set re-INVITE local answer: {}", e))?;
-
-        pc.local_description()
-            .map(|desc| desc.to_sdp_string())
-            .ok_or_else(|| anyhow!("PeerConnection has no local description after re-INVITE"))
+        Ok(answer.to_sdp_string())
     }
 
     async fn build_local_dialog_answer(
@@ -8567,12 +8578,9 @@ impl SipSession {
             }
         }
 
-        let pc = self
-            .get_local_reinvite_pc(leg_id)
-            .await
-            .ok_or_else(|| anyhow!("No local PeerConnection available for {:?}", side))?;
+        let leg = self.media_leg(leg_id).ok_or_else(|| anyhow!("Missing media leg {leg_id}"))?;
         let mut answer_sdp =
-            Self::build_local_answer_from_pc(&pc, offer_sdp, offered_video_caps.as_deref()).await?;
+            Self::prepare_local_answer(leg.pc(), offer_sdp, offered_video_caps.as_deref()).await?;
         if has_audio {
             let preferred_peer_sdp = peer_leg_id
                 .as_ref()
@@ -8597,24 +8605,7 @@ impl SipSession {
         // Align answer direction with offer per RFC 3264 §5.1
         answer_sdp = MediaNegotiator::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
 
-        // Refresh the peer's negotiated profile from the re-INVITE answer.
-        // The session updates routing after applying the hold transition,
-        // using the renegotiated codec instead of the call-setup profile.
-        // Otherwise relay rules / RTCP relay generation can stay wrong (and
-        // re-accumulate) after a mid-call codec change.
-        if self.media.bridge.is_some() {
-            let side_leg = self.media_leg(leg_id);
-            if let Some(leg) = side_leg {
-                leg.refresh_observer();
-                if let Err(error) = leg.apply_profile_from_sdp(&answer_sdp).await {
-                    warn!(
-                        session_id = %self.id,
-                        %error,
-                        "Failed to synchronize MediaBridge leg codec after re-INVITE"
-                    );
-                }
-            }
-        }
+        let answer_sdp = leg.commit_local_answer(&answer_sdp, rustrtc::SdpType::Answer).await?;
 
         match side {
             DialogSide::Caller => {
@@ -9601,6 +9592,11 @@ impl SipSession {
             }
         }
 
+        let body = self.leg_id_for_dialog(&dialog_id.to_string())
+            .and_then(|id| self.media_leg(&id))
+            .and_then(|leg| leg.negotiated_local_sdp())
+            .map(|desc| desc.to_sdp_string().into_bytes())
+            .or(body);
         self.try_reinvite_refresh(dialog_id, body).await
     }
 
@@ -10295,10 +10291,7 @@ impl SipSession {
                         .clone()
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    let profile = self
-                        .media_leg(&LegId::from("caller"))
-                        .and_then(|peer| peer.negotiated())
-                        .ok_or_else(|| anyhow!("No caller media profile for recording"))?;
+                    let profile = self.caller_recording_profile()?;
                     let option = self.recorder_option(path.clone());
                     self.media
                         .recording
@@ -11363,10 +11356,7 @@ impl SipSession {
                                 ));
                             }
                             caller_peer
-                                .apply_remote_sdp(
-                                    &String::from_utf8_lossy(response.body()),
-                                    rustrtc::SdpType::Answer,
-                                )
+                                .apply_remote_sdp(&String::from_utf8_lossy(response.body()), rustrtc::SdpType::Answer)
                                 .await?;
                             caller_peer.accept();
                             self.legs.set_media_leg(&caller, caller_peer);

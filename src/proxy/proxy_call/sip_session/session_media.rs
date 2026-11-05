@@ -359,19 +359,19 @@ impl SipSession {
             return Ok(None);
         }
 
+        let peer = self
+            .media_leg(&LegId::from("caller"))
+            .ok_or_else(|| anyhow!("No caller media peer"))?;
         if !self.media.early_media_sent {
-            // Get caller-facing answer SDP from the caller leg's PC
-            let answer_sdp = self
-                .media_leg(&LegId::from("caller"))
-                .and_then(|leg| leg.pc().local_description())
-                .map(|desc| desc.to_sdp_string())
-                .or_else(|| self.media.answer.clone())
-                .unwrap_or_default();
-
-            if answer_sdp.is_empty() {
+            let answer_sdp = if peer.pc().signaling_state() == rustrtc::SignalingState::HaveRemoteOffer {
+                let draft = self.media.answer.as_deref().ok_or_else(|| anyhow!("No caller SDP for early media"))?;
+                peer.commit_local_answer(draft, rustrtc::SdpType::Pranswer).await?
+            } else if let Some(local) = peer.pc().local_description() {
+                local.to_sdp_string()
+            } else {
                 warn!(session_id = %self.id, "Cannot send 183: no local SDP available on caller leg");
                 return Ok(None);
-            }
+            };
 
             self.media.answer = Some(answer_sdp.clone());
             self.media.early_media_sent = true;
@@ -390,9 +390,6 @@ impl SipSession {
             }
         }
 
-        let peer = self
-            .media_leg(&LegId::from("caller"))
-            .ok_or_else(|| anyhow!("No caller media peer"))?;
         let audio: Box<dyn crate::media::audio_source::AudioSource> =
             if let Some(spec) = audio_path.strip_prefix("tone://") {
                 let (frequency, duration) = spec
@@ -642,10 +639,7 @@ impl SipSession {
         force_regenerate: bool,
         callee_sdp_type: rustrtc::SdpType,
     ) -> Result<Option<String>> {
-        let is_early_media = callee_sdp_type == rustrtc::SdpType::Pranswer;
-        let rtp_timeout = self.rtp_timeout_config();
-
-        // ── MediaBridge path: both legs exist → apply answer + bridge ────
+        // Apply the callee answer and prepare the caller SDP without committing it.
         if let Some(callee_sdp_value) = callee_sdp.as_ref() {
             let has_callee_leg = self.media_leg(&LegId::from("callee")).is_some();
 
@@ -665,117 +659,55 @@ impl SipSession {
                 let callee = self
                     .media_leg(&LegId::from("callee"))
                     .ok_or_else(|| anyhow!("Missing callee media peer"))?;
-                if self.media.bridge.is_none() {
-                    self.media.bridge = Some(MediaBridge::new_with_quality_stats(
-                        self.id.to_string(),
-                        self.context.dialplan.media.quality_stats.clone(),
-                    ));
-                }
-                self.bridge_mut()
-                    .unwrap()
-                    .select_pair(caller, callee)
-                    .await?;
-                // Direct dialing owns this selection; later media resume restores it.
-                self.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("callee"));
-                let cmd_tx = self.cmd_tx.clone();
-                let session_id = self.context.session_id.clone();
                 // Once the callee answers, normalize caller audio to the
                 // selected audio codec and answer caller video with only the
                 // video capabilities accepted by the callee.
-                let caller_answer = match (
-                    self.media.answer.as_deref(),
-                    self.media.caller_offer.as_deref(),
-                ) {
-                    (Some(answer), Some(caller_offer)) => {
-                        let answer = self.rewrite_answer_to_selected_audio_codecs(
-                            answer,
-                            caller_offer,
-                            Some(callee_sdp_value),
-                            None,
-                            "MediaBridge caller answer",
-                        );
-                        let caller_video_caps = self.video_caps_from_sdp(caller_offer);
-                        let accepted_video_caps = MediaNegotiator::accepted_video_capabilities(
-                            &caller_video_caps,
-                            callee_sdp_value,
-                        );
-                        let answer = MediaNegotiator::rewrite_video_capabilities(
-                            rustrtc::SdpType::Answer,
-                            &answer,
-                            &accepted_video_caps,
-                        )
-                        .map_err(|error| {
-                            anyhow!("failed to build MediaBridge caller video answer: {error}")
-                        })?;
-                        Some(answer)
+                let caller_pending = caller.pc().signaling_state() == rustrtc::SignalingState::HaveRemoteOffer;
+                let caller_answer = if !caller_pending {
+                    caller.negotiated_local_sdp().map(|sdp| sdp.to_sdp_string())
+                } else {
+                    match (
+                        self.media.answer.as_deref(),
+                        self.media.caller_offer.as_deref(),
+                    ) {
+                        (Some(answer), Some(caller_offer)) => {
+                            let answer = self.rewrite_answer_to_selected_audio_codecs(
+                                answer,
+                                caller_offer,
+                                Some(callee_sdp_value),
+                                None,
+                                "MediaBridge caller answer",
+                            );
+                            let caller_video_caps = self.video_caps_from_sdp(caller_offer);
+                            let accepted_video_caps = MediaNegotiator::accepted_video_capabilities(
+                                &caller_video_caps,
+                                callee_sdp_value,
+                            );
+                            let answer = MediaNegotiator::rewrite_video_capabilities(
+                                rustrtc::SdpType::Answer,
+                                &answer,
+                                &accepted_video_caps,
+                            )
+                            .map_err(|error| {
+                                anyhow!("failed to build MediaBridge caller video answer: {error}")
+                            })?;
+                            Some(answer)
+                        }
+                        _ => self.media.answer.clone(),
                     }
-                    _ => self.media.answer.clone(),
                 };
                 // Custom-SDP-attribute gate: the anchored caller answer is
                 // rebuilt locally, so the callee's custom attributes must be
                 // copied in (pass-through, the default) or stripped when a
                 // trunk opted out.
-                let caller_answer = self
-                    .apply_custom_sdp_attr_policy_to_answer(caller_answer, Some(callee_sdp_value));
+                let caller_answer = if caller_pending {
+                    self.apply_custom_sdp_attr_policy_to_answer(caller_answer, Some(callee_sdp_value))
+                } else {
+                    caller_answer
+                };
+                callee.apply_remote_sdp(callee_sdp_value, callee_sdp_type).await?;
+
                 self.media.answer = caller_answer.clone();
-
-                {
-                    let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-                    if let Some(callee_leg) = mb.leg(LegSide::B) {
-                        let sdp_type = callee_sdp_type;
-                        callee_leg.apply_remote_sdp(callee_sdp_value, sdp_type).await?;
-                    }
-
-                    // Keep the actual sender, egress codec, bridge profile and
-                    // recorder profile aligned with the SDP returned to caller.
-                    // This must happen before accept() activates the route.
-                    if let (Some(leg), Some(answer)) =
-                        (mb.leg(LegSide::A), caller_answer.as_deref())
-                    {
-                        leg.apply_profile_from_sdp(answer).await?;
-                    }
-                }
-
-                // One-shot: only the first answer path (app answer or callee
-                // answer) arms the relay-arm-failure monitor — a second
-                // spawn would double the warn and the fallback command.
-                let arm_relay_monitor = !self.meta.relay_arm_monitor_spawned;
-                if arm_relay_monitor {
-                    self.meta.relay_arm_monitor_spawned = true;
-                }
-                // Same one-shot rule for the media-health monitor: the answer
-                // path can run more than once per session, and a second
-                // watcher on the same bridge would duplicate every periodic
-                // media_health trace and every proxy.media_stalled error.
-                let arm_health_monitor = !self.meta.media_health_monitor_spawned;
-                if arm_health_monitor {
-                    self.meta.media_health_monitor_spawned = true;
-                }
-                let stall_detect_secs = self.context.dialplan.media.stall_detect_secs;
-                let trace_interval_secs = self.context.dialplan.media.media_trace_interval_secs;
-                let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-                mb.accept(LegSide::B).await;
-                mb.accept(LegSide::A).await;
-                if !is_early_media {
-                    Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
-                }
-                if arm_health_monitor {
-                    mb.spawn_health_monitor(
-                        stall_detect_secs,
-                        trace_interval_secs,
-                        Self::forward_media_health_event(cmd_tx.clone(), session_id.clone()),
-                    );
-                }
-                if arm_relay_monitor {
-                    mb.spawn_relay_arm_monitor(Self::forward_relay_arm_failure(
-                        cmd_tx,
-                        session_id.clone(),
-                    ));
-                }
-
-                // A real callee answered — any in-progress transfer is over.
-                self.meta.transfer_in_progress = false;
-                self.sync_rtp_timeout_pause();
 
                 self.media.callee_answer_sdp = Some(callee_sdp_value.clone());
                 return Ok(caller_answer);
@@ -786,20 +718,11 @@ impl SipSession {
             if callee_sdp_type == rustrtc::SdpType::Answer && self.media.early_media_sent {
                 debug!(session_id = %self.id,
                     session_id = %self.context.session_id,
-                    "Final 200 OK has no SDP; promoting the existing early-media descriptions to Answer"
+                    "Final 200 OK has no SDP; promoting the callee early-media description to Answer"
                 );
 
-                let (caller_pc, callee_pc) = if self.media_profile.path == MediaPathMode::Anchored {
-                    let caller_pc = self
-                        .media_leg(&LegId::from("caller"))
-                        .map(|peer| peer.pc().clone());
-                    let callee_pc = self
-                        .media_leg(&LegId::from("callee"))
-                        .map(|peer| peer.pc().clone());
-                    (caller_pc, callee_pc)
-                } else {
-                    (None, None)
-                };
+                let callee_pc = self.media_leg(&LegId::from("callee"))
+                    .map(|peer| peer.pc().clone());
 
                 if let Some(callee_pc) = callee_pc
                     && let Some(mut answer) = callee_pc.remote_description()
@@ -811,20 +734,6 @@ impl SipSession {
                             session_id = %self.context.session_id,
                             error = %error,
                             "Failed to promote callee remote pranswer"
-                        );
-                    }
-                }
-
-                if let Some(caller_pc) = caller_pc
-                    && let Some(mut answer) = caller_pc.local_description()
-                    && answer.sdp_type == rustrtc::SdpType::Pranswer
-                {
-                    answer.sdp_type = rustrtc::SdpType::Answer;
-                    if let Err(error) = caller_pc.set_local_description(answer) {
-                        warn!(session_id = %self.id,
-                            session_id = %self.context.session_id,
-                            error = %error,
-                            "Failed to promote caller local pranswer"
                         );
                     }
                 }
@@ -858,24 +767,89 @@ impl SipSession {
             );
         }
 
-        let callee_sdp = Some(callee_sdp_value);
         let caller_answer = if self.media_profile.path == MediaPathMode::Anchored {
             if let Some(peer) = self.media_leg(&LegId::from("callee")) {
-                peer.apply_remote_sdp(callee_sdp.as_deref().unwrap(), callee_sdp_type)
-                    .await?;
+                peer.apply_remote_sdp(&callee_sdp_value, callee_sdp_type).await?;
             }
             self.ensure_caller_leg().await?;
             self.media.answer.clone()
         } else {
             // Pass-through answer: it already carries the callee's custom
             // attributes; the gate only strips them when a trunk opted out.
-            self.apply_custom_sdp_attr_policy_to_answer(callee_sdp.clone(), None)
+            self.apply_custom_sdp_attr_policy_to_answer(Some(callee_sdp_value.clone()), None)
         };
 
-        self.media.callee_answer_sdp = callee_sdp.clone();
+        self.media.callee_answer_sdp = Some(callee_sdp_value);
         self.media.answer = caller_answer.clone();
 
         Ok(caller_answer)
+    }
+
+    /// Activate the callee route after committing the caller response SDP.
+    pub(crate) async fn activate_callee_media(&mut self, is_early_media: bool) -> Result<()> {
+        let (Some(caller), Some(callee)) = (
+            self.media_leg(&LegId::from("caller")),
+            self.media_leg(&LegId::from("callee")),
+        ) else {
+            return Ok(());
+        };
+        let rtp_timeout = self.rtp_timeout_config();
+        if self.media.bridge.is_none() {
+            self.media.bridge = Some(MediaBridge::new_with_quality_stats(
+                self.id.to_string(),
+                self.context.dialplan.media.quality_stats.clone(),
+            ));
+        }
+        self.bridge_mut()
+            .unwrap()
+            .select_pair(caller, callee)
+            .await?;
+        // Direct dialing owns this selection; later media resume restores it.
+        self.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("callee"));
+        let cmd_tx = self.cmd_tx.clone();
+        let session_id = self.context.session_id.clone();
+        // One-shot: only the first answer path (app answer or callee
+        // answer) arms the relay-arm-failure monitor — a second
+        // spawn would double the warn and the fallback command.
+        let arm_relay_monitor = !self.meta.relay_arm_monitor_spawned;
+        if arm_relay_monitor {
+            self.meta.relay_arm_monitor_spawned = true;
+        }
+        // Same one-shot rule for the media-health monitor: the answer
+        // path can run more than once per session, and a second
+        // watcher on the same bridge would duplicate every periodic
+        // media_health trace and every proxy.media_stalled error.
+        let arm_health_monitor = !self.meta.media_health_monitor_spawned;
+        if arm_health_monitor {
+            self.meta.media_health_monitor_spawned = true;
+        }
+        let stall_detect_secs = self.context.dialplan.media.stall_detect_secs;
+        let trace_interval_secs = self.context.dialplan.media.media_trace_interval_secs;
+        let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
+        mb.accept(LegSide::B).await;
+        mb.accept(LegSide::A).await;
+        if !is_early_media {
+            Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
+        }
+        if arm_health_monitor {
+            mb.spawn_health_monitor(
+                stall_detect_secs,
+                trace_interval_secs,
+                Self::forward_media_health_event(cmd_tx.clone(), session_id.clone()),
+            );
+        }
+        if arm_relay_monitor {
+            mb.spawn_relay_arm_monitor(Self::forward_relay_arm_failure(
+                cmd_tx,
+                session_id.clone(),
+            ));
+        }
+
+        // A real callee answered — any in-progress transfer is over.
+        self.meta.transfer_in_progress = false;
+        self.sync_rtp_timeout_pause();
+
+        Ok(())
     }
 
     /// Classify a peer's media transport from its SDP:
@@ -968,25 +942,16 @@ impl SipSession {
         side: &LegId,
         direction: &str,
     ) -> Result<String> {
-        if let Some(peer) = self.legs.media_leg(side) {
-            if let Some(sdp) = peer.pc().local_description() {
-                return Ok(rustrtc::modify_sdp_direction(
-                    &sdp.to_sdp_string(),
-                    direction,
-                ));
-            }
+        if let Some(peer) = self.media_leg(side)
+            && let Some(local) = peer.negotiated_local_sdp()
+        {
+            return Ok(rustrtc::modify_sdp_direction(&local.to_sdp_string(), direction));
         }
-        let base_sdp = if side.0 == "callee" {
-            self.media
-                .callee_answer_sdp
-                .as_deref()
-                .or(self.media.callee_offer.as_deref())
-        } else {
-            self.media
-                .answer
-                .as_ref()
-                .or(self.media.caller_offer.as_ref())
-                .map(|s| s.as_str())
+        // Signaling-only calls use the descriptions kept on their SIP dialog.
+        let base_sdp = match side.as_str() {
+            "caller" => self.media.answer.as_deref().or(self.media.caller_offer.as_deref()),
+            "callee" => self.media.callee_answer_sdp.as_deref().or(self.media.callee_offer.as_deref()),
+            _ => None,
         }
         .ok_or_else(|| anyhow!("No SDP available for {} hold/unhold", side.0))?;
         Ok(rustrtc::modify_sdp_direction(base_sdp, direction))

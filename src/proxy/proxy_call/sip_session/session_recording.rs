@@ -29,6 +29,14 @@ impl SipSession {
         Ok(Some(sender))
     }
 
+    pub(super) fn caller_recording_profile(&self) -> Result<crate::media::negotiate::NegotiatedLegProfile> {
+        let peer = self.media_leg(&LegId::from("caller")).ok_or_else(|| anyhow!("No caller media for recording"))?;
+        // Recording can start at media setup, before the first SDP response.
+        peer.negotiated().or_else(|| {
+            self.media.answer.as_deref().map(MediaNegotiator::extract_leg_profile)
+        }).ok_or_else(|| anyhow!("No caller media profile for recording"))
+    }
+
     /// Fill missing file options from per-call policy, then server policy.
     /// Explicit RecorderOption values win, including stereo_swap = false.
     pub(crate) fn recorder_option(&self, path: String) -> crate::media::recorder::RecorderOption {
@@ -154,10 +162,7 @@ impl SipSession {
             if path.trim().is_empty() {
                 return Err(anyhow!("file recording strategy has no output path"));
             }
-            let profile = self
-                .media_leg(&LegId::from("caller"))
-                .and_then(|peer| peer.negotiated())
-                .ok_or_else(|| anyhow!("No caller media profile for recording"))?;
+            let profile = self.caller_recording_profile()?;
             let option = self.recorder_option(path.clone());
             self.media
                 .recording

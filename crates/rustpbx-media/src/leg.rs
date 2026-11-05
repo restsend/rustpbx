@@ -706,6 +706,29 @@ impl LegInner {
         self.negotiated.lock().clone()
     }
 
+    /// Build a local description for hold/resume without re-offering unused audio codecs.
+    pub fn negotiated_local_sdp(&self) -> Option<SessionDescription> {
+        let mut local = self.pc.local_description()?;
+        if let Some(profile) = self.negotiated()
+            && let Some(codec) = &profile.audio
+            && let Some(audio) = local.media_sections.iter_mut()
+                .find(|section| section.kind == rustrtc::MediaKind::Audio && section.port != 0)
+        {
+            let mut payloads = profile.dtmf_pts();
+            payloads.insert(codec.payload_type);
+            audio.formats.retain(|pt| pt.parse::<u8>().is_ok_and(|pt| payloads.contains(&pt)));
+            audio.attributes.retain(|attr| {
+                if matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
+                    && let Some(pt) = attr.value.as_deref().and_then(|v| v.split_whitespace().next())
+                {
+                    return pt == "*" || audio.formats.iter().any(|format| format == pt);
+                }
+                true
+            });
+        }
+        Some(local)
+    }
+
     /// Audio address this leg advertised in its local SDP (`addr:port` a
     /// remote peer would send media to), captured when the local description
     /// commits. Diagnostics anchor for media black-hole analysis.
@@ -2885,6 +2908,24 @@ mod tests {
         leg.stop();
     }
 
+    #[tokio::test]
+    async fn reinvite_draft_leaves_local_answer_uncommitted_until_direction_is_aligned() {
+        let leg = LegInner::new("unbridged", &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=sendrecv\r\n";
+        leg.answer(offer).await.unwrap();
+
+        let hold = offer.replace("a=sendrecv", "a=sendonly");
+        leg.apply_remote_sdp(&hold, SdpType::Offer).await.unwrap();
+        let draft = leg.prepare_answer().await.unwrap();
+        assert!(leg.pc().local_description().is_none_or(|desc| desc.sdp_type != SdpType::Pranswer));
+        let aligned = negotiate::MediaNegotiator::align_answer_direction_with_offer(&hold, &draft.to_sdp_string());
+        let answer = leg.commit_local_answer(&aligned, SdpType::Answer).await.unwrap();
+        assert!(answer.lines().any(|line| line == "a=recvonly"));
+        assert_eq!(leg.pc().local_description().unwrap().to_sdp_string(), answer);
+        assert_eq!(leg.pc().signaling_state(), rustrtc::SignalingState::Stable);
+        leg.stop();
+    }
+
     /// Regression: when the caller leg answers an offer whose telephone-event
     /// PTs are not in the local answer (rustrtc's answer formats come from
     /// media_capabilities.audio which excludes telephone-event), the ingress
@@ -2979,7 +3020,10 @@ mod p24_uac_test {
     async fn uac_leg_apply_answer_after_own_offer() {
         // A leg generates its own offer (UAC), then applies a remote answer with
         // a codec it offered. This mirrors RWI originate's callee leg.
-        let cfg = LegConfig::rtp_pcmu();
+        let mut cfg = LegConfig::rtp_pcmu();
+        cfg.codecs.insert(0, CodecInfo {
+            codec: CodecType::PCMA, payload_type: 8, clock_rate: 8000, channels: 1, fmtp: None,
+        });
         let leg = LegInner::new("uac", &cfg, None).unwrap();
         let offer = leg.create_offer().await.expect("offer");
         assert!(!offer.is_empty());
@@ -2989,9 +3033,16 @@ mod p24_uac_test {
             "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
         );
         leg
-            .apply_remote_sdp(&answer, SdpType::Answer)
+            .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
             .await
             .expect("apply answer");
+        let resume = leg.negotiated_local_sdp().unwrap();
+        let offered = SessionDescription::parse(SdpType::Offer, &offer).unwrap();
+        let audio = &resume.media_sections[0];
+        assert_eq!(audio.port, offered.media_sections[0].port, "keep this leg's local port");
+        assert!(offered.media_sections[0].formats.contains(&"8".to_owned()));
+        assert_eq!(audio.formats.first().map(String::as_str), Some("0"));
+        assert!(!audio.formats.contains(&"8".to_owned()), "do not re-offer rejected PCMA");
         let p = leg.negotiated().expect("negotiated profile");
         assert!(
             p.audio.is_some(),

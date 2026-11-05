@@ -4794,12 +4794,9 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
         .into_owned();
     session.media_profile.path = MediaPathMode::Anchored;
     setup_recording_test_media(&mut session).await;
-    let profile = session
-        .legs
-        .media_leg(&LegId::from("caller"))
-        .unwrap()
-        .negotiated()
-        .unwrap();
+    let profile = crate::media::negotiate::MediaNegotiator::extract_leg_profile(
+        session.media.answer.as_deref().expect("caller SDP prepared for recording"),
+    );
     session
         .media
         .recording
@@ -7185,7 +7182,7 @@ async fn ingress_stalled_fires_once_per_leg_when_media_stops_after_flowing() {
     let offer = caller.create_offer().await.unwrap();
     let answer = phone.answer(&offer).await.unwrap();
     caller
-        .apply_remote_sdp(&answer, rustrtc::sdp::SdpType::Answer)
+        .apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
     caller.accept();
