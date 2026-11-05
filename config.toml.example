@@ -319,6 +319,21 @@ type = "extension"
 # Defaults to false — production should keep this off.
 # dev_mint_enabled = true
 
+# RFC 8599 push notifications: wake mobile apps (e.g. Linphone) that registered
+# with pn-provider/pn-prid/pn-param when a call arrives while they are asleep.
+# See docs/config/03-auth-users.md for full documentation.
+# [proxy.push]
+# wakeup_timeout_secs = 30
+# max_expires = 604800
+# refresh_before_secs = 300
+# [[proxy.push.fcm]]
+# service_account = "/etc/rustpbx/firebase-service-account.json"
+# aliases = ["123456789012"]  # Firebase project number (Linphone's pn-param)
+# [[proxy.push.apns]]          # iOS: pn-provider apns (production) and apns.dev (sandbox)
+# key = "/etc/rustpbx/AuthKey_ABC123DEFG.p8"
+# key_id = "ABC123DEFG"
+# team_id = "DEF123GHIJ"
+
 # HTTP Token Auth Backend — one-shot token auth via external HTTP service.
 # Add token_header to any HTTP user backend to enable one-shot registration.
 # See docs/config/03-auth-users.md for full documentation.

@@ -254,6 +254,36 @@ pub mod transfer {
     }
 }
 
+/// RFC 8599 push notifications.
+pub mod push {
+    /// One push request handed to a provider. `kind` is `call` or
+    /// `binding_refresh`; `result` is `ok`, `invalid_prid` or `failed`.
+    pub fn sent(provider: &str, kind: &str, result: &str) {
+        metrics::counter!(
+            "rustpbx_push_notifications_total",
+            "provider" => provider.to_string(),
+            "kind" => kind.to_string(),
+            "result" => result.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Outcome of holding a call for a pushed device: `registered` or
+    /// `timeout`.
+    pub fn wakeup(result: &str) {
+        metrics::counter!(
+            "rustpbx_push_wakeups_total",
+            "result" => result.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Seconds from push to the device's binding-refresh REGISTER.
+    pub fn wakeup_latency_seconds(secs: f64) {
+        metrics::histogram!("rustpbx_push_wakeup_latency_seconds").record(secs);
+    }
+}
+
 pub mod conference {
     pub fn created() {
         metrics::counter!("rustpbx_conference_created_total").increment(1);

@@ -638,7 +638,8 @@ impl SipSession {
         let target_for_log = target_uri.to_string();
 
         let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+        let mut invitation =
+            crate::proxy::push::send_invite(server.clone(), invite_option, state_tx).boxed();
 
         let id = SessionId::from(new_call_id.clone());
         let (new_handle, mut _cmd_rx) = SipSession::with_handle(id);
@@ -661,7 +662,7 @@ impl SipSession {
             async {
                 loop {
                     tokio::select! {
-                        res = &mut invitation => break res,
+                        (res, _sent) = &mut invitation => break res,
                         state = state_rx.recv() => {
                             let _ = watch_tx.send(state.clone());
                             if let Some(ref state) = state {

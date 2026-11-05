@@ -155,7 +155,14 @@ pub trait Locator: Send + Sync {
         self.has_active_bindings(username, Some("localhost")).await
     }
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
-    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
+    /// Remove the bindings reached through `addr`, whose flow closed, except
+    /// those `keep` selects (RFC 8599 push bindings: their device stays
+    /// reachable through push notifications while asleep).
+    async fn unregister_with_address(
+        &self,
+        addr: &SipAddr,
+        keep: &(dyn for<'l> Fn(&'l Location) -> bool + Send + Sync),
+    ) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
     /// Read persisted registration leases without expiry cleanup or presence events.
     /// Unsupported backends must remain unknown instead of reporting a cached view.
@@ -612,6 +619,7 @@ pub struct TransportInspectorLocator {
     locator_events: LocatorEventSender,
     locator: Arc<Box<dyn Locator>>,
     locator_event_lock: LocatorEventLock,
+    push: Option<Arc<crate::proxy::push::PushService>>,
 }
 
 impl TransportInspectorLocator {
@@ -620,11 +628,13 @@ impl TransportInspectorLocator {
         locator: Arc<Box<dyn Locator>>,
         locator_events: LocatorEventSender,
         locator_event_lock: LocatorEventLock,
+        push: Option<Arc<crate::proxy::push::PushService>>,
     ) -> Box<dyn TransportEventInspector> {
         Box::new(Self {
             locator,
             locator_events,
             locator_event_lock,
+            push,
         }) as Box<dyn TransportEventInspector>
     }
 }
@@ -632,10 +642,23 @@ impl TransportInspectorLocator {
 #[async_trait]
 impl TransportEventInspector for TransportInspectorLocator {
     async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
+        if let TransportEvent::New(conn) = &event
+            && let (Some(push), Some(addr)) = (&self.push, conn.get_remote_addr())
+        {
+            push.flow_opened(addr);
+        }
         if let TransportEvent::Closed(conn) = &event {
             let addr = conn.get_remote_addr().unwrap_or_else(|| conn.get_addr());
+            if let Some(push) = &self.push {
+                push.flow_closed(addr);
+            }
+            let keep = |location: &Location| {
+                self.push
+                    .as_ref()
+                    .is_some_and(|push| push.keeps_binding(location))
+            };
             let _event_guard = self.locator_event_lock.lock().await;
-            match self.locator.unregister_with_address(addr).await {
+            match self.locator.unregister_with_address(addr, &keep).await {
                 Ok(Some(removed)) => {
                     let offline =
                         locations_without_active_bindings(self.locator.as_ref().as_ref(), removed)
@@ -841,7 +864,11 @@ impl Locator for MemoryLocator {
         Ok(false)
     }
 
-    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+    async fn unregister_with_address(
+        &self,
+        addr: &SipAddr,
+        keep: &(dyn for<'l> Fn(&'l Location) -> bool + Send + Sync),
+    ) -> Result<Option<Vec<Location>>> {
         let now = Instant::now();
         let grace_cutoff = now - Duration::from_secs(UNREGISTER_GRACE_SECS as u64);
         let mut removed_locations = Vec::new();
@@ -852,6 +879,7 @@ impl Locator for MemoryLocator {
                 .filter_map(|(key, loc)| {
                     if let Some(dest) = &loc.destination
                         && dest == addr
+                        && !keep(loc)
                     {
                         // Only remove bindings older than the grace window.
                         // This guards against the rapid-reconnect race: a WS
@@ -1285,6 +1313,59 @@ mod tests {
             .try_into()
             .unwrap();
         assert!(!fb.matches_aor(&aor3));
+    }
+
+    #[tokio::test]
+    async fn memory_locator_keeps_selected_bindings_on_flow_close() {
+        let locator = MemoryLocator::new();
+        let flow = SipAddr {
+            r#type: Some(Transport::Tcp),
+            addr: HostWithPort::try_from("10.0.0.2:40001").unwrap(),
+        };
+        let stale = Some(Instant::now() - Duration::from_secs(60));
+        for (user, contact) in [
+            (
+                "bob",
+                "sip:bob@10.0.0.2:5060;transport=tcp;pn-provider=fcm;pn-prid=tok",
+            ),
+            ("carol", "sip:carol@10.0.0.2:5060;transport=tcp"),
+        ] {
+            locator
+                .register(
+                    user,
+                    Some("example.com"),
+                    Location {
+                        aor: contact.try_into().unwrap(),
+                        expires: 3600,
+                        destination: Some(flow.clone()),
+                        last_modified: stale,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let keep_push = |location: &Location| location.aor.to_string().contains("pn-prid");
+        let removed = locator
+            .unregister_with_address(&flow, &keep_push)
+            .await
+            .unwrap()
+            .expect("carol removed");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].registered_username.as_deref(), Some("carol"));
+        assert!(
+            locator
+                .has_active_bindings("bob", Some("example.com"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !locator
+                .has_active_bindings("carol", Some("example.com"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

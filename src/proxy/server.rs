@@ -106,6 +106,8 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub locator_event_lock: LocatorEventLock,
+    /// RFC 8599 push notifications (`[proxy.push]`); `None` when disabled.
+    pub push: Option<Arc<crate::proxy::push::PushService>>,
     pub sipflow_config: Arc<arc_swap::ArcSwap<Option<SipFlowConfig>>>,
     pub recording_policy: Arc<arc_swap::ArcSwap<Option<RecordingPolicy>>>,
     pub sip_flow: Option<SipFlow>,
@@ -245,6 +247,8 @@ pub struct SipServerBuilder {
     /// Worker-mode cross-gen relay handle (None outside worker processes).
     /// Handed to `DialogTargetLocator` for outbound virtual-conn interception.
     worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
+    /// Pre-built push service (takes precedence over `[proxy.push]`).
+    push: Option<Arc<crate::proxy::push::PushService>>,
 }
 
 impl SipServerBuilder {
@@ -292,6 +296,7 @@ impl SipServerBuilder {
             trunk_health: None,
             session_hooks: Vec::new(),
             worker_relay: None,
+            push: None,
         }
     }
 
@@ -300,6 +305,12 @@ impl SipServerBuilder {
         relay: Option<Arc<crate::master_link::WorkerRelay>>,
     ) -> Self {
         self.worker_relay = relay;
+        self
+    }
+
+    /// Use this push service instead of building one from `[proxy.push]`.
+    pub fn with_push_service(mut self, push: Arc<crate::proxy::push::PushService>) -> Self {
+        self.push = Some(push);
         self
     }
 
@@ -656,6 +667,31 @@ impl SipServerBuilder {
         };
 
         let locator = Arc::new(locator);
+
+        // RFC 8599 push: built before the endpoint so the transport inspector
+        // can keep push bindings alive and track their flows.
+        let push = match self.push.take() {
+            Some(push) => Some(push),
+            None => match self.config.push.as_ref().filter(|cfg| cfg.enabled) {
+                Some(cfg) => match crate::proxy::push::PushService::from_config(
+                    cfg,
+                    http_client.clone(),
+                    self.database.clone(),
+                )
+                .await
+                {
+                    Ok(push) => Some(Arc::new(push)),
+                    Err(e) => {
+                        warn!(error = %e, "failed to set up push notifications; push disabled");
+                        None
+                    }
+                },
+                None => None,
+            },
+        };
+        if let Some(push) = &push {
+            push.attach_locator(locator.clone()).await;
+        }
         let mut rtp_config = self.rtp_config.unwrap_or_default();
         let mut sip_contact_config = self.sip_contact_config.unwrap_or_default();
         let network_profiles = self.network_profiles.unwrap_or_else(|| {
@@ -1061,6 +1097,7 @@ impl SipServerBuilder {
                 locator.clone(),
                 locator_events.clone(),
                 locator_event_lock.clone(),
+                push.clone(),
             ));
 
         let endpoint = endpoint_builder.build();
@@ -1279,6 +1316,10 @@ impl SipServerBuilder {
             }
         };
 
+        if let Some(push) = &push {
+            push.spawn_maintenance(cancel_token.child_token());
+        }
+
         // Create trunk health state map BEFORE inner so inner.trunk_health is populated
         // (the health loop itself is spawned after inner since it needs endpoint/cancel_token).
         let trunk_health_states: crate::proxy::trunk_health::HealthStateMap =
@@ -1316,6 +1357,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             locator_event_lock,
+            push: push.clone(),
             sipflow_config: self.sipflow_config_slot.unwrap_or_else(|| {
                 Arc::new(ArcSwap::new(Arc::new(self.sipflow_config.clone())))
             }),

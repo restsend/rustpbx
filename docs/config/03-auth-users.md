@@ -487,3 +487,121 @@ between `[sso.jwt]` and `[proxy.jwt_auth]` so tokens issued/relayed by the SSO
 broker are accepted on the SIP (`X-Auth-Token`) and WebSocket (`?token=`)
 chains unchanged. Stateful-free by design — cluster-safe with identical node
 secrets, no shared storage.
+
+## Push Notifications for Mobile Apps (RFC 8599)
+
+Mobile apps such as Linphone cannot keep a SIP connection open while the OS
+suspends or kills them. With `[proxy.push]` configured, RustPBX wakes them for
+incoming calls with a push notification, following RFC 8599:
+
+1. The app registers a Contact carrying `pn-provider`, `pn-prid` (its push
+   token) and `pn-param`. RustPBX records the device (persisted in the
+   `rustpbx_push_devices` table, so it survives restarts) and grants the
+   binding up to `max_expires` instead of `max_registrar_expires`. The 200 OK
+   carries `Feature-Caps: *;+sip.pns="fcm"`.
+2. When the app's connection closes (the OS suspended or killed it), its
+   binding stays registered: the device is asleep, not gone. Every lookup —
+   direct calls, routes, queues, transfers, API-originated calls — still
+   finds it, so none of them needs to know about push. (No `offline`
+   locator event is emitted for it either.)
+3. Every INVITE RustPBX sends passes through one place that recognizes push
+   devices (by the `pn-*` parameters of the Request-URI, or by the INVITE
+   going to a push device's connection). An INVITE to a push device always
+   pushes it at once, whether its connection looks alive or not: a phone can
+   sit on a half-open connection that the server cannot tell from a live one.
+   The push carries the Call-ID of the INVITE.
+4. If the device's connection is open (or the device uses UDP, whose
+   liveness is unknown), the INVITE is sent on it right away. If the
+   connection is down, the INVITE is held until the app sends its
+   binding-refresh REGISTER. Each time the device registers on a new
+   connection before it replies, the INVITE is sent again there, with the
+   same Call-ID (the unanswered one is dropped). If the device does not
+   re-register within `wakeup_timeout_secs` of the push, a held INVITE fails
+   with 480; other devices of the callee ring in parallel meanwhile.
+5. Shortly before a binding expires (`refresh_before_secs`), RustPBX pushes
+   the device so it re-registers (RFC 8599 §5.5).
+
+Push messages use the payload keys Flexisip sends (`call-id`, `loc-key`,
+`send-time`, ...), so stock Linphone handles them: `call-id` is the Call-ID
+of the INVITE the device is about to receive.
+
+```toml
+[proxy]
+tcp_port = 5060   # or tls_port: push devices should not register over UDP
+
+[proxy.push]
+# enabled = true
+# wakeup_timeout_secs = 30          # how long a call waits for a pushed device
+# max_expires = 604800              # binding lifetime cap for push devices (7 days)
+# refresh_before_secs = 300         # push devices this long before expiry; 0 disables
+# reject_unsupported_provider = false  # 555 instead of registering without push
+# include_caller_info = false       # caller URI/name in the payload (seen by the PNS)
+
+[[proxy.push.fcm]]
+service_account = "/etc/rustpbx/firebase-service-account.json"
+# project_id = "my-app"             # defaults to the service account's project_id
+# Linphone sends the Firebase project *number* (gcm_defaultSenderId) as
+# pn-param; list it here. With a single [[proxy.push.fcm]] entry every fcm
+# device is served by it regardless of pn-param.
+aliases = ["123456789012"]
+
+[[proxy.push.apns]]
+key = "/etc/rustpbx/AuthKey_ABC123DEFG.p8"
+key_id = "ABC123DEFG"
+team_id = "DEF123GHIJ"
+# bundle_ids = ["com.example.phone"]  # apps this key pushes to; empty: any
+```
+
+The service account needs permission to send FCM messages (e.g. the
+"Firebase Cloud Messaging API Admin" role) in the Firebase project the app is
+built with (its `google-services.json`).
+
+### APNs (iOS)
+
+One `[[proxy.push.apns]]` entry serves both APNs environments: devices that
+register with `pn-provider=apns` go to production, `pn-provider=apns.dev`
+(development builds) to the sandbox. Make the key in the Apple Developer
+account (Certificates, Identifiers & Profiles > Keys, with "Apple Push
+Notifications service"). It is a `.p8` file that can be downloaded once.
+RustPBX signs a provider token (JWT) with it and renews it every 50 minutes.
+
+Devices register the way Linphone does:
+
+- `pn-param=<team ID>.<bundle ID>.voip&remote`
+- `pn-prid=<VoIP token>:voip&<remote token>:remote`
+
+The RFC 8599 form with a single token (`pn-param=<team>.<bundle>.voip`,
+`pn-prid=<token>`) also works.
+
+- Calls send a VoIP push (PushKit, topic `<bundle ID>.voip`). The payload
+  holds `aps.call-id`, which Linphone uses to show the call in CallKit.
+- Binding refreshes send a background push (`content-available`) to the
+  remote token. iOS requires the app to report a CallKit call for every VoIP
+  push, so RustPBX never uses one for a refresh. A device without a remote
+  token gets no refresh pushes; iOS also limits background pushes to a few
+  per hour.
+- A device without a VoIP token is registered without push: a call could not
+  wake it.
+- Key selection: the entry whose `bundle_ids` lists the app, else the entry
+  of the device's team ID with no `bundle_ids`. When only one entry is
+  configured and it has no `bundle_ids`, it serves every APNs device. This
+  is necessary for Linphone apps that do not set a team ID: they send the
+  placeholder `ABCD1234`.
+- `BadDeviceToken` usually means that the environment is wrong: a sandbox
+  token registered with `apns`, or the other way round.
+
+Notes:
+
+- `fcm`, `apns` and `apns.dev` are implemented. Contacts naming another
+  provider register as ordinary bindings, or get 555 with
+  `reject_unsupported_provider = true`.
+- A push token that FCM reports as `UNREGISTERED`, or that APNs answers with
+  410 (`Unregistered`), is forgotten (the app was uninstalled).
+- Only INVITEs wake devices; SIP MESSAGE to a sleeping device is not
+  pushed.
+- Device state lives on the node that handled the REGISTER; cluster
+  deployments should route a user's calls through the same node.
+- `[proxy.push]` is read at startup; changes need a restart.
+- Metrics: `rustpbx_push_notifications_total{provider,kind,result}`,
+  `rustpbx_push_wakeups_total{result}`,
+  `rustpbx_push_wakeup_latency_seconds`.

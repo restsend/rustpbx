@@ -168,6 +168,7 @@ async fn create_test_server_with_dependencies(
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
         locator_event_lock,
+        push: None,
         sipflow_config: Arc::new(ArcSwap::new(Arc::new(None))),
         sip_flow: sipflow_backend
             .map(|backend| crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new())),

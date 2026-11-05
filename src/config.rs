@@ -1561,6 +1561,122 @@ pub struct LocatorWebhookConfig {
     pub track_queue_latency: Option<bool>,
 }
 
+/// RFC 8599 push notification settings (`[proxy.push]`).
+///
+/// Lets mobile apps that cannot keep a SIP connection open (e.g. Linphone with
+/// `pn-provider`/`pn-prid`/`pn-param` Contact parameters) receive calls: every
+/// call pushes the device. The INVITE goes to its connection when one is open,
+/// and again to each new connection it registers on before it answers.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PushConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How long an incoming call waits for a pushed device to send its
+    /// binding-refresh REGISTER before giving up on it with 480 (the RFC 8599
+    /// "Bucket Timer").
+    #[serde(default = "default_push_wakeup_timeout_secs")]
+    pub wakeup_timeout_secs: u64,
+    /// Maximum binding lifetime granted to push-capable registrations. These
+    /// bindings must outlive the app, so they are not capped by
+    /// `max_registrar_expires`.
+    #[serde(default = "default_push_max_expires")]
+    pub max_expires: u32,
+    /// Push devices this many seconds before their binding expires so they
+    /// re-register (RFC 8599 §5.5 recommends at least 120). `0` disables
+    /// binding-refresh pushes.
+    #[serde(default = "default_push_refresh_before_secs")]
+    pub refresh_before_secs: u64,
+    /// Reply 555 (Push Notification Service Not Supported) to a REGISTER naming
+    /// a `pn-provider` that is not configured, instead of registering the
+    /// contact without push support.
+    #[serde(default)]
+    pub reject_unsupported_provider: bool,
+    /// Include the caller's URI and display name in the push payload. Off by
+    /// default: the payload transits the push provider (e.g. Google).
+    #[serde(default)]
+    pub include_caller_info: bool,
+    /// Firebase Cloud Messaging projects (`pn-provider=fcm`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fcm: Vec<FcmProjectConfig>,
+    /// Apple Push Notification service keys (`pn-provider=apns` and
+    /// `apns.dev`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apns: Vec<ApnsKeyConfig>,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            wakeup_timeout_secs: default_push_wakeup_timeout_secs(),
+            max_expires: default_push_max_expires(),
+            refresh_before_secs: default_push_refresh_before_secs(),
+            reject_unsupported_provider: false,
+            include_caller_info: false,
+            fcm: Vec::new(),
+            apns: Vec::new(),
+        }
+    }
+}
+
+fn default_push_wakeup_timeout_secs() -> u64 {
+    30
+}
+fn default_push_max_expires() -> u32 {
+    7 * 24 * 3600
+}
+fn default_push_refresh_before_secs() -> u64 {
+    300
+}
+
+/// One Firebase project able to send pushes (`[[proxy.push.fcm]]`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FcmProjectConfig {
+    /// Path to the project's service account key (JSON) with permission to
+    /// send FCM messages.
+    pub service_account: String,
+    /// Firebase project ID. Defaults to the service account's `project_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Additional `pn-param` values that select this project. RFC 8599 uses
+    /// the project ID, but Linphone sends the project *number*
+    /// (`gcm_defaultSenderId`), so list it here. When only one FCM project is
+    /// configured it is used for every `fcm` device regardless of `pn-param`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Override the FCM API base URL (default `https://fcm.googleapis.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+}
+
+/// One APNs authentication key able to send pushes (`[[proxy.push.apns]]`).
+///
+/// A key signs provider tokens (JWT, ES256) for every app of its team, in
+/// both the production (`apns`) and the sandbox (`apns.dev`) environment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ApnsKeyConfig {
+    /// Path to the key file (`AuthKey_<key_id>.p8`) from the Apple Developer
+    /// account, with the "Apple Push Notifications service" capability.
+    pub key: String,
+    /// The 10-character key ID.
+    pub key_id: String,
+    /// The 10-character team ID that owns the key.
+    pub team_id: String,
+    /// Bundle IDs of the apps this key pushes to. Empty: any app of
+    /// `team_id`, or any app at all when this is the only APNs key (Linphone
+    /// sends the placeholder team ID `ABCD1234` unless the app sets one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundle_ids: Vec<String>,
+    /// Override the production API base URL (default
+    /// `https://api.push.apple.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// Override the sandbox API base URL (default
+    /// `https://api.sandbox.push.apple.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_api_url: Option<String>,
+}
+
 /// Global recovery for Step IVR when the external provider cannot continue.
 ///
 /// Rules are evaluated in descending `priority` order using the same
@@ -1797,6 +1913,9 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub locator: LocatorConfig,
     pub locator_webhook: Option<LocatorWebhookConfig>,
+    /// RFC 8599 push notifications for mobile devices (`[proxy.push]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushConfig>,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
     /// Global failure-tone profile (`[proxy.audio_profile]`): the base
@@ -2632,6 +2751,7 @@ impl Default for ProxyConfig {
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             locator_webhook: None,
+            push: None,
             media_proxy: MediaProxyMode::default(),
             audio_profile: None,
             audio_codecs: None,

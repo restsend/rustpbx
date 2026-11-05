@@ -248,6 +248,70 @@ impl MigrationTrait for MigrationUserAgentText {
     }
 }
 
+/// Widen `rustpbx_locations.aor` from VARCHAR(255) to TEXT: Contact URIs
+/// carrying RFC 8599 push parameters (an FCM registration token alone is
+/// ~160 chars) overflow the bound. Runs on every startup, guarded by an
+/// information_schema lookup.
+#[derive(DeriveMigrationName)]
+pub struct MigrationAorText;
+
+#[async_trait::async_trait]
+impl MigrationTrait for MigrationAorText {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+        match db.get_database_backend() {
+            sea_orm::DbBackend::MySql => {
+                let row = db
+                    .query_one_raw(sea_orm::Statement::from_string(
+                        sea_orm::DbBackend::MySql,
+                        "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+                         WHERE TABLE_SCHEMA = DATABASE() \
+                           AND TABLE_NAME = 'rustpbx_locations' \
+                           AND COLUMN_NAME = 'aor'",
+                    ))
+                    .await?;
+                if let Some(row) = row {
+                    let data_type: String = row.try_get("", "DATA_TYPE")?;
+                    if data_type.eq_ignore_ascii_case("varchar") {
+                        db.execute_unprepared(
+                            "ALTER TABLE rustpbx_locations MODIFY COLUMN aor TEXT NOT NULL",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            sea_orm::DbBackend::Postgres => {
+                let row = db
+                    .query_one_raw(sea_orm::Statement::from_string(
+                        sea_orm::DbBackend::Postgres,
+                        "SELECT data_type FROM information_schema.columns \
+                         WHERE table_name = 'rustpbx_locations' \
+                           AND column_name = 'aor'",
+                    ))
+                    .await?;
+                if let Some(row) = row {
+                    let data_type: String = row.try_get("", "data_type")?;
+                    if data_type == "character varying" {
+                        // varchar → text is metadata-only in Postgres.
+                        db.execute_unprepared(
+                            "ALTER TABLE rustpbx_locations ALTER COLUMN aor TYPE TEXT",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            // SQLite TEXT affinity: nothing to change.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Locations rows are ephemeral — leave the column wide.
+        Ok(())
+    }
+}
+
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -257,6 +321,7 @@ impl MigratorTrait for Migrator {
             Box::new(Migration {}),
             Box::new(MigrationAddInstanceId {}),
             Box::new(MigrationUserAgentText {}),
+            Box::new(MigrationAorText {}),
         ]
     }
 }
@@ -314,6 +379,10 @@ impl DbLocator {
             .up(&manager)
             .await
             .map_err(|e| anyhow::anyhow!("Migration error (user_agent text): {}", e))?;
+        MigrationAorText
+            .up(&manager)
+            .await
+            .map_err(|e| anyhow::anyhow!("Migration error (aor text): {}", e))?;
         Ok(())
     }
 
@@ -797,7 +866,11 @@ impl Locator for DbLocator {
         Ok(())
     }
 
-    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+    async fn unregister_with_address(
+        &self,
+        addr: &SipAddr,
+        keep: &(dyn for<'l> Fn(&'l Location) -> bool + Send + Sync),
+    ) -> Result<Option<Vec<Location>>> {
         // Unregister all locations matching the given address
         let host = addr.addr.to_string();
         let transport = addr
@@ -810,35 +883,41 @@ impl Locator for DbLocator {
         // the same NAT ip:port, then the stale close event for the previous
         // connection arrives and would otherwise delete the fresh row.
         let now_epoch = now_epoch_secs();
+        let now_instant = Instant::now();
         let cutoff = now_epoch - UNREGISTER_GRACE_SECS;
 
-        let removed_locations = Entity::find()
+        let candidates = Entity::find()
             .filter(Column::Destination.eq(&host))
             .filter(Column::Transport.eq(&transport))
             .filter(Column::LastModified.lt(cutoff))
             .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup before unregister: {}", e))?;
-        if removed_locations.is_empty() {
+
+        let mut ids = Vec::new();
+        let mut locations = Vec::new();
+        for model in candidates {
+            match model_to_location(&model, now_epoch, now_instant) {
+                Ok(location) if keep(&location) => continue,
+                Ok(location) => locations.push(location),
+                Err(e) => {
+                    warn!(error = %e, aor = %model.aor, "removing unparsable location row");
+                }
+            }
+            ids.push(model.id);
+        }
+        if ids.is_empty() {
             return Ok(None);
         }
 
         Entity::delete_many()
-            .filter(Column::Destination.eq(&host))
-            .filter(Column::Transport.eq(&transport))
-            .filter(Column::LastModified.lt(cutoff))
+            .filter(Column::Id.is_in(ids))
             .exec(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on unregister with address: {}", e))?;
 
-        let mut locations = Vec::new();
-        for loc in removed_locations {
-            match model_to_location(&loc, now_epoch, Instant::now()) {
-                Ok(location) => locations.push(location),
-                Err(e) => {
-                    warn!(error = %e, aor = %loc.aor, "skipping unparsable unregistered location row");
-                }
-            }
+        if locations.is_empty() {
+            return Ok(None);
         }
         Ok(Some(sort_locations_by_recency(locations)))
     }

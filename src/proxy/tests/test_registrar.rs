@@ -70,8 +70,12 @@ impl Locator for PausingLocator {
         Ok(())
     }
 
-    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
-        self.inner.unregister_with_address(addr).await
+    async fn unregister_with_address(
+        &self,
+        addr: &SipAddr,
+        keep: &(dyn for<'l> Fn(&'l Location) -> bool + Send + Sync),
+    ) -> Result<Option<Vec<Location>>> {
+        self.inner.unregister_with_address(addr, keep).await
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
@@ -409,7 +413,7 @@ async fn nat_reconnect_unregister_preserves_contact_identity() {
                 // Reconnecting must replace this Contact, not add a flow-shaped identity.
                 assert!(
                     locator
-                        .unregister_with_address(&old_flow)
+                        .unregister_with_address(&old_flow, &|_| false)
                         .await
                         .unwrap()
                         .is_none()
