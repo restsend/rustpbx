@@ -195,6 +195,13 @@ mod escalation_e2e {
                 .await
                 .unwrap();
         }
+        // Short server-side ring timeout: the primary offer is deliberately
+        // unanswered, and since the ringing-gate fix the widening waits for
+        // the in-flight offer to end before it dials the overflow agents.
+        cc_registry.set_desk_behavior(rustpbx::addons::cc::config::DeskBehaviorConfig {
+            ring_no_answer_secs: 3,
+            ..Default::default()
+        });
 
         let cc_registry_reset = cc_registry.clone();
         let (sg_tx, mut sg_rx) =
@@ -362,47 +369,95 @@ mod escalation_e2e {
         );
         // agent1 deliberately does NOT answer.
 
-        // ── Phase 2 (fair widening): after the group's max_wait_secs (2s)
-        // the auto-armed escalation timer fires, resolves the union
-        // (support ∪ support_l2) and dials the overflow agent ─────────────
-        let (agent2_invite_at, agent2_invite) =
-            wait_for_event(&mut agent2, t0, Duration::from_secs(10), |e| {
-                matches!(e, TestUaEvent::IncomingCall(_, _))
-            })
-            .await
-            .expect("agent2 (overflow group) must receive the widened INVITE");
+        // ── Phase 2 (fair widening, single-call): the 2s threshold fires
+        // while agent1's offer is in flight — the ringing gate defers the
+        // widening until agent1's ring timeout (3s) ends it; the re-armed
+        // timer resolves the union (agent1 excluded via the no-answer
+        // rotation) and offers EXACTLY ONE overflow agent. Single-call
+        // invariant: never a group ring. ─────────────────────────────────
+        let mut invite2: Option<(Duration, TestUaEvent)> = None;
+        let mut invite3: Option<(Duration, TestUaEvent)> = None;
+        let widen_deadline = Instant::now() + Duration::from_secs(15);
+        while invite2.is_none() && invite3.is_none() && Instant::now() < widen_deadline {
+            if invite2.is_none() {
+                invite2 = wait_for_event(
+                    &mut agent2,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+            if invite3.is_none() {
+                invite3 = wait_for_event(
+                    &mut agent3,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+        }
         assert!(
-            agent2_invite_at >= Duration::from_secs(2),
-            "widening must respect the max_wait_secs threshold (2s), fired at {agent2_invite_at:?}"
+            invite2.as_ref().xor(invite3.as_ref()).is_some(),
+            "single-call widening must offer EXACTLY ONE overflow agent (2:{invite2:?} 3:{invite3:?})"
         );
-        assert!(
-            agent2_invite_at < Duration::from_secs(6),
-            "widening must happen promptly after the threshold, took {agent2_invite_at:?}"
-        );
-
-        // agent2 answers → the call connects through the queue.
-        let TestUaEvent::IncomingCall(agent2_dialog, _) = agent2_invite else {
-            unreachable!("matcher guarantees IncomingCall");
-        };
-        let sdp_answer = "v=0\r\n\
-            o=agent2 2 0 IN IP4 127.0.0.1\r\ns=agent2\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-            m=audio 30002 RTP/AVP 0 101\r\n\
-            a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
-            .to_string();
-        agent2
-            .answer_call(&agent2_dialog, Some(sdp_answer))
-            .await
+        let widened_at = invite2
+            .as_ref()
+            .map(|(d, _)| *d)
+            .or_else(|| invite3.as_ref().map(|(d, _)| *d))
             .unwrap();
+        assert!(
+            widened_at >= Duration::from_secs(3),
+            "widening must be deferred past the ringing window (3s), fired at {widened_at:?}"
+        );
+        assert!(
+            widened_at < Duration::from_secs(10),
+            "widening must happen promptly after the offer ends, took {widened_at:?}"
+        );
 
-        // Both sides see the established call.
-        wait_for_event(
-            &mut agent2,
-            t0,
-            Duration::from_secs(5),
-            |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent2_dialog),
-        )
-        .await
-        .expect("agent2 leg must be established after answering");
+        // The winner answers → the call connects through the queue.
+        let sdp_answer_for = |owner: &str, port: u32| {
+            format!(
+                "v=0\r\n\
+                o={owner} 2 0 IN IP4 127.0.0.1\r\ns={owner}\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                m=audio {port} RTP/AVP 0 101\r\n\
+                a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            )
+        };
+        if invite2.is_some() {
+            let (_, TestUaEvent::IncomingCall(agent2_dialog, _)) = invite2.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent2
+                .answer_call(&agent2_dialog, Some(sdp_answer_for("agent2", 30002)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent2,
+                t0,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent2_dialog),
+            )
+            .await
+            .expect("agent2 leg must be established after answering");
+        } else {
+            let (_, TestUaEvent::IncomingCall(agent3_dialog, _)) = invite3.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent3
+                .answer_call(&agent3_dialog, Some(sdp_answer_for("agent3", 30014)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent3,
+                t0,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent3_dialog),
+            )
+            .await
+            .expect("agent3 leg must be established after answering");
+        }
 
         // The queue's on_call_connected hook fired for the session.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -490,49 +545,111 @@ mod escalation_e2e {
             Ok::<_, anyhow::Error>(())
         });
 
-        // Phase 1: the ROTATED head (agent2) is dialled first — call 1's
-        // head was agent1.
-        wait_for_event(&mut agent2, t1, Duration::from_secs(8), |e| {
-            matches!(e, TestUaEvent::IncomingCall(_, _))
-        })
-        .await
-        .expect("agent2 must be the head of call 2 (fair rotation across calls)");
-        // NOTE: the widened phase still adds the union tail (agent1) after
-        // the threshold — the rotation contract is about the HEAD, asserted
-        // above (call 1 head=agent1, call 2 head=agent2).
-
-        // Phase 2: after the 2s threshold the widen reaches agent3 (the next
-        // fair pick — NOT agent2's dialog again, NOT agent1).
-        let (agent3_invite_at, agent3_invite) =
-            wait_for_event(&mut agent3, t1, Duration::from_secs(10), |e| {
-                matches!(e, TestUaEvent::IncomingCall(_, _))
-            })
-            .await
-            .expect("agent3 must receive the widened INVITE of call 2");
+        // Phase 1+2 (single-call widening, deferred gate): the entry dial is
+        // agent1 (the only primary candidate); the 2s threshold fires while
+        // agent1's offer is in flight — deferred until agent1's ring timeout
+        // (3s) ends it; the widen then (agent1 excluded via the no-answer
+        // rotation) offers EXACTLY ONE of {agent2, agent3} — never a group
+        // ring, never the just-failed agent1. The old "agent2 head first"
+        // expectation was an artifact of ring-all widening.
+        let mut w2: Option<(Duration, TestUaEvent)> = None;
+        let mut w3: Option<(Duration, TestUaEvent)> = None;
+        let widen2_deadline = t1 + Duration::from_secs(15);
+        while w2.is_none() && w3.is_none() && Instant::now() < widen2_deadline {
+            if w2.is_none() {
+                w2 = wait_for_event(
+                    &mut agent2,
+                    t1,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+            if w3.is_none() {
+                w3 = wait_for_event(
+                    &mut agent3,
+                    t1,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+        }
         assert!(
-            agent3_invite_at >= Duration::from_secs(2),
-            "widening must respect max_wait_secs, fired at {agent3_invite_at:?}"
+            w2.as_ref().xor(w3.as_ref()).is_some(),
+            "single-call widening of call 2 must offer EXACTLY ONE candidate (2:{w2:?} 3:{w3:?})"
         );
-        let TestUaEvent::IncomingCall(agent3_dialog, _) = agent3_invite else {
-            unreachable!("matcher guarantees IncomingCall");
-        };
-        let sdp_answer3 = "v=0\r\n\
-            o=agent3 4 0 IN IP4 127.0.0.1\r\ns=agent3\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-            m=audio 30004 RTP/AVP 0 101\r\n\
-            a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
-            .to_string();
-        agent3
-            .answer_call(&agent3_dialog, Some(sdp_answer3))
-            .await
+        let widened2_at = w2
+            .as_ref()
+            .map(|(d, _)| *d)
+            .or_else(|| w3.as_ref().map(|(d, _)| *d))
             .unwrap();
-        wait_for_event(
-            &mut agent3,
-            t1,
-            Duration::from_secs(5),
-            |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent3_dialog),
-        )
-        .await
-        .expect("agent3 leg must be established after answering");
+        assert!(
+            widened2_at >= Duration::from_secs(3),
+            "widening must be deferred past the ringing window (3s), fired at {widened2_at:?}"
+        );
+        let sdp_answer_for2 = |owner: &str, port: u32| {
+            format!(
+                "v=0\r\n\
+                o={owner} 4 0 IN IP4 127.0.0.1\r\ns={owner}\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                m=audio {port} RTP/AVP 0 101\r\n\
+                a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            )
+        };
+        let winner_is_agent2 = w2.is_some();
+        if winner_is_agent2 {
+            let (_, TestUaEvent::IncomingCall(agent2_dialog, _)) = w2.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent2
+                .answer_call(&agent2_dialog, Some(sdp_answer_for2("agent2", 30012)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent2,
+                t1,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent2_dialog),
+            )
+            .await
+            .expect("agent2 leg must be established after answering");
+        } else {
+            let (_, TestUaEvent::IncomingCall(agent3_dialog, _)) = w3.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent3
+                .answer_call(&agent3_dialog, Some(sdp_answer_for2("agent3", 30004)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent3,
+                t1,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent3_dialog),
+            )
+            .await
+            .expect("agent3 leg must be established after answering");
+        }
+
+        // Single-call invariant: the overflow agent that was NOT offered
+        // must never receive an INVITE.
+        if winner_is_agent2 {
+            let events = agent3.process_dialog_events().await.unwrap_or_default();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, TestUaEvent::IncomingCall(_, _))),
+                "agent3 must never be dialed in call 2's widening (single-call)"
+            );
+        } else {
+            let events = agent2.process_dialog_events().await.unwrap_or_default();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, TestUaEvent::IncomingCall(_, _))),
+                "agent2 must never be dialed in call 2's widening (single-call)"
+            );
+        }
 
         // The queue connected call 2 as well (hook fired again).
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -645,6 +762,334 @@ mod escalation_e2e {
             }
             println!("── end timeline ──");
         }
+
+        server.stop();
+    }
+
+    /// The overflow rule book, end to end on real SIP (SEQUENTIAL mode,
+    /// default idle-only scheduling):
+    /// 1. ringing gate — the widen waits for agent1's offer to end (3s ring
+    ///    timeout), it never races a live offer;
+    /// 2. single-call — the widen offers EXACTLY ONE overflow agent;
+    /// 3. pool re-offer — when that offer times out, the wait-retention poll
+    ///    (covering primary + triggered overflow groups) offers the NEXT
+    ///    pool candidate;
+    /// 4. no-answer rotation — the just-failed agents are never re-offered
+    ///    before fresh candidates;
+    /// 5. break exclusion — an Away (小休) agent is NEVER dialed (default
+    ///    policy `available_states = [idle]`).
+    #[tokio::test]
+    async fn test_overflow_pool_rules_single_call_never_break_never_group_ring_e2e() {
+        let _ = tracing_subscriber::fmt().try_init();
+
+        let port = portpicker::pick_unused_port().unwrap_or(15075);
+
+        // Sequential overflow: per-stage dwell 2s (overflow_after_secs), the
+        // queue's own max wait is 30s — decoupled so the pool re-offer can
+        // actually happen after the first offer's ring timeout (with
+        // max_wait == threshold the queue would fall back right after the
+        // first widened offer ends).
+        let mut cache = SkillGroupTomlCache::default();
+        cache.groups.insert(
+            "support".to_string(),
+            SkillGroupConfigEntry {
+                skill_group_id: "support".to_string(),
+                display_name: None,
+                skills_required: vec!["support".to_string()],
+                overflow_groups: vec!["support_l2".to_string()],
+                sla_target_secs: 30,
+                max_wait_secs: 30,
+                acd_policy: None,
+                overflow_mode: Some("sequential".to_string()),
+                overflow_after_secs: Some(2),
+            },
+        );
+        cache.groups.insert(
+            "support_l2".to_string(),
+            group("support_l2", &["support_l2"], &[], 90),
+        );
+        let skill_group_cache = Arc::new(tokio::sync::RwLock::new(cache));
+
+        let cc_registry = Arc::new(AgentRegistry::new());
+        for (id, skills) in [
+            ("agent1", vec!["support"]),
+            ("agent2", vec!["support_l2"]),
+            ("agent3", vec!["support_l2"]),
+            ("agent_rest", vec!["support_l2"]),
+        ] {
+            cc_registry
+                .register(
+                    id.to_string(),
+                    skills.into_iter().map(|s| s.to_string()).collect(),
+                    1,
+                )
+                .await
+                .unwrap();
+            cc_registry
+                .update_status(id, AgentStatus::Idle)
+                .await
+                .unwrap();
+        }
+        // agent_rest is on BREAK (小休): default policy schedules idle only —
+        // it must never be dialed, not by the widen, not by re-polls.
+        cc_registry
+            .update_status("agent_rest", AgentStatus::Away(String::new()))
+            .await
+            .unwrap();
+        // Deterministic ring timeout for the unanswered offers.
+        cc_registry.set_desk_behavior(rustpbx::addons::cc::config::DeskBehaviorConfig {
+            ring_no_answer_secs: 3,
+            ..Default::default()
+        });
+
+        let adapter = Arc::new(
+            CcAgentRegistryAdapter::new(
+                cc_registry.clone(),
+                Arc::new(AcdEngine::new(AcdConfig::default())),
+                "localhost",
+            )
+            .with_skill_group_cache(skill_group_cache),
+        );
+
+        let connected: Arc<Mutex<Vec<CallSessionContext>>> = Arc::new(Mutex::new(Vec::new()));
+        let hook: Arc<dyn CallSessionHook> = Arc::new(RecordingHook {
+            connected: connected.clone(),
+        });
+
+        let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
+            escalation_proxy_config(port),
+            crate::common::e2e_test_server::E2eTestServerInject {
+                queue_enricher: None,
+                users: ["caller", "agent1", "agent2", "agent3", "agent_rest"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, username)| SipUser {
+                        id: (idx + 1) as u64,
+                        username: username.to_string(),
+                        password: Some("password".to_string()),
+                        enabled: true,
+                        realm: Some("127.0.0.1".to_string()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                session_hook: Some(hook),
+                agent_registry: Some(adapter),
+                rwi_gateway: None,
+                #[cfg(feature = "addon-cc")]
+                cc_policy_db: None,
+            },
+        )
+        .await
+        .unwrap();
+        let proxy_addr = server.proxy_addr;
+
+        let mk_ua = |username: &'static str, port_hint: u16| {
+            TestUa::new(TestUaConfig {
+                webrtc: false,
+                username: username.to_string(),
+                password: "password".to_string(),
+                realm: "127.0.0.1".to_string(),
+                local_port: portpicker::pick_unused_port().unwrap_or(port_hint),
+                proxy_addr,
+            })
+        };
+
+        let mut agent1 = mk_ua("agent1", 26110);
+        agent1.start().await.unwrap();
+        agent1.register().await.unwrap();
+        let mut agent2 = mk_ua("agent2", 26111);
+        agent2.start().await.unwrap();
+        agent2.register().await.unwrap();
+        let mut agent3 = mk_ua("agent3", 26112);
+        agent3.start().await.unwrap();
+        agent3.register().await.unwrap();
+        let mut agent_rest = mk_ua("agent_rest", 26113);
+        agent_rest.start().await.unwrap();
+        agent_rest.register().await.unwrap();
+        let mut caller = mk_ua("caller", 26114);
+        caller.start().await.unwrap();
+
+        let sdp_offer = "v=0\r\n\
+            o=caller 1 0 IN IP4 127.0.0.1\r\ns=caller\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+            m=audio 30020 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            .to_string();
+
+        let t0 = Instant::now();
+        let (hangup_tx, hangup_rx) = tokio::sync::oneshot::channel::<()>();
+        let call_task = tokio::spawn(async move {
+            let dialog_id = caller.make_call("support", Some(sdp_offer)).await?;
+            let _ = hangup_rx.await;
+            caller.hangup(&dialog_id).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        // ── Rule 1 setup: agent1 rings and never answers ─────────────────
+        wait_for_event(&mut agent1, t0, Duration::from_secs(8), |e| {
+            matches!(e, TestUaEvent::IncomingCall(_, _))
+        })
+        .await
+        .expect("agent1 (primary) must receive the INVITE first");
+
+        // ── Rule 1+2: deferred widening offers EXACTLY ONE overflow agent ─
+        let mut w2: Option<(Duration, TestUaEvent)> = None;
+        let mut w3: Option<(Duration, TestUaEvent)> = None;
+        let widen_deadline = t0 + Duration::from_secs(15);
+        while w2.is_none() && w3.is_none() && Instant::now() < widen_deadline {
+            if w2.is_none() {
+                w2 = wait_for_event(
+                    &mut agent2,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+            if w3.is_none() {
+                w3 = wait_for_event(
+                    &mut agent3,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+        }
+        assert!(
+            w2.as_ref().xor(w3.as_ref()).is_some(),
+            "the widen must offer EXACTLY ONE overflow agent (2:{w2:?} 3:{w3:?})"
+        );
+        let widened_at = w2
+            .as_ref()
+            .map(|(d, _)| *d)
+            .or_else(|| w3.as_ref().map(|(d, _)| *d))
+            .unwrap();
+        assert!(
+            widened_at >= Duration::from_secs(3),
+            "widening must be deferred past agent1's ringing window (3s), fired at {widened_at:?}"
+        );
+        let first_winner_is_agent2 = w2.is_some();
+
+        // ── Rule 3 setup: the first offer is left unanswered too ─────────
+        let (first_winner_terminated_at, _) = if first_winner_is_agent2 {
+            wait_for_event(&mut agent2, t0, Duration::from_secs(8), |e| {
+                matches!(e, TestUaEvent::CallTerminated(_))
+            })
+            .await
+            .expect("the first widened offer must end at its ring timeout")
+        } else {
+            wait_for_event(&mut agent3, t0, Duration::from_secs(8), |e| {
+                matches!(e, TestUaEvent::CallTerminated(_))
+            })
+            .await
+            .expect("the first widened offer must end at its ring timeout")
+        };
+        let _ = first_winner_terminated_at;
+
+        // ── Rule 3+4: the re-poll offers the OTHER overflow candidate ────
+        let mut r2: Option<(Duration, TestUaEvent)> = None;
+        let mut r3: Option<(Duration, TestUaEvent)> = None;
+        let reoffer_deadline = Instant::now() + Duration::from_secs(15);
+        while r2.is_none() && r3.is_none() && Instant::now() < reoffer_deadline {
+            if first_winner_is_agent2 && r3.is_none() {
+                r3 = wait_for_event(
+                    &mut agent3,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+            if !first_winner_is_agent2 && r2.is_none() {
+                r2 = wait_for_event(
+                    &mut agent2,
+                    t0,
+                    Duration::from_millis(250),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                )
+                .await;
+            }
+        }
+        assert!(
+            r2.as_ref().xor(r3.as_ref()).is_some(),
+            "the pool re-offer must go to the OTHER overflow candidate (2:{r2:?} 3:{r3:?})"
+        );
+        let sdp_answer_for = |owner: &str, port: u32| {
+            format!(
+                "v=0\r\n\
+                o={owner} 2 0 IN IP4 127.0.0.1\r\ns={owner}\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                m=audio {port} RTP/AVP 0 101\r\n\
+                a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            )
+        };
+        if r2.is_some() {
+            let (_, TestUaEvent::IncomingCall(agent2_dialog, _)) = r2.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent2
+                .answer_call(&agent2_dialog, Some(sdp_answer_for("agent2", 30022)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent2,
+                t0,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent2_dialog),
+            )
+            .await
+            .expect("agent2 leg must be established");
+        } else {
+            let (_, TestUaEvent::IncomingCall(agent3_dialog, _)) = r3.unwrap() else {
+                unreachable!("matcher guarantees IncomingCall");
+            };
+            agent3
+                .answer_call(&agent3_dialog, Some(sdp_answer_for("agent3", 30023)))
+                .await
+                .unwrap();
+            wait_for_event(
+                &mut agent3,
+                t0,
+                Duration::from_secs(5),
+                |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent3_dialog),
+            )
+            .await
+            .expect("agent3 leg must be established");
+        }
+
+        // The queue's on_call_connected hook fired for the session.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !connected.lock().await.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "on_call_connected must fire once the pool re-offer answers"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        // ── Rule 5 + final invariants: drain every UA ────────────────────
+        // agent_rest (小休): ZERO invites across the whole call.
+        let rest_events = agent_rest.process_dialog_events().await.unwrap_or_default();
+        assert!(
+            rest_events.is_empty(),
+            "a break (Away) agent must NEVER be dialed, got: {rest_events:?}"
+        );
+        // agent1: entry INVITE only — the widen/re-poll never re-dialed the
+        // just-failed primary agent. (The entry INVITE was consumed by the
+        // phase-1 wait above — the drain must hold NO further IncomingCall.)
+        let agent1_events = agent1.process_dialog_events().await.unwrap_or_default();
+        assert!(
+            !agent1_events
+                .iter()
+                .any(|e| matches!(e, TestUaEvent::IncomingCall(_, _))),
+            "agent1 must never be re-dialed after its ring terminal, got: {agent1_events:?}"
+        );
+
+        let _ = hangup_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
+        sleep(Duration::from_millis(300)).await;
 
         server.stop();
     }

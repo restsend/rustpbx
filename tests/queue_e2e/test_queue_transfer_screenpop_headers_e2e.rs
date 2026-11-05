@@ -154,6 +154,13 @@ async fn start_harness(
         .update_status("bob", rustpbx::addons::cc::agent::AgentStatus::Idle)
         .await
         .unwrap();
+    // Short server-side ring timeout: the overflow escalation scenario leaves
+    // the primary offer unanswered, and since the ringing-gate fix the
+    // widening waits for that offer to end. 3s keeps the test deterministic.
+    cc_registry.set_desk_behavior(rustpbx::addons::cc::config::DeskBehaviorConfig {
+        ring_no_answer_secs: 3,
+        ..Default::default()
+    });
     if start_busy {
         // Queue-then-assign: the agent must be Busy at entry so the call
         // actually queues and the assignment happens via wait retention.
@@ -502,6 +509,13 @@ async fn queue_overflow_escalation_agent_invite_carries_screenpop_headers() -> R
             .await
             .unwrap();
     }
+    // Short server-side ring timeout: agent1's offer is deliberately left
+    // unanswered, and since the ringing-gate fix the widening waits for that
+    // offer to end before dialing the overflow agent.
+    cc_registry.set_desk_behavior(rustpbx::addons::cc::config::DeskBehaviorConfig {
+        ring_no_answer_secs: 3,
+        ..Default::default()
+    });
 
     let adapter = Arc::new(CcAgentRegistryAdapter::new(
         cc_registry,

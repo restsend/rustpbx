@@ -1967,6 +1967,10 @@ mod tests {
 
     // ── Escalation ──
 
+    /// Cumulative escalation over a skill-group union: the primary agent's
+    /// leg is ringing when the threshold fires — the check must be SKIPPED
+    /// (in-flight offer runs to its terminal first); after the ring terminal
+    /// the re-armed timer resolves the widened union and dials the new agent.
     #[tokio::test]
     async fn test_cumulative_escalation_does_not_crash() {
         use std::sync::Arc;
@@ -2001,19 +2005,58 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "LegAdd-primary", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-            })
-            .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, target, .. }
+                if target.to_string().contains("agent1@example.com") =>
+            {
+                leg_id.clone()
+            }
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
 
+        // 振铃中（在途 offer）阈值到点 → 溢出必须被跳过：不拨宽、不消费 step。
+        // 旧行为（已废弃）会在主腿振铃时把扩宽坐席一起拨出。
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal（no-answer）→ 回等待态 → 重新武装的定时器触发扩宽。
         // The auto-armed escalation timer must resolve the widened group and
         // dial the new agent — NOT hang up, even though the widened group
         // came back as a fresh union.
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue, // hold music / prompts around the re-entry
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed check must dial the widened agent"
+        );
 
         // No Hangup and no spurious dial after the escalation.
         assert!(
@@ -2223,6 +2266,7 @@ mod tests {
             _call_id: &str,
             fair: bool,
             include_primary: bool,
+            _excluded_agent_ids: &[String],
         ) -> Vec<String> {
             self.escalation_calls.lock().unwrap().push((
                 primary_target_uri.to_string(),
@@ -2336,7 +2380,8 @@ mod tests {
     /// The escalation timer must arm itself in `on_enter` and fire WITHOUT
     /// any manual `stack.timeout("escalation_check")` — the dormant-path
     /// regression (timer only ever re-armed after firing) is exactly what
-    /// this test forbids.
+    /// this test forbids. While the primary leg is ringing the check is
+    /// skipped; the re-armed timer fires after the ring terminal.
     #[tokio::test]
     async fn test_escalation_timer_auto_arms_and_widens_fairly() {
         use std::sync::Arc;
@@ -2376,18 +2421,57 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(2000, "LegAdd-primary", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, target, .. }
+                if target.to_string().contains("agent1@example.com") =>
+            {
+                leg_id.clone()
+            }
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
 
-        // The auto-armed escalation timer fires by itself after the 1s
-        // threshold; the widened union resolves and dials ONLY the new agent
-        // (the duplicate primary leg is filtered out).
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        // The auto-armed timer fires after the 1s threshold — but the primary
+        // leg is RINGING: the check must be skipped (in-flight offer runs to
+        // its terminal), no resolve, no widened dial.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal (no-answer) → back to wait retention → the re-armed
+        // timer resolves the widened union and dials ONLY the new agent (the
+        // duplicate primary leg is filtered out).
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must widen fairly"
+        );
 
         // No further LegAdd beyond the two above within a quiet window.
         assert!(
@@ -2416,7 +2500,9 @@ mod tests {
     }
 
     /// Once every timeline step has triggered the escalation timer stops
-    /// re-arming — no idle wake-ups for the rest of the call.
+    /// re-arming — no idle wake-ups for the rest of the call. While the
+    /// primary leg is ringing the check is skipped; the step is consumed
+    /// only after the ring terminal returns the call to wait retention.
     #[tokio::test]
     async fn test_escalation_timer_stops_after_all_steps() {
         use std::sync::Arc;
@@ -2448,15 +2534,51 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "LegAdd-primary", |c| {
-                matches!(c, CallCommand::LegAdd { .. })
-            })
-            .await;
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone(),
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+
+        // The primary leg is ringing: the 1s threshold fires while the offer
+        // is in flight — the check must be SKIPPED.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal → wait retention → the re-armed timer consumes the
+        // step (widened dial).
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must consume the step"
+        );
 
         // The historical behavior re-armed a 10s wake-up forever even after
         // the last step; give the timer ample time to misfire.
@@ -2474,12 +2596,13 @@ mod tests {
         let _ = stack.join().await;
     }
 
-    /// Replace-mode escalation over a skill-group union: when the widened
-    /// resolve returns the already-dialled primary agent plus a new agent,
-    /// Replace must (1) tear down the pending primary leg via LegRemove,
-    /// (2) skip the duplicate primary, and (3) dial ONLY the new agent.
+    /// Replace-mode escalation over a skill-group union: while the primary
+    /// leg is ringing the check is SKIPPED; after the ring terminal the
+    /// widened resolve returns the already-dialled primary agent plus a new
+    /// agent — Replace must (1) skip the duplicate primary and (2) dial ONLY
+    /// the new agent (the ring terminal already released the primary leg).
     #[tokio::test]
-    async fn test_escalation_replace_mode_removes_pending_leg_and_dials_union() {
+    async fn test_escalation_replace_mode_defers_while_ringing_then_dials_union() {
         use std::sync::Arc;
 
         let mut config = build_simple_queue_config();
@@ -2520,19 +2643,48 @@ mod tests {
         let ringback = stack.next_cmd(2000).await.expect("agent ringback");
         assert_eq!(play_path(&ringback), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
 
-        // Replace escalation: the pending primary leg is removed first …
-        stack
-            .assert_cmd(4000, "LegRemove-primary", |c| {
-                matches!(c, CallCommand::LegRemove { .. })
-            })
-            .await;
-        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
-        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
-        // … then ONLY the widened agent is dialled (no duplicate primary).
-        stack.assert_cmd(2000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        // Replace escalation fires while the primary leg is RINGING: the
+        // check must be SKIPPED — no LegRemove, no widened dial (an in-flight
+        // offer runs to its terminal first).
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "replace escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal (no-answer) → back to wait retention → the re-armed
+        // timer runs the Replace step: the (now released) primary has no
+        // pending leg left, the widened agent is dialled.
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue, // hold music / prompts around the re-entry
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must dial the widened agent"
+        );
         assert!(
             stack.next_cmd(1200).await.is_none(),
             "replace escalation must not re-dial the removed primary"
@@ -3022,6 +3174,117 @@ mod tests {
         assert!(
             targets.first().map(String::as_str) == Some("skill-group:support"),
             "the call's own group must still be polled first, got {targets:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Sequential overflow must NOT touch a call whose agent leg is ringing:
+    /// at the threshold the check is skipped (no leg cancel, no group
+    /// switch, no resolve); after the ring terminal returns the call to wait
+    /// retention, the re-armed check performs the stage switch and dials the
+    /// new stage's agent. Regression for "已分配坐席等待振铃的呼叫被溢出重新分配".
+    #[tokio::test]
+    async fn test_sequential_escalation_skipped_while_leg_ringing() {
+        use std::sync::Arc;
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "stage_b".to_string(),
+            fair: false,
+        }];
+        config.skill_group = Some("support".to_string());
+        // The primary agent IS dialable (a real ringing leg), unlike the
+        // wait-retention-only sequential tests.
+        config.skill_routing_enabled = false;
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_escalation_uris(vec![vec!["sip:l2agent@example.com".to_string()]]),
+        );
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-ring".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone(),
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+        stack.custom("agent_ringing", serde_json::json!({ "leg_id": primary_leg }));
+        stack.drain_cmds();
+
+        // Threshold fires while the leg is ringing → the whole stage switch
+        // must be skipped.
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "sequential stage switch must be SKIPPED while the agent leg is ringing"
+        );
+        assert!(
+            registry.group_switches.lock().unwrap().is_empty(),
+            "no group switch may happen while the offer is in flight"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal → wait retention → the re-armed check switches the
+        // stage: the departed leg was already released, ONLY the new stage's
+        // agent is dialled.
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut switched = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    switched = true;
+                    break;
+                }
+                // The stale pending entry of the DEAD primary leg may be
+                // cleaned up at the switch (harmless remove of a leg the
+                // ring terminal already killed). Cancelling anything else is
+                // forbidden.
+                Some(CallCommand::LegRemove { leg_id, .. })
+                    if primary_leg.as_ref() == Some(&leg_id) =>
+                continue,
+                Some(CallCommand::LegRemove { leg_id, .. }) => {
+                    panic!("stage switch cancelled a LIVE leg: {leg_id:?}")
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            switched,
+            "after the ring terminal the re-armed check must dial the new stage's agent"
+        );
+        assert_eq!(
+            registry.group_switches.lock().unwrap().clone(),
+            vec![("support".to_string(), "stage_b".to_string())],
+            "the stage switch must be paired-accounted exactly once"
         );
 
         stack.cancel();

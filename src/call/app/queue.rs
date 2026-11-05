@@ -2214,15 +2214,21 @@ impl QueueApp {
         // After max_wait/abandon the call is owned by the fallback path (or
         // gone entirely) — originating escalation legs there produces ghost
         // rings nobody collects.
+        //
+        // `DialingAgents` and `PlayingTransferPrompt { connected_agent: None
+        // }` are deliberately NOT in the list: an in-flight agent offer (leg
+        // dialing/ringing, prompt playing before the answer) must run to its
+        // terminal first — escalating then would either cancel a ringing leg
+        // mid-ring (sequential / replace re-assign) or pile more legs onto a
+        // call that already has an agent's phone ringing (cumulative). Ring
+        // terminal (no-answer / reject / timeout) returns the call to a
+        // waiting state, and the next re-armed check fires the pending step
+        // immediately.
         if !matches!(
             self.state,
             QueueState::WaitingForAgent
                 | QueueState::PlayingHold { .. }
                 | QueueState::PlayingComfortPrompt
-                | QueueState::DialingAgents { .. }
-                | QueueState::PlayingTransferPrompt {
-                    connected_agent: None
-                }
         ) {
             debug!(state = ?self.state, "Queue: escalation check skipped — not waiting");
             return Ok(());
@@ -2247,6 +2253,13 @@ impl QueueApp {
                 if matches!(self.config.escalation_mode, EscalationMode::Sequential) {
                     let from_group = self.skill_queue_id().to_string();
                     if from_group != step.add_skill_group {
+                        // Dispatcher: paired waiting-depth accounting
+                        // (dequeue `from`, enqueue the new stage) + the
+                        // dispatcher-family `skill_group_call_moved` marker —
+                        // emitted BEFORE queue_left so consumers see the
+                        // skill-group departure first.
+                        self.notify_group_switch(&from_group, &step.add_skill_group)
+                            .await;
                         // RWI: the call left the queue/stage it was queued in.
                         // skill_groups lists everything queued SO FAR (up to
                         // and including the stage being left).
@@ -2261,10 +2274,6 @@ impl QueueApp {
                                 Some(groups)
                             },
                         });
-                        // Dispatcher: paired waiting-depth accounting
-                        // (dequeue `from`, enqueue the new stage).
-                        self.notify_group_switch(&from_group, &step.add_skill_group)
-                            .await;
                     }
                 }
 
@@ -2299,6 +2308,7 @@ impl QueueApp {
                                     &self.call_id,
                                     step.fair,
                                     include_primary,
+                                    &self.no_answer_agents,
                                 )
                                 .await
                         }
@@ -2321,23 +2331,37 @@ impl QueueApp {
                         })
                         .collect();
 
+                    // ── Single-call invariant (单呼) ──────────────────────────
+                    // A queued call has at most ONE in-flight agent leg. The
+                    // resolve atomically reserved exactly one agent and put
+                    // it at the head of the union — dial THAT one only. The
+                    // rest of the union stays a re-resolvable pool: after the
+                    // offer's ring terminal the wait-retention poll (which
+                    // covers primary + already-triggered overflow groups)
+                    // offers the next candidate one at a time. The old
+                    // ring-all widening (dial the whole union = 群振) is
+                    // retired — cumulative widening means the CANDIDATE POOL
+                    // widens, never "more legs ring simultaneously".
+                    let dial_head: &[String] = &agent_uris[..agent_uris.len().min(1)];
+
                     match self.config.escalation_mode {
                         EscalationMode::Cumulative => {
-                            // Add new agents alongside existing
+                            // Pool widened: dial the reserved head alongside
+                            // existing legs (there may be none pending).
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: cumulative escalation - added agent",
                                 "Queue: cumulative escalation - failed to add agent",
                             )
                             .await;
                         }
                         EscalationMode::Replace => {
-                            // Cancel existing legs and dial new agents
+                            // Cancel existing legs and dial the new stage's head.
                             Self::cancel_pending_legs(self, ctrl).await;
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: replace escalation - dialed agent",
                                 "Queue: replace escalation - failed to dial agent",
                             )
@@ -2345,16 +2369,16 @@ impl QueueApp {
                         }
                         EscalationMode::Sequential => {
                             // Stage switch: drop the previous stage's legs,
-                            // dial ONLY the new stage's candidates, then move
-                            // the stage timer. When the new group resolves to
-                            // zero candidates the switch still counts (the
-                            // call IS queued there) — wait retention keeps
-                            // polling the new group and the next escalation
-                            // check advances the chain.
+                            // dial ONLY the new stage's head candidate, then
+                            // move the stage timer. When the new group
+                            // resolves to zero candidates the switch still
+                            // counts (the call IS queued there) — wait
+                            // retention keeps polling the new group and the
+                            // next escalation check advances the chain.
                             Self::cancel_pending_legs(self, ctrl).await;
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: sequential overflow - dialed agent",
                                 "Queue: sequential overflow - failed to dial agent",
                             )

@@ -196,6 +196,10 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         server: crate::common::e2e_test_server::E2eTestServer,
         hook: Arc<RecordingHook>,
         _ivr_path: std::path::PathBuf,
+        /// Adapter skill-group lifecycle events (single-consumer drain).
+        skill_events_rx: tokio::sync::mpsc::UnboundedReceiver<
+            rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent,
+        >,
     }
 
     /// Start the server with the CC adapter wired to both skill groups
@@ -228,14 +232,26 @@ action = {{ type = "transfer", target = "{queue_target}" }}
                 .await
                 .unwrap();
         }
+        // Short server-side ring timeout: the primary agent never answers, so
+        // the offer must terminate quickly and deterministically — since the
+        // ringing-gate fix, overflow waits for the in-flight offer to end.
+        cc_registry.set_desk_behavior(rustpbx::addons::cc::config::DeskBehaviorConfig {
+            ring_no_answer_secs: 3,
+            ..Default::default()
+        });
 
+        let (sg_tx, sg_rx) =
+            tokio::sync::mpsc::unbounded_channel::<
+                rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent,
+            >();
         let adapter = Arc::new(
             CcAgentRegistryAdapter::new(
                 cc_registry,
                 Arc::new(AcdEngine::new(AcdConfig::default())),
                 "localhost",
             )
-            .with_skill_group_cache(skill_group_cache),
+            .with_skill_group_cache(skill_group_cache)
+            .with_skill_group_event_tx(sg_tx),
         );
 
         let hook = Arc::new(RecordingHook {
@@ -283,6 +299,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             server,
             hook,
             _ivr_path: ivr_path,
+            skill_events_rx: sg_rx,
         }
     }
 
@@ -364,30 +381,33 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             "primary agent must be dialed immediately, took {sales_invite_at:?}"
         );
 
-        // ── Phase 2: URI `overflow_after=2` — widened INVITE reaches the
-        // URI-specified overflow group ~2s in, while the primary leg keeps
-        // ringing (cumulative) ────────────────────────────────────────────
+        // ── Phase 2: ringing-gate — the 2s threshold fires while the offer is
+        // in flight, so widening is DEFERRED until the primary leg's ring
+        // timeout (3s) ends the offer; only then does the l2 INVITE go out ──
+        let (sales_ended_at, _) =
+            wait_for_event(&mut agent_sales, t0, Duration::from_secs(10), |e| {
+                matches!(e, TestUaEvent::CallTerminated(_))
+            })
+            .await
+            .expect("primary leg must terminate at its ring timeout");
+        assert!(
+            sales_ended_at >= Duration::from_secs(3),
+            "the in-flight offer must run to its ring timeout, ended at {sales_ended_at:?}"
+        );
+
         let (l2_invite_at, l2_invite) =
             wait_for_event(&mut agent_l2, t0, Duration::from_secs(10), |e| {
                 matches!(e, TestUaEvent::IncomingCall(_, _))
             })
             .await
-            .expect("agent_l2 must receive the widened INVITE from the URI overflow params");
+            .expect("agent_l2 must receive the widened INVITE after the offer ended");
         assert!(
-            l2_invite_at >= Duration::from_secs(2),
-            "widening must respect the URI overflow_after=2 threshold, fired at {l2_invite_at:?}"
+            l2_invite_at > sales_ended_at,
+            "widening must be deferred past the ringing window: l2 at {l2_invite_at:?} < sales end {sales_ended_at:?}"
         );
         assert!(
-            l2_invite_at < Duration::from_secs(6),
-            "widening must happen promptly after the URI threshold, took {l2_invite_at:?}"
-        );
-        // Cumulative: the primary leg is still ringing (not cancelled).
-        assert!(
-            !matches!(
-                agent_sales.process_dialog_events().await,
-                Ok(events) if events.iter().any(|e| matches!(e, TestUaEvent::CallTerminated(_)))
-            ),
-            "primary leg must keep ringing in cumulative mode before anybody answers"
+            l2_invite_at < sales_ended_at + Duration::from_secs(5),
+            "widening must fire promptly after the offer ends, took {l2_invite_at:?}"
         );
 
         // agent_l2 answers → connected.
@@ -490,17 +510,19 @@ action = {{ type = "transfer", target = "{queue_target}" }}
 
     const L2_SEQ_SDP_PORT: u32 = 30103;
 
-    /// Sequential URI overflow (`overflow_mode=sequential&overflow_after=2`):
-    /// the stage switch must (1) CANCEL the primary group's ringing leg,
-    /// (2) dial ONLY the URI overflow group's agent (never re-dial the
-    /// primary), and (3) complete when the overflow agent answers — the full
-    /// "dequeue + re-enqueue" contract, driven purely by URI params.
+    /// Sequential URI overflow (`overflow_mode=sequential&overflow_after=2`),
+    /// with the ringing gate: at the 2s threshold the primary offer is still
+    /// in flight, so the switch is DEFERRED until the primary leg's ring
+    /// timeout ends it. Then the stage switch must (1) dial ONLY the URI
+    /// overflow group's agent (never re-dial the primary), and (2) complete
+    /// when the overflow agent answers — the "dequeue + re-enqueue"
+    /// contract, driven purely by URI params.
     #[tokio::test]
     async fn test_queue_overflow_uri_sequential_switches_stage_e2e() {
         let _ = tracing_subscriber::fmt().try_init();
 
         let port = portpicker::pick_unused_port().unwrap_or(15100);
-        let harness = start_harness(port, Some("sequential")).await;
+        let mut harness = start_harness(port, Some("sequential")).await;
         let proxy_addr = harness.server.proxy_addr;
 
         let mut agent_sales = mk_ua(proxy_addr, "agent_sales", 26040);
@@ -538,20 +560,21 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         .await
         .expect("agent_sales (stage 1) must receive the INVITE");
 
-        // ── Stage switch at overflow_after=2: the primary leg is CANCELLED
-        // first (sequential dequeues the departed stage's legs) ──────────
+        // ── Stage switch DEFERRED by the ringing gate: at overflow_after=2
+        // the offer is still in flight, so the switch waits for the ring
+        // timeout (3s) to end it; the primary leg then terminates ─────────
         let (terminated_at, _) =
             wait_for_event(&mut agent_sales, t0, Duration::from_secs(10), |e| {
                 matches!(e, TestUaEvent::CallTerminated(_))
             })
             .await
-            .expect("stage switch must cancel the primary agent's ringing leg");
+            .expect("the primary agent's ringing leg must terminate at its ring timeout");
         assert!(
-            terminated_at >= Duration::from_secs(2),
-            "stage switch must respect the URI overflow_after=2 threshold, fired at {terminated_at:?}"
+            terminated_at >= Duration::from_secs(3),
+            "the in-flight offer must run to its ring timeout (3s), ended at {terminated_at:?}"
         );
 
-        // ── Stage 2: ONLY the overflow agent is dialed ────────────────────
+        // ── Stage 2: ONLY the overflow agent is dialed (after the switch) ──
         let (l2_invite_at, l2_invite) =
             wait_for_event(&mut agent_l2, t0, Duration::from_secs(8), |e| {
                 matches!(e, TestUaEvent::IncomingCall(_, _))
@@ -559,7 +582,11 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             .await
             .expect("agent_l2 (stage 2) must receive the INVITE after the switch");
         assert!(
-            l2_invite_at < Duration::from_secs(6),
+            l2_invite_at > terminated_at,
+            "stage 2 must dial only after the ringing window ended: l2 at {l2_invite_at:?} <= end {terminated_at:?}"
+        );
+        assert!(
+            l2_invite_at < terminated_at + Duration::from_secs(5),
             "stage 2 must dial promptly after the switch, took {l2_invite_at:?}"
         );
 
@@ -570,6 +597,32 @@ action = {{ type = "transfer", target = "{queue_target}" }}
                 Ok(events) if events.iter().any(|e| matches!(e, TestUaEvent::IncomingCall(_, _)))
             ),
             "sequential switch must never re-dial the departed stage's agent"
+        );
+
+        // Dispatcher-family switch marker: the adapter emitted
+        // GroupSwitched (→ skill_group_call_moved{from, to, reason}) at the
+        // stage switch — the skill_group family sees the transition, not
+        // just the queue family.
+        let mut saw_moved = false;
+        while let Ok(ev) = harness.skill_events_rx.try_recv() {
+            if matches!(
+                ev,
+                rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::GroupSwitched {
+                    ref from_group,
+                    ref to_group,
+                    ref reason,
+                    ..
+                } if from_group == PRIMARY_GROUP
+                    && to_group == OVERFLOW_GROUP
+                    && reason == "overflow"
+            ) {
+                saw_moved = true;
+                break;
+            }
+        }
+        assert!(
+            saw_moved,
+            "the stage switch must emit GroupSwitched (skill_group_call_moved) for {PRIMARY_GROUP} → {OVERFLOW_GROUP}"
         );
 
         // agent_l2 answers → the call completes on the overflow stage.
