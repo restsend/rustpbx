@@ -21,7 +21,6 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(25);
 const MAX_RESTARTS_PER_RELEASE: u32 = 5;
 
@@ -422,8 +421,14 @@ impl SupCore {
 
         // Wait for Ready, failing fast if the worker dies before reporting
         // (bad args, config error…). Without this the child would linger as
-        // an unreaped zombie and the boot would stall until READY_TIMEOUT.
-        let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+        // an unreaped zombie and the boot would stall until the Ready
+        // timeout. The timeout itself must CLEAN UP, not poison: leaving the
+        // Starting entry in place made every future upgrade fail with
+        // "already in progress" forever (observed when first-boot DB
+        // migrations exceeded the window on a loaded machine — the child is
+        // killed and its resumable migrations continue on the next attempt).
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.cfg.master.ready_timeout_secs());
         loop {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 let mut st = self.state.lock().await;
@@ -443,6 +448,15 @@ impl SupCore {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    generation,
+                    window_secs = self.cfg.master.ready_timeout_secs(),
+                    "worker not Ready in time — killing and unblocking future upgrades"
+                );
+                let _ = child.kill().await;
+                let mut st = self.state.lock().await;
+                st.gens.remove(&generation);
+                self.stats.upgrades_failed.fetch_add(1, Ordering::Relaxed);
                 return Err(SupError::NotReady("timeout".into()));
             }
             tokio::time::sleep(READY_POLL).await;
@@ -1340,5 +1354,71 @@ mod pump_wiring_tests {
         );
         assert_eq!(df.datagram, sip);
         assert_eq!(core.relay_stats.to_dialog_routed.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod ready_timeout_tests {
+    use super::*;
+    use crate::config::ConfigSubset;
+    use rustpbx_master_ipc::{handle_for_end, socketpair_std};
+
+    /// The poisoning fix: a Ready-timeout must REMOVE the Starting entry so
+    /// the retry reaches the spawn stage again — before the fix the retry
+    /// died with `InProgress` and the supervisor was bricked until restart.
+    #[tokio::test]
+    async fn upgrade_timeout_cleans_up_and_unblocks() {
+        let mut cfg = ConfigSubset::default();
+        cfg.master.ready_timeout_secs = Some(1);
+        let mut core = SupCore::new(
+            cfg,
+            Path::new("/tmp/x.toml"),
+            Path::new("/tmp/x.sock"),
+            HashMap::new(),
+        )
+        .expect("sup core");
+        // Stub worker: stays alive, never sends Ready (no IPC at all).
+        let stub = std::env::temp_dir().join(format!("slow-worker-{}.sh", std::process::id()));
+        std::fs::write(&stub, "#!/bin/sh\nsleep 300\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        core.set_worker_bin(stub.clone());
+
+        let err = core.upgrade_to().await.unwrap_err();
+        assert!(
+            matches!(err, SupError::NotReady(_)),
+            "first attempt must time out, got: {err}"
+        );
+        // THE FIX: no Starting residue — the retry reaches the spawn stage
+        // (and times out again), instead of dying with InProgress.
+        let err2 = core.upgrade_to().await.unwrap_err();
+        assert!(
+            matches!(err2, SupError::NotReady(_)),
+            "retry must reach the Ready wait, got: {err2}"
+        );
+        assert!(
+            !matches!(err2, SupError::InProgress),
+            "supervisor poisoned: {err2}"
+        );
+        let _ = std::fs::remove_file(&stub);
+    }
+
+    /// Sanity for the IPC plumbing used above (socketpair shape unchanged).
+    #[tokio::test]
+    async fn socketpair_pairing_still_works() {
+        let (ca, cb) = socketpair_std().unwrap();
+        let (da, db) = socketpair_std().unwrap();
+        let mut a = handle_for_end(ca, da, 8).unwrap();
+        let b = handle_for_end(cb, db, 8).unwrap();
+        b.control_tx
+            .send(ControlMessage::Ready)
+            .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), a.control_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        assert!(matches!(frame.msg, ControlMessage::Ready));
     }
 }

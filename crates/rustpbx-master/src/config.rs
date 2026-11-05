@@ -37,6 +37,10 @@ pub struct MasterSubset {
     /// Node-level registration directory hard cap (Registry-in-Master,
     /// memory-locator deployments only).
     pub max_registry_entries: Option<usize>,
+    /// Worker Ready window (seconds): how long the master waits for a newly
+    /// spawned generation to report Ready before giving up. First-boot DB
+    /// migrations on a loaded machine may need more than the default.
+    pub ready_timeout_secs: Option<u64>,
     /// Accept-time fd routing for SIP TCP: sniff the first message's
     /// Call-ID and route to the generation owning that dialog (parity with
     /// the UDP path). Default on.
@@ -84,6 +88,12 @@ impl MasterSubset {
     /// Default 100k directory entries.
     pub fn max_registry_entries(&self) -> usize {
         self.max_registry_entries.unwrap_or(100_000)
+    }
+
+    /// Default 60s. On timeout the worker is killed (its resumable
+    /// migrations continue on the next attempt) and the supervisor unblocks.
+    pub fn ready_timeout_secs(&self) -> u64 {
+        self.ready_timeout_secs.unwrap_or(60)
     }
 }
 
