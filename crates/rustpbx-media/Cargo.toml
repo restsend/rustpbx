@@ -13,6 +13,7 @@ audio-codec = "0.4.13"
 bytes = { version = "1", features = ["serde"] }
 dashmap = "6"
 minimp3 = "0.6.1"
+mp4 = "0.14.0"
 parking_lot = "0.12"
 rand = "0.10"
 rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.2-rc" }

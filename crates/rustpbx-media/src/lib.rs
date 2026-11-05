@@ -28,6 +28,7 @@ pub mod rtp_track_builder;
 pub mod sdp_attrs;
 pub mod telemetry;
 pub mod telephone_event;
+pub mod video_recorder;
 pub mod volume_stats;
 pub mod wav_reader;
 pub mod wav_writer;

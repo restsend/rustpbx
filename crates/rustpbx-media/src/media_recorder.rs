@@ -112,6 +112,11 @@ pub struct RecordingResult {
     pub path: String,
     pub duration_secs: f64,
     pub file_size: u64,
+    /// Additional artifacts produced by the same recorder alongside `path`
+    /// (e.g. the callee-leg MP4 next to the caller-leg one, or the MP4 files
+    /// produced next to a WAV by a composite recorder). Consumers that care
+    /// about a single file can ignore this.
+    pub extra_files: Vec<RecordingResult>,
 }
 
 /// A backend exclusively owned and driven by the call's recording task.
@@ -284,6 +289,7 @@ impl MediaRecorder for FileRecorder {
             path,
             duration_secs: recorder.duration_secs(),
             file_size,
+            extra_files: Vec::new(),
         }))
     }
 }
