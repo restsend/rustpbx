@@ -2205,6 +2205,9 @@ impl SipSession {
                 }
 
                 Some(result) = Self::recv_recorder_finished(&mut self.media.recording) => {
+                    // Max-duration expiry finalized the backend: stop feeding
+                    // it before publishing the artifacts.
+                    self.set_video_capture_enabled(false);
                     match result {
                         Ok(Some(result)) => {
                             self.publish_recording_complete(result);
@@ -10300,19 +10303,25 @@ impl SipSession {
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let profile = self.caller_recording_profile()?;
-                    let option = self.recorder_option(path.clone());
-                    self.media
-                        .recording
-                        .start_recording(
-                            profile,
-                            option,
-                            config.channels.unwrap_or(2),
-                            config.mono_caller_only.unwrap_or(false),
-                            config
-                                .max_duration_secs
-                                .map(|seconds| Duration::from_secs(seconds as u64)),
-                        )
-                        .await?;
+                    let policy = self.resolved_recording_policy();
+                    let want_video = policy
+                        .as_ref()
+                        .and_then(|p| p.video.as_ref())
+                        .is_some_and(|v| v.h264_enabled());
+                    self.install_file_recording(
+                        path.clone(),
+                        profile,
+                        config.channels.unwrap_or(2),
+                        config.mono_caller_only.unwrap_or(false),
+                        config
+                            .max_duration_secs
+                            .map(|seconds| Duration::from_secs(seconds as u64)),
+                        policy.as_ref(),
+                    )
+                    .await?;
+                    if want_video {
+                        self.set_video_capture_enabled(true);
+                    }
                     self.recording.active = Some(crate::callrecord::ActiveRecording {
                         path,
                         segment_type: segment_type.clone(),

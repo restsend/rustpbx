@@ -121,6 +121,10 @@ pub struct RecordingSegment {
     /// artifact across real-time and CDR-pipeline events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_id: Option<String>,
+    /// Media kind of the artifact: `None`/absent = audio (WAV), `"video"` =
+    /// per-leg MP4 video recorded alongside an audio segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_kind: Option<String>,
 }
 
 /// In-flight recording bookkeeping owned by `SipSession`.

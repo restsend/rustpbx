@@ -421,6 +421,41 @@ pub struct RecordingPolicy {
     /// source has no entry uploads to the main bucket fields above.
     #[serde(default)]
     pub sources: Option<HashMap<String, RecordingS3Target>>,
+    /// Video call recording (P2P per-leg MP4). Off by default; when enabled,
+    /// a call whose negotiated SDP carries an H264 video m-line additionally
+    /// records each leg's video as `{base}_caller.mp4` / `{base}_callee.mp4`
+    /// next to the WAV artifact.
+    #[serde(default)]
+    pub video: Option<VideoRecordingConfig>,
+}
+
+/// `[recording.video]` — video recording options.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+pub struct VideoRecordingConfig {
+    /// Master switch. Video recording additionally requires the call to have
+    /// negotiated H264 video (`VideoPolicy::PassThrough` keeps video on the
+    /// legs; `Strip` removes it, leaving a plain audio recording).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Video codec to record. Only `h264` is supported today (VP8 negotiated
+    /// calls degrade to the audio-only WAV).
+    #[serde(default)]
+    pub codec: Option<String>,
+}
+
+impl VideoRecordingConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn h264_enabled(&self) -> bool {
+        self.enabled
+            && self
+                .codec
+                .as_deref()
+                .map(|codec| codec.eq_ignore_ascii_case("h264"))
+                .unwrap_or(true)
+    }
 }
 
 /// One `[recording.sources.<tag>]` entry: an independent S3-compatible upload

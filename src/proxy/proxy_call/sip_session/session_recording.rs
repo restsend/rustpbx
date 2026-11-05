@@ -12,6 +12,109 @@ use crate::proxy::proxy_call::sip_session::util::format_duration_ms;
 // ===================================================================
 
 impl SipSession {
+    /// Effective `[recording.video]` options for this call: per-call
+    /// (dialplan) policy first, then the server-wide policy.
+    pub(crate) fn resolved_recording_policy(&self) -> Option<crate::config::RecordingPolicy> {
+        self.context
+            .dialplan
+            .recording_policy
+            .clone()
+            .or_else(|| {
+                self.server
+                    .recording_policy
+                    .load()
+                    .as_ref()
+                    .as_ref()
+                    .cloned()
+            })
+    }
+
+    /// Video recording configuration for this call, when possible:
+    /// `[recording.video].enabled` + codec `h264` (default) + an H264 video
+    /// codec actually negotiated on the caller leg. Calls stripped of video
+    /// (`VideoPolicy::Strip`) simply never match the third condition.
+    pub(crate) fn video_recording_config(
+        &self,
+        profile: &crate::media::negotiate::NegotiatedLegProfile,
+        policy: Option<&crate::config::RecordingPolicy>,
+    ) -> Option<crate::config::VideoRecordingConfig> {
+        let video = policy
+            .and_then(|policy| policy.video.clone())
+            .filter(|video| video.h264_enabled())?;
+        let negotiated = profile
+            .video
+            .iter()
+            .any(|codec| codec.name.eq_ignore_ascii_case("h264"));
+        negotiated.then_some(video)
+    }
+
+    /// Install a file recording for `path`: the WAV backend (existing
+    /// behaviour), optionally composed with the per-leg MP4 video recorder
+    /// when video recording applies. Both live in the SAME recording task;
+    /// the video tap gate opens only after the backend initialized.
+    pub(crate) async fn install_file_recording(
+        &mut self,
+        path: String,
+        profile: crate::media::negotiate::NegotiatedLegProfile,
+        channels: u16,
+        mono_caller_only: bool,
+        max_duration: Option<Duration>,
+        policy: Option<&crate::config::RecordingPolicy>,
+    ) -> Result<()> {
+        let video = self.video_recording_config(&profile, policy);
+        match video {
+            None => {
+                self.media
+                    .recording
+                    .start_recording(profile, self.recorder_option(path), channels, mono_caller_only, max_duration)
+                    .await
+            }
+            Some(_) => {
+                let base_path = std::path::Path::new(&path)
+                    .with_extension("")
+                    .display()
+                    .to_string();
+                let option = self.recorder_option(path);
+                let wav = Box::new(crate::media::media_recorder::FileRecorder::new(
+                    option,
+                    profile.clone(),
+                    channels,
+                    mono_caller_only,
+                ));
+                let mp4 = Box::new(crate::media::video_recorder::Mp4Recorder::new(
+                    crate::media::video_recorder::Mp4RecorderOptions {
+                        base_path,
+                        warn_on_unsupported_codec: true,
+                    },
+                ));
+                let composite =
+                    crate::media::video_recorder::CompositeMediaRecorder::new(vec![wav, mp4]);
+                self.media
+                    .recording
+                    .set_recorder(Box::new(composite), max_duration)
+                    .await?;
+                debug!(
+                    session_id = %self.id,
+                    "[recording.video] enabled: per-leg MP4 recorder composed with WAV"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Toggle negotiated-video forwarding on every tapped leg (caller,
+    /// callee, and any child legs). Lock-free and safe mid-call; packets that
+    /// arrive while no recorder is installed simply land in the bounded
+    /// queue and get counted as drops.
+    pub(crate) fn set_video_capture_enabled(&self, enabled: bool) {
+        for (id, _) in self.legs.iter() {
+            if let Some(leg) = self.media_leg(id) {
+                leg.ingress_tap().enable_video_capture(enabled);
+            }
+        }
+        debug!(session_id = %self.id, enabled, "video capture gate toggled");
+    }
+
     /// Create the capture queue and task before constructing caller leg A.
     /// The sender becomes immutable state on the leg's plaintext RTP tap.
     /// Recording capture is attached to the caller peer so a call can
@@ -163,11 +266,23 @@ impl SipSession {
                 return Err(anyhow!("file recording strategy has no output path"));
             }
             let profile = self.caller_recording_profile()?;
-            let option = self.recorder_option(path.clone());
-            self.media
-                .recording
-                .start_recording(profile, option, 2, false, None)
-                .await?;
+            // Resolve once: [recording.video] lives next to the WAV options.
+            let policy = self.resolved_recording_policy();
+            self.install_file_recording(
+                path.clone(),
+                profile,
+                2,
+                false,
+                None,
+                policy.as_ref(),
+            )
+            .await?;
+            if policy.as_ref().and_then(|p| p.video.as_ref()).is_some_and(|v| v.h264_enabled()) {
+                // The gate only forwards packets once the recorder consumed
+                // them; enabling it for calls without negotiated H264 is
+                // harmless (the tap allowlist stays empty → no forwarding).
+                self.set_video_capture_enabled(true);
+            }
             self.recording.active = Some(crate::callrecord::ActiveRecording {
                 path,
                 segment_type: "full".to_string(),
@@ -350,6 +465,7 @@ impl SipSession {
                 ended_at: Some(ended_at.to_rfc3339()),
                 duration_secs: result.duration_secs,
                 unique_id: unique_id.clone(),
+                media_kind: None,
             });
         Some((notify_app, unique_id))
     }
@@ -566,6 +682,8 @@ impl SipSession {
     /// no recorder was armed; each caller keeps its own log/command-result
     /// policy for `Err`.
     pub(crate) async fn stop_and_publish_recording(&mut self) -> Result<Option<String>> {
+        // Stop feeding video into the task before finalizing the backend.
+        self.set_video_capture_enabled(false);
         match self.media.recording.stop_recording().await {
             Ok(Some(result)) => {
                 let path = result.path.clone();
@@ -595,12 +713,32 @@ impl SipSession {
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
     ) {
+        // Video artifacts recorded alongside the primary file (per-leg MP4).
+        let extra_paths: Vec<String> = result
+            .extra_files
+            .iter()
+            .map(|extra| extra.path.clone())
+            .collect();
         let (notify_app, unique_id) = match self.finalize_active_recording_segment(&result) {
             Some(pair) => pair,
             None => {
                 // Discarded segment (e.g. outbound ringback slice on an
                 // answered call): the file is already gone and no CDR entry
-                // was registered — suppress every recording event.
+                // was registered — suppress every recording event, and take
+                // the video artifacts with it.
+                for path in &extra_paths {
+                    if let Err(error) = std::fs::remove_file(path) {
+                        warn!(
+                            session_id = %self.id,
+                            path = %path,
+                            %error,
+                            "Failed to discard companion video file"
+                        );
+                    }
+                    let _ = std::fs::remove_file(crate::callrecord::upload_failed_marker_path(
+                        std::path::Path::new(path),
+                    ));
+                }
                 info!(
                     session_id = %self.id,
                     path = %result.path,
@@ -633,6 +771,40 @@ impl SipSession {
                     "unique_id": unique_id,
                 })),
             );
+            // Register the per-leg video artifacts as companion segments: the
+            // same segment_type (per-source upload targeting), own ids, and a
+            // `media_kind = "video"` marker for CDR/console consumers.
+            let parent = self.recording.completed_segments.last().cloned();
+            if let Some(parent) = parent {
+                for extra in &result.extra_files {
+                    let suffix = extra_video_suffix(&extra.path);
+                    let segment_id = format!("{}:video_{}", parent.segment_id, suffix);
+                    let label = format!("{}_video_{}", parent.label, suffix);
+                    let unique_id = uuid::Uuid::new_v4().to_string();
+                    let file_size = extra.file_size;
+                    info!(
+                        session_id = %self.id,
+                        path = %extra.path,
+                        %file_size,
+                        "Video artifact registered"
+                    );
+                    self.recording.completed_segments.push(
+                        crate::callrecord::RecordingSegment {
+                            path: extra.path.clone(),
+                            size: extra.file_size,
+                            segment_type: parent.segment_type.clone(),
+                            segment_id,
+                            seq: parent.seq,
+                            label,
+                            started_at: parent.started_at.clone(),
+                            ended_at: Some(chrono::Utc::now().to_rfc3339()),
+                            duration_secs: extra.duration_secs,
+                            unique_id: Some(unique_id),
+                            media_kind: Some("video".to_string()),
+                        },
+                    );
+                }
+            }
         }
         let info = crate::call::app::RecordingInfo {
             path,
@@ -1190,4 +1362,15 @@ impl SipSession {
             );
         }
     }
+}
+
+/// Channel suffix of a companion video artifact: `{base}_caller.mp4` →
+/// `"caller"`. Falls back to the whole file stem for unknown shapes.
+fn extra_video_suffix(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit('_').next())
+        .unwrap_or("video")
+        .to_string()
 }
