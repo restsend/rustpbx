@@ -1602,11 +1602,18 @@ impl SipServer {
                 continue;
             }
             // Graceful shutdown (drain): while draining, reject ALL
-            // out-of-dialog requests (new REGISTER / INVITE / SUBSCRIBE /
-            // OPTIONS / ...) so no new registrations or calls are accepted.
-            // In-dialog requests (To-tag present, e.g. BYE / re-INVITE / ACK)
-            // keep flowing so active calls can finish cleanly. Health probes
-            // answer 500 to signal the draining state to the load balancer.
+            // out-of-dialog requests (new INVITE / SUBSCRIBE / OPTIONS / ...)
+            // so no new calls are accepted. In-dialog requests (To-tag
+            // present, e.g. BYE / re-INVITE / ACK) keep flowing so active
+            // calls can finish cleanly. Health probes answer 500 to signal
+            // the draining state to the load balancer.
+            //
+            // REGISTER is exempt — but ONLY in master/worker mode: a
+            // registration refresh is not a new call, and refusing it would
+            // let bindings expire while this generation is still draining
+            // (hours on a long call) — the cross-gen relay resolves
+            // dispatches through those bindings. Standalone keeps the
+            // historical reject-everything drain behavior.
             if crate::shutdown::is_draining() {
                 let to_tag = tx
                     .original
@@ -1614,7 +1621,9 @@ impl SipServer {
                     .and_then(|to| to.tag())
                     .ok()
                     .flatten();
-                if to_tag.is_none() {
+                let register_exempt = self.inner.worker_relay.is_some()
+                    && tx.original.method == rsipstack::sip::Method::Register;
+                if to_tag.is_none() && !register_exempt {
                     let code = if tx.original.method == rsipstack::sip::Method::Options {
                         rsipstack::sip::StatusCode::ServerInternalError
                     } else {
