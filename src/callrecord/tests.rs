@@ -1822,9 +1822,11 @@ async fn test_persist_call_records_writes_session_id_column() {
     use rustpbx_models::call_record::Column;
     use sea_orm::{ColumnTrait, QueryFilter};
 
-    let db = rustpbx_models::create_db("sqlite::memory:", None)
+    let url = std::env::var("RUSTPBX_CDR_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let db = rustpbx_models::create_db(&url, None)
         .await
-        .expect("migrated in-memory db");
+        .expect("migrated test db");
 
     let mut record = make_record();
     record.session_id = Some("initial-root".to_string());

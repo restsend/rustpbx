@@ -249,7 +249,14 @@ pub fn merge_sipflow_fragments(
             extract(incoming),
         ],
     );
-    // Calls without a signaling archive keep their original metadata verbatim,
+    // PostgreSQL requires both CASE branches to have the same type, even when
+    // no fragments exist. Cast directly to preserve SQL NULL on that path.
+    let selected = if backend == DbBackend::Postgres {
+        Expr::cust_with_expr("CAST($1 AS jsonb)", selected)
+    } else {
+        selected
+    };
+    // Calls without a signaling archive keep their original metadata values,
     // including SQL NULL; this index must not alter unrelated CDR snapshots.
     Expr::case(has_fragments, merged).finally(selected).into()
 }
