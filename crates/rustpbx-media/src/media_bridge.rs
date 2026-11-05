@@ -1361,7 +1361,9 @@ async fn sample_leg(leg: &Leg) -> LegSample {
         jitter_us: rtcp.jitter_us,
         rtt_us: rtcp.rtt_us,
         fraction_lost: rtcp.fraction_lost,
-        recording_queue_drops: tap.recording_queue_drops,
+        // Combined audio + video recording-queue drops: both signal recording
+        // degradation and feed the same periodic quality log.
+        recording_queue_drops: tap.recording_queue_drops + tap.video_queue_drops,
     }
 }
 

@@ -28,6 +28,12 @@ use crate::recorder::{Leg, Recorder, RecorderOption};
 // queues (2048) cost ~150 KB per recording call and add malloc churn at
 // high concurrency; overflow only drops recording packets, never media.
 const DEFAULT_CAPTURE_QUEUE_CAPACITY: usize = 256;
+// Video rides a separate queue so an audio-burst never starves the WAV
+// timeline and vice versa. Video paces far faster than audio (a 30 fps
+// H264 stream emits 2-10 RTP packets per frame), so overflow here degrades
+// individual frames (decoders skip to the next keyframe) instead of
+// corrupting the audio track.
+const DEFAULT_VIDEO_CAPTURE_QUEUE_CAPACITY: usize = 512;
 
 /// Dedicated runtime for recorder tasks, set once at startup by the app
 /// (rustpbx wires it to the media runtime). Recording tasks wake once per
@@ -370,9 +376,15 @@ pub(crate) struct RecorderHandle {
 /// Non-blocking media-path sender installed on the tapped legs' RTP
 /// transports. Cloneable: every tap of the call (caller + callee legs) pushes
 /// into the same recording task.
+///
+/// Audio/DTMF and video ride separate bounded queues (see
+/// [`RecorderSender::capture_video_with_profile`]) so neither media kind can
+/// starve the other; both drain into the same recording task.
 pub struct RecorderSender {
     tx: mpsc::Sender<CapturedRtp>,
     dropped: Arc<AtomicU64>,
+    video_tx: Option<mpsc::Sender<CapturedRtp>>,
+    video_dropped: Arc<AtomicU64>,
 }
 
 pub type RecordingCompletion = Result<Option<RecordingResult>>;
@@ -395,15 +407,17 @@ impl RecorderHandle {
         mpsc::UnboundedReceiver<RecordingCompletion>,
     ) {
         let (rtp_tx, rtp_rx) = mpsc::channel(DEFAULT_CAPTURE_QUEUE_CAPACITY);
+        let (video_tx, video_rx) = mpsc::channel(DEFAULT_VIDEO_CAPTURE_QUEUE_CAPACITY);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (recorder_finished_tx, recorder_finished_rx) = mpsc::unbounded_channel();
         let runtime = recorder_runtime_or_current();
         runtime.spawn(async move {
             RecorderTask::new(rtp_rx, command_rx, recorder_finished_tx)
+                .with_video_rx(video_rx)
                 .run()
                 .await;
         }.in_current_span().with_current_subscriber());
-        let sender = RecorderSender::new(rtp_tx);
+        let sender = RecorderSender::new(rtp_tx).with_video_channel(video_tx);
         (Self { tx: command_tx }, sender, recorder_finished_rx)
     }
 
@@ -463,7 +477,16 @@ impl RecorderSender {
         Self {
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
+            video_tx: None,
+            video_dropped: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Attach the video capture queue. Called once by
+    /// [`RecorderHandle::new`]; every clone shares the same channels.
+    pub(crate) fn with_video_channel(mut self, video_tx: mpsc::Sender<CapturedRtp>) -> Self {
+        self.video_tx = Some(video_tx);
+        self
     }
 
     #[inline]
@@ -504,8 +527,47 @@ impl RecorderSender {
         }
     }
 
+    /// Enqueue a captured video packet on the dedicated video queue. Silence
+    /// (no queue attached) or a full queue drops the packet with a counter —
+    /// the H264 frame assembler tolerates the gap (it skips the corrupted
+    /// fragment and re-aligns on the next keyframe).
+    pub(crate) fn capture_video_with_profile(
+        &self,
+        channel: CaptureChannel,
+        packet: &RtpPacket,
+        peer_addr: Option<std::net::SocketAddr>,
+        profile: Option<Arc<NegotiatedLegProfile>>,
+    ) {
+        let Some(video_tx) = self.video_tx.as_ref() else {
+            return;
+        };
+        let received_at_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_micros() as u64)
+            .unwrap_or_default();
+        let captured = CapturedRtp {
+            profile,
+            channel,
+            packet: packet.clone(),
+            received_at_micros,
+            peer_addr,
+        };
+        if let Err(error) = video_tx.try_send(captured)
+            && matches!(error, mpsc::error::TrySendError::Full(_))
+        {
+            let dropped = self.video_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 1000 == 0 {
+                warn!(dropped, "recording video queue full; packet dropped");
+            }
+        }
+    }
+
     pub(crate) fn dropped_packets(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn dropped_video_packets(&self) -> u64 {
+        self.video_dropped.load(Ordering::Relaxed)
     }
 
     /// Compatibility helper for direct injection: maps the classic caller-tap
@@ -520,12 +582,15 @@ impl Clone for RecorderSender {
         Self {
             tx: self.tx.clone(),
             dropped: Arc::clone(&self.dropped),
+            video_tx: self.video_tx.clone(),
+            video_dropped: Arc::clone(&self.video_dropped),
         }
     }
 }
 
 struct RecorderTask {
     rtp_rx: mpsc::Receiver<CapturedRtp>,
+    video_rx: Option<mpsc::Receiver<CapturedRtp>>,
     command_rx: mpsc::UnboundedReceiver<RecorderCommand>,
     recorder_finished_tx: mpsc::UnboundedSender<RecordingCompletion>,
     recorder: Option<Box<dyn MediaRecorder>>,
@@ -541,6 +606,7 @@ impl RecorderTask {
     ) -> Self {
         Self {
             rtp_rx,
+            video_rx: None,
             command_rx,
             recorder_finished_tx,
             recorder: None,
@@ -549,13 +615,22 @@ impl RecorderTask {
         }
     }
 
+    fn with_video_rx(mut self, video_rx: mpsc::Receiver<CapturedRtp>) -> Self {
+        self.video_rx = Some(video_rx);
+        self
+    }
+
     async fn run(mut self) {
+        // Hold the video receiver in a local so the select branch borrows
+        // only this variable — borrowing `self` inside select! would conflict
+        // with the command/RTP branch bodies that need `&mut self`.
+        let mut video_rx = self.video_rx.take();
         loop {
             tokio::select! {
                 biased;
                 command = self.command_rx.recv() => {
                     let Some(command) = command else {
-                        self.finish_recorder().await;
+                        self.finish_recorder(&mut video_rx).await;
                         return;
                     };
                     match command {
@@ -575,11 +650,9 @@ impl RecorderTask {
                             if self.paused {
                                 // Commands take priority over RTP. Discard the
                                 // paused backlog before reanchoring on fresh media.
-                                let queued = self.rtp_rx.len();
-                                for _ in 0..queued {
-                                    if self.rtp_rx.try_recv().is_err() {
-                                        break;
-                                    }
+                                drain_captures(&mut self.rtp_rx);
+                                if let Some(rx) = video_rx.as_mut() {
+                                    drain_captures(rx);
                                 }
                                 if let Some(recorder) = self.recorder.as_mut() {
                                     recorder.resume();
@@ -588,19 +661,29 @@ impl RecorderTask {
                             }
                         }
                         RecorderCommand::StopRecorder { reply } => {
-                            let _ = reply.send(self.finalize_recorder().await);
+                            let _ = reply.send(self.finalize_recorder(&mut video_rx).await);
                         }
                     }
                 }
                 _ = wait_for_deadline(self.deadline), if self.deadline.is_some() => {
-                    self.finish_recorder().await;
+                    self.finish_recorder(&mut video_rx).await;
                 }
                 captured = self.rtp_rx.recv() => {
                     match captured {
                         Some(captured) => self.write_rtp(&captured).await,
                         None => {
-                            self.finish_recorder().await;
+                            self.finish_recorder(&mut video_rx).await;
                             return;
+                        }
+                    }
+                }
+                captured = recv_video_capture(&mut video_rx) => {
+                    match captured {
+                        Some(captured) => self.write_rtp(&captured).await,
+                        None => {
+                            // Video channel closed (task shutdown); drop the
+                            // branch but keep draining audio/commands.
+                            video_rx = None;
                         }
                     }
                 }
@@ -608,8 +691,8 @@ impl RecorderTask {
         }
     }
 
-    async fn finish_recorder(&mut self) {
-        let result = self.finalize_recorder().await;
+    async fn finish_recorder(&mut self, video_rx: &mut Option<mpsc::Receiver<CapturedRtp>>) {
+        let result = self.finalize_recorder(video_rx).await;
         if let Err(error) = &result {
             warn!(%error, "recording task failed to finalize recorder");
         }
@@ -663,13 +746,38 @@ impl RecorderTask {
         }
     }
 
-    async fn finalize_recorder(&mut self) -> RecordingCompletion {
+    async fn finalize_recorder(
+        &mut self,
+        video_rx: &mut Option<mpsc::Receiver<CapturedRtp>>,
+    ) -> RecordingCompletion {
         self.deadline = None;
-        let queued = self.rtp_rx.len();
-        for _ in 0..queued {
-            let Ok(captured) = self.rtp_rx.try_recv() else {
-                break;
-            };
+        // Drain both queues into local buffers first: writing to the recorder
+        // needs `&mut self`, so the borrow of the receivers must end first.
+        let mut backlog = {
+            let queued = self.rtp_rx.len();
+            let mut backlog = Vec::with_capacity(queued);
+            for _ in 0..queued {
+                if let Ok(captured) = self.rtp_rx.try_recv() {
+                    backlog.push(captured);
+                } else {
+                    break;
+                }
+            }
+            backlog
+        };
+        if let Some(video_rx) = video_rx.as_mut() {
+            let queued = video_rx.len();
+            let mut video_backlog = Vec::with_capacity(queued);
+            for _ in 0..queued {
+                if let Ok(captured) = video_rx.try_recv() {
+                    video_backlog.push(captured);
+                } else {
+                    break;
+                }
+            }
+            backlog.extend(video_backlog);
+        }
+        for captured in backlog {
             self.write_rtp(&captured).await;
         }
         self.paused = false;
@@ -677,6 +785,28 @@ impl RecorderTask {
             Some(recorder) => recorder.finalize().await,
             None => Ok(None),
         }
+    }
+}
+
+/// Discard every currently queued capture (paused-backlog drop).
+fn drain_captures(rx: &mut mpsc::Receiver<CapturedRtp>) {
+    let queued = rx.len();
+    for _ in 0..queued {
+        if rx.try_recv().is_err() {
+            break;
+        }
+    }
+}
+
+/// Await the next capture on the optional video queue; resolves pending
+/// forever while the queue is detached (`None`), keeping the select branch
+/// inert without a precondition.
+async fn recv_video_capture(
+    video_rx: &mut Option<mpsc::Receiver<CapturedRtp>>,
+) -> Option<CapturedRtp> {
+    match video_rx.as_mut() {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
