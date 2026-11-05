@@ -4506,6 +4506,88 @@ async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
     assert!(session.meta.transferred, "session must be marked transferred");
 }
 
+/// Consult-into-queue regression (prd 1105): an agent dials a feature code /
+/// IVR as the consult party — the agent's caller leg is the only LIVE leg,
+/// while a not-yet-established `callee` slot entry exists. The role-aware
+/// blind-transfer intercept must not treat that dead entry as the transfer
+/// customer: the resolver used to return the slot unconditionally, the
+/// intercept retired the agent, and the queue app started with no live party
+/// (playback died on "answered caller has no media peer").
+#[tokio::test]
+async fn resolve_cc_customer_leg_requires_live_peer() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "1001",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "consult-ivr".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "consult-ivr".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:1001@rustpbx.com".into(),
+        original_callee: "sip:*82support@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, handle, _rx) = SipSession::new_uac(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        false,
+    );
+    server
+        .active_call_registry
+        .register_handle("consult-ivr".into(), handle);
+
+    let caller = LegId::from("caller");
+    let mut caller_leg = Leg::new(caller.clone());
+    caller_leg.agent_id = Some("1001".into());
+    caller_leg.state = LegState::Connected;
+    session.legs.insert(caller.clone(), caller_leg);
+    let callee = LegId::from("callee");
+
+    // No callee entry at all: nobody to hand off.
+    assert_eq!(session.resolve_cc_customer_leg(&caller), None);
+
+    // The prd shape: a slot entry exists but was never established.
+    let mut dead = Leg::new(callee.clone());
+    dead.state = LegState::Initializing;
+    session.legs.insert(callee.clone(), dead);
+    assert_eq!(
+        session.resolve_cc_customer_leg(&caller),
+        None,
+        "a dead callee slot is nobody to hand off"
+    );
+
+    // A live peer resolves — the legit hand-off keeps working.
+    let mut live = Leg::new(callee.clone());
+    live.state = LegState::Connected;
+    session.legs.insert(callee.clone(), live);
+    assert_eq!(
+        session.resolve_cc_customer_leg(&caller),
+        Some(callee.clone())
+    );
+    session.update_leg_state(&callee, LegState::Hold);
+    assert_eq!(
+        session.resolve_cc_customer_leg(&caller),
+        Some(callee.clone())
+    );
+    session.update_leg_state(&callee, LegState::Ended);
+    assert_eq!(session.resolve_cc_customer_leg(&caller), None);
+}
+
 /// Same hand-off with the QUEUE-DISPATCHED agent shape: the agent dials into
 /// a DYNAMIC leg (`LegPurpose::Agent`, stamped with the agent id) bridged to
 /// the caller — previously `resolve_cc_customer_leg` only knew the

@@ -848,19 +848,32 @@ impl SipSession {
     /// transfer: the caller/callee leg opposite the resolved agent leg.
     /// Queue-dispatched agents dial into DYNAMIC legs (`LegPurpose::Agent`),
     /// so for those the customer is the other side of the active bridge pair.
+    ///
+    /// The peer must be a LIVE party (Connected/Hold): a slot-only or
+    /// not-yet-established entry is nobody to hand off. The consult-into-queue
+    /// shape (prd 1105) used to slip through here — an agent dials a feature
+    /// code with a dead `callee` slot present, the resolver returned it, and
+    /// the role-aware intercept retired the agent, leaving the queue app
+    /// running with no live party (playback died on "answered caller has no
+    /// media peer").
     pub(super) fn resolve_cc_customer_leg(&self, agent_leg: &LegId) -> Option<LegId> {
+        let live = |id: &LegId| {
+            self.legs.get(id).is_some_and(|leg| {
+                matches!(leg.state, LegState::Connected | LegState::Hold)
+            })
+        };
         let caller = LegId::from("caller");
         let callee = LegId::from("callee");
         if agent_leg == &caller || agent_leg == &callee {
             let customer = if agent_leg == &caller { callee } else { caller };
-            return self.legs.contains_key(&customer).then_some(customer);
+            return live(&customer).then_some(customer);
         }
         if self.bridge.legs.len() == 2 && self.bridge.contains_leg(agent_leg) {
             if let Some(peer) = self
                 .bridge
                 .legs
                 .iter()
-                .find(|id| id.as_str() != agent_leg.as_str() && self.legs.contains_key(id))
+                .find(|id| id.as_str() != agent_leg.as_str() && live(id))
             {
                 return Some(peer.clone());
             }
