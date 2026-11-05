@@ -1270,6 +1270,10 @@ channel_left_caller = "Left · Caller"
 channel_right_callee = "Right · Callee"
 playback_segment = "Segment"
 no_recording = "No media recording stored for this session."
+video_recording_title = "Video recording"
+video_recording_desc = "Per-leg MP4 video captured when [recording.video] is enabled and the call negotiated H264."
+video_download = "Download MP4"
+video_unavailable = "Video artifact not available on this server (already uploaded/archived)."
 
 # Participant rewrite labels
 rewrite_original = "Original"

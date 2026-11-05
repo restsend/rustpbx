@@ -908,6 +908,8 @@ impl RecordingUploadManager {
             {
                 Some(extension) if extension.eq_ignore_ascii_case("wav") => "audio/wav",
                 Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "application/jsonl",
+                // Per-leg MP4 video recorded alongside an audio WAV.
+                Some(extension) if extension.eq_ignore_ascii_case("mp4") => "video/mp4",
                 _ => "application/octet-stream",
             };
             let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
@@ -1397,6 +1399,7 @@ impl RecordingRetryWorker {
                 let content_type = match source.extension().and_then(|e| e.to_str()) {
                     Some(ext) if ext.eq_ignore_ascii_case("wav") => "audio/wav",
                     Some(ext) if ext.eq_ignore_ascii_case("jsonl") => "application/jsonl",
+                    Some(ext) if ext.eq_ignore_ascii_case("mp4") => "video/mp4",
                     _ => "application/octet-stream",
                 };
                 let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
@@ -1508,10 +1511,21 @@ impl RecordingUploadHook {
             .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
             .to_string_lossy()
             .to_string();
+        // Per-extension MIME (video artifacts must not inherit the WAV
+        // default); `None` lets the config default win for audio.
+        let content_type = match Path::new(media_path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("mp4") => Some("video/mp4".to_string()),
+            _ => None,
+        };
         let request = crate::storage::UploadRequest {
             key: file_name.clone(),
             file_name: Some(file_name.clone()),
-            content_type: None,
+            content_type,
             file_field: None,
             body_field: None,
             vars: HashMap::from([

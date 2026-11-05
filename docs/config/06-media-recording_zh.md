@@ -344,6 +344,46 @@ bucket = "test2"
 - 上传失败的 `.upload_failed.*` 标记记录了来源标签，重试时仍写回各自的桶。
 - 配置支持热更新（console 保存或重载配置后所有桶的 Storage 自动重建）。
 
+### 视频通话录制（`[recording.video]`）
+
+启用后，凡是 SDP 协商出 **H264** 视频 m-line 的通话（需
+`video_policy = "pass_through"` 让视频留在媒体路径上），会在音频工件之外
+**逐腿录制独立的 MP4 文件**：
+
+- `{base}_caller.mp4` / `{base}_callee.mp4` —— 每条腿一个文件，内容恰为该
+  腿发出的媒体（与立体声 WAV 的逐声道约定一致）。
+- 录制从**第一个关键帧（IDR）**开始：通话中途启动录制会等待下一个自然 IDR
+  （通常远小于一个 GOP，约 1–2 秒），丢弃 IDR 之前的帧，保证文件从首个
+  采样起即可解码。
+- MP4 文件与音频 WAV 走完全相同的生命周期：CDR `recorder[]` 分段（携带
+  `media_kind = "video"`）、`recording_metadata_available` 事件、控制台
+  通话详情页（逐腿视频播放器），以及上传钩子 —— S3/OSS/HTTP 上传按扩展名
+  设置 `content-type: video/mp4`，按来源分桶（`[recording.sources.*]`）对
+  伴生文件同样生效。
+- 控制台回放端点支持 HTTP Range 流式播放
+  （`GET /call-records/{id}/recording?segment={unique_id}`）。
+
+范围说明：
+
+- **音频仍在 WAV 工件中** —— MP4 仅含视频轨。这是刻意的生态约束：纯 Rust
+  生态没有支持 Opus 的 MP4 封装器，也没有成熟的纯 Rust AAC 编码器，
+  而 RustPBX 默认不引入新的 C 依赖。
+- **仅协商 VP8 的通话**降级为纯音频 WAV（每次呼叫告警一次）。VP9/WebM
+  属后续工作。
+- 丢包只影响个别帧（解码器跳到下一个 IDR），不会损坏文件；视频抓包队列
+  饱和时按计数丢弃，音频录制永不因视频而饥饿。
+
+```toml
+[recording]
+enabled = true
+type = "s3"
+bucket = "recordings"
+
+[recording.video]
+enabled = true
+codec = "h264"   # 目前仅支持 h264；VP8 通话回退纯音频
+```
+
 ### 外呼回铃段录音（record_ringing）
 
 `[recording].record_ringing = true` 启用系统管理的外呼回铃段：

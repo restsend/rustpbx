@@ -520,6 +520,23 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # [recording.sources.ringing]
 # bucket = "test2"
 #
+# Video call recording ([recording.video], P2P per-leg MP4):
+# When enabled, a call whose negotiated SDP carries an H264 video m-line
+# additionally records each leg's video as `{base}_caller.mp4` /
+# `{base}_callee.mp4` next to the WAV artifact. The MP4 files ride the same
+# lifecycle as the audio WAV: CDR segments (media_kind = "video"),
+# console playback/download (per-leg players on the call-record detail
+# page), and upload hooks (S3/OSS/HTTP — content-type video/mp4 is set
+# per extension). Requires `video_policy = "pass_through"` and H264 video
+# negotiation; VP8-only calls record audio only.
+# Companion artifacts share the audio segment's upload target
+# ([recording.sources.*] keyed by segment type applies unchanged).
+# Note: recording starts at the first keyframe, so a mid-call start waits
+# for the next IDR (typically well under one GOP, ~1-2s).
+# [recording.video]
+# enabled = true
+# codec = "h264"                # only h264 today (VP8 → audio-only fallback)
+#
 # HTTP mode: a generic, configurable multipart uploader. Defaults preserve the
 # historical wire format (POST, multipart field "recording", file name = local
 # file name, audio/wav, plus call_id/track_id form fields). Any upload API can

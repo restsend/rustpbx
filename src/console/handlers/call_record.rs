@@ -2684,6 +2684,7 @@ async fn build_recording_segments_payload(
             "ended_at": string_extra("ended_at"),
             "duration_secs": duration_secs,
             "size": media.size,
+            "media_kind": string_extra("media_kind"),
             "supports_streams": local_playback,
             "playback_url": playback_url,
         }));
@@ -2878,6 +2879,9 @@ fn guess_audio_mime(file_name: &str) -> &'static str {
         Some("mp3") => "audio/mpeg",
         Some("ogg") | Some("oga") | Some("opus") => "audio/ogg",
         Some("flac") => "audio/flac",
+        // Per-leg video artifacts recorded alongside an audio WAV.
+        Some("mp4") | Some("m4a") | Some("mov") => "video/mp4",
+        Some("webm") => "video/webm",
         _ => "application/octet-stream",
     }
 }

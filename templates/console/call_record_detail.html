@@ -473,6 +473,50 @@
                                 :src="recordingPlaybackUrl()"></audio>
                         </div>
                     </template>
+                    <!-- Per-leg video recordings ([recording.video]) -->
+                    <template x-if="recordingVideos().length > 0">
+                        <div class="mt-5 space-y-4 border-t border-slate-100 pt-4">
+                            <div>
+                                <p class="text-sm font-semibold text-slate-900">{{
+                                    "call_record_detail.video_recording_title" | t }}</p>
+                                <p class="text-xs text-slate-500">{{
+                                    "call_record_detail.video_recording_desc" | t }}</p>
+                            </div>
+                            <template x-for="video in recordingVideos()"
+                                :key="(video.unique_id || '') + (video.track_id || '')">
+                                <div class="rounded-lg border border-slate-200 bg-slate-900/5 p-3">
+                                    <div
+                                        class="mb-2 flex flex-col gap-1 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between">
+                                        <span class="font-semibold text-slate-700"
+                                            x-text="video.label || video.track_id"></span>
+                                        <span class="flex items-center gap-3">
+                                            <span x-show="video.duration_secs"
+                                                x-text="formatWaveformTimestamp(video.duration_secs)"></span>
+                                            <a v-if="video.playback_url" :href="video.playback_url"
+                                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-700 transition hover:border-sky-300 hover:text-sky-700"
+                                                target="_blank" rel="noopener">
+                                                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"
+                                                    stroke="currentColor" stroke-width="1.8">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M12 5v12m0 0l-4-4m4 4l4-4" />
+                                                </svg>
+                                                {{ "call_record_detail.video_download" | t }}
+                                            </a>
+                                        </span>
+                                    </div>
+                                    <template x-if="video.playback_url">
+                                        <video class="max-h-72 w-full rounded bg-black" controls preload="none"
+                                            :src="video.playback_url"></video>
+                                    </template>
+                                    <template x-if="!video.playback_url">
+                                        <div
+                                            class="rounded border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400">
+                                            {{ "call_record_detail.video_unavailable" | t }}</div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
                     <template x-if="!record.recording || !record.recording.url">
                         <div
                             class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
@@ -2246,6 +2290,15 @@
                     this.$refs.waveformCanvas.innerHTML = '';
                 }
                 this.waveformOriginalBuffer = null;
+            },
+            // Per-leg video artifacts ([recording.video]) — MP4 segments
+            // carrying `media_kind = "video"`, each playable on its own URL.
+            recordingVideos() {
+                const segments = (this.record && this.record.recording
+                    && Array.isArray(this.record.recording.segments))
+                    ? this.record.recording.segments
+                    : [];
+                return segments.filter((seg) => seg && seg.media_kind === 'video');
             },
             recordingPlaybackUrl() {
                 if (!this.record || !this.record.recording || !this.record.recording.url) {

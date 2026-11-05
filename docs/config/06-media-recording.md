@@ -449,6 +449,49 @@ Notes:
 - Hot-reload friendly: saving from the console (or reloading the config)
   rebuilds the Storage of every bucket.
 
+### Video Call Recording (`[recording.video]`)
+
+When enabled, a call whose negotiated SDP carries an **H264** video m-line
+(`video_policy = "pass_through"` keeps video on the legs) additionally
+records **each leg's video as its own MP4 file** next to the audio artifact:
+
+- `{base}_caller.mp4` / `{base}_callee.mp4` — one file per leg, containing
+  exactly the media that leg sent (mirrors the stereo WAV convention).
+- Recording starts at the **first keyframe (IDR)**: a mid-call start waits
+  for the next natural IDR (typically well under one GOP, ~1–2 s) and drops
+  pre-IDR frames, so files are decodable from their first sample.
+- The MP4 files ride the same lifecycle as the audio WAV: CDR `recorder[]`
+  segments (with `media_kind = "video"`), `recording_metadata_available`
+  events, the console call-record detail page (per-leg video players), and
+  the upload hooks — S3/OSS/HTTP uploads set `content-type: video/mp4` by
+  extension, and per-source targets (`[recording.sources.*]`) apply to the
+  companion files unchanged.
+- The console playback endpoint streams MP4 with HTTP Range support
+  (`GET /call-records/{id}/recording?segment={unique_id}`).
+
+Scope notes:
+
+- **Audio stays in the WAV artifact** — the MP4 files are video-only. This
+  is a deliberate ecosystem constraint: no pure-Rust MP4 muxer supports
+  Opus and no pure-Rust AAC encoder exists, and RustPBX avoids new C
+  dependencies by default.
+- **VP8-only calls** degrade to the audio-only WAV (logged once per call).
+  VP9/WebM are future work.
+- Packet loss degrades individual frames (decoders skip to the next IDR)
+  rather than corrupting the file; the video capture queue drops under
+  saturation while audio recording is never starved.
+
+```toml
+[recording]
+enabled = true
+type = "s3"
+bucket = "recordings"
+
+[recording.video]
+enabled = true
+codec = "h264"   # only h264 today; VP8 calls fall back to audio-only
+```
+
 ### Outbound Ringback Recording (record_ringing)
 
 `[recording].record_ringing = true` enables the system-managed outbound
