@@ -6238,6 +6238,23 @@ impl SipSession {
                 let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
                 let source = self.transfer_source_snapshot(leg_id).await;
                 self.stash_transfer_source(source.clone());
+                // Same dial intent as the CTI blind-transfer path: a
+                // REGISTERED agent target declares the RFC 7433 UUI
+                // `leg=agent` marker (+ the agent-leg Call-ID scheme), so
+                // the target's INVITE carries the root session id for
+                // correlation and its home node treats the dialog as a
+                // child leg of this logical call. A plain extension /
+                // trunk target keeps no marker (CTI parity — the agent-leg
+                // scheme must not leak onto it).
+                let target_is_agent = match (
+                    Self::uri_user_part(uri.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    (Some(user), Some(registry)) => registry.get_agent(&user).await.is_some(),
+                    _ => false,
+                };
+                let refer_purpose =
+                    target_is_agent.then_some(crate::call::domain::LegPurpose::Agent);
                 self.pending_refers.insert(
                     target_leg.clone(),
                     PendingRefer {
@@ -6257,7 +6274,7 @@ impl SipSession {
                         Some(target_leg.clone()),
                         vec![],
                         Some(LegId::from("caller")),
-                        None,
+                        refer_purpose,
                     )
                     .await
                 {

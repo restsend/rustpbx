@@ -1790,3 +1790,178 @@ async fn test_http_named_ivr_passes_headers_to_provider() {
         );
     }
 }
+
+/// A REFER blind transfer to a REGISTERED AGENT target must carry the same
+/// dial intent as the CTI transfer path on the target's INVITE: the RFC 7433
+/// UUI declares the root session id (`session-id` correlation for the
+/// target's side) plus `leg=agent`, and the target leg uses the agent-leg
+/// Call-ID scheme. (2026-11-05: the in-session REFER used to dial the target
+/// with empty headers / no purpose — the CTI path carried the UUI, the
+/// REFER path didn't, so the transfer target lost its call correlation.)
+#[tokio::test]
+async fn test_inbound_refer_to_registered_agent_carries_session_id_uui() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let mut config = crate::common::test_helpers::test_proxy_config(portpicker::pick_unused_port().unwrap());
+    config.media_proxy = MediaProxyMode::All;
+    let mut users = crate::common::test_helpers::standard_test_users();
+    for user in &mut users {
+        user.is_support_webrtc = false;
+    }
+    // The transfer TARGET (charlie) must be a registered CC agent so the
+    // REFER leg takes the same agent-facing dial intent as the CTI path.
+    let cc_registry = Arc::new(rustpbx::addons::cc::agent::AgentRegistry::new());
+    cc_registry
+        .register("charlie".into(), vec![], 1)
+        .await
+        .unwrap();
+    let adapter = Arc::new(
+        rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter::new(
+            cc_registry.clone(),
+            Arc::new(rustpbx::addons::cc::acd::AcdEngine::new(
+                rustpbx::addons::cc::acd::AcdConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )),
+            "example.test",
+        ),
+    );
+    let server = Arc::new(
+        E2eTestServer::start_with_inject(
+            config,
+            E2eTestServerInject {
+                users,
+                agent_registry: Some(adapter),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("E2E server start failed"),
+    );
+
+    let alice = server.create_ua("alice").await.expect("create alice failed");
+    let bob = server.create_ua("bob").await.expect("create bob failed");
+    let bob_sdp = "v=0\r\n\
+        o=- 789012 789012 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 54321 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+        .to_string();
+
+    // Alice (customer) calls Bob; Bob answers.
+    let alice_sdp = "v=0\r\n\
+        o=- 123456 123456 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 12345 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+        .to_string();
+    let caller_handle = rustpbx::utils::spawn({
+        let a = alice.clone();
+        let sdp = alice_sdp.clone();
+        async move { a.make_call("bob", Some(sdp)).await }
+    });
+    let mut bob_dialog_id = None;
+    for _ in 0..50 {
+        let events = bob.process_dialog_events().await.expect("process events failed");
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _) = event {
+                bob.answer_call(&id, Some(bob_sdp.clone())).await.expect("bob answer failed");
+                bob_dialog_id = Some(id.clone());
+                break;
+            }
+        }
+        if bob_dialog_id.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert!(bob_dialog_id.is_some(), "Bob should receive the call");
+    let _ = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+        .expect("call setup timed out").expect("call failed");
+
+    // The root session id the UUI must carry — the owning session of the
+    // original call (registry-resolved from the transferor's dialog).
+    let registry = &server.server_ref.active_call_registry;
+    let owner = registry
+        .get_handle_by_dialog(&bob_dialog_id.as_ref().unwrap().call_id)
+        .expect("original call must resolve for REFER");
+    let root_session_id = owner.session_id().to_string();
+
+    // Charlie (registered agent) answers the transferred call.
+    let charlie = server.create_ua("charlie").await.expect("create charlie failed");
+    let charlie_uri = format!("sip:charlie@127.0.0.1:{}", charlie.local_port());
+    let charlie_sdp = "v=0\r\n\
+        o=- 111111 111111 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 33333 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+        .to_string();
+    let charlie_clone = charlie.clone();
+    let charlie_answer_handle = rustpbx::utils::spawn(async move {
+        let mut charlie_dialog_id = None;
+        for _ in 0..50 {
+            let events = charlie_clone.process_dialog_events().await.expect("charlie events failed");
+            for event in events {
+                if let TestUaEvent::IncomingCall(id, _) = event {
+                    charlie_clone.answer_call(&id, Some(charlie_sdp.clone())).await.expect("charlie answer failed");
+                    charlie_dialog_id = Some(id);
+                    break;
+                }
+            }
+            if charlie_dialog_id.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        charlie_dialog_id
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Bob (the transferor) blind-transfers to the registered agent via
+    // in-dialog REFER — the URL-handler / panel single-step path with the
+    // CTI switch off.
+    let refer_status = bob
+        .send_refer(bob_dialog_id.as_ref().unwrap(), &charlie_uri)
+        .await
+        .expect("send_refer failed");
+    assert_eq!(refer_status, 202, "REFER should be accepted with 202");
+
+    let charlie_dialog_id = tokio::time::timeout(Duration::from_secs(5), charlie_answer_handle)
+        .await
+        .expect("Charlie answer timeout")
+        .expect("charlie answer task failed");
+    assert!(charlie_dialog_id.is_some(), "Charlie should receive and answer the transfer call");
+
+    // The transferred INVITE must declare the root session id + the
+    // `leg=agent` dial intent (CTI-path parity).
+    let uui = charlie
+        .incoming_invite_header(charlie_dialog_id.as_ref().unwrap(), "User-to-User")
+        .await;
+    let uui = uui.unwrap_or_default();
+    assert!(
+        uui.to_ascii_lowercase().contains("purpose=call-center"),
+        "target INVITE must carry the CC UUI, got {uui:?}"
+    );
+    assert!(uui.contains("leg=agent"), "target INVITE must declare leg=agent, got {uui:?}");
+    let root = uui.split(';').next().unwrap_or_default().trim().to_string();
+    assert_eq!(
+        root, root_session_id,
+        "UUI root must be the original call's session id: uui={uui:?} root_session_id={root_session_id}"
+    );
+
+    let final_state = charlie_dialog_id.unwrap();
+    assert!(!final_state.call_id.is_empty());
+}
