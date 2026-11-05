@@ -757,6 +757,26 @@ impl SipSession {
         Ok(())
     }
 
+    pub(super) async fn apply_reinvite_answer(
+        &mut self,
+        leg_id: &LegId,
+        offer: &str,
+        response: &rsipstack::sip::Response,
+    ) -> Result<()> {
+        if let Some(peer) = self.media_leg(leg_id)
+            && let Some(answer) = Self::extract_sdp(response.body())
+        {
+            // Commit only after SIP accepts the offer. A rejection keeps the previous media state.
+            let offer = Self::parse_sdp(rustrtc::SdpType::Offer, offer, "local re-INVITE")?;
+            Self::parse_sdp(rustrtc::SdpType::Answer, &answer, "re-INVITE answer")?;
+            peer.pc().set_local_description(offer)?;
+            peer.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await?;
+            peer.refresh_observer();
+            self.legs.set_answer(leg_id.clone(), answer);
+        }
+        Ok(())
+    }
+
     /// Send a re-INVITE (e.g. hold/unhold SDP) to the dialog of the target leg
     /// ("caller" → the primary caller dialog; "callee" → the callee dialog).
     pub(crate) async fn send_reinvite_to_leg(&mut self, leg_id: &LegId, sdp: String) -> Result<()> {
@@ -778,13 +798,14 @@ impl SipSession {
                 leg_id,
                 rsipstack::sip::Method::Invite,
                 headers,
-                Some(sdp.into_bytes()),
+                Some(sdp.as_bytes().to_vec()),
             )
             .await?
         {
             Some(response) => {
                 let status = response.status_code.code();
                 if StatusCode::from(status).kind() == rsipstack::sip::StatusCodeKind::Successful {
+                    self.apply_reinvite_answer(leg_id, &sdp, &response).await?;
                     info!(session_id = %self.id, status = %status, "re-INVITE accepted");
                     Ok(())
                 } else {

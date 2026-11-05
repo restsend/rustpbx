@@ -188,7 +188,12 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
     let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
     let mut original = Vec::new();
     for (caller, callee, name) in [(alice.clone(), bob.clone(), "bob"), (bob.clone(), charlie.clone(), "charlie")] {
-        let dial = rustpbx::utils::spawn({ let caller = caller.clone(); let sdp = sdp.clone(); async move { caller.make_call(name, Some(sdp)).await.unwrap() } });
+        // Alice offers Opus first, but Bob answers with PCMU on the original call.
+        let offer = if name == "bob" {
+            sdp.replace("RTP/AVP 0", "RTP/AVP 96 0 97")
+                .replace("a=rtpmap:0", "a=rtpmap:96 opus/48000/2\r\na=rtpmap:97 telephone-event/8000\r\na=rtpmap:0")
+        } else { sdp.clone() };
+        let dial = rustpbx::utils::spawn({ let caller = caller.clone(); let sdp = offer; async move { caller.make_call(name, Some(sdp)).await.unwrap() } });
         let received = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 for event in callee.process_dialog_events().await.unwrap() {
@@ -212,6 +217,13 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
     let c_owner = registry.get_handle_by_dialog(&original[1].0.call_id).unwrap();
     assert_ne!(a_owner.session_id(), c_owner.session_id());
     let consult = &original[1].0;
+    let initial_answer = alice.get_negotiated_answer_sdp(&original[0].0).await.unwrap();
+    let initial_audio = initial_answer.lines().find(|line| line.starts_with("m=audio ")).unwrap();
+    assert!(initial_audio.contains("RTP/AVP 0"));
+    let resumed_rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let resume_answer = sdp.replace("23456", &resumed_rtp.local_addr().unwrap().port().to_string());
+    alice.set_answer_sdp(&original[0].0, &resume_answer).await;
+    let mut saw_resume = false;
     for (tag, expected) in [("wrong-tag".to_string(), 481), (consult.remote_tag.clone(), 200)] {
         let replaces = format!("{};to-tag={};from-tag={}", consult.call_id, tag, consult.local_tag);
         let target = format!("sip:charlie@{}?Replaces={}", server.proxy_addr, urlencoding::encode(&replaces));
@@ -220,6 +232,15 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
             loop {
                 for (ua, existing) in [(&alice, &original[0].0), (&charlie, &original[1].1)] {
                     let events = ua.process_dialog_events().await.unwrap();
+                    for event in &events {
+                        if let TestUaEvent::CallUpdated(id, rsipstack::sip::Method::Invite, Some(offer)) = event
+                            && id == &original[0].0 && offer.contains("a=sendrecv")
+                        {
+                            assert_eq!(offer.lines().find(|line| line.starts_with("m=audio ")), Some(initial_audio),
+                                "resume must preserve Alice's negotiated audio port and payloads");
+                            saw_resume = true;
+                        }
+                    }
                     assert!(!events.iter().any(|event| matches!(event, TestUaEvent::IncomingCall(id, _) if id.call_id != existing.call_id)),
                         "attended REFER must not originate another call: {events:?}");
                     assert!(!events.iter().any(|event| matches!(event, TestUaEvent::CallTerminated(..))),
@@ -259,6 +280,12 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
             );
         }
     }
+    assert!(saw_resume, "expected a resume re-INVITE on the held caller dialog");
+    let mut packet = [0; 2048];
+    let len = tokio::time::timeout(Duration::from_secs(4), resumed_rtp.recv(&mut packet))
+        .await.expect("RTP must reach the port Alice advertised on resume").unwrap();
+    assert!(len >= 12 && packet[0] >> 6 == 2);
+    assert_eq!(packet[1] & 0x7f, 0, "Alice must receive PCMU after resume");
     let room = server.server_ref.conference_server.list_conferences_detail().await.into_iter()
         .find(|room| room.host_leg_id == Some(rustpbx::call::domain::LegId::from(format!("{}-caller", a_owner.session_id()))))
         .expect("surviving caller owns the transfer room");

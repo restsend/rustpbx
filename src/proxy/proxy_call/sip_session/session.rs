@@ -9478,14 +9478,14 @@ impl SipSession {
         headers: Vec<rsipstack::sip::Header>,
         body: Option<Vec<u8>>,
     ) -> Result<Option<rsipstack::sip::Response>> {
-        if self.is_uac_dialog(dialog_id) {
+        let response = if self.is_uac_dialog(dialog_id) {
             let Some(mut dialog) = self.server.dialog_layer.get_dialog(dialog_id) else {
                 return Err(anyhow!("No callee dialog found for {}", dialog_id));
             };
 
             match &mut dialog {
                 Dialog::Invite(invite_dialog) => invite_dialog
-                    .reinvite(Some(headers), body)
+                    .reinvite(Some(headers), body.clone())
                     .await
                     .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
                 _ => Err(anyhow!(
@@ -9495,13 +9495,21 @@ impl SipSession {
             }
         } else if let Some(dialog) = self.caller_dialog.as_ref() {
             dialog
-                .reinvite(Some(headers), body)
+                .reinvite(Some(headers), body.clone())
                 .await
                 .map_err(|e| anyhow!("re-INVITE failed: {}", e))
         } else {
             // UAC mode: no inbound caller dialog for mid-dialog request.
             Ok(None)
+        }?;
+        if let Some(response) = &response
+            && response.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful
+            && let Some(offer) = body.as_deref()
+            && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+        {
+            self.apply_reinvite_answer(&leg_id, std::str::from_utf8(offer)?, response).await?;
         }
+        Ok(response)
     }
 
     async fn try_reinvite_refresh(
