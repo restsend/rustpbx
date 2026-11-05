@@ -5,6 +5,7 @@ pub mod conn_table;
 pub mod dialogs;
 pub mod admin_client;
 pub mod ipc_server;
+pub mod registry_table;
 pub mod run;
 pub mod sip_scan;
 pub mod supervisor;

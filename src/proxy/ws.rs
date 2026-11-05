@@ -56,6 +56,7 @@ impl Drop for WsChannelCleanupGuard {
             .transport_layer
             .remove_connection(&self.sip_connection);
         if let Some(r) = self.worker_relay.as_ref() {
+            r.unregister_real_close(self.conn_kind, self.peer);
             r.unregister_real_write(self.conn_kind, self.peer);
             if let Some(id) = self.conn_id {
                 r.report_conn_down(id);
@@ -126,7 +127,16 @@ pub async fn sip_ws_handler(
 
     // The REAL connection's write path (conn-owner side of the relay):
     // relayed messages from other generations are injected as text frames.
+    // The close knob cancels the session token — the write loop observes the
+    // resulting transport Closed event and tears the flow down (drain-time
+    // idle eviction).
     if let Some(r) = worker_relay.as_ref() {
+        let ws_token_for_close = ws_token.clone();
+        r.register_real_close(
+            conn_kind,
+            client_addr.addr,
+            std::sync::Arc::new(move || ws_token_for_close.cancel()),
+        );
         r.register_real_write(
             conn_kind,
             client_addr.addr,

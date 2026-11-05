@@ -24,6 +24,7 @@ use crate::{
         cluster_event::ClusterEventHub,
         locator::{
             DialogTargetLocator, LocatorEvent, LocatorEventLock, LocatorEventSender,
+            MasterBackedLocator,
             TransportInspectorLocator, sweep_offline_locations,
         },
         presence::PresenceManager,
@@ -631,6 +632,27 @@ impl SipServerBuilder {
                     return Err(e);
                 }
             }
+        };
+        // Worker mode + memory locator: wrap with the master-backed
+        // decorator — accepted registrations report to the master's node
+        // directory and dispatch-time misses query it (cross-generation
+        // registration visibility without forcing a locator type). A
+        // user-configured Database locator shares via the DB and is left
+        // untouched.
+        let locator = if self.worker_relay.is_some()
+            && matches!(
+                self.config.locator,
+                crate::config::LocatorConfig::Memory
+            ) {
+            info!("worker mode: locator auto-shared via master registry (memory locator)");
+            Box::new(MasterBackedLocator::new(
+                locator,
+                self.worker_relay
+                    .clone()
+                    .expect("checked worker_relay above"),
+            )) as Box<dyn Locator>
+        } else {
+            locator
         };
 
         let locator = Arc::new(locator);

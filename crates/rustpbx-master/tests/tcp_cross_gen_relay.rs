@@ -140,7 +140,10 @@ async fn boot_master(env: &Env, worker_bin: &Path) -> Arc<SupCore> {
 }
 
 async fn wait_until(mut pred: impl AsyncFnMut() -> bool, what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // Generous budget: --all-targets runs this alongside other suites and a
+    // loaded machine stretches every phase (worker boot migrations, auth
+    // round-trips, drain). The per-phase deadlines below still bound the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     while !pred().await {
         if tokio::time::Instant::now() >= deadline {
             panic!("timeout waiting for {what}");
@@ -273,7 +276,7 @@ async fn dispatched_leg_completes_across_generations() {
         &logs.join("callerB.log"),
     );
     let mut b_done = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     while tokio::time::Instant::now() < deadline {
         match caller_b.try_wait() {
             Ok(Some(st)) => {
@@ -306,7 +309,7 @@ async fn dispatched_leg_completes_across_generations() {
     // callee's TCP churn replaces the flow — an upstream semantic, not a
     // relay concern). Caller A exists ONLY to pin gen1 in draining; its exit
     // code is not an assertion point. Once its dialogs end, gen1 drains. ──
-    let a_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let a_deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
         match caller_a.try_wait() {
             Ok(Some(_)) => break,

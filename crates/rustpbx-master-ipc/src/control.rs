@@ -161,6 +161,27 @@ pub enum ControlMessage {
         kind: ConnKind,
         peer: SocketAddr,
     },
+    /// Registration visibility for memory-locator deployments: the
+    /// registering worker reports the accepted binding so the master keeps a
+    /// node-level directory. `expires_secs == 0` removes the keys. Worker
+    /// mode + explicit Database locator never sends this (shared via DB).
+    RegistryUp {
+        aors: Vec<String>,
+        kind: ConnKind,
+        /// The registering connection's peer; `None` on removal.
+        peer: Option<SocketAddr>,
+        expires_secs: u64,
+    },
+    /// Dispatch-time directory query (worker locator miss in the flip
+    /// window). Reply goes back to the requesting generation.
+    RegistryLookup {
+        nonce: u64,
+        aor: String,
+    },
+    RegistryLookupReply {
+        nonce: u64,
+        dest: Option<(ConnKind, SocketAddr)>,
+    },
 }
 
 /// One control frame = `u32 BE len | JSON bytes`.

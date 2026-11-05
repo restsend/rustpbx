@@ -43,7 +43,7 @@ pub fn conn_kind_of_transport(t: Transport) -> Option<ConnKind> {
     }
 }
 
-fn transport_of_conn_kind(kind: ConnKind) -> Transport {
+pub fn transport_of_conn_kind(kind: ConnKind) -> Transport {
     match kind {
         ConnKind::SipTcp => Transport::Tcp,
         ConnKind::SipTls => Transport::Tls,
@@ -119,8 +119,14 @@ struct RelayLive {
     virtual_conns: dashmap::DashMap<(u8, SocketAddr), Arc<VirtualConn>>,
     /// Real connection write paths WE own (conn-owner side): (kind, peer).
     real_writes: dashmap::DashMap<(u8, SocketAddr), RealWrite>,
+    /// Close knobs for the real connections WE own (drain-time eviction).
+    real_closes: dashmap::DashMap<(u8, SocketAddr), Arc<dyn Fn() + Send + Sync>>,
     conn_ids: AtomicU64,
     mirror_cap: usize,
+    /// Pending RegistryLookup RPCs (nonce → reply channel).
+    pending_lookups:
+        dashmap::DashMap<u64, tokio::sync::oneshot::Sender<Option<(ConnKind, SocketAddr)>>>,
+    lookup_nonce: AtomicU64,
 }
 
 /// Injected handle for worker-mode cross-generation SIP relay + connection
@@ -185,6 +191,47 @@ impl WorkerRelay {
     pub fn holds_real_conn(&self, kind: ConnKind, peer: SocketAddr) -> bool {
         let Some(live) = self.live() else { return false };
         live.real_writes.contains_key(&(kind.as_u8(), peer))
+    }
+
+    /// Register how to CLOSE a real connection this worker owns (drain-time
+    /// idle eviction). `close` must fully tear the flow down — its own
+    /// teardown path (guard / read-loop exit) performs the standard
+    /// unregister + ConnDown sequence.
+    pub fn register_real_close(&self, kind: ConnKind, peer: SocketAddr, close: Arc<dyn Fn() + Send + Sync>) {
+        let Some(live) = self.live() else { return };
+        live.real_closes.insert((kind.as_u8(), peer), close);
+    }
+
+    pub fn unregister_real_close(&self, kind: ConnKind, peer: SocketAddr) {
+        let Some(live) = self.live() else { return };
+        live.real_closes.remove(&(kind.as_u8(), peer));
+    }
+
+    /// Evict real connections this worker owns whose peer is NOT in `busy`
+    /// (the set of live dialog remote targets). Draining generations call
+    /// this periodically so registered-but-idle clients reconnect onto the
+    /// current generation instead of pinning relay traffic on a draining
+    /// process. Connections skipped from `busy` (live calls) keep flowing.
+    pub fn evict_conns_except(&self, busy: &std::collections::HashSet<(String, u16)>) -> usize {
+        let Some(live) = self.live() else { return 0 };
+        let mut evicted = 0;
+        let keys: Vec<(u8, SocketAddr)> = live
+            .real_writes
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for key in keys {
+            let busy_hit = busy.contains(&(key.1.ip().to_string(), key.1.port()));
+            if busy_hit {
+                continue;
+            }
+            if let Some((_, close)) = live.real_closes.remove(&key) {
+                info!(peer = %key.1, "drain: evicting idle real connection");
+                close();
+                evicted += 1;
+            }
+        }
+        evicted
     }
 
     // ── inbound relay decision (bridge pumps scan REAL-conn messages) ──
@@ -336,6 +383,60 @@ impl WorkerRelay {
         }
         info!(%peer, ?kind, "virtual relay connection registered");
         true
+    }
+
+    // ── Registry-in-Master (memory-locator deployments) ──
+
+    /// Report an accepted registration to the master's node-level directory
+    /// (`expires_secs == 0` removes the keys on deregistration).
+    pub fn report_registry(
+        &self,
+        aors: &[String],
+        kind: ConnKind,
+        peer: Option<SocketAddr>,
+        expires_secs: u64,
+    ) {
+        let Some(live) = self.live() else { return };
+        if let Some(control) = live.writers.control() {
+            let _ = control.send(ControlMessage::RegistryUp {
+                aors: aors.to_vec(),
+                kind,
+                peer,
+                expires_secs,
+            });
+        }
+    }
+
+    /// Dispatch-time directory query: ask the master which generation (and
+    /// destination) holds `aor`. `None` on miss/timeout — the caller keeps
+    /// its own fallback path.
+    pub async fn registry_lookup(&self, aor: &str) -> Option<(ConnKind, SocketAddr)> {
+        let Some(live) = self.live() else { return None };
+        let Some(control) = live.writers.control() else { return None };
+        let nonce = live.lookup_nonce.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        live.pending_lookups.insert(nonce, tx);
+        let sent = control.send(ControlMessage::RegistryLookup { nonce, aor: aor.to_string() });
+        if sent.is_err() {
+            live.pending_lookups.remove(&nonce);
+            return None;
+        }
+        match tokio::time::timeout(Duration::from_millis(300), rx).await {
+            Ok(Ok(reply)) => reply,
+            _ => {
+                live.pending_lookups.remove(&nonce);
+                debug!(%aor, "registry lookup timed out");
+                None
+            }
+        }
+    }
+
+    /// Reply from the master for a pending [`Self::registry_lookup`].
+    fn resolve_lookup(&self, nonce: u64, dest: Option<(ConnKind, SocketAddr)>) {
+        let Some(live) = self.live() else { return };
+        if let Some((_, tx)) = live.pending_lookups.remove(&nonce) {
+            let _ = tx.send(dest);
+        }
     }
 
     // ── master → worker handlers (run_link pumps) ──
@@ -727,6 +828,9 @@ pub fn start_worker_mode(
         real_writes: dashmap::DashMap::new(),
         conn_ids: AtomicU64::new(0),
         mirror_cap: MIRROR_CAP,
+        pending_lookups: dashmap::DashMap::new(),
+        lookup_nonce: AtomicU64::new(0),
+        real_closes: dashmap::DashMap::new(),
     }));
 
     tokio::spawn(async move {
@@ -923,6 +1027,9 @@ async fn run_link(
                 ControlMessage::ConnClosed { kind, peer } => {
                     relay.handle_conn_closed(kind, peer);
                 }
+                ControlMessage::RegistryLookupReply { nonce, dest } => {
+                    relay.resolve_lookup(nonce, dest);
+                }
                 ControlMessage::Drain { .. } => {
                     tracing::info!("master requested drain");
                     // Same semantics as SIGTERM drain: reject new calls, wait
@@ -941,6 +1048,7 @@ async fn run_link(
                     let timeout = state_ctrl.config().graceful_shutdown_timeout();
                     let state_drain = state_ctrl.clone();
                     let writers_drain = writers.clone();
+                    let relay_drain = relay.clone();
                     if first {
                         let active_calls = state_drain.sip_server().inner.active_call_registry.count();
                         tracing::info!(
@@ -951,6 +1059,30 @@ async fn run_link(
                     }
                     tokio::spawn(async move {
                         let sip = state_drain.sip_server().clone();
+                        // Progressive idle-conn eviction while draining: registered
+                        // but call-less clients are disconnected so they reconnect
+                        // onto the current generation (zero relay for them). Conns
+                        // carrying live dialogs are skipped (remote-contact match).
+                        let evict_relay = relay_drain.clone();
+                        let sip_evict = sip.clone();
+                        let evict_task = tokio::spawn(async move {
+                            let mut ticker = tokio::time::interval(Duration::from_secs(2));
+                            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            loop {
+                                ticker.tick().await;
+                                let busy: std::collections::HashSet<(String, u16)> =
+                                    sip_evict.inner.dialog_layer.all_dialog_ids().iter().filter_map(|id| {
+                                        let dialog = sip_evict.inner.dialog_layer.get_dialog_with(id)?;
+                                        let contact = dialog.remote_contact()?;
+                                        Some((
+                                            contact.host().to_string(),
+                                            contact.host_with_port.port.map(|p| p.0).unwrap_or(0),
+                                        ))
+                                    })
+                                    .collect();
+                                evict_relay.evict_conns_except(&busy);
+                            }
+                        });
                         let outcome = crate::shutdown::wait_until_drained(
                             || {
                                 sip.inner.active_call_registry.count() == 0
@@ -964,6 +1096,7 @@ async fn run_link(
                             timeout,
                         )
                         .await;
+                        evict_task.abort();
                         crate::shutdown::log_drain_outcome(outcome);
                         let _ = writers_drain.control().map(|c| c.send(ControlMessage::Drained));
                     });
@@ -1064,6 +1197,12 @@ async fn bridge_sip_stream<S>(
     let (inject_tx, mut inject_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     if let Some(r) = relay.as_ref() {
         r.register_real_write(kind, peer, RealWrite::Bytes(inject_tx.clone()));
+        let token_for_close = bridge_token.clone();
+        r.register_real_close(
+            kind,
+            peer,
+            Arc::new(move || token_for_close.cancel()),
+        );
     }
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let writer_task = tokio::spawn(async move {
@@ -1086,10 +1225,26 @@ async fn bridge_sip_stream<S>(
     });
 
     // ── read loop: framed SIP, relay-vs-local decision per message ──
+    // The flow token doubles as the drain-time eviction close knob.
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
-        match read_sip_frame(&mut read_half, &mut buf).await {
-            Ok(Some(frame)) => {
+        let frame = tokio::select! {
+            biased;
+            _ = bridge_token.cancelled() => {
+                debug!(%peer, ?kind, "sip stream bridge: flow token cancelled (evicted)");
+                None
+            }
+            r = read_sip_frame(&mut read_half, &mut buf) => match r {
+                Ok(Some(frame)) => Some(frame),
+                Ok(None) => None,
+                Err(e) => {
+                    debug!(%peer, error = %e, "sip stream bridge: read error");
+                    None
+                }
+            },
+        };
+        match frame {
+            Some(frame) => {
                 let msg = match rsipstack::sip::SipMessage::try_from(frame.as_slice()) {
                     Ok(m) => m,
                     Err(e) => {
@@ -1113,11 +1268,7 @@ async fn bridge_sip_stream<S>(
                     break;
                 }
             }
-            Ok(None) => break, // EOF
-            Err(e) => {
-                debug!(%peer, error = %e, "sip stream bridge: read error");
-                break;
-            }
+            None => break, // EOF or evicted
         }
     }
 
@@ -1125,6 +1276,7 @@ async fn bridge_sip_stream<S>(
     // dead-marking + serve-loop exit) and drop the channel senders so the
     // transport layer emits Closed (locator unbind).
     if let Some(r) = relay.as_ref() {
+        r.unregister_real_close(kind, peer);
         r.unregister_real_write(kind, peer);
         if let Some(id) = conn_id {
             r.report_conn_down(id);
@@ -1460,6 +1612,9 @@ mod relay_tests {
             real_writes: dashmap::DashMap::new(),
             conn_ids: AtomicU64::new(0),
             mirror_cap: MIRROR_CAP,
+            pending_lookups: dashmap::DashMap::new(),
+            lookup_nonce: AtomicU64::new(0),
+            real_closes: dashmap::DashMap::new(),
         }));
         relay
     }
@@ -1578,6 +1733,9 @@ mod relay_tests {
             real_writes: dashmap::DashMap::new(),
             conn_ids: AtomicU64::new(0),
             mirror_cap: MIRROR_CAP,
+            pending_lookups: dashmap::DashMap::new(),
+            lookup_nonce: AtomicU64::new(0),
+            real_closes: dashmap::DashMap::new(),
         }));
         let peer: SocketAddr = "198.51.100.11:53200".parse().unwrap();
         let sip = b"BYE sip:u@d SIP/2.0\r\nCall-ID: vb\r\n\r\n";

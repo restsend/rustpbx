@@ -6,6 +6,7 @@
 
 use crate::config::{ConfigSubset, RtpSlice};
 use crate::conn_table::{ConnTable, Metrics as ConnMetrics};
+use crate::registry_table::{RegistryTable, Metrics as RegistryMetrics};
 use crate::dialogs::{DialogTable, Metrics};
 use rustpbx_master_ipc::frame::{unpack_conn_kind, DataWriter, FrameKind};
 use rustpbx_master_ipc::link::ControlFrame;
@@ -112,6 +113,11 @@ pub struct SupCore {
     /// Live SIP connections per generation (worker ConnUp/ConnDown reports):
     /// accept-time affinity + relay routing target resolution.
     pub conns: Arc<ConnTable>,
+    /// Node-level registration directory (Registry-in-Master): bindings
+    /// reported by memory-locator workers so a flip-window dispatch on the
+    /// NEW generation can resolve an agent whose connection lives in the
+    /// draining one. Unused when the locator is a shared Database.
+    pub registry: Arc<RegistryTable>,
     /// `(ConnKind, peer) → generations holding a virtual relay connection`
     /// toward that real connection. Drives the `ConnClosed` fan-out when the
     /// real connection (or its whole generation) dies.
@@ -131,6 +137,7 @@ pub struct RelayStats {
     pub to_dialog_routed: AtomicU64,
     pub to_dialog_no_route: AtomicU64,
     pub conn_closed_fanout: AtomicU64,
+    pub registry_lookup_hits: AtomicU64,
 }
 
 impl SupCore {
@@ -149,9 +156,14 @@ impl SupCore {
             std::time::Duration::from_secs(cfg.master.conn_ttl_secs()),
             Arc::new(ConnMetrics::default()),
         ));
+        let registry = Arc::new(RegistryTable::new(
+            cfg.master.max_registry_entries(),
+            Arc::new(RegistryMetrics::default()),
+        ));
         Ok(Arc::new(Self {
             dialogs,
             conns,
+            registry,
             relay_pairs: Mutex::new(HashMap::new()),
             udp_sockets: Mutex::new(udp_sockets),
             stats: SupervisorStats::default(),
@@ -215,6 +227,7 @@ impl SupCore {
             "generations": gens,
             "dialog_entries": self.dialogs.len(),
             "conn_entries": self.conns.len(),
+            "registry_entries": self.registry.len(),
             "relay": {
                 "to_conn_routed": self.relay_stats.to_conn_routed.load(Ordering::Relaxed),
                 "to_conn_no_route": self.relay_stats.to_conn_no_route.load(Ordering::Relaxed),
@@ -667,8 +680,31 @@ impl SupCore {
 
     pub async fn on_conn_down(&self, conn_id: u64) {
         if let Some((kind, peer)) = self.conns.remove_by_conn_id(conn_id) {
+            // Registrations that rode this connection are unreachable through
+            // it — drop their directory entries so lookups stop returning a
+            // dead destination.
+            self.registry.remove_by_conn(kind, &peer);
             self.fan_out_conn_closed(kind, &peer).await;
         }
+    }
+
+    /// RegistryUp from a worker: node-level directory insert/refresh/remove.
+    pub fn on_registry_up(
+        &self,
+        generation: u32,
+        aors: &[String],
+        kind: ConnKind,
+        peer: Option<SocketAddr>,
+        expires_secs: u64,
+    ) {
+        self.registry.upsert(aors, kind, peer, expires_secs, generation);
+    }
+
+    /// Dispatch-time directory query from a worker (local locator missed).
+    pub fn on_registry_lookup(&self, aor: &str) -> Option<(ConnKind, SocketAddr)> {
+        self.registry.lookup(aor).inspect(|_| {
+            self.relay_stats.registry_lookup_hits.fetch_add(1, Ordering::Relaxed);
+        })
     }
 
     pub fn on_relay_pair_open(&self, generation: u32, kind: ConnKind, peer: SocketAddr) {
@@ -819,6 +855,7 @@ impl SupCore {
         for (kind, peer) in self.conns.purge_generation(generation) {
             self.fan_out_conn_closed(kind, &peer).await;
         }
+        self.registry.purge_generation(generation);
         {
             let mut pairs = self.lock_pairs();
             for (_, holders) in pairs.iter_mut() {
@@ -987,6 +1024,19 @@ pub fn spawn_worker_pump(
                     }
                 }
                 ControlMessage::ConnDown { conn_id } => pump.on_conn_down(conn_id).await,
+                ControlMessage::RegistryUp { aors, kind, peer, expires_secs } => {
+                    if let Some(g) = current {
+                        pump.on_registry_up(g, &aors, kind, peer, expires_secs);
+                    }
+                }
+                ControlMessage::RegistryLookup { nonce, aor } => {
+                    let dest = pump.on_registry_lookup(&aor);
+                    // Reply on the REQUESTING generation's own link.
+                    if let Some(g) = current
+                        && let Some(link) = core.gen_link(g).await {
+                        let _ = link.control.send(ControlMessage::RegistryLookupReply { nonce, dest });
+                    }
+                }
                 ControlMessage::RelayPairOpen { kind, peer } => {
                     if let Some(g) = current {
                         pump.on_relay_pair_open(g, kind, peer);

@@ -2421,3 +2421,137 @@ mod tests {
         assert!(locations.is_empty(), "expired old AoR should not be found");
     }
 }
+
+/// Worker-mode locator decorator for memory-locator deployments: the local
+/// memory locator stays the store, while accepted registrations are reported
+/// to the master's node-level directory (`RegistryUp`) and dispatch-time
+/// misses query it (`RegistryLookup`) — giving the flip window
+/// cross-generation registration visibility without a shared database and
+/// without touching the user's locator configuration. Cluster deployments
+/// (explicit Database locator) never activate this decorator.
+pub struct MasterBackedLocator {
+    inner: Box<dyn Locator>,
+    relay: std::sync::Arc<crate::master_link::WorkerRelay>,
+}
+
+impl MasterBackedLocator {
+    pub fn new(
+        inner: Box<dyn Locator>,
+        relay: std::sync::Arc<crate::master_link::WorkerRelay>,
+    ) -> Self {
+        Self { inner, relay }
+    }
+
+    /// Report a binding to the master directory. Only conn-bound stream
+    /// transports with an IP destination apply: UDP is master-routed
+    /// statelessly (any generation can emit a datagram), domain destinations
+    /// are remote servers, not local flows.
+    fn report(&self, location: &Location) {
+        let Some(dest) = location.destination.as_ref() else {
+            return;
+        };
+        let Some(transport) = dest.r#type else {
+            return;
+        };
+        let Some(kind) = crate::master_link::conn_kind_of_transport(transport) else {
+            return;
+        };
+        let peer = match (&dest.addr.host, dest.addr.port) {
+            (rsipstack::sip::Host::IpAddr(ip), Some(port)) => {
+                SocketAddr::new(*ip, port.0)
+            }
+            _ => return,
+        };
+        let expires_secs = u64::from(location.expires);
+        self.relay.report_registry(
+            &[location.aor.to_string()],
+            kind,
+            Some(peer),
+            expires_secs,
+        );
+    }
+
+    fn synth_location(&self, uri: &rsipstack::sip::Uri, kind: rustpbx_master_ipc::ConnKind, peer: SocketAddr) -> Location {
+        let transport = crate::master_link::transport_of_conn_kind(kind);
+        Location {
+            aor: uri.clone(),
+            expires: 60,
+            destination: Some(SipAddr {
+                r#type: Some(transport),
+                addr: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::IpAddr(peer.ip()),
+                    port: Some(peer.port().into()),
+                },
+            }),
+            last_modified: Some(std::time::Instant::now()),
+            supports_webrtc: matches!(
+                transport,
+                rsipstack::sip::Transport::Ws | rsipstack::sip::Transport::Wss
+            ),
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait]
+impl Locator for MasterBackedLocator {
+    async fn is_local_realm(&self, realm: &str) -> bool {
+        self.inner.is_local_realm(realm).await
+    }
+    fn set_realm_checker(&self, checker: RealmChecker) {
+        self.inner.set_realm_checker(checker);
+    }
+    fn set_event_sender(&self, sender: Option<LocatorEventSender>) {
+        self.inner.set_event_sender(sender);
+    }
+    fn set_event_lock(&self, lock: Option<LocatorEventLock>) {
+        self.inner.set_event_lock(lock);
+    }
+    async fn register(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        location: Location,
+    ) -> Result<()> {
+        self.report(&location);
+        self.inner.register(username, realm, location).await
+    }
+    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool> {
+        self.inner.has_active_bindings(username, realm).await
+    }
+    async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
+        self.inner.has_active_binding_for_user(username).await
+    }
+    async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
+        self.inner.unregister(username, realm).await
+    }
+    async fn unregister_with_address(
+        &self,
+        addr: &SipAddr,
+    ) -> Result<Option<Vec<Location>>> {
+        // Local unbind propagates via the master's ConnDown → registry
+        // eviction; nothing extra to report here.
+        self.inner.unregister_with_address(addr).await
+    }
+    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
+        let local = self.inner.lookup(uri).await?;
+        if !local.is_empty() {
+            return Ok(local);
+        }
+        // Flip window: the binding lives on another generation's registry.
+        if let Some((kind, peer)) = self.relay.registry_lookup(&uri.to_string()).await {
+            debug!(%uri, ?kind, %peer, "registry hit from master directory");
+            return Ok(vec![self.synth_location(uri, kind, peer)]);
+        }
+        Ok(local)
+    }
+    async fn diagnostic_lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
+        self.inner.diagnostic_lookup(uri).await
+    }
+    async fn sweep_expired(&self) -> Result<Vec<Location>> {
+        self.inner.sweep_expired().await
+    }
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        self.inner.online_stats().await
+    }
+}

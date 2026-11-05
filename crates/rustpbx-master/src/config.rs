@@ -34,6 +34,9 @@ pub struct MasterSubset {
     /// ConnTable entry TTL (seconds): a worker that stops refreshing (crash
     /// without ConnDown) has its entries reclaimed on the next touch.
     pub conn_ttl_secs: Option<u64>,
+    /// Node-level registration directory hard cap (Registry-in-Master,
+    /// memory-locator deployments only).
+    pub max_registry_entries: Option<usize>,
     /// Accept-time fd routing for SIP TCP: sniff the first message's
     /// Call-ID and route to the generation owning that dialog (parity with
     /// the UDP path). Default on.
@@ -76,6 +79,11 @@ impl MasterSubset {
 
     pub fn tcp_fallback(&self) -> bool {
         self.tcp_fallback.unwrap_or(true)
+    }
+
+    /// Default 100k directory entries.
+    pub fn max_registry_entries(&self) -> usize {
+        self.max_registry_entries.unwrap_or(100_000)
     }
 }
 
