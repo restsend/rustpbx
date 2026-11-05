@@ -452,6 +452,97 @@ async fn queue_dispatch_uui_always_and_call_info_only_when_configured() -> Resul
     Ok(())
 }
 
+/// Scenario F — **求助（consult）派发标记透传**（验收 2026-11-05 问题1，
+/// IVR→agent 形态）：坐席 A 的 consult INVITE 声明
+/// `User-to-User: self-dial;…;purpose=call-center;leg=consult;caller=<客户号码>`
+/// —— 直连求助里该头经 rustpbx 原样透传到被求助坐席；而**咨询目标为
+/// IVR/队列**时派发给 B 的 INVITE 由服务端 enricher 重新生成（只有
+/// q/sg 上下文），consult 标记与客户号码在换腿处丢失 → B 无法显示
+/// 「求助通话」与客户来源。enricher 必须把主叫 UUI 的 `leg`/`caller`
+/// 参数并入派发腿 UUI（q/sg 仍由 enricher 权威生成；普通客户派发无
+/// consult 标记，行为逐字节不变）。
+#[tokio::test]
+async fn queue_dispatch_relays_consult_leg_and_caller_to_agent_invite() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    let (server, _registry) = start_harness(
+        "consult_relay",
+        "q_consult_relay",
+        "sg_consult_relay",
+        "queue:q_consult_relay?target=skillgroup:sg_consult_relay",
+        false,
+        true,
+    )
+    .await?;
+
+    let bob = make_registered_ua(&server, "bob").await?;
+    let caller = make_registered_ua(&server, "caller").await?;
+
+    // 坐席 A 的 consult INVITE 形态（restsend-call `with_leg_role` + 客户
+    // 号码随路，restsend-call crates/pc Action::Consult 组装）。
+    let consult_uui =
+        "self-dial;encoding=ascii;purpose=call-center;leg=consult;caller=13800008000".to_string();
+    let offer = create_test_sdp(
+        "127.0.0.1",
+        portpicker::pick_unused_port().unwrap_or(30200),
+        false,
+    );
+    let dialog = caller
+        .make_call_with_headers(IVR_NUMBER, Some(offer), vec![("User-to-User".into(), consult_uui)])
+        .await?;
+    sleep(Duration::from_millis(600)).await;
+
+    // Press 1 → transfer to the queue（生产形态：咨询目标 IVR 路由进队列）。
+    caller.send_dtmf_info(&dialog, "1").await?;
+
+    let mut uui = None;
+    let mut agent_dialog = None;
+    for _ in 0..150 {
+        let events = bob.process_dialog_events().await?;
+        for ev in events {
+            if let TestUaEvent::IncomingCall(id, offer) = ev {
+                uui = bob.incoming_invite_header(&id, "User-to-User").await;
+                bob.ring_call(&id).await?;
+                sleep(Duration::from_millis(300)).await;
+                bob.answer_call(
+                    &id,
+                    offer
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| Some(create_test_sdp("127.0.0.1", portpicker::pick_unused_port().unwrap_or(30201), false))),
+                )
+                .await?;
+                agent_dialog = Some(id);
+                break;
+            }
+        }
+        if agent_dialog.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    let agent_dialog = agent_dialog.expect("queue must dispatch the consulted call to the agent");
+    let uui = uui.unwrap_or_else(|| "<missing>".to_string());
+
+    sleep(Duration::from_millis(800)).await;
+    bob.hangup(&agent_dialog).await.ok();
+    sleep(Duration::from_millis(300)).await;
+    server.stop();
+
+    assert!(
+        uui.contains("q=") && uui.contains("sg="),
+        "enricher queue/skill context must stay on the dispatched leg: {uui}"
+    );
+    assert!(
+        uui.contains("leg=consult"),
+        "consult leg marker must relay onto the dispatched agent INVITE: {uui}"
+    );
+    assert!(
+        uui.contains("caller=13800008000"),
+        "customer number must relay onto the dispatched agent INVITE: {uui}"
+    );
+    Ok(())
+}
+
 /// Scenario E — **溢出升级路径**（`dial_agents`，修复点 3）：primary 组坐席
 /// 振铃不应答，`max_wait_secs` 到点后 fair widening 把溢出组坐席补进拨打
 /// 列表（`dial_agents` 裸 URI originate）。升级腿 INVITE 必须与即时腿

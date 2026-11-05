@@ -45,6 +45,11 @@ pub struct CcUui {
     /// values are dropped; unknown roles are kept as-is — the consuming node
     /// decides what to do with them.
     pub leg: Option<String>,
+    /// Customer number attached by the consulting agent's client
+    /// (`caller=<digits>`) — rides the consult relay onto dispatched agent
+    /// legs so the consulted side can render the customer, not the
+    /// consulting extension.
+    pub caller: Option<String>,
 }
 
 /// Leg roles the `leg=` UUI parameter may carry. Each maps to a dial intent
@@ -72,6 +77,7 @@ pub fn parse_uui(value: &str) -> Option<CcUui> {
     let mut queue_name = None;
     let mut skill_group = None;
     let mut leg = None;
+    let mut caller = None;
     for param in parts {
         let param = param.trim();
         let (k, v) = match param.split_once('=') {
@@ -90,6 +96,7 @@ pub fn parse_uui(value: &str) -> Option<CcUui> {
             }
             "skill" => skill_group = Some(v.to_string()),
             "leg" if !v.is_empty() => leg = Some(v.to_string()),
+            "caller" if !v.is_empty() => caller = Some(v.to_string()),
             _ => {}
         }
     }
@@ -103,6 +110,7 @@ pub fn parse_uui(value: &str) -> Option<CcUui> {
         queue_name,
         skill_group,
         leg,
+        caller,
     })
 }
 
@@ -114,6 +122,66 @@ pub fn extract_cc_uui(headers: &rsipstack::sip::Headers) -> Option<CcUui> {
         }
         parse_uui(&h.value())
     })
+}
+
+/// [`extract_cc_uui`] over a raw header slice (the queue-enrich context
+/// carries the caller dialog's initial INVITE headers as a slice).
+pub fn extract_cc_uui_from_slice(headers: &[Header]) -> Option<CcUui> {
+    headers.iter().find_map(|h| {
+        if !h.name().eq_ignore_ascii_case(UUI_HEADER_NAME) {
+            return None;
+        }
+        parse_uui(h.value())
+    })
+}
+
+/// Consult-dispatch relay: merge the caller dialog's consult params onto a
+/// dispatched agent-leg UUI value.
+///
+/// When an agent's consult INVITE (`leg=consult;caller=<customer>`) targets
+/// an IVR/queue, the queue dispatches a NEW agent leg whose UUI is built by
+/// the enricher (queue/skill context only) — the consult marker and the
+/// customer number would be lost at the re-leg, and the consulted agent
+/// could not render「求助通话」with the customer. Only these two params
+/// relay (queue/skill/ivr/t/acw stay enricher-authoritative); ordinary
+/// customer dispatches carry no consult UUI and are byte-for-byte unchanged.
+///
+/// Metadata (`encoding=` / `purpose=`) is re-appended at the tail; any
+/// pre-existing `leg=` / `caller=` param on the base is replaced by the
+/// relayed one (the enricher never emits them today — the filter is
+/// belt-and-braces against future emitters).
+pub fn merge_consult_relay(
+    base: Option<String>,
+    leg: Option<&str>,
+    caller: Option<&str>,
+) -> Option<String> {
+    let is_meta = |p: &str| {
+        let p = p.trim();
+        p.starts_with("encoding=")
+            || p.starts_with("purpose=")
+            || p.starts_with("leg=")
+            || p.starts_with("caller=")
+    };
+    let mut parts: Vec<String> = match base {
+        Some(uui) if !uui.is_empty() => uui
+            .split(';')
+            .filter(|p| !is_meta(p))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let Some(leg) = leg.map(str::trim).filter(|l| !l.is_empty()) {
+        parts.push(format!("leg={leg}"));
+    }
+    if let Some(caller) = caller.map(str::trim).filter(|c| !c.is_empty()) {
+        parts.push(format!("caller={caller}"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push("encoding=ascii".into());
+    parts.push("purpose=isdn-uui".into());
+    Some(parts.join(";"))
 }
 
 /// Device-declared dial intent for a SELF-dialed leg (restsend-call tags its
@@ -238,6 +306,93 @@ mod tests {
         let uui = parse_uui("root-1;encoding=hex;purpose=call-center;leg=whatever").unwrap();
         assert_eq!(uui.leg.as_deref(), Some("whatever"));
         assert!(!is_known_leg_role("whatever"));
+    }
+
+    /// Consult relay params (`caller=` / restsend consult INVITE 形态）：
+    /// restsend-call 的 consult INVITE UUI（`self-dial;encoding=ascii;
+    /// purpose=call-center;leg=consult;caller=<客户号码>`）解析出 leg 与
+    /// caller；无 caller（旧 A 端）回落 None；非 call-center UUI 拒绝。
+    #[test]
+    fn parse_consult_relay_params() {
+        let uui = parse_uui(
+            "self-dial;encoding=ascii;purpose=call-center;leg=consult;caller=13800008000",
+        )
+        .expect("restsend consult UUI must parse");
+        assert_eq!(uui.leg.as_deref(), Some("consult"));
+        assert_eq!(uui.caller.as_deref(), Some("13800008000"));
+        // 旧 A 端：无 caller 键。
+        let uui = parse_uui("self-dial;encoding=ascii;purpose=call-center;leg=consult").unwrap();
+        assert_eq!(uui.caller, None);
+        // 空 caller 值视为缺失。
+        let uui = parse_uui("self-dial;encoding=ascii;purpose=call-center;caller=").unwrap();
+        assert_eq!(uui.caller, None);
+        // enricher 自产的 isdn-uui UUI 不被 extract_cc_uui 采纳（caller/leg
+        // 透传源只认 call-center）。
+        assert!(
+            extract_cc_uui_from_slice(&[Header::Other(
+                UUI_HEADER_NAME.into(),
+                "q=sales;sg=sg1;leg=consult;caller=10086;encoding=ascii;purpose=isdn-uui".into()
+            )])
+            .is_none()
+        );
+    }
+
+    /// 派发腿 UUI 合并：relay 参数追加到 enricher 上下文之后，metadata
+    /// 保持尾部；无 relay 时逐字节不变；base 缺失时产最小 relay UUI。
+    #[test]
+    fn merge_consult_relay_matrix() {
+        // enricher 上下文 + relay。
+        let merged = merge_consult_relay(
+            Some("q=sales;sg=sg1;t=inbound;encoding=ascii;purpose=isdn-uui".into()),
+            Some("consult"),
+            Some("13800008000"),
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            "q=sales;sg=sg1;t=inbound;leg=consult;caller=13800008000;encoding=ascii;purpose=isdn-uui"
+        );
+        // 仅 caller（无 consult 标记的极端形态）也透传。
+        let merged = merge_consult_relay(
+            Some("q=sales;encoding=ascii;purpose=isdn-uui".into()),
+            None,
+            Some("10086"),
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            "q=sales;caller=10086;encoding=ascii;purpose=isdn-uui"
+        );
+        // base 已有 leg=（假想的未来 emitters）→ relay 替换不重复。
+        let merged = merge_consult_relay(
+            Some("q=sales;leg=agent;encoding=ascii;purpose=isdn-uui".into()),
+            Some("consult"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            "q=sales;leg=consult;encoding=ascii;purpose=isdn-uui"
+        );
+        // base 缺失 + relay → 最小 UUI。
+        let merged =
+            merge_consult_relay(None, Some("consult"), Some("10086")).unwrap();
+        assert_eq!(
+            merged,
+            "leg=consult;caller=10086;encoding=ascii;purpose=isdn-uui"
+        );
+        // 无 relay → base 逐字节不变。
+        let base = "q=sales;sg=sg1;encoding=ascii;purpose=isdn-uui".to_string();
+        assert_eq!(
+            merge_consult_relay(Some(base.clone()), None, None).as_deref(),
+            Some(base.as_str())
+        );
+        // 空 caller 值不透传。
+        assert_eq!(
+            merge_consult_relay(Some(base.clone()), Some("consult"), Some(""))
+                .as_deref(),
+            Some("q=sales;sg=sg1;leg=consult;encoding=ascii;purpose=isdn-uui")
+        );
     }
 
     #[test]
