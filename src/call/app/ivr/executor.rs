@@ -997,19 +997,10 @@ impl StepIvrApp {
                         // (third_party getDynamicTree merges here), so
                         // `node.next` must NOT short-circuit it.
                         if let WaitEvent::ApiResponse { status, body } = wait_event {
-                            let next = self
-                                .request_next(Some(ProviderEvent::ApiResponse {
-                                    status: *status,
-                                    body: body.clone(),
-                                }))
-                                .await?;
-                            let next_id =
-                                next.step_id.clone().or_else(|| next.step_name.clone());
-                            self.record_trace(IvrTraceEntry {
+                            // Resolving the successor changes the live step identity and timing.
+                            let mut trace = IvrTraceEntry {
                                 step_end_time: Some(step_end),
                                 duration_ms: elapsed_ms,
-                                next_node_id: next_id.clone(),
-                                next_step_id: next_id,
                                 ..self.trace_entry(
                                     &session_id,
                                     &caller,
@@ -1024,7 +1015,18 @@ impl StepIvrApp {
                                     step_id.clone(),
                                     step_name.clone(),
                                 )
-                            });
+                            };
+                            let next = self
+                                .request_next(Some(ProviderEvent::ApiResponse {
+                                    status: *status,
+                                    body: body.clone(),
+                                }))
+                                .await?;
+                            let next_id =
+                                next.step_id.clone().or_else(|| next.step_name.clone());
+                            trace.next_node_id = next_id.clone();
+                            trace.next_step_id = next_id;
+                            self.record_trace(trace);
                             self.current_trigger =
                                 Some(crate::rwi::TriggerInfo::new("api_response"));
                             self.current_node = Some(next);
@@ -6047,7 +6049,8 @@ mod tests {
             // The provider POSTs a start notification before the first /step
             // (and fail-fasts on 4xx) — the mock must accept it without
             // consuming a scripted response.
-            .route("/ivr/step/start", post(|| async { axum::http::StatusCode::OK }));
+            .route("/ivr/step/start", post(|| async { axum::http::StatusCode::OK }))
+            .route("/ivr/step/end", post(|| async { Json(serde_json::json!({"ok": true})) }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         crate::utils::spawn(async move {
@@ -9194,14 +9197,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_api_response_advances_flow_without_stalling() {
+    async fn test_api_response_advances_flow_without_stalling_vendor_review_regression() {
         // Acceptance §3.2.1.1 api row: the HTTP call executes synchronously
         // inside execute_action, so the ApiResponse wait event must advance
         // immediately — no ControllerEvent ever carries it (RED: the flow
         // stalled forever after api/ApiResponse and the successor command
         // never arrived). The unreachable URL keeps the test deterministic:
         // the transport-failure arm still yields ApiResponse{status: 0}.
-        let api = ActionNode::new(EntryAction::Api {
+        let mut api = ActionNode::new(EntryAction::Api {
             url: "http://127.0.0.1:1/unreachable".into(),
             method: None,
             headers: HashMap::new(),
@@ -9209,9 +9212,14 @@ mod tests {
             timeout: 1,
             get_dynamic_tree: None,
         });
-        let hangup = ActionNode::new(EntryAction::hangup_none());
-        let mut stack =
-            MockCallStack::run(Box::new(mock_app(vec![api, hangup])), "1001", "2000");
+        api.step_id = Some("api-step".into());
+        api.extra = Some(serde_json::json!({"node": "api"}));
+        let mut hangup = ActionNode::new(EntryAction::hangup_none());
+        hangup.step_id = Some("end-step".into());
+        hangup.extra = Some(serde_json::json!({"node": "end"}));
+        let trace = IvrTraceCollector::new();
+        let app = mock_app(vec![api, hangup]).with_trace(Some(trace.clone()));
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
             .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -9220,6 +9228,35 @@ mod tests {
         stack
             .assert_cmd(8000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
             .await;
+        let entries = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entries = trace.query_by_session("test-session").await;
+                if entries
+                    .iter()
+                    .any(|entry| entry.step_id.as_deref() == Some("api-step"))
+                {
+                    break entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let api_trace = entries
+            .iter()
+            .find(|entry| entry.step_id.as_deref() == Some("api-step"))
+            .unwrap();
+        assert_eq!(
+            api_trace.step_index, 1,
+            "API trace must retain its own index"
+        );
+        assert_eq!(api_trace.extra, Some(serde_json::json!({"node": "api"})));
+        assert_eq!(api_trace.next_step_id.as_deref(), Some("end-step"));
+        let start = chrono::DateTime::parse_from_rfc3339(api_trace.step_start_time.as_deref().unwrap())
+            .unwrap();
+        let end =
+            chrono::DateTime::parse_from_rfc3339(api_trace.step_end_time.as_deref().unwrap()).unwrap();
+        assert!(start <= end, "API trace must not start after it ends");
     }
 
     #[tokio::test]
@@ -9600,8 +9637,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_step_provider_start_total_deadline_stops_without_step() {
-        // mock 时钟是进程级的——与其他 pause/advance 使用者互斥（否则并行
-        // 测试的 advance 会提前烧掉本测试的 2s 真实窗口）。
         let _clock = crate::utils::test_time_lock();
         let entered = Arc::new(Notify::new());
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -9637,16 +9672,23 @@ mod tests {
             Box::new(StepIvrApp::with_provider(Box::new(provider))),
             context.clone(),
         );
-        // 30s：仅是防挂死的上界——正常毫秒级到达；满载并行跑全量时
-        // （3700+ 测试）2s 真实窗口会被 CPU 争用击穿（实测 0.05s 即超时）。
+        // Bound real network admission before pausing this runtime's clock.
         tokio::time::timeout(Duration::from_secs(30), entered.notified())
             .await
             .unwrap();
         // Pause only after real network admission; advancing before it would race I/O.
         tokio::time::pause();
         let paused_at = tokio::time::Instant::now();
-        tokio::time::advance(Duration::from_secs(10)).await;
-        for _ in 0..16 {
+        // Sleep drives expired timers in order; advance() only moves the clock.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait for the app to publish its error rather than assuming a fixed
+        // number of scheduler yields is enough. Keep simulated time fixed here.
+        let wait_started = std::time::Instant::now();
+        while context.get_var(IVR_LAST_ERROR_KEY).is_none() {
+            assert!(
+                wait_started.elapsed() < Duration::from_secs(5),
+                "startup timeout did not publish an IVR error at the ten-second deadline"
+            );
             tokio::task::yield_now().await;
         }
         assert!(
@@ -9655,7 +9697,11 @@ mod tests {
                 .unwrap()
                 .contains("timed out")
         );
-        assert!(tokio::time::Instant::now() - paused_at <= Duration::from_secs(10));
+        // Tokio rounds timer deadlines up to the next millisecond.
+        assert!(
+            tokio::time::Instant::now() - paused_at
+                <= Duration::from_secs(10) + Duration::from_millis(1)
+        );
         tokio::time::resume();
         finish_startup_fallback(stack).await;
         assert_eq!(
