@@ -612,13 +612,6 @@ async fn load_stored_transcript(
 }
 
 fn resolve_models_path(cfg: &TranscriptConfig) -> Option<String> {
-    if let Ok(env_path) = std::env::var("MODEL_PATH") {
-        let trimmed = env_path.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
     cfg.models_path
         .as_ref()
         .map(|value| value.trim())

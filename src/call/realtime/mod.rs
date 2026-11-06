@@ -183,22 +183,14 @@ impl RealtimeParams {
         Ok(params)
     }
 
-    /// Env-var fallback chain for the API key, mirroring the Deepgram ASR
-    /// precedent (`config wins, env fills in`).
+    /// The API key configured on the realtime config. Callers without a
+    /// configured key must set one explicitly — there is no environment
+    /// fallback (config is the single configuration source).
     pub fn effective_api_key(&self) -> Option<String> {
-        if let Some(key) = self.api_key.as_deref().filter(|k| !k.is_empty()) {
-            return Some(key.to_string());
-        }
-        if self.protocol == RealtimeProtocolKind::OpenAi {
-            if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-                if !key.is_empty() {
-                    return Some(key);
-                }
-            }
-        }
-        std::env::var("REALTIME_API_KEY")
-            .ok()
+        self.api_key
+            .as_deref()
             .filter(|k| !k.is_empty())
+            .map(|k| k.to_string())
     }
 }
 

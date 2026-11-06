@@ -324,23 +324,23 @@ mod tests {
     fn deepgram_factory_requires_api_key() {
         let factory = resolve_transcription_provider("deepgram").unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        // Only assert the failure path when DEEPGRAM_API_KEY is not set in
-        // the environment (tests may run on machines that export it).
-        if std::env::var("DEEPGRAM_API_KEY").is_err() {
-            let err = match factory.create(
-                &TranscriptionCallInfo {
-                    call_id: "test-call".to_string(),
-                    session_id: "test-session".to_string(),
-                },
-                &[],
-                tx.clone(),
-                &serde_json::json!({}),
-            ) {
-                Err(e) => e,
-                Ok(_) => panic!("missing api_key must be rejected"),
-            };
-            assert!(err.to_string().contains("api_key"));
-        }
+        // No api_key in the provider config: construction must be rejected.
+        // (The old environment fallback is gone — config is the single
+        // configuration source, so this no longer depends on the test
+        // machine's environment.)
+        let err = match factory.create(
+            &TranscriptionCallInfo {
+                call_id: "test-call".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            &[],
+            tx.clone(),
+            &serde_json::json!({}),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("missing api_key must be rejected"),
+        };
+        assert!(err.to_string().contains("api_key"));
         // Empty `sides` means no ASR connection is spawned, so this stays
         // hermetic; with a key present the provider constructs fine.
         let provider = factory

@@ -22,28 +22,29 @@ static INSTANCE_ID: Mutex<Option<String>> = Mutex::new(None);
 /// "node" fields.
 ///
 /// Resolution order (first match wins):
-/// 1. `RUSTPBX_INSTANCE_ID` env — explicit operator override;
+/// 1. `instance_id` in config.toml — explicit operator override;
 /// 2. the `[cluster].peers` entry that IS this node, matched against the
 ///    host's interface IPs — yields `"addr:sip_port"`, the same string other
 ///    peers see in `cluster_self_addr` and `"node"` fields;
-/// 3. `HOSTNAME`/`HOST` env, then the system hostname;
+/// 3. the system hostname;
 /// 4. `"unknown"`.
 pub fn init_instance_identity(config: &Config) {
     let mut guard = INSTANCE_ID.lock().unwrap();
     if guard.is_some() {
         return;
     }
-    let env_override = std::env::var("RUSTPBX_INSTANCE_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let hostname_env = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("HOST"))
-        .ok()
-        .filter(|h| !h.is_empty());
+    let configured = config
+        .instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // The system hostname is resolved inside `resolve_identity_from_parts`
+    // when no explicit override applies.
     *guard = Some(resolve_identity_from_parts(
-        env_override,
+        configured,
         config.cluster.as_ref(),
-        hostname_env,
+        None,
         config.proxy.udp_port,
         &local_ips(),
     ));
@@ -57,14 +58,10 @@ pub fn instance_id() -> String {
     let mut guard = INSTANCE_ID.lock().unwrap();
     guard
         .get_or_insert_with(|| {
-            let env_override = std::env::var("RUSTPBX_INSTANCE_ID")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let hostname_env = std::env::var("HOSTNAME")
-                .or_else(|_| std::env::var("HOST"))
-                .ok()
-                .filter(|h| !h.is_empty());
-            resolve_identity_from_parts(env_override, None, hostname_env, None, &local_ips())
+            // No config at hand (single-node processes, tests): skip the
+            // configured override and the [cluster].peers self-match, and
+            // fall through to the system hostname.
+            resolve_identity_from_parts(None, None, None, None, &local_ips())
         })
         .clone()
 }

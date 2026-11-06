@@ -16,7 +16,7 @@ const TOKEN_TTL_SECS: u64 = 3600;
 const DEFAULT_SECRET: &str = "cc-phone-auth-secret-change-in-production";
 
 fn default_secret() -> String {
-    std::env::var("CC_PHONE_AUTH_SECRET").unwrap_or_else(|_| DEFAULT_SECRET.to_string())
+    DEFAULT_SECRET.to_string()
 }
 
 #[derive(Debug, Clone)]

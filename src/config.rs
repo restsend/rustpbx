@@ -712,6 +712,11 @@ pub struct Config {
     pub recording: Option<RecordingPolicy>,
     #[serde(default)]
     pub demo_mode: bool,
+    /// Explicit node identity (config-only; the former
+    /// `RUSTPBX_INSTANCE_ID` environment override). When unset the identity
+    /// falls back to the cluster peer self-match, then the system hostname.
+    #[serde(default)]
+    pub instance_id: Option<String>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
     #[serde(default)]
@@ -2910,6 +2915,7 @@ impl Default for Config {
             database_pool: DatabasePoolConfig::default(),
             recording: None,
             demo_mode: false,
+            instance_id: None,
             storage: None,
             sipflow: None,
             licenses: None,
@@ -2950,12 +2956,6 @@ impl Config {
         let mut config: Self = toml::from_str(
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
         )?;
-        if std::env::var("RUSTPBX_DEMO_MODE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-        {
-            config.demo_mode = true;
-        }
         config.ensure_recording_defaults();
         Ok(config)
     }
@@ -2965,12 +2965,6 @@ impl Config {
             .await
             .map_err(|e| anyhow::anyhow!("{}: {}", e, path))?;
         let mut config: Self = toml::from_str(&contents)?;
-        if std::env::var("RUSTPBX_DEMO_MODE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-        {
-            config.demo_mode = true;
-        }
         config.ensure_recording_defaults();
         Ok(config)
     }

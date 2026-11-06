@@ -290,9 +290,7 @@ impl AppBuilder {
             let (filter_layer, filter_handle) = log_reload::ReloadableFilterLayer::new(env_filter);
             log_reload::set_log_filter_handle(filter_handle);
 
-            let tokio_console_enabled = cli.tokio_console.is_some()
-                || std::env::var_os("TOKIO_CONSOLE").is_some()
-                || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();
+            let tokio_console_enabled = cli.tokio_console.is_some();
             let mut console_layer = None;
             if tokio_console_enabled {
                 use console_subscriber::ServerAddr;

@@ -101,11 +101,11 @@ impl RemoteTranscriptConfig {
     fn effective_api_key(&self) -> Option<String> {
         self.api_key
             .clone()
-            .or_else(|| std::env::var("DEEPGRAM_API_KEY").ok())
+            .filter(|k| !k.is_empty())
     }
 
     /// True when the provider has enough configuration to run (API key from
-    /// config or env, and a URL — defaults apply for the rest).
+    /// config, and a URL — defaults apply for the rest).
     pub fn is_runnable(&self) -> bool {
         self.effective_api_key().is_some()
     }

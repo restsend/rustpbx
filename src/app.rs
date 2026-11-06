@@ -861,8 +861,8 @@ impl AppStateBuilder {
                     }
                     let server = snap_app.sip_server().inner.clone();
                     let now = chrono::Utc::now();
-                    let instance = Some(std::env::var("RUSTPBX_INSTANCE_ID").unwrap_or_default())
-                        .filter(|s| !s.is_empty());
+                    let instance = crate::utils::instance_id();
+                    let instance = Some(instance).filter(|s| !s.is_empty());
                     // Locator population.
                     if let Ok(stats) = server.locator.online_stats().await {
                         let model = runtime_snapshot::ActiveModel {

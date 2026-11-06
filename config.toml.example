@@ -3,6 +3,10 @@
 # cargo run . --bin rustpbx --conf config.toml
 
 http_addr = "0.0.0.0:8080"
+# Explicit node identity override. When unset the identity falls back to the
+# cluster peer self-match, then the system hostname. (Replaces the former
+# RUSTPBX_INSTANCE_ID environment variable.)
+# instance_id = "pbx-node-1"
 # Trust X-Forwarded-For / X-Real-IP / X-Forwarded-Proto headers when deriving
 # the client IP and request scheme. Only enable when RustPBX sits behind a
 # reverse proxy that overwrites these headers — otherwise any caller can spoof
