@@ -98,6 +98,9 @@ pub struct Model {
     pub sip_server: Option<String>,
     pub sip_transport: SipTransport,
     pub outbound_proxy: Option<String>,
+    /// REGISTER From/To user; absent preserves the legacy auth_username identity.
+    #[serde(default)]
+    pub register_username: Option<String>,
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub default_route_label: Option<String>,
@@ -161,6 +164,7 @@ impl MigrationTrait for Migration {
                             .default(SipTransport::default().as_str()),
                     )
                     .col(string_len_null(Column::OutboundProxy, 160))
+                    .col(string_len_null(Column::RegisterUsername, 160))
                     .col(string_len_null(Column::AuthUsername, 160))
                     .col(string_len_null(Column::AuthPassword, 160))
                     .col(string_len_null(Column::DefaultRouteLabel, 160))

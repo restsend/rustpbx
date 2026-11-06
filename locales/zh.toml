@@ -1010,6 +1010,8 @@ none = "无"
 
 # Access / Authentication section
 section_auth = "认证与路由"
+field_register_username = "注册用户名"
+field_register_username_hint = "REGISTER From/To 中的号码，例如 +8675789985014。留空使用认证用户名；认证用户名可以单独填写带域名的账号。"
 field_auth_username = "认证用户名"
 field_auth_username_placeholder = "由运营商提供"
 field_auth_password = "认证密码"

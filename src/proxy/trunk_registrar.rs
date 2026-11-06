@@ -8,6 +8,7 @@
 /// On reload, registrations for removed trunks are cancelled (un-REGISTER with
 /// Expires: 0) and new/changed trunks with registration enabled are started.
 use crate::proxy::routing::TrunkConfig;
+use crate::config::{NetworkProfile, ProxyConfig};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -45,6 +46,7 @@ pub struct TrunkRegistrationStatus {
 
 struct ActiveRegistration {
     config: TrunkConfig,
+    contact_policy: String,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -59,6 +61,7 @@ pub struct TrunkRegistrar {
     parent_cancel: CancellationToken,
     /// SIP endpoint reference for creating transactions (set after server build).
     endpoint: RwLock<Option<EndpointInnerRef>>,
+    network: RwLock<Option<(Vec<NetworkProfile>, String, ProxyConfig)>>,
 }
 
 impl Drop for TrunkRegistrar {
@@ -81,6 +84,7 @@ impl TrunkRegistrar {
             lifecycle: Mutex::new(()),
             parent_cancel: CancellationToken::new(),
             endpoint: RwLock::new(None),
+            network: RwLock::new(None),
         }
     }
 
@@ -88,6 +92,11 @@ impl TrunkRegistrar {
     /// built, before the first `reconcile`.
     pub fn set_endpoint(&self, endpoint: EndpointInnerRef) {
         *self.endpoint.write().unwrap() = Some(endpoint);
+    }
+
+    /// Supply the same network profiles used by calls, before reconciling trunks.
+    pub fn set_network_profiles(&self, profiles: Vec<NetworkProfile>, default_id: String, proxy: ProxyConfig) {
+        *self.network.write().unwrap() = Some((profiles, default_id, proxy));
     }
 
     /// Get the registration status of all trunks.
@@ -140,14 +149,38 @@ impl TrunkRegistrar {
             }
         }
 
+        let network = self.network.read().unwrap().clone();
+
         // Start / restart registrations for desired trunks.
         for (name, config) in &desired {
+            let selected_network = if let Some((profiles, default_id, proxy)) = &network {
+                let id = config.profile.as_deref().map(str::trim)
+                    .filter(|id| !id.is_empty()).unwrap_or(default_id);
+                let Some(profile) = profiles.iter().find(|profile| profile.id == id) else {
+                    self.stop_registration(name).await;
+                    update_status(&self.statuses, name, false, None,
+                        Some(format!("unknown registration network profile '{id}'")), None);
+                    continue;
+                };
+                Some((profile.clone(), proxy.clone()))
+            } else {
+                None
+            };
+            // Compare resolved profile contents too: editing an existing profile
+            // must restart registration even when its id has not changed.
+            let contact_policy = selected_network.as_ref().map(|(profile, proxy)| {
+                serde_json::to_string(&(profile, &proxy.addr, proxy.all_udp_ports(),
+                    proxy.tcp_port, proxy.tls_port)).expect("serializable network profile")
+            }).unwrap_or_default();
             let unchanged = self.registrations.get(name.as_str()).is_some_and(|active| {
                 let previous = &active.config;
                 !active.task.is_finished()
+                    && active.contact_policy == contact_policy
+                    && previous.profile == config.profile
                     && previous.dest == config.dest
                     && previous.outbound_proxy == config.outbound_proxy
                     && previous.username == config.username
+                    && previous.auth_username == config.auth_username
                     && previous.password == config.password
                     && previous.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
                         == config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
@@ -156,7 +189,7 @@ impl TrunkRegistrar {
             if !unchanged {
                 self.stop_registration(name).await;
                 info!(trunk = %name, dest = %config.dest, "starting trunk registration");
-                self.start_registration(name.clone(), (*config).clone(), endpoint.clone());
+                self.start_registration(name.clone(), (*config).clone(), endpoint.clone(), selected_network, contact_policy);
             }
         }
     }
@@ -187,7 +220,8 @@ impl TrunkRegistrar {
     }
 
     /// Spawn a background task for trunk registration.
-    fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef) {
+    fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef,
+        network: Option<(NetworkProfile, ProxyConfig)>, contact_policy: String) {
         let child_token = self.parent_cancel.child_token();
         let task_config = config.clone();
         let task_name = name.clone();
@@ -195,10 +229,11 @@ impl TrunkRegistrar {
         let statuses = self.statuses.clone();
 
         let task = crate::utils::spawn(async move {
-            registration_loop(task_name, task_config, task_cancel, statuses, endpoint).await;
+            registration_loop(task_name, task_config, task_cancel, statuses, endpoint, network).await;
         });
         self.registrations.insert(name, ActiveRegistration {
             config,
+            contact_policy,
             cancel: child_token,
             task,
         });
@@ -246,6 +281,7 @@ async fn registration_loop(
     cancel: CancellationToken,
     statuses: Arc<DashMap<String, TrunkRegistrationStatus>>,
     endpoint: EndpointInnerRef,
+    network: Option<(NetworkProfile, ProxyConfig)>,
 ) {
     let expires = config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES);
     // Initial guess from the requested expires; recomputed from the
@@ -277,13 +313,13 @@ async fn registration_loop(
     let credential = match (&config.username, &config.password) {
         (Some(user), Some(pass)) => Some(Credential {
             username: user.clone(),
-            auth_username: None, // falls back to `username` for the digest
+            auth_username: config.auth_username.clone(),
             password: pass.clone(),
             realm: None, // extracted from server challenge
         }),
         (Some(user), None) => Some(Credential {
             username: user.clone(),
-            auth_username: None,
+            auth_username: config.auth_username.clone(),
             password: String::new(),
             realm: None,
         }),
@@ -308,7 +344,53 @@ async fn registration_loop(
         let result = match resolve_outbound_proxy(config.outbound_proxy.as_deref()).await {
             Ok(proxy) => {
                 registration.outbound_proxy = proxy;
-                do_register(&name, &mut registration, &server_uri, expires).await
+                async {
+                    if let Some((profile, proxy_config)) = &network {
+                        let destination = match proxy {
+                            Some(addr) => Some(addr),
+                            None => resolve_outbound_proxy(Some(&server_uri.to_string())).await?,
+                        };
+                        let transport = server_uri.params.iter().find_map(|p| match p {
+                            rsipstack::sip::Param::Transport(t) => Some(*t),
+                            _ => None,
+                        }).unwrap_or(if server_uri.scheme == Some(rsipstack::sip::Scheme::Sips) {
+                            rsipstack::sip::Transport::Tls
+                        } else {
+                            rsipstack::sip::Transport::Udp
+                        });
+                        let mut profile = profile.clone();
+                        if profile.sip_external_ip.is_none() {
+                            if let Some(url) = &profile.auto_sip_external_ip {
+                                profile.sip_external_ip = Some(crate::auto_external_ip::detect_external_ip(url).await?.to_string());
+                            }
+                        }
+                        if profile.external_ip.is_none() && profile.sip_external_ip.is_none() {
+                            if let Some(url) = &profile.auto_external_ip {
+                                profile.external_ip = Some(crate::auto_external_ip::detect_external_ip(url).await?.to_string());
+                            }
+                        }
+                        let mut proxy_config = proxy_config.clone();
+                        proxy_config.addr = profile.effective_bind_ip(&proxy_config.addr, None).to_string();
+                        let addr = super::sip_contact::build_contact_sip_addr(
+                            &proxy_config, &profile.sip_contact_config(), profile.external_ip.as_deref(),
+                            transport, destination.map(|addr| addr.ip()),
+                        ).ok_or_else(|| anyhow::anyhow!("no {transport} listener for registration profile '{}'", profile.id))?;
+                        registration.contact = Some(rsipstack::sip::typed::Contact {
+                            display_name: None,
+                            uri: rsipstack::sip::Uri {
+                                scheme: Some(rsipstack::sip::Scheme::Sip),
+                                auth: config.username.as_ref().map(|user| rsipstack::sip::Auth {
+                                    user: user.clone(), password: None,
+                                }).or_else(|| server_uri.auth.clone()),
+                                host_with_port: addr.addr,
+                                params: vec![rsipstack::sip::Param::Transport(transport)],
+                                headers: vec![],
+                            },
+                            params: vec![],
+                        });
+                    }
+                    do_register(&name, &mut registration, &server_uri, expires).await
+                }.await
             }
             Err(err) => Err(err),
         };
@@ -431,6 +513,7 @@ mod tests {
         let connection = UdpConnection::create_connection(
             "127.0.0.1:0".parse().unwrap(), None, Some(cancel.clone()),
         ).await.unwrap();
+        let local_port = connection.get_addr().addr.port.unwrap().0;
         transports.add_transport(connection.into());
         let endpoint = EndpointBuilder::new()
             .with_cancel_token(cancel.clone())
@@ -452,15 +535,39 @@ mod tests {
                 loop {
                     let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
                     let request = String::from_utf8(buffer[..size].to_vec()).unwrap();
-                    let mut response = String::from("SIP/2.0 200 OK\r\n");
+                    if request.contains("X-Challenge: yes") {
+                        if let Some(value) = request.lines().find_map(|line| line.strip_prefix("Authorization: ")) {
+                            let auth = rsipstack::sip::typed::Authorization::parse(value).unwrap();
+                            assert!(rsipstack::dialog::authenticate::verify_digest(
+                                &auth, "ims-test-password", &rsipstack::sip::Method::Register, value,
+                            ), "invalid Digest response: {request}");
+                        }
+                    }
+                    let challenge = request.contains("X-Challenge: yes")
+                        && !request.contains("Authorization:") && !request.contains("Expires: 0\r\n");
+                    let mut response = String::from(if challenge {
+                        "SIP/2.0 401 Unauthorized\r\n"
+                    } else {
+                        "SIP/2.0 200 OK\r\n"
+                    });
                     for line in request.lines().skip(1) {
                         let Some((name, _)) = line.split_once(':') else { continue };
                         if ["via", "from", "to", "call-id", "cseq", "contact", "expires"]
                             .contains(&name.to_ascii_lowercase().as_str())
                         {
-                            response.push_str(line);
+                            if name.eq_ignore_ascii_case("via") && request.contains("X-Challenge: yes") {
+                                let contact = request.lines().find(|line| line.starts_with("Contact:")).unwrap();
+                                let address = contact.split('@').nth(1).unwrap().split([';', '>']).next().unwrap();
+                                let (host, port) = address.rsplit_once(':').unwrap();
+                                response.push_str(&line.replace(";rport", &format!(";received={host};rport={port}")));
+                            } else {
+                                response.push_str(line);
+                            }
                             response.push_str("\r\n");
                         }
+                    }
+                    if challenge {
+                        response.push_str("WWW-Authenticate: Digest realm=\"ims.test\", nonce=\"test-nonce\", algorithm=MD5, qop=\"auth\"\r\n");
                     }
                     response.push_str("Content-Length: 0\r\n\r\n");
                     socket.send_to(response.as_bytes(), peer).await.unwrap();
@@ -529,6 +636,79 @@ mod tests {
         let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
         assert!(request.contains("X-Tenant-Id: tenant-43\r\n"));
         assert!(!request.contains("User-Agent: Carrier UA\r\n"));
+
+        // The first REGISTER must use the selected IMS profile, even though
+        // the shared socket and default profile belong to another network.
+        let wan: NetworkProfile = toml::from_str("id = 'wan'\nbind_ip = '192.168.130.252'").unwrap();
+        let mut ims: NetworkProfile = toml::from_str("id = 'ims'\nbind_ip = '10.213.109.10'").unwrap();
+        let proxy = ProxyConfig {
+            addr: "192.168.130.252".into(), udp_port: Some(local_port), ..Default::default()
+        };
+        registrar.set_network_profiles(vec![wan.clone(), ims.clone()], "wan".into(), proxy.clone());
+        trunks.get_mut("trunk").unwrap().profile = Some("ims".into());
+        trunks.get_mut("trunk").unwrap().auth_username = Some("bob@ims.test".into());
+        trunks.get_mut("trunk").unwrap().password = Some("ims-test-password".into());
+        trunks.get_mut("trunk").unwrap().dest = "sip:ims.invalid".into();
+        trunks.get_mut("trunk").unwrap().outbound_proxy = Some(addresses[1].to_string());
+        trunks.get_mut("trunk").unwrap().register_extra_headers = Some(HashMap::from([
+            ("X-Challenge".into(), "yes".into()),
+        ]));
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        for authenticated in [false, true] {
+            let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+            assert!(request.contains(&format!("Contact: <sip:bob@10.213.109.10:{local_port};transport=UDP>")), "{request}");
+            assert_eq!(request.contains("Authorization:"), authenticated, "{request}");
+            assert!(request.starts_with("REGISTER sip:ims.invalid SIP/2.0"), "{request}");
+            assert!(request.contains("From: <sip:bob@ims.invalid>"), "{request}");
+            assert!(request.contains("To: <sip:bob@ims.invalid>"), "{request}");
+            if authenticated {
+                assert!(request.contains("username=\"bob@ims.test\""), "{request}");
+            }
+        }
+        registrar.reconcile(&trunks).await;
+        assert!(timeout(Duration::from_millis(100), received.recv()).await.is_err());
+
+        // Changing only the Digest identity must restart the task without
+        // changing From/To or Contact. Clearing it restores the legacy fallback.
+        for auth_username in [Some("private-bob@ims.test"), None] {
+            trunks.get_mut("trunk").unwrap().auth_username = auth_username.map(str::to_string);
+            registrar.reconcile(&trunks).await;
+            let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+            assert!(request.contains("Expires: 0\r\n"));
+            for authenticated in [false, true] {
+                let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+                assert!(request.contains("From: <sip:bob@ims.invalid>"), "{request}");
+                assert!(request.contains("To: <sip:bob@ims.invalid>"), "{request}");
+                assert!(request.contains(&format!("Contact: <sip:bob@10.213.109.10:{local_port};transport=UDP>")), "{request}");
+                if authenticated {
+                    assert!(request.contains(&format!("username=\"{}\"", auth_username.unwrap_or("bob"))), "{request}");
+                }
+            }
+        }
+
+        // Editing the same profile id must update the first Contact too.
+        ims.sip_external_ip = Some("10.213.109.11".into());
+        ims.contact_lan_use_bind = false;
+        registrar.set_network_profiles(vec![wan, ims], "wan".into(), proxy);
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        for _ in 0..2 {
+            let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+            assert!(request.contains(&format!("Contact: <sip:bob@10.213.109.11:{local_port};transport=UDP>")), "{request}");
+        }
+
+        // Falling back to the default profile must not retain the IMS address.
+        trunks.get_mut("trunk").unwrap().profile = None;
+        registrar.reconcile(&trunks).await;
+        let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+        assert!(request.contains("Expires: 0\r\n"));
+        for _ in 0..2 {
+            let (_, request) = timeout(Duration::from_secs(2), received.recv()).await.unwrap().unwrap();
+            assert!(request.contains(&format!("Contact: <sip:bob@192.168.130.252:{local_port};transport=UDP>")), "{request}");
+        }
 
         trunks.get_mut("trunk").unwrap().disabled = Some(true);
         registrar.reconcile(&trunks).await;

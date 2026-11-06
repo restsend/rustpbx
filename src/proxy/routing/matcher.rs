@@ -1522,7 +1522,7 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
     if let (Some(username), Some(password)) = (&trunk.username, &trunk.password) {
         option.credential = Some(Credential {
             username: username.clone(),
-            auth_username: None, // TrunkConfig.username already carries the auth ID (legacy mapping)
+            auth_username: trunk.auth_username.clone(),
             password: password.clone(),
             realm: dest_uri.host().to_string().into(),
         });
@@ -1794,6 +1794,22 @@ mod apply_trunk_config_tests {
             callee: "sip:+15550100@pbx.local".try_into().unwrap(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn separate_digest_identity_does_not_replace_invite_caller() {
+        let trunk: TrunkConfig = toml::from_str(r#"
+            dest = "sip:ims.test"
+            username = "+8675789985014"
+            auth_username = "8675789985014@ims.test"
+            password = "test-password"
+        "#).unwrap();
+        let mut option = option();
+        apply_trunk_config(&mut option, &trunk).unwrap();
+        assert_eq!(option.caller.user(), Some("alice"));
+        let credential = option.credential.unwrap();
+        assert_eq!(credential.username, "+8675789985014");
+        assert_eq!(credential.digest_username(), "8675789985014@ims.test");
     }
 
     #[test]

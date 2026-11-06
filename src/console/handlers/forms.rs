@@ -74,6 +74,7 @@ pub struct SipTrunkForm {
     pub sip_server: Option<String>,
     pub sip_transport: Option<SipTransport>,
     pub outbound_proxy: Option<String>,
+    pub register_username: Option<String>,
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub default_route_label: Option<String>,
