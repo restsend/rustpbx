@@ -17,7 +17,6 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     future::Future,
-    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
@@ -132,6 +131,13 @@ pub trait Locator: Send + Sync {
     /// registration events. Backends use it only when removing bindings on
     /// their own, so all event producers observe the same ordering boundary.
     fn set_event_lock(&self, _lock: Option<LocatorEventLock>) {}
+    /// Dump all live registrations as `(aor, location)` pairs. Used by the
+    /// rolling handover to push the predecessor's registration table to the
+    /// successor (memory-locator deployments; DB-backed locators already
+    /// share rows). Default: empty (backend does not support dumping).
+    async fn dump_registrations(&self) -> Vec<(String, Location)> {
+        Vec::new()
+    }
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool>;
@@ -416,12 +422,6 @@ pub struct DialogTargetLocator {
     locator: Arc<Box<dyn Locator>>,
     local_addrs: Vec<SipAddr>,
     cluster_enabled: bool,
-    /// Worker-mode cross-gen relay. When resolved targets are stream
-    /// transports whose real connection lives in ANOTHER generation, a
-    /// virtual relay connection is created here so the subsequent
-    /// `transport_layer.lookup` finds it (rsipstack client transactions
-    /// without a held connection do exactly one lookup after `locate`).
-    worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
 }
 
 impl DialogTargetLocator {
@@ -430,23 +430,12 @@ impl DialogTargetLocator {
         locator: Arc<Box<dyn Locator>>,
         local_addrs: Vec<SipAddr>,
         cluster_enabled: bool,
-        worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
     ) -> Box<dyn TargetLocator> {
         Box::new(Self {
             locator,
             local_addrs,
             cluster_enabled,
-            worker_relay,
         }) as Box<dyn TargetLocator>
-    }
-
-    /// Worker mode: make the destination dialable across generations
-    /// (delegates to the relay's shared seam — also invoked from the session
-    /// dispatch sites which short-circuit this locator entirely).
-    async fn ensure_dialable_cross_gen(&self, dest: &SipAddr) {
-        if let Some(relay) = &self.worker_relay {
-            relay.ensure_dialable(dest).await;
-        }
     }
 
     fn is_local_home_proxy(&self, home_proxy: &SipAddr) -> bool {
@@ -511,7 +500,6 @@ impl DialogTargetLocator {
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         let dest = self.locate_inner(uri).await?;
-        self.ensure_dialable_cross_gen(&dest).await;
         Ok(dest)
     }
 }
@@ -684,6 +672,20 @@ impl MemoryLocator {
 
 #[async_trait]
 impl Locator for MemoryLocator {
+    async fn dump_registrations(&self) -> Vec<(String, Location)> {
+        let now = Instant::now();
+        let mut out = Vec::new();
+        for entry in self.locations.iter() {
+            let identifier = entry.key().clone();
+            for loc in entry.value().values() {
+                if !loc.is_expired_at(now) {
+                    out.push((identifier.clone(), loc.clone()));
+                }
+            }
+        }
+        out
+    }
+
     async fn is_local_realm(&self, realm: &str) -> bool {
         let checker = self.realm_checker.lock().clone();
         if let Some(checker) = checker {
@@ -1556,7 +1558,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true);
         let result = target_locator.locate(&target_uri).await.unwrap();
         assert_eq!(
             result, home_proxy,
@@ -1597,7 +1599,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&gruu_uri).await.unwrap();
 
         assert_eq!(result, destination);
@@ -1655,7 +1657,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
 
         // The BYE Request-URI is the .invalid contact
         let result = target_locator.locate(&contact_uri).await.unwrap();
@@ -1706,7 +1708,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
 
         // Lookup by canonical AoR — uri.host (rustpbx.com) != home_proxy.addr.
         let result = target_locator.locate(&canonical_aor).await.unwrap();
@@ -1759,7 +1761,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
 
         let result = target_locator.locate(&contact_uri).await.unwrap();
         assert_eq!(
@@ -1801,7 +1803,7 @@ mod tests {
             .unwrap();
 
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false, None);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1842,7 +1844,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1901,7 +1903,7 @@ mod tests {
             rsipstack::EndpointBuilder::new()
                 .with_cancel_token(cancel.clone())
                 .with_inspector(Box::new(NatInspector::new(true)))
-                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false, None))
+                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false))
                 .build(),
         );
         let serving = {
@@ -2080,7 +2082,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&dialog_contact).await.unwrap();
 
         assert_eq!(
@@ -2136,7 +2138,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&exact_contact).await.unwrap();
 
         assert_eq!(
@@ -2209,7 +2211,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -2422,136 +2424,3 @@ mod tests {
     }
 }
 
-/// Worker-mode locator decorator for memory-locator deployments: the local
-/// memory locator stays the store, while accepted registrations are reported
-/// to the master's node-level directory (`RegistryUp`) and dispatch-time
-/// misses query it (`RegistryLookup`) — giving the flip window
-/// cross-generation registration visibility without a shared database and
-/// without touching the user's locator configuration. Cluster deployments
-/// (explicit Database locator) never activate this decorator.
-pub struct MasterBackedLocator {
-    inner: Box<dyn Locator>,
-    relay: std::sync::Arc<crate::master_link::WorkerRelay>,
-}
-
-impl MasterBackedLocator {
-    pub fn new(
-        inner: Box<dyn Locator>,
-        relay: std::sync::Arc<crate::master_link::WorkerRelay>,
-    ) -> Self {
-        Self { inner, relay }
-    }
-
-    /// Report a binding to the master directory. Only conn-bound stream
-    /// transports with an IP destination apply: UDP is master-routed
-    /// statelessly (any generation can emit a datagram), domain destinations
-    /// are remote servers, not local flows.
-    fn report(&self, location: &Location) {
-        let Some(dest) = location.destination.as_ref() else {
-            return;
-        };
-        let Some(transport) = dest.r#type else {
-            return;
-        };
-        let Some(kind) = crate::master_link::conn_kind_of_transport(transport) else {
-            return;
-        };
-        let peer = match (&dest.addr.host, dest.addr.port) {
-            (rsipstack::sip::Host::IpAddr(ip), Some(port)) => {
-                SocketAddr::new(*ip, port.0)
-            }
-            _ => return,
-        };
-        let expires_secs = u64::from(location.expires);
-        self.relay.report_registry(
-            &[location.aor.to_string()],
-            kind,
-            Some(peer),
-            expires_secs,
-        );
-    }
-
-    fn synth_location(&self, uri: &rsipstack::sip::Uri, kind: rustpbx_master_ipc::ConnKind, peer: SocketAddr) -> Location {
-        let transport = crate::master_link::transport_of_conn_kind(kind);
-        Location {
-            aor: uri.clone(),
-            expires: 60,
-            destination: Some(SipAddr {
-                r#type: Some(transport),
-                addr: rsipstack::sip::HostWithPort {
-                    host: rsipstack::sip::Host::IpAddr(peer.ip()),
-                    port: Some(peer.port().into()),
-                },
-            }),
-            last_modified: Some(std::time::Instant::now()),
-            supports_webrtc: matches!(
-                transport,
-                rsipstack::sip::Transport::Ws | rsipstack::sip::Transport::Wss
-            ),
-            ..Default::default()
-        }
-    }
-}
-
-#[async_trait]
-impl Locator for MasterBackedLocator {
-    async fn is_local_realm(&self, realm: &str) -> bool {
-        self.inner.is_local_realm(realm).await
-    }
-    fn set_realm_checker(&self, checker: RealmChecker) {
-        self.inner.set_realm_checker(checker);
-    }
-    fn set_event_sender(&self, sender: Option<LocatorEventSender>) {
-        self.inner.set_event_sender(sender);
-    }
-    fn set_event_lock(&self, lock: Option<LocatorEventLock>) {
-        self.inner.set_event_lock(lock);
-    }
-    async fn register(
-        &self,
-        username: &str,
-        realm: Option<&str>,
-        location: Location,
-    ) -> Result<()> {
-        self.report(&location);
-        self.inner.register(username, realm, location).await
-    }
-    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool> {
-        self.inner.has_active_bindings(username, realm).await
-    }
-    async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
-        self.inner.has_active_binding_for_user(username).await
-    }
-    async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
-        self.inner.unregister(username, realm).await
-    }
-    async fn unregister_with_address(
-        &self,
-        addr: &SipAddr,
-    ) -> Result<Option<Vec<Location>>> {
-        // Local unbind propagates via the master's ConnDown → registry
-        // eviction; nothing extra to report here.
-        self.inner.unregister_with_address(addr).await
-    }
-    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
-        let local = self.inner.lookup(uri).await?;
-        if !local.is_empty() {
-            return Ok(local);
-        }
-        // Flip window: the binding lives on another generation's registry.
-        if let Some((kind, peer)) = self.relay.registry_lookup(&uri.to_string()).await {
-            debug!(%uri, ?kind, %peer, "registry hit from master directory");
-            return Ok(vec![self.synth_location(uri, kind, peer)]);
-        }
-        Ok(local)
-    }
-    async fn diagnostic_lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
-        self.inner.diagnostic_lookup(uri).await
-    }
-    async fn sweep_expired(&self) -> Result<Vec<Location>> {
-        self.inner.sweep_expired().await
-    }
-    async fn online_stats(&self) -> Result<LocatorStats> {
-        self.inner.online_stats().await
-    }
-}

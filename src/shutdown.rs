@@ -37,6 +37,15 @@ pub fn is_draining() -> bool {
     DRAINING.load(Ordering::SeqCst)
 }
 
+/// TEST-ONLY: clear the process-global draining flag. The in-process
+/// rolling handover e2e runs two generations inside one process — the
+/// predecessor's drain must not leak the draining state into the successor
+/// that shares the address space. Production processes never call this.
+#[doc(hidden)]
+pub fn reset_for_tests() {
+    DRAINING.store(false, Ordering::SeqCst);
+}
+
 /// Outcome of [`wait_until_drained`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainOutcome {
@@ -141,12 +150,12 @@ mod tests {
     #[test]
     fn test_graceful_config_defaults() {
         let cfg = crate::config::GracefulShutdownConfig::default();
-        assert_eq!(cfg.drain_timeout_secs, 300);
+        assert_eq!(cfg.drain_timeout_secs, 3600);
         assert!(!cfg.enabled_at_startup);
         assert_eq!(
             cfg.effective_timeout(),
-            Some(Duration::from_secs(300)),
-            "default must be a finite 300s timeout"
+            Some(Duration::from_secs(3600)),
+            "default must be a finite 3600s timeout (aligned with max_call_duration)"
         );
         let mut infinite = cfg.clone();
         infinite.drain_timeout_secs = 0;

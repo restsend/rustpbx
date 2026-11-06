@@ -24,7 +24,6 @@ use crate::{
         cluster_event::ClusterEventHub,
         locator::{
             DialogTargetLocator, LocatorEvent, LocatorEventLock, LocatorEventSender,
-            MasterBackedLocator,
             TransportInspectorLocator, sweep_offline_locations,
         },
         presence::PresenceManager,
@@ -121,6 +120,11 @@ pub struct SipServerInner {
     /// IVR step trace collector (set by IVR Editor addon, accessed by StepIvrApp).
     pub ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
+    /// Every transport connection bound at startup (UDP sockets, TCP/TLS/WS
+    /// listeners). The rolling handover closes them (cancel token + remove
+    /// from the transport layer) without touching the media runtime.
+    /// Empty outside rolling builds.
+    pub bound_transports: std::sync::Mutex<Vec<SipConnection>>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
     pub conference_server: Arc<crate::call::runtime::ConferenceServer>,
     pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
@@ -152,11 +156,11 @@ pub struct SipServerInner {
     /// Backend selected by `[cluster].session_registry_backend`; no-op when
     /// cluster is not configured.
     pub session_registry: crate::call::runtime::SessionRegistryRef,
-    /// Worker-mode cross-gen relay (None outside worker processes). Session
-    /// dispatch consults it before pre-setting `InviteOption.destination`.
-    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
     /// Keeps the owning node's sessions alive (single batch update per tick).
-    pub session_registry_heartbeat: Option<crate::call::runtime::NodeHeartbeat>,
+    /// Mutex-wrapped so the rolling handover can stop the heartbeat without
+    /// owning the server struct (`RollingRuntime::begin_handover`).
+    pub session_registry_heartbeat:
+        std::sync::Mutex<Option<crate::call::runtime::NodeHeartbeat>>,
     /// Trunk health check states (populated by trunk_health background loop).
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks (connected, held, unheld, ended).
@@ -242,9 +246,11 @@ pub struct SipServerBuilder {
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
     session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
-    /// Worker-mode cross-gen relay handle (None outside worker processes).
-    /// Handed to `DialogTargetLocator` for outbound virtual-conn interception.
-    worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
+    /// Rolling handover runtime (None unless `[rolling] enabled`). When
+    /// present, UDP transports are created through the rolling pump
+    /// (per-datagram forward hook) and listeners are retained in
+    /// `SipServerInner::bound_transports` for the handover-time close.
+    rolling: Option<Arc<crate::rolling::RollingRuntime>>,
 }
 
 impl SipServerBuilder {
@@ -291,15 +297,15 @@ impl SipServerBuilder {
             cluster_config: None,
             trunk_health: None,
             session_hooks: Vec::new(),
-            worker_relay: None,
+            rolling: None,
         }
     }
 
-    pub fn with_worker_relay(
+    pub fn with_rolling(
         mut self,
-        relay: Option<Arc<crate::master_link::WorkerRelay>>,
+        rolling: Option<Arc<crate::rolling::RollingRuntime>>,
     ) -> Self {
-        self.worker_relay = relay;
+        self.rolling = rolling;
         self
     }
 
@@ -633,28 +639,6 @@ impl SipServerBuilder {
                 }
             }
         };
-        // Worker mode + memory locator: wrap with the master-backed
-        // decorator — accepted registrations report to the master's node
-        // directory and dispatch-time misses query it (cross-generation
-        // registration visibility without forcing a locator type). A
-        // user-configured Database locator shares via the DB and is left
-        // untouched.
-        let locator = if self.worker_relay.is_some()
-            && matches!(
-                self.config.locator,
-                crate::config::LocatorConfig::Memory
-            ) {
-            info!("worker mode: locator auto-shared via master registry (memory locator)");
-            Box::new(MasterBackedLocator::new(
-                locator,
-                self.worker_relay
-                    .clone()
-                    .expect("checked worker_relay above"),
-            )) as Box<dyn Locator>
-        } else {
-            locator
-        };
-
         let locator = Arc::new(locator);
         let mut rtp_config = self.rtp_config.unwrap_or_default();
         let mut sip_contact_config = self.sip_contact_config.unwrap_or_default();
@@ -721,6 +705,8 @@ impl SipServerBuilder {
         }
         // Clone of TLS listener for hot-reload support (initialized inside if !self.no_bind block)
         let mut tls_listener_clone: Option<rsipstack::transport::TlsListenerConnection> = None;
+        // Rolling builds retain every transport for the handover-time close.
+        let mut bound_transports: Vec<SipConnection> = Vec::new();
 
         let mut local_addrs: HashSet<SocketAddr> = HashSet::new();
 
@@ -812,17 +798,34 @@ impl SipServerBuilder {
                 let external_addr = external_ip
                     .as_ref()
                     .map(|ip| SocketAddr::new(*ip, udp_port));
-                let udp_conn = UdpConnection::create_connection(
-                    local_addr,
-                    external_addr,
-                    Some(cancel_token.child_token()),
-                )
-                .await
-                .map_err(|e| {
-                    anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e)
-                })?;
-                info!("start proxy, udp port: {}", udp_conn.get_addr());
-                transport_layer.add_transport(udp_conn.into());
+                let udp_conn = if let Some(rolling) = &self.rolling {
+                    // Rolling successor: socket owned by the rolling pump so
+                    // inbound datagrams get a pre-transaction forward hook.
+                    crate::rolling::create_udp_transport(local_addr, rolling).await?
+                } else {
+                    let udp_conn = UdpConnection::create_connection(
+                        local_addr,
+                        external_addr,
+                        Some(cancel_token.child_token()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e)
+                    })?;
+                    let conn: SipConnection = udp_conn.into();
+                    info!("start proxy, udp port: {}", udp_port);
+                    conn
+                };
+                // The rolling UDP transport is a ChannelConnection: it must be
+                // served via add_connection (spawns the serve_loop that feeds
+                // injected events into the endpoint) AND present in listens
+                // (the transport lookup's UDP fallback for outbound sends).
+                if let Some(rolling) = &self.rolling {
+                    transport_layer.add_connection(udp_conn.clone());
+                    bound_transports.push(udp_conn.clone());
+                    let _ = rolling;
+                }
+                transport_layer.add_transport(udp_conn.clone());
                 local_addrs.insert(local_addr);
             }
 
@@ -835,7 +838,11 @@ impl SipServerBuilder {
                     .await
                     .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
                 info!("start proxy, tcp port: {}", tcp_conn.get_addr());
-                transport_layer.add_transport(tcp_conn.into());
+                let conn: SipConnection = tcp_conn.into();
+                if self.rolling.is_some() {
+                    bound_transports.push(conn.clone());
+                }
+                transport_layer.add_transport(conn);
                 local_addrs.insert(local_addr);
             }
 
@@ -903,7 +910,11 @@ impl SipServerBuilder {
                                     );
                                     // Clone for hot-reload support
                                     tls_listener_clone = Some(conn.clone());
-                                    transport_layer.add_transport(conn.into());
+                                    let sip_conn: SipConnection = conn.into();
+                                    if self.rolling.is_some() {
+                                        bound_transports.push(sip_conn.clone());
+                                    }
+                                    transport_layer.add_transport(sip_conn);
                                     local_addrs.insert(local_addr);
                                 }
                                 Err(e) => {
@@ -1055,7 +1066,6 @@ impl SipServerBuilder {
                 locator.clone(),
                 locator_local_addrs,
                 cluster_enabled,
-                self.worker_relay.clone(),
             ))
             .with_transport_inspector(TransportInspectorLocator::new(
                 locator.clone(),
@@ -1222,7 +1232,7 @@ impl SipServerBuilder {
         //   no peers                  — no-op (single-node)
         let (session_registry, session_registry_heartbeat): (
             crate::call::runtime::SessionRegistryRef,
-            Option<crate::call::runtime::NodeHeartbeat>,
+            std::sync::Mutex<Option<crate::call::runtime::NodeHeartbeat>>,
         ) = {
             use crate::call::runtime::{
                 DbSessionRegistry, MemorySessionRegistry, NoopSessionRegistry,
@@ -1273,9 +1283,12 @@ impl SipServerBuilder {
                         heartbeat,
                         live_call_ids,
                     );
-                    (registry, Some(heartbeat_task))
+                    (registry, std::sync::Mutex::new(Some(heartbeat_task)))
                 }
-                _ => (Arc::new(NoopSessionRegistry), None),
+                _ => (
+                    Arc::new(NoopSessionRegistry),
+                    std::sync::Mutex::new(None),
+                ),
             }
         };
 
@@ -1334,6 +1347,7 @@ impl SipServerBuilder {
             rwi_gateway: self.rwi_gateway,
             ivr_trace: self.ivr_trace,
             tls_listener: tls_listener_clone,
+            bound_transports: std::sync::Mutex::new(bound_transports),
             conference_manager,
             conference_server,
             agent_registry: self.agent_registry,
@@ -1350,7 +1364,6 @@ impl SipServerBuilder {
             cluster_self_addr,
             session_registry,
             session_registry_heartbeat,
-            worker_relay: self.worker_relay.clone(),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
             contact_username: self
@@ -1643,9 +1656,7 @@ impl SipServer {
                     .and_then(|to| to.tag())
                     .ok()
                     .flatten();
-                let register_exempt = self.inner.worker_relay.is_some()
-                    && tx.original.method == rsipstack::sip::Method::Register;
-                if to_tag.is_none() && !register_exempt {
+                if to_tag.is_none() {
                     let code = if tx.original.method == rsipstack::sip::Method::Options {
                         rsipstack::sip::StatusCode::ServerInternalError
                     } else {

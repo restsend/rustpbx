@@ -39,12 +39,10 @@ struct WsChannelCleanupGuard {
     sip_connection: SipConnection,
     ws_token: CancellationToken,
     addr: SipAddr,
-    /// Worker-mode extras: ConnDown the master's ConnTable entry and drop
-    /// the relay write path when the session ends.
-    worker_relay: Option<std::sync::Arc<crate::master_link::WorkerRelay>>,
-    conn_kind: rustpbx_master_ipc::ConnKind,
+    /// Rolling-mode extras: drop the drain-time eviction close handle.
+    rolling: Option<std::sync::Arc<crate::rolling::RollingRuntime>>,
+    conn_kind: &'static str,
     peer: SocketAddr,
-    conn_id: Option<u64>,
 }
 
 impl Drop for WsChannelCleanupGuard {
@@ -55,12 +53,8 @@ impl Drop for WsChannelCleanupGuard {
         self.endpoint
             .transport_layer
             .remove_connection(&self.sip_connection);
-        if let Some(r) = self.worker_relay.as_ref() {
+        if let Some(r) = self.rolling.as_ref() {
             r.unregister_real_close(self.conn_kind, self.peer);
-            r.unregister_real_write(self.conn_kind, self.peer);
-            if let Some(id) = self.conn_id {
-                r.report_conn_down(id);
-            }
         }
         debug!(addr = %self.addr, "ws channel cleanup: transport entry removed");
     }
@@ -71,31 +65,18 @@ pub async fn sip_ws_handler(
     client_addr: ClientAddr,
     socket: WebSocket,
     endpoint_ref: EndpointInnerRef,
-    worker_relay: Option<std::sync::Arc<crate::master_link::WorkerRelay>>,
+    rolling: Option<std::sync::Arc<crate::rolling::RollingRuntime>>,
 ) {
     let (mut ws_sink, mut ws_read) = socket.split();
     let (from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
     let (to_ws_tx, mut to_ws_rx) = mpsc::unbounded_channel();
-    // Clone for the relay write path (the original moves into the channel
-    // connection below).
-    let relay_to_ws_tx = to_ws_tx.clone();
 
     let transport_type = if client_addr.is_secure {
         rsipstack::sip::transport::Transport::Wss
     } else {
         rsipstack::sip::transport::Transport::Ws
     };
-    let conn_kind = match transport_type {
-        rsipstack::sip::transport::Transport::Wss => rustpbx_master_ipc::ConnKind::Wss,
-        _ => rustpbx_master_ipc::ConnKind::Ws,
-    };
-    // Report the live SIP connection to the master's ConnTable. `local` is
-    // unknown from inside the axum handler (the master forwards fd+addrs
-    // before the upgrade); the master only keys by (kind, peer), so peer is
-    // used as a placeholder for the informational field.
-    let conn_id = worker_relay
-        .as_ref()
-        .and_then(|r| r.report_conn_up(conn_kind, client_addr.addr, client_addr.addr));
+    let conn_kind: &'static str = if client_addr.is_secure { "Wss" } else { "Ws" };
     let local_addr = SipAddr {
         r#type: Some(transport_type),
         addr: client_addr.addr.into(),
@@ -112,9 +93,6 @@ pub async fn sip_ws_handler(
         Ok(conn) => conn,
         Err(e) => {
             warn!(addr = %local_addr, "failed to create channel connection: {}", e);
-            if let (Some(r), Some(id)) = (worker_relay.as_ref(), conn_id) {
-                r.report_conn_down(id);
-            }
             return;
         }
     };
@@ -125,26 +103,17 @@ pub async fn sip_ws_handler(
         "created WebSocket channel connection"
     );
 
-    // The REAL connection's write path (conn-owner side of the relay):
-    // relayed messages from other generations are injected as text frames.
-    // The close knob cancels the session token — the write loop observes the
-    // resulting transport Closed event and tears the flow down (drain-time
-    // idle eviction).
-    if let Some(r) = worker_relay.as_ref() {
+    // Rolling handover: register the drain-time eviction close handle so
+    // the predecessor can disconnect idle WS clients (they reconnect onto
+    // the successor). Live-dialog conns are skipped by the eviction loop.
+    if let Some(r) = rolling.as_ref() {
         let ws_token_for_close = ws_token.clone();
+        let kind = conn_kind;
+        let peer = client_addr.addr;
         r.register_real_close(
-            conn_kind,
-            client_addr.addr,
+            kind,
+            peer,
             std::sync::Arc::new(move || ws_token_for_close.cancel()),
-        );
-        r.register_real_write(
-            conn_kind,
-            client_addr.addr,
-            crate::master_link::RealWrite::WsChannel {
-                to_ws: relay_to_ws_tx.clone(),
-                sip_connection: sip_connection.clone(),
-                sip_addr: local_addr.clone(),
-            },
         );
     }
 
@@ -162,23 +131,9 @@ pub async fn sip_ws_handler(
         sip_connection: sip_connection.clone(),
         ws_token: ws_token.clone(),
         addr: local_addr.clone(),
-        worker_relay: worker_relay.clone(),
+        rolling: rolling.clone(),
         conn_kind,
         peer: client_addr.addr,
-        conn_id,
-    };
-
-    // Cross-gen relay scan: a message whose dialog is owned by ANOTHER
-    // generation is relayed to it instead of being processed locally (the
-    // local endpoint would answer 481 for a dialog it cannot see).
-    let relay_for_scan = worker_relay.clone();
-    let scan_kind = conn_kind;
-    let scan_peer = client_addr.addr;
-    let relay_scan = move |msg: &SipMessage| -> bool {
-        relay_for_scan
-            .as_ref()
-            .map(|r| r.maybe_relay_inbound(msg, scan_kind, scan_peer))
-            .unwrap_or(false)
     };
 
     const WS_PING_INTERVAL: Duration = Duration::from_secs(25);
@@ -235,9 +190,6 @@ pub async fn sip_ws_handler(
                                             continue;
                                         }
                                     };
-                                    if relay_scan(&msg) {
-                                        continue; // relayed to the dialog-owner generation
-                                    }
                                     if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
                                         msg,
                                         sip_connection_clone.clone(),
@@ -270,9 +222,6 @@ pub async fn sip_ws_handler(
                                         continue;
                                     }
                                 };
-                                if relay_scan(&msg) {
-                                    continue; // relayed to the dialog-owner generation
-                                }
                                 if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
                                     msg,
                                     sip_connection_clone.clone(),
@@ -520,10 +469,9 @@ mod channel_cleanup_tests {
             sip_connection: sip_connection.clone(),
             ws_token: ws_token.clone(),
             addr: peer_addr,
-            worker_relay: None,
-            conn_kind: rustpbx_master_ipc::ConnKind::Ws,
+            rolling: None,
+            conn_kind: "Ws",
             peer: "203.0.113.7:54323".parse().unwrap(),
-            conn_id: None,
         };
         drop(guard);
 
@@ -582,10 +530,9 @@ mod channel_cleanup_tests {
             sip_connection,
             ws_token: ws_token.clone(),
             addr: peer_addr,
-            worker_relay: None,
-            conn_kind: rustpbx_master_ipc::ConnKind::Ws,
+            rolling: None,
+            conn_kind: "Ws",
             peer: "203.0.113.7:54323".parse().unwrap(),
-            conn_id: None,
         };
         drop(guard);
 

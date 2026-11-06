@@ -4182,20 +4182,6 @@ impl SipSession {
         // Worker mode: the destination's connection may live in ANOTHER
         // generation (shared locator finds the registration; the delivery
         // needs the cross-gen virtual relay connection). Must run BEFORE the
-        // InviteOption pre-sets `destination` — a preset destination
-        // short-circuits `resolve_target_uri`, so the locator's own seam
-        // never runs for dispatched legs.
-        if !route_via_home_proxy
-            && let (Some(relay), Some(dest)) =
-                (self.server.worker_relay.as_ref(), target.destination.as_ref())
-        {
-            relay.ensure_dialable(dest).await;
-            // Pre-announce before the INVITE is sent: the callee's response
-            // must find the dialog in the master's routing tables on arrival
-            // (the 1s reporter loop loses that race against fast answers).
-            relay.preannounce_dialog(&callee_call_id);
-        }
-
         let option = rsipstack::dialog::invitation::InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
             callee: callee_uri.clone(),
@@ -13255,18 +13241,6 @@ impl SipSession {
         };
         self.meta.callee_call_ids.insert(bleg_call_id.clone());
         // Worker mode: same cross-gen delivery guarantee as dispatched legs —
-        // the agent's connection may live in another generation while THIS
-        // session (and its dialog) lives here; pre-wire the virtual relay
-        // connection before the preset destination skips the locator seam,
-        // and pre-announce before the INVITE is sent (response race, see
-        // build_target_invite_option).
-        if !route_via_home_proxy
-            && let (Some(relay), Some(dest)) =
-                (self.server.worker_relay.as_ref(), location.destination.as_ref())
-        {
-            relay.ensure_dialable(dest).await;
-            relay.preannounce_dialog(&bleg_call_id);
-        }
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),

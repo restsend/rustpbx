@@ -535,7 +535,6 @@ async fn cross_node_wss_bye_with_locator(
                 locator.clone(),
                 vec![node_a.clone()],
                 true,
-                None,
             ))
             .build(),
     );
@@ -551,7 +550,6 @@ async fn cross_node_wss_bye_with_locator(
                 locator.clone(),
                 vec![node_b.clone()],
                 true,
-                None,
             ))
             .build();
         inner.dialog_layer = Arc::new(DialogLayer::new(inner.endpoint.inner.clone()));

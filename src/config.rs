@@ -749,6 +749,10 @@ pub struct Config {
     /// Graceful shutdown (drain) tuning — see `GracefulShutdownConfig`.
     #[serde(default)]
     pub graceful_shutdown: Option<GracefulShutdownConfig>,
+    /// Rolling process handover (container rolling release) — see
+    /// [`RollingConfig`]. Inert unless `[rolling] enabled = true`.
+    #[serde(default)]
+    pub rolling: Option<RollingConfig>,
     /// Maximum size (in bytes) for audio files downloaded over HTTP from the
     /// console (queue prompts, voicemail prompts, ...). Defaults to 20 MB.
     #[serde(default = "default_max_audio_download_bytes")]
@@ -2313,7 +2317,10 @@ impl Default for GracefulShutdownConfig {
 }
 
 fn default_graceful_shutdown_drain_timeout() -> u64 {
-    300
+    // Aligned with max_call_duration (3600s): a rolling-handover drain must
+    // never force-kill a call that would have ended naturally. Ops note:
+    // `docker stop -t` must exceed this value or SIGKILL defeats the drain.
+    3600
 }
 
 impl GracefulShutdownConfig {
@@ -2322,6 +2329,79 @@ impl GracefulShutdownConfig {
     pub fn effective_timeout(&self) -> Option<std::time::Duration> {
         (self.drain_timeout_secs > 0)
             .then(|| std::time::Duration::from_secs(self.drain_timeout_secs))
+    }
+}
+
+/// `[rolling]` — rolling process handover for container deployments.
+///
+/// The successor (new release) container starts first and waits for the
+/// public ports; `docker stop` on the predecessor triggers a handover
+/// instead of a plain drain: the predecessor keeps serving its live calls
+/// while the successor takes over every public listener, and in-dialog SIP
+/// destined to the predecessor's calls is relayed over loopback HTTP until
+/// the drain completes. Protocol lives in [`crate::rolling`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RollingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Loopback-only listener the PREDECESSOR serves during the handover
+    /// window (`/rolling/relay_ingress`, `/rolling/manifest`, plus the full
+    /// management router for AMI forwards). Host-network deployments must
+    /// pick a port that no other node uses. Default 18181.
+    #[serde(default = "default_rolling_predecessor_port")]
+    pub predecessor_port: u16,
+    /// How long the successor keeps retrying the final port binds after the
+    /// predecessor announces the handover. The idle wait BEFORE that
+    /// ("new container up" → "docker stop old") is unbounded — the
+    /// successor hello-pings while it waits. Default 60s.
+    #[serde(default = "default_rolling_bind_wait_secs")]
+    pub bind_wait_secs: u64,
+    /// Push the predecessor's registration table to the successor at
+    /// handover. Only meaningful for memory-locator deployments (DB-backed
+    /// locators already share registrations). Default false.
+    #[serde(default)]
+    pub handoff_registrations: bool,
+    /// Successor → predecessor hello heartbeat interval in seconds. The
+    /// predecessor only accepts a handover when a heartbeat arrived within
+    /// 3× this window. Default 2s.
+    #[serde(default = "default_rolling_hello_interval_secs")]
+    pub hello_interval_secs: u64,
+}
+
+fn default_rolling_predecessor_port() -> u16 {
+    18181
+}
+
+fn default_rolling_bind_wait_secs() -> u64 {
+    60
+}
+
+fn default_rolling_hello_interval_secs() -> u64 {
+    2
+}
+
+impl Default for RollingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            predecessor_port: default_rolling_predecessor_port(),
+            bind_wait_secs: default_rolling_bind_wait_secs(),
+            handoff_registrations: false,
+            hello_interval_secs: default_rolling_hello_interval_secs(),
+        }
+    }
+}
+
+impl RollingConfig {
+    /// A successor heartbeat older than this is treated as absent.
+    pub fn hello_fresh_window(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.hello_interval_secs * 3)
+    }
+
+    /// How long the successor keeps trusting the predecessor's manifest
+    /// (call-id set) after the last refresh.
+    pub fn manifest_fresh_window(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(10)
     }
 }
 
@@ -2750,6 +2830,7 @@ impl Default for Config {
             media: None,
             ami: Some(AmiConfig::default()),
             graceful_shutdown: None,
+            rolling: None,
             external_ip: None,
             auto_external_ip: None,
             sip_external_ip: None,

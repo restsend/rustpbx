@@ -282,6 +282,18 @@ impl ActiveProxyCallRegistry {
         self.context_meta.get(session_id).map(|e| e.clone())
     }
 
+    /// True when at least one live call carries queue context (`queue_id`
+    /// stamped by the queue app). Used by the rolling handover's idle-conn
+    /// eviction as a busy gate: while callers are waiting in a queue, the
+    /// draining predecessor must keep its agent connections reachable —
+    /// evicting them would strand the waiters on a generation whose agents
+    /// have re-homed onto the successor.
+    pub fn has_queued_calls(&self) -> bool {
+        self.context_meta
+            .iter()
+            .any(|e| e.value().queue_id.is_some())
+    }
+
     pub fn count(&self) -> usize {
         self.entries.len()
     }
@@ -675,5 +687,40 @@ mod tests {
         assert_eq!(meta.queue_name.as_deref(), Some("Support"));
         registry.remove(session);
         assert!(registry.get_context_meta(session).is_none());
+    }
+
+    /// Rolling-handover eviction gate: a queued call must flip
+    /// `has_queued_calls` until its context is removed.
+    #[test]
+    fn test_has_queued_calls_gate() {
+        let registry = ActiveProxyCallRegistry::new();
+        assert!(!registry.has_queued_calls());
+
+        let session = "rolling-queue-gate";
+        registry.upsert(make_entry(session), make_handle(session));
+        registry.set_context_meta(
+            session.to_string(),
+            ActiveCallContextMeta {
+                queue_id: Some("q1".to_string()),
+                queue_name: Some("Support".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            registry.has_queued_calls(),
+            "a queued caller must gate the eviction loop"
+        );
+
+        // Non-queue call does NOT gate.
+        let other = "plain-call";
+        registry.upsert(make_entry(other), make_handle(other));
+        assert!(registry.has_queued_calls());
+
+        registry.remove(session);
+        assert!(
+            !registry.has_queued_calls(),
+            "queue drained → eviction may resume"
+        );
+        registry.remove(other);
     }
 }

@@ -704,7 +704,7 @@ async fn test_cross_cluster_invalid_bye_routes_to_remote_home_proxy() {
 
     // DialogTargetLocator on Node B (cluster enabled; Node A is remote)
     let node_b = sip_addr("10.0.0.6:5060", rsipstack::sip::transport::Transport::Udp);
-    let dtl = DialogTargetLocator::new(locator.clone(), vec![node_b], true, None);
+    let dtl = DialogTargetLocator::new(locator.clone(), vec![node_b], true);
 
     let result = dtl.locate(&contact_a).await.unwrap();
     assert_eq!(
@@ -743,7 +743,7 @@ async fn test_cross_cluster_invalid_bye_delivers_to_local_ws() {
         .unwrap();
 
     // DialogTargetLocator on Node A (home node; home_proxy is local)
-    let dtl = DialogTargetLocator::new(locator.clone(), vec![node_a], true, None);
+    let dtl = DialogTargetLocator::new(locator.clone(), vec![node_a], true);
 
     let result = dtl.locate(&contact_a).await.unwrap();
     assert_eq!(
@@ -807,7 +807,7 @@ async fn test_cross_cluster_multi_node_same_user_routes_correctly() {
         .unwrap();
 
     // DialogTargetLocator on Node A
-    let dtl_a = DialogTargetLocator::new(locator.clone(), vec![node_a.clone()], true, None);
+    let dtl_a = DialogTargetLocator::new(locator.clone(), vec![node_a.clone()], true);
     // Own contact → local WS
     assert_eq!(
         dtl_a.locate(&contact_a).await.unwrap(),
@@ -822,7 +822,7 @@ async fn test_cross_cluster_multi_node_same_user_routes_correctly() {
     );
 
     // DialogTargetLocator on Node B
-    let dtl_b = DialogTargetLocator::new(locator.clone(), vec![node_b.clone()], true, None);
+    let dtl_b = DialogTargetLocator::new(locator.clone(), vec![node_b.clone()], true);
     // Own contact → local WS
     assert_eq!(
         dtl_b.locate(&contact_b).await.unwrap(),

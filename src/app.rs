@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::{
     path::Path,
     sync::atomic::{AtomicBool, AtomicU64},
+    time::Duration,
 };
 use tokio::net::TcpListener;
 use tokio::select;
@@ -105,11 +106,10 @@ pub struct AppStateInner {
     /// SSE pipeline terminates. `None` when the outbound module is disabled.
     /// Created once at startup — changing `max_concurrent` requires a restart.
     pub outbound_limiter: Option<Arc<tokio::sync::Semaphore>>,
-    /// Worker-mode cross-gen SIP relay + connection reporter. `Some` only in
-    /// `--master` worker processes; filled by `master_link::start_worker_mode`,
-    /// inert until then. Consumed by ws.rs (ConnUp/Down + inbound scan) and
-    /// `DialogTargetLocator` (outbound virtual-conn interception).
-    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
+    /// Rolling process handover runtime (`[rolling] enabled = true`).
+    /// `Some` in both the successor (waiting) and predecessor (draining)
+    /// generations; see `crate::rolling`.
+    pub rolling: Option<Arc<crate::rolling::RollingRuntime>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -126,8 +126,8 @@ pub struct AppStateBuilder {
     /// Worker mode (`--master`): HTTP/HTTPS are served from fds forwarded by
     /// the master process; do not bind public HTTP listeners here.
     pub no_http_bind: bool,
-    /// Cross-gen relay handle for worker mode (see `AppStateInner.worker_relay`).
-    pub worker_relay: Option<Arc<crate::master_link::WorkerRelay>>,
+    /// Rolling handover runtime (see `AppStateInner.rolling`).
+    pub rolling: Option<Arc<crate::rolling::RollingRuntime>>,
     pub extra_addons: Arc<Vec<Arc<dyn crate::addons::Addon>>>,
 }
 
@@ -245,7 +245,7 @@ impl AppStateBuilder {
             skip_sip_bind: false,
             skip_migrate: false,
             no_http_bind: false,
-            worker_relay: None,
+            rolling: None,
             extra_addons: Arc::new(Vec::new()),
         }
     }
@@ -273,11 +273,6 @@ impl AppStateBuilder {
 
     /// Worker mode: inject the cross-gen relay handle (created before the
     /// app state exists so the endpoint's target locator can hold it).
-    pub fn with_worker_relay(mut self, relay: Arc<crate::master_link::WorkerRelay>) -> Self {
-        self.worker_relay = Some(relay);
-        self
-    }
-
     pub fn with_config(mut self, mut config: Config) -> Self {
         config.ensure_recording_defaults();
         self.config = Some(config);
@@ -578,11 +573,10 @@ impl AppStateBuilder {
                     .filter_map(|p| format!("{}:{}", p.addr, p.sip_port).parse().ok())
                     .collect();
 
-                #[allow(unused_mut)]
                 let mut builder = SipServerBuilder::new(proxy_config.clone())
                     .with_cluster_config(config.cluster.clone())
                     .with_cluster_peers(cluster_peers)
-                    .with_worker_relay(self.worker_relay.clone())
+                    .with_rolling(self.rolling.clone())
                     .with_cancel_token(core.token.child_token())
                     .with_callrecord_sender(core.callrecord_sender.clone())
                     .with_rtp_config(config.rtp_config())
@@ -720,7 +714,7 @@ impl AppStateBuilder {
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
             cluster_config: std::sync::RwLock::new(config.cluster.clone()),
-            worker_relay: self.worker_relay.clone(),
+            rolling: self.rolling.clone(),
             outbound_limiter: config
                 .outbound
                 .as_ref()
@@ -1051,9 +1045,7 @@ impl AppStateBuilder {
     }
 }
 
-/// Register the SIP-over-WebSocket upgrade route. Used by standalone `run`
-/// and by the builder before handing the router to worker mode (forwarded
-/// WSS fds need the upgrade route on the router `master_link` serves).
+/// Register the SIP-over-WebSocket upgrade route (standalone `run`).
 pub fn with_ws_routes(state: &AppState, mut router: Router) -> Router {
     if let Some(ref ws_handler) = state.sip_server().inner.proxy_config.load().ws_handler {
         info!(
@@ -1062,7 +1054,7 @@ pub fn with_ws_routes(state: &AppState, mut router: Router) -> Router {
         );
         let endpoint_ref = state.sip_server().inner.endpoint.inner.clone();
         let token = state.token().clone();
-        let worker_relay = state.worker_relay.clone();
+        let rolling = state.rolling.clone();
         router = router.route(
             ws_handler,
             axum::routing::get(
@@ -1073,7 +1065,7 @@ pub fn with_ws_routes(state: &AppState, mut router: Router) -> Router {
                             client_ip,
                             socket,
                             endpoint_ref.clone(),
-                            worker_relay.clone(),
+                            rolling.clone(),
                         )
                         .await
                     })
@@ -1088,6 +1080,8 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     let token = state.token().clone();
     let addr: SocketAddr = state.config().http_addr.parse()?;
     let worker_mode = state.no_http_bind;
+    let rolling = state.rolling.clone();
+    let rolling_enabled = rolling.as_ref().map(|r| r.enabled()).unwrap_or(false);
     let listener = if worker_mode {
         info!("worker mode: HTTP served via master fd forwarding (public {})", addr);
         None
@@ -1095,19 +1089,50 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         match TcpListener::bind(addr).await {
             Ok(l) => Some(l),
             Err(e) => {
-                tracing::error!("Failed to bind to {}: {}", addr, e);
-                return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
+                if rolling_enabled {
+                    // Successor waiting for the predecessor to release the
+                    // ports (docker stop has not happened yet). Retry until
+                    // it succeeds — the hello pinger keeps the predecessor
+                    // convinced this process is ready to take over.
+                    let started = std::time::Instant::now();
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        match TcpListener::bind(addr).await {
+                            Ok(l) => {
+                                info!(
+                                    waited_s = started.elapsed().as_secs(),
+                                    "rolling: successor bound public HTTP {}",
+                                    addr
+                                );
+                                break Some(l);
+                            }
+                            Err(_) => {
+                                if started.elapsed().as_secs() % 5 == 0 {
+                                    info!(
+                                        waited_s = started.elapsed().as_secs(),
+                                        "rolling: waiting for predecessor to release {}",
+                                        addr
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    tracing::error!("Failed to bind to {}: {}", addr, e);
+                    return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
+                }
             }
         }
     };
 
-    // In worker mode the builder already installed ws routes (the router is
-    // served by master_link for forwarded fds); adding again would panic.
-    router = if worker_mode {
-        router
-    } else {
-        with_ws_routes(&state, router)
-    };
+    router = with_ws_routes(&state, router);
+
+    // Rolling: successor takeover is complete — stop hello-pinging, enable
+    // AMI forwarding, and serve the public listeners on closable accept
+    // loops (the predecessor closes its own via the shared close token).
+    if let Some(ref rolling) = rolling {
+        rolling.mark_bound();
+    }
 
     // Check for HTTPS config
     let mut ssl_config = None;
@@ -1185,9 +1210,20 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     }
 
     let http_router = router.clone();
+    let http_close: CancellationToken = rolling
+        .as_ref()
+        .map(|r| r.close_http_token())
+        .unwrap_or_default();
+    let http_task_close = http_close.clone();
     let http_task = async move {
         if let Some(l) = listener {
-            if let Err(e) = axum::serve(
+            if rolling_enabled {
+                // Rolling: manual accept loop with the close seam — the
+                // predecessor stops accepting without killing established
+                // connections (WS clients stay served).
+                crate::rolling::run_public_http_listener(l, http_router, None, http_task_close)
+                    .await;
+            } else if let Err(e) = axum::serve(
                 l,
                 http_router.into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -1199,6 +1235,14 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
             // worker mode: HTTP arrives via master-forwarded fds
             std::future::pending::<()>().await;
         }
+    };
+
+    let rolling_tls = if rolling_enabled && https_addr.is_some() {
+        // Manual TLS path: the axum_server server cannot stop accepting
+        // without killing connections, so rolling uses its own acceptor.
+        crate::rolling::tls_acceptor_from_config(&state)
+    } else {
+        None
     };
 
     let https_router = if https_addr.is_some() {
@@ -1213,34 +1257,81 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         router
     };
 
-    select! {
-        _ = http_task => {
-            info!("Server shut down gracefully");
-        }
-        https_result = async {
-            if let (Some(config), Some(addr)) = (https_config, https_addr) {
-                 axum_server::bind_rustls(addr, config)
-                    .serve(https_router.into_make_service_with_connect_info::<SocketAddr>())
-                    .await
+    let https_result_task = async move {
+        if rolling_enabled {
+            // Rolling: manual TLS accept loop with the close seam.
+            if let (Some(addr), Some(acceptor)) = (https_addr, rolling_tls) {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(l) => {
+                        crate::rolling::run_public_http_listener(
+                            l,
+                            https_router,
+                            Some(acceptor),
+                            http_close.clone(),
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             } else {
-                std::future::pending().await
+                std::future::pending::<Result<(), std::io::Error>>().await
             }
-        } => {
-             match https_result {
-                Ok(_) => info!("HTTPS Server shut down gracefully"),
-                Err(e) => {
-                    tracing::error!("HTTPS Server error: {}", e);
-                    return Err(anyhow::anyhow!("HTTPS Server error: {}", e));
+        } else if let (Some(config), Some(addr)) = (https_config, https_addr) {
+             axum_server::bind_rustls(addr, config)
+                .serve(https_router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+        } else {
+            std::future::pending::<Result<(), std::io::Error>>().await
+        }
+    };
+
+    // ── listener tasks + serve select ────────────────────────────────────
+    //
+    // CRITICAL rolling-mode semantics: the listener accept loops complete
+    // when the handover closes them (close_http) — that completion must NOT
+    // end `run()`, or the SIP serve future below would be dropped with it
+    // (the predecessor's endpoint event loop dies mid-drain and relayed
+    // in-dialog messages are processed by nobody). In rolling mode the
+    // listener loops are therefore DETACHED tasks; `run()` exits only via
+    // the runtime token (post-drain) or a SIP serve error.
+    if rolling_enabled {
+        let http_detached = tokio::spawn(http_task);
+        let https_detached = tokio::spawn(https_result_task);
+        select! {
+            prx_result = state.sip_server().serve() => {
+                if let Err(e) = prx_result {
+                    tracing::error!("Sip server error: {}", e);
+                }
+                http_detached.abort();
+                https_detached.abort();
+            }
+            _ = token.cancelled() => {
+                info!("Application shutting down due to cancellation");
+            }
+        }
+    } else {
+        select! {
+            _ = http_task => {
+                info!("Server shut down gracefully");
+            }
+            https_result = https_result_task => {
+                match https_result {
+                    Ok(_) => info!("HTTPS Server shut down gracefully"),
+                    Err(e) => {
+                        tracing::error!("HTTPS Server error: {}", e);
+                        return Err(anyhow::anyhow!("HTTPS Server error: {}", e));
+                    }
                 }
             }
-        }
-        prx_result = state.sip_server().serve()  => {
-            if let Err(e) = prx_result {
-                tracing::error!("Sip server error: {}", e);
+            prx_result = state.sip_server().serve()  => {
+                if let Err(e) = prx_result {
+                    tracing::error!("Sip server error: {}", e);
+                }
             }
-        }
-        _ = token.cancelled() => {
-            info!("Application shutting down due to cancellation");
+            _ = token.cancelled() => {
+                info!("Application shutting down due to cancellation");
+            }
         }
     }
 
@@ -1380,6 +1471,13 @@ pub fn create_router(state: AppState) -> Router {
         .nest_service(&static_path, static_files_service)
         .merge(call_routes)
         .layer(cors);
+
+    // Rolling handover endpoints (hello/manifest/relay_egress/relay_ingress/
+    // handoff_registrations). Loopback-guarded handlers; also served again by
+    // the predecessor's loopback listener during the handover window.
+    if state.rolling.is_some() {
+        router = router.merge(crate::rolling::rolling_routes(&state));
+    }
 
     // Add RWI WebSocket endpoint if configured
     if let (Some(auth), Some(gateway), Some(call_registry)) = (

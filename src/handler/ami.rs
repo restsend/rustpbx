@@ -139,6 +139,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
+        crate::rolling::ami_forward_middleware,
+    ));
+    let r = r.layer(middleware::from_fn_with_state(
+        app_state.clone(),
         crate::handler::middleware::ami_auth::ami_auth_middleware,
     ));
     Router::new().nest(&ami_path, r).with_state(app_state)

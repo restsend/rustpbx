@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::Parser as _;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
@@ -30,26 +30,7 @@ use tracing_subscriber::{
 /// Same behaviour as AMI `POST /shutdown`: `docker stop` /
 /// `systemctl stop` and the HTTP endpoint are interchangeable. The
 /// drain timeout comes from `[graceful_shutdown].drain_timeout_secs`
-/// (default 300s, 0 = wait forever).
-/// `logs/rustpbx.log` + gen 2 → `logs/rustpbx-gen2.log`（保留原扩展名）。
-fn with_generation_suffix(file: &str, generation: u32) -> String {
-    let path = std::path::Path::new(file);
-    match (path.parent(), path.file_stem(), path.extension()) {
-        (Some(dir), Some(stem), Some(ext)) => dir
-            .join(format!(
-                "{}-gen{generation}.{}",
-                stem.to_string_lossy(),
-                ext.to_string_lossy()
-            ))
-            .to_string_lossy()
-            .into_owned(),
-        (Some(dir), Some(stem), None) => dir
-            .join(format!("{}-gen{generation}", stem.to_string_lossy()))
-            .to_string_lossy()
-            .into_owned(),
-        _ => format!("{file}-gen{generation}"),
-    }
-}
+/// (default 3600s, 0 = wait forever).
 
 pub async fn drain_and_stop(state: &crate::app::AppState) {
     let first = crate::shutdown::initiate();
@@ -141,7 +122,6 @@ impl AppBuilder {
         let cli = self.cli;
         let extra_addons = Arc::new(self.extra_addons);
         let config_path = cli.conf.clone();
-        let worker_mode = cli.master.is_some();
         let config = if let Some(ref path) = config_path {
             println!("Loading config from: {}", path);
             Config::load(path).expect("Failed to load config")
@@ -191,6 +171,15 @@ impl AppBuilder {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build media runtime: {}", e))?;
         crate::utils::set_media_runtime(media_runtime.handle().clone());
+
+        // Rolling handover runtime: created ONCE before the retry loop
+        // (recreating per attempt would stack hello pingers). Shared by
+        // successor (waiting/serving) and predecessor (handover + window).
+        let rolling: Option<Arc<crate::rolling::RollingRuntime>> = config
+            .rolling
+            .clone()
+            .filter(|r| r.enabled)
+            .map(|cfg| crate::rolling::RollingRuntime::new(cfg, &config.http_addr));
         // Recorder tasks wake per captured RTP packet; keep them off the small
         // SIP runtime so high-concurrency recording cannot starve SIP timers.
         crate::media::media_recorder::set_recorder_runtime(media_runtime.handle().clone());
@@ -412,7 +401,7 @@ impl AppBuilder {
             let retry_interval = Duration::from_secs(5);
 
             loop {
-                let mut config = if let Some(cfg) = cached_config.take() {
+                let config = if let Some(cfg) = cached_config.take() {
                     cfg
                 } else if let Some(ref path) = next_config_path {
                     match Config::load_async(path).await {
@@ -450,34 +439,42 @@ impl AppBuilder {
                 if cli.skip_migrate {
                     state_builder = state_builder.with_skip_migrate();
                 }
-                if worker_mode {
-                    state_builder = state_builder
-                        .with_skip_sip_bind()
-                        .with_no_http_bind()
-                        .with_worker_relay(crate::master_link::WorkerRelay::new());
-                }
-                // The master hands each generation a disjoint RTP slice; it
-                // wins over the config file so two generations never share
-                // media ports.
-                if let Some(v) = cli.rtp_start {
-                    config.rtp_start_port = Some(v);
-                }
-                if let Some(v) = cli.rtp_end {
-                    config.rtp_end_port = Some(v);
-                }
-                // master 与 worker 可能写同一个 log_file —— 轮转 rename 在
-                // 多进程下会互相踩（丢日志）。worker 模式给日志文件加代数
-                // 后缀，保证每个文件只有一个写入者。
-                // Standalone keeps log_file as configured (the suffix would also
-                // stack on every retry through `cached_config`).
-                if worker_mode && let Some(file) = &config.log_file {
-                    config.log_file = Some(with_generation_suffix(file, cli.worker_gen));
-                }
+                // Rolling handover runtime: created ONCE before the retry
+                // loop (recreating per attempt would stack hello pingers).
+                // Shared by successor (waiting/serving) and predecessor
+                // (handover + window).
+                state_builder.rolling = rolling.clone();
 
                 let (app_reload_requested, app_config_path) = {
                     let state = match state_builder.build().await {
                         Ok(state) => state,
                         Err(err) => {
+                            // Rolling successor waiting for the predecessor
+                            // to release the ports: park on a fast retry
+                            // WITHOUT burning the general retry budget (the
+                            // wait is unbounded by design; hello keeps the
+                            // predecessor convinced this process is ready).
+                            let err_msg = format!("{err:#}");
+                            if rolling.is_some()
+                                && (err_msg.contains("Failed to bind")
+                                    || err_msg.contains("Address already in use"))
+                            {
+                                if retry_count == 0 {
+                                    info!(
+                                        "rolling: waiting for predecessor to release the SIP ports"
+                                    );
+                                }
+                                if retry_count % 50 == 0 && retry_count > 0 {
+                                    info!(
+                                        waited_s = retry_count / 5,
+                                        "rolling: still waiting for the SIP ports"
+                                    );
+                                }
+                                retry_count += 1;
+                                sleep(Duration::from_millis(200)).await;
+                                cached_config = Some(config);
+                                continue;
+                            }
                             retry_count += 1;
                             if retry_count > max_retries {
                                 return Err(anyhow::anyhow!(
@@ -498,6 +495,13 @@ impl AppBuilder {
                             continue;
                         }
                     };
+
+                    // Rolling: wire the local dialog registry into the UDP
+                    // pump and start hello-pinging the predecessor.
+                    if let Some(ref rolling) = rolling {
+                        rolling.attach_sip_server(state.sip_server().inner.clone());
+                        rolling.start_hello_pinger();
+                    }
 
                     // Auto-create demo superuser when demo_mode is enabled.
                     // Loud warning: the credentials are public knowledge.
@@ -536,44 +540,7 @@ impl AppBuilder {
 
                     info!("starting rustpbx on {}", state.config().http_addr);
                     let router = create_router(state.clone());
-                    let router = if worker_mode {
-                        match rustpbx_master_ipc::worker_connect(Path::new(
-                            cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock"),
-                        ))
-                        .await
-                        {
-                            Ok(link) => {
-                                // Forwarded WSS fds need the upgrade route
-                                // before the router is served by master_link
-                                // (run() skips it in worker mode to avoid a
-                                // duplicate-route panic).
-                                let router = crate::app::with_ws_routes(&state, router);
-                                let relay = state
-                                    .worker_relay
-                                    .clone()
-                                    .unwrap_or_else(crate::master_link::WorkerRelay::new);
-                                crate::master_link::start_worker_mode(
-                                    link,
-                                    cli.worker_gen,
-                                    cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock").into(),
-                                    state.clone(),
-                                    router.clone(),
-                                    relay,
-                                );
-                                router
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!(
-                                    "worker mode: cannot connect to master at {}: {}",
-                                    cli.master.as_deref().unwrap_or("/tmp/rustpbx-master.sock"),
-                                    e
-                                ));
-                            }
-                        }
-                    } else {
-                        router
-                    };
-                    let mut app_future = Box::pin(crate::app::run(state.clone(), router));
+                    let mut app_future = Box::pin(crate::app::run(state.clone(), router.clone()));
 
                     #[cfg(unix)]
                     let mut sigterm_stream = {
@@ -601,8 +568,13 @@ impl AppBuilder {
                                 let _ = app_future.await;
                             }
                             _ = sigterm_stream.recv() => {
-                                info!("received SIGTERM, initiating graceful drain");
-                                drain_and_stop(&state).await;
+                                if let Some(ref rolling) = rolling {
+                                    info!("received SIGTERM — rolling handover path");
+                                    rolling.handle_termination(&state, router).await;
+                                } else {
+                                    info!("received SIGTERM, initiating graceful drain");
+                                    drain_and_stop(&state).await;
+                                }
                                 let _ = app_future.await;
                             }
                         }
@@ -797,17 +769,3 @@ async fn dump_ddl(
     Ok(())
 }
 
-#[cfg(test)]
-mod log_suffix_tests {
-    use super::with_generation_suffix;
-
-    #[test]
-    fn appends_generation_before_extension() {
-        assert_eq!(
-            with_generation_suffix("logs/rustpbx.log", 2),
-            "logs/rustpbx-gen2.log"
-        );
-        assert_eq!(with_generation_suffix("rustpbx.log", 7), "rustpbx-gen7.log");
-        assert_eq!(with_generation_suffix("logs/rustpbx", 3), "logs/rustpbx-gen3");
-    }
-}

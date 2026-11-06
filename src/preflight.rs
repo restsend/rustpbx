@@ -79,6 +79,29 @@ pub async fn validate_start(config: &Config) -> Result<(), PreflightError> {
     let current_ports = HashSet::new();
     issues.append(&mut check_bind_targets(targets, &current_ports).await);
 
+    // Rolling handover: the predecessor's loopback listener port must be
+    // bindable at handover time. A plain TCP probe now catches collisions
+    // with other nodes/containers early instead of failing the handover
+    // mid-drain (which falls back to a plain drain — safe, but the rolling
+    // window is silently lost).
+    if let Some(rolling) = &config.rolling
+        && rolling.enabled
+    {
+        let addr = SocketAddr::from(([127, 0, 0, 1], rolling.predecessor_port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => drop(l),
+            Err(e) => issues.push(PreflightIssue {
+                field: "rolling.predecessor_port".to_string(),
+                message: format!(
+                    "predecessor port {} unavailable: {e} — pick a port that no \
+                     other node/container on this host uses (handover will fall \
+                     back to a plain drain)",
+                    addr
+                ),
+            }),
+        }
+    }
+
     if issues.is_empty() {
         Ok(())
     } else {

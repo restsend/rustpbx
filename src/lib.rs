@@ -26,7 +26,6 @@ pub(crate) mod log_capture;
 pub mod log_reload;
 mod log_search;
 pub mod log_viewer;
-pub mod master_link;
 pub mod mail;
 
 pub use rustpbx_http_util as http_util;
@@ -40,6 +39,7 @@ pub mod prelude;
 pub mod proc_stats;
 pub mod proxy;
 pub mod report;
+pub mod rolling;
 pub mod rwi;
 pub mod security;
 pub mod shutdown;

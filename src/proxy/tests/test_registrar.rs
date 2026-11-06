@@ -416,7 +416,7 @@ async fn nat_reconnect_unregister_preserves_contact_identity() {
                 );
                 if flow == &new_flow {
                     reconnected_target = Some(
-                        DialogTargetLocator::new(locator.clone(), vec![], false, None)
+                        DialogTargetLocator::new(locator.clone(), vec![], false)
                             .locate(&contact)
                             .await
                             .unwrap(),
