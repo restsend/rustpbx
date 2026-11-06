@@ -9010,7 +9010,6 @@ async fn consult_media_preserves_peers_body() {
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::media_bridge::MediaBridge;
     use crate::proxy::tests::common::create_test_request;
-    #[cfg(not(feature = "addon-cc"))]
     use crate::proxy::tests::common::create_test_server_with_config;
 
     for scenario in [
@@ -9027,24 +9026,6 @@ async fn consult_media_preserves_peers_body() {
         "switch_then_merge",
         "supervisor_switch",
     ] {
-        #[cfg(feature = "addon-cc")]
-        let transfer_container = Arc::new(tokio::sync::RwLock::new(None));
-        #[cfg(feature = "addon-cc")]
-        let call_container = Arc::new(tokio::sync::RwLock::new(None));
-        #[cfg(feature = "addon-cc")]
-        let (server, _) = crate::proxy::tests::common::create_test_server_with_session_hooks(
-            ProxyConfig::default(),
-            vec![Arc::new(
-                crate::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
-                    Arc::new(crate::addons::cc::agent::AgentRegistry::new()),
-                    Arc::new(crate::addons::cc::metrics::MetricsCollector::new()),
-                )
-                .with_transfer_manager_shared(transfer_container.clone())
-                .with_call_registry_shared(call_container.clone()),
-            )],
-        )
-        .await;
-        #[cfg(not(feature = "addon-cc"))]
         let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
         let request = create_test_request(
             rsipstack::sip::Method::Invite,
@@ -9075,30 +9056,6 @@ async fn consult_media_preserves_peers_body() {
             context,
             true,
         );
-        #[cfg(feature = "addon-cc")]
-        let transfer_manager = {
-            server
-                .active_call_registry
-                .register_handle(session.id.to_string(), _handle.clone());
-            *call_container.write().await = Some(server.active_call_registry.clone());
-            let manager = Arc::new(
-                crate::addons::cc::transfer::ConsultTransferManager::new(
-                    server.conference_server.manager_raw().clone(),
-                )
-                .with_call_registry(server.active_call_registry.clone()),
-            );
-            manager.initiate(
-                "transfer-media".into(),
-                session.id.to_string(),
-                "agent".into(),
-                "alice".into(),
-            );
-            manager
-                .mark_connected_pending_answer("transfer-media", session.id.to_string())
-                .unwrap();
-            *transfer_container.write().await = Some(manager.clone());
-            manager
-        };
         let callee = LegId::from("callee");
         session.legs.insert(callee.clone(), Leg::new(callee));
         let mut bridge = MediaBridge::new("consult-media");
@@ -9221,37 +9178,25 @@ async fn consult_media_preserves_peers_body() {
                 session.legs.get(&LegId::from("caller")).unwrap().state,
                 LegState::Hold
             );
-            #[cfg(feature = "addon-cc")]
-            if !scenario.starts_with("cancel_") {
-                assert!(matches!(
-                    transfer_manager.get_state("transfer-media"),
-                    Some(crate::addons::cc::transfer::TransferState::Failed { .. })
-                ));
-                while let Ok(command) = _commands.try_recv() {
-                    session.execute_command(command, None).await;
-                }
-            }
-            if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
-                for command in [
-                    CallCommand::LeaveMixer,
-                    CallCommand::LegRemove {
-                        leg_id: consult.clone(),
-                        reason: None,
-                    },
-                    CallCommand::Bridge {
-                        leg_a: LegId::from("caller"),
-                        leg_b: LegId::from("callee"),
-                        mode: crate::call::domain::P2PMode::Audio,
-                    },
-                    CallCommand::Unhold {
-                        leg_id: LegId::from("caller"),
-                    },
-                    CallCommand::Unhold {
-                        leg_id: LegId::from("callee"),
-                    },
-                ] {
-                    assert!(session.execute_command(command, None).await.success);
-                }
+            for command in [
+                CallCommand::LeaveMixer,
+                CallCommand::LegRemove {
+                    leg_id: consult.clone(),
+                    reason: None,
+                },
+                CallCommand::Bridge {
+                    leg_a: LegId::from("caller"),
+                    leg_b: LegId::from("callee"),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                CallCommand::Unhold {
+                    leg_id: LegId::from("caller"),
+                },
+                CallCommand::Unhold {
+                    leg_id: LegId::from("callee"),
+                },
+            ] {
+                assert!(session.execute_command(command, None).await.success);
             }
             assert!(session.legs.get(&consult).is_none());
             // An already queued answer must not resurrect a cancelled/failed C.
@@ -9510,37 +9455,25 @@ async fn consult_media_preserves_peers_body() {
                 session.legs.get(&LegId::from("caller")).unwrap().state,
                 LegState::Hold
             );
-            #[cfg(feature = "addon-cc")]
-            if !scenario.starts_with("cancel_") {
-                assert!(matches!(
-                    transfer_manager.get_state("transfer-media"),
-                    Some(crate::addons::cc::transfer::TransferState::Failed { .. })
-                ));
-                while let Ok(command) = _commands.try_recv() {
-                    session.execute_command(command, None).await;
-                }
-            }
-            if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
-                for command in [
-                    CallCommand::LeaveMixer,
-                    CallCommand::LegRemove {
-                        leg_id: consult.clone(),
-                        reason: None,
-                    },
-                    CallCommand::Bridge {
-                        leg_a: LegId::from("caller"),
-                        leg_b: LegId::from("callee"),
-                        mode: crate::call::domain::P2PMode::Audio,
-                    },
-                    CallCommand::Unhold {
-                        leg_id: LegId::from("caller"),
-                    },
-                    CallCommand::Unhold {
-                        leg_id: LegId::from("callee"),
-                    },
-                ] {
-                    assert!(session.execute_command(command, None).await.success);
-                }
+            for command in [
+                CallCommand::LeaveMixer,
+                CallCommand::LegRemove {
+                    leg_id: consult.clone(),
+                    reason: None,
+                },
+                CallCommand::Bridge {
+                    leg_a: LegId::from("caller"),
+                    leg_b: LegId::from("callee"),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                CallCommand::Unhold {
+                    leg_id: LegId::from("caller"),
+                },
+                CallCommand::Unhold {
+                    leg_id: LegId::from("callee"),
+                },
+            ] {
+                assert!(session.execute_command(command, None).await.success);
             }
             assert!(session.legs.get(&consult).is_none());
             // An already queued answer must not resurrect a cancelled/failed C.
@@ -9674,122 +9607,6 @@ async fn consult_media_preserves_peers_body() {
             .expect("agent must hear consult RTP");
         }
         // Merge keeps the consultation mixer and adds only Charlie.
-        #[cfg(feature = "addon-cc")]
-        {
-            server
-                .active_call_registry
-                .register_handle(session.id.to_string(), _handle.clone());
-            let transfers = &transfer_manager;
-            transfers.initiate(
-                "transfer-media".into(),
-                session.id.to_string(),
-                "agent".into(),
-                "alice".into(),
-            );
-            transfers
-                .consultation_connected("transfer-media", session.id.to_string())
-                .unwrap();
-            if scenario == "switch_then_merge" {
-                // Restore agent↔consult with LeaveMixer (not Unbridge) — the
-                // same topology prepare_conference_merge_media / switch-back
-                // must establish before same-session merge.
-                session.execute_command(CallCommand::LeaveMixer, None).await;
-                session
-                    .execute_command(
-                        CallCommand::Hold {
-                            leg_id: LegId::from("caller"),
-                            music: None,
-                        },
-                        None,
-                    )
-                    .await;
-                session
-                    .execute_command(
-                        CallCommand::Unhold {
-                            leg_id: consult.clone(),
-                        },
-                        None,
-                    )
-                    .await;
-                session
-                    .execute_command(
-                        CallCommand::Bridge {
-                            leg_a: LegId::from("callee"),
-                            leg_b: consult.clone(),
-                            mode: crate::call::domain::P2PMode::Audio,
-                        },
-                        None,
-                    )
-                    .await;
-                assert!(session.bridge().unwrap().is_bridged());
-            }
-            let room = transfers
-                .merge_to_conference("transfer-media")
-                .await
-                .unwrap();
-            assert_eq!(room, "consult-consult-media");
-            assert!(matches!(transfers.get_state("transfer-media"),
-            Some(crate::addons::cc::transfer::TransferState::Completed { conf_id, .. })
-                if conf_id == room));
-            // prepare_conference_merge_media queues the B↔C topology restore
-            // (LeaveMixer / Hold / Unhold×2 / Bridge — an idempotent re-assert
-            // of the switch-back state) BEFORE the merge attaches the three
-            // legs to the mixer. Drain everything and verify both groups.
-            let mut joins: Vec<CallCommand> = Vec::new();
-            let mut restored = 0;
-            let mut mark_transferred = false;
-            while let Ok(cmd) = _commands.try_recv() {
-                match cmd {
-                    CallCommand::JoinMixerLeg { .. } => joins.push(cmd),
-                    CallCommand::LeaveMixer
-                    | CallCommand::Hold { .. }
-                    | CallCommand::Unhold { .. }
-                    | CallCommand::Bridge { .. } => restored += 1,
-                    CallCommand::MarkTransferred => mark_transferred = true,
-                    other => panic!("unexpected command from merge: {other:?}"),
-                }
-            }
-            assert_eq!(
-                restored, 5,
-                "B↔C topology restore (5 commands) must precede the joins"
-            );
-            assert_eq!(joins.len(), 3, "merge must attach A/B/C to the mixer");
-            for (i, expected) in ["caller", "callee", "consult-transfer-media"]
-                .iter()
-                .enumerate()
-            {
-                assert!(
-                    matches!(
-                        &joins[i],
-                        CallCommand::JoinMixerLeg { mixer_id, leg_id }
-                            if mixer_id == &room && leg_id == &LegId::from(*expected)
-                    ),
-                    "expected JoinMixerLeg({expected}) into {room}"
-                );
-            }
-            assert!(
-                mark_transferred,
-                "merge retains the existing transfer bookkeeping command"
-            );
-            assert!(
-                _commands.try_recv().is_err(),
-                "merge must only attach A/B/C + MarkTransferred"
-            );
-            for cmd in joins.into_iter() {
-                session.execute_command(cmd, None).await;
-            }
-            for name in ["callee", "consult-transfer-media"] {
-                private_tokens.push(
-                    session
-                        .legs
-                        .conference_bridge_handle(&LegId::from(name))
-                        .unwrap()
-                        .cancel_token
-                        .clone(),
-                );
-            }
-        }
-        #[cfg(not(feature = "addon-cc"))]
         {
             {
                 // LeaveMixer above dropped the last conference participants,
@@ -9798,8 +9615,14 @@ async fn consult_media_preserves_peers_body() {
                 // fails with "Audio mixer not found" (torn window) or
                 // "Conference not found" (fully torn down). Wait for the
                 // teardown to settle, recreate the room and restore all
-                // three legs — mirroring the create-if-missing self-heal the
-                // addon-cc merge path (`merge_to_conference`) applies.
+                // three legs before joining the customer.
+                // LeaveMixer above dropped the last conference participants,
+                // which spawns an *async* destroy that removes the mixer
+                // before the room. Joining while that task is mid-flight
+                // fails with "Audio mixer not found" (torn window) or
+                // "Conference not found" (fully torn down). Wait for the
+                // teardown to settle, recreate the room and restore all
+                // three legs before joining the customer.
                 tokio::time::timeout(Duration::from_secs(5), async {
                     while server
                         .conference_server
@@ -10452,49 +10275,6 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
     for outcome in ["answer", "early_media", "reject", "timeout"] {
         let mut config = ProxyConfig::default();
         config.blind_transfer_use_refer = false;
-        #[cfg(feature = "addon-cc")]
-        let registry = Arc::new(crate::addons::cc::agent::AgentRegistry::new());
-        #[cfg(feature = "addon-cc")]
-        let (server, _) = {
-            use crate::addons::cc::agent::AgentStatus;
-            registry.register("agent".into(), vec![], 1).await.unwrap();
-            registry
-                .update_status("agent", AgentStatus::Idle)
-                .await
-                .unwrap();
-            registry
-                .update_status_with_call_delta(
-                    "agent",
-                    AgentStatus::Ringing {
-                        call_id: format!("blind-{outcome}"),
-                        since: Instant::now(),
-                    },
-                    1,
-                )
-                .await
-                .unwrap();
-            registry
-                .update_status(
-                    "agent",
-                    AgentStatus::Busy {
-                        call_id: format!("blind-{outcome}"),
-                        since: Instant::now(),
-                    },
-                )
-                .await
-                .unwrap();
-            crate::proxy::tests::common::create_test_server_with_session_hooks(
-                config,
-                vec![Arc::new(
-                    crate::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
-                        registry.clone(),
-                        Arc::new(crate::addons::cc::metrics::MetricsCollector::new()),
-                    ),
-                )],
-            )
-            .await
-        };
-        #[cfg(not(feature = "addon-cc"))]
         let (server, _) = crate::proxy::tests::common::create_test_server_with_config(config).await;
         let request = create_test_request(
             rsipstack::sip::Method::Invite,
@@ -10618,23 +10398,6 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
         );
         assert!(target_peer.negotiated().is_none());
         assert!(session.meta.transferred);
-        #[cfg(feature = "addon-cc")]
-        {
-            use crate::addons::cc::agent::AgentStatus;
-            let released = registry.get_agent("agent").await.unwrap();
-            assert!(matches!(released.status, AgentStatus::Wrapup { .. }));
-            assert_eq!(released.current_calls, 0);
-            session
-                .execute_command(CallCommand::HangupAgentLeg, None)
-                .await;
-            session.fire_on_call_ended_hooks(None, 10).await;
-            let duplicate = registry.get_agent("agent").await.unwrap();
-            assert_eq!(
-                duplicate.last_state_changed_at,
-                released.last_state_changed_at
-            );
-            assert_eq!(duplicate.current_calls, 0);
-        }
         // Retired B's termination must not cascade into a caller BYE.
         session
             .handle_callee_state(DialogState::Terminated(
@@ -10712,15 +10475,6 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
                 )
                 .await;
             assert!(connected.success, "{:?}", connected.message);
-            #[cfg(feature = "addon-cc")]
-            {
-                let released = registry.get_agent("agent").await.unwrap();
-                assert!(matches!(
-                    released.status,
-                    crate::addons::cc::agent::AgentStatus::Wrapup { .. }
-                ));
-                assert_eq!(released.current_calls, 0);
-            }
             assert!(!session.meta.transfer_in_progress);
             assert!(session.bridge().unwrap().is_bridged());
             assert!(Arc::ptr_eq(

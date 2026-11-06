@@ -4174,55 +4174,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "addon-wholesale")]
-    async fn build_record_payload_exposes_error_from_metadata() {
-        // Empirically proves the call-record UI error chip data path: the
-        // standardized error fields written by the reporter into the metadata
-        // JSON column are surfaced as a structured `error` object for both the
-        // list and detail templates.
-        let db = setup_db().await;
-        let state = create_console_state(db.clone()).await;
-
-        let record = call_record::ActiveModel {
-            call_id: Set("call-err-1".into()),
-            direction: Set("inbound".into()),
-            status: Set("failed".into()),
-            started_at: Set(Utc::now()),
-            duration_secs: Set(0),
-            metadata: Set(Some(json!({
-                "error_code": "wholesale.insufficient_funds",
-                "error_app": "wholesale",
-                "error_severity": "error",
-                "error_message": "Insufficient funds",
-                "sip_code": "402",
-            }))),
-            has_transcript: Set(false),
-            transcript_status: Set("pending".into()),
-            created_at: Set(Utc::now()),
-            updated_at: Set(Utc::now()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .expect("insert call record");
-
-        let related = load_related_context(&db, &[record.clone()])
-            .await
-            .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None).await;
-        assert_eq!(payload["error"]["code"], "wholesale.insufficient_funds");
-        assert_eq!(payload["error"]["app"], "wholesale");
-        assert_eq!(payload["error"]["severity"], "error");
-        assert_eq!(payload["error"]["message"], "Insufficient funds");
-        // registered code -> catalog locale/remediation keys are attached
-        assert_eq!(
-            payload["error"]["locale_key"],
-            "errors.wholesale.insufficient_funds"
-        );
-        assert!(payload["error"]["remediation_key"].is_string());
-    }
-
-    #[tokio::test]
     async fn build_record_payload_error_null_when_no_error_code() {
         let db = setup_db().await;
         let state = create_console_state(db.clone()).await;

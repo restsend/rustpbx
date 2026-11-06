@@ -922,24 +922,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "addon-wholesale")]
-    fn enrich_metadata_severity_and_catalog_message_fallback() {
-        // A registered code with no dynamic detail: severity + catalog default
-        // message are resolved from the registry at write time.
-        let mut meta: HashMap<String, serde_json::Value> = HashMap::new();
-        let route = HashMap::from([(
-            "error_code".to_string(),
-            "wholesale.insufficient_funds".to_string(),
-        )]);
-        enrich_error_metadata(&mut meta, Some(&route), 402, None, None);
-        assert_eq!(
-            meta_str(&meta, "error_severity"),
-            crate::call_errors::ErrSeverity::Warn.as_str()
-        );
-        assert_eq!(meta_str(&meta, "error_message"), "Insufficient funds");
-    }
-
-    #[test]
     fn enrich_metadata_unknown_code_no_severity() {
         // An unregistered code (e.g. from a newer build) must not panic; it
         // simply leaves error_severity absent for the renderer to default.
