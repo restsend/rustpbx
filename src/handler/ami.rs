@@ -38,6 +38,7 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/trunk_registrations", get(trunk_registrations_handler))
         .route("/reload/routes", post(reload_routes_handler))
         .route("/reload/acl", post(reload_acl_handler))
+        .route("/reload/console_acl", post(reload_console_acl_handler))
         .route("/reload/app", post(reload_app_handler))
         .route("/reload/queues", post(reload_queues_handler))
         .route("/reload/ivr", post(reload_ivr_handler))
@@ -608,6 +609,58 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "status": "error",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Apply `[console.acl]` from the on-disk configuration to the running
+/// console (first-account bootstrap + registration source restrictions).
+/// The config file is re-parsed in full first: a malformed file aborts the
+/// reload with 422 and leaves the running ACL untouched (fail-closed, same
+/// contract as `load_proxy_config_override`).
+async fn reload_console_acl_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+) -> Response {
+    info!(%client_ip, "Reload console ACL via /reload/console_acl endpoint");
+    let Some(console) = state.console.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": "console is not running",
+            })),
+        )
+            .into_response();
+    };
+    let Some(path) = state.config_path.clone() else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "status": "invalid",
+                "message": "no configuration file path configured",
+            })),
+        )
+            .into_response();
+    };
+
+    match console.reload_acl_config(&path).await {
+        Ok(acl) => Json(serde_json::json!({
+            "status": "ok",
+            "bootstrap": acl.bootstrap,
+            "registration": acl.registration,
+        }))
+        .into_response(),
+        Err(error) => {
+            warn!(%client_ip, error = %error, "console ACL reload failed");
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "status": "invalid",
                     "message": error.to_string(),
                 })),
             )

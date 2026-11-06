@@ -165,6 +165,19 @@ require_mfa = false
 secure_cookie = false
 # Static files HTTP path prefix (default: "/static")
 static_path = "/static"
+# Source-address ACL for the console. "bootstrap" limits which client
+# addresses may create the FIRST (superuser) account on the unauthenticated
+# /register page; when omitted only loopback (127.0.0.1 / ::1) may bootstrap.
+# "registration" optionally restricts the whole /register endpoint (bootstrap
+# and self-registration alike). Entries support exact IPs, CIDR ranges, and
+# "*"; an explicit list replaces the loopback default. Behind a trusted
+# reverse proxy (trust_forward_headers = true) the forwarded client address
+# is evaluated.
+# [console.acl]
+# bootstrap = ["127.0.0.1", "::1", "192.168.1.0/24"]
+# registration = ["10.0.0.0/8"]
+# Apply edits without a restart: POST /ami/v1/reload/console_acl
+# (a malformed config aborts the reload with 422 and keeps the current ACL).
 
 [ami]
 # AMI access allow list. Supports exact IPs, CIDR ranges, and "*".

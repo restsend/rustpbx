@@ -1,11 +1,11 @@
 use crate::app::AppStateInner;
 use crate::callrecord::{derive_daily_url, today_string};
-use crate::config::{CallRecordConfig, ConsoleConfig};
+use crate::config::{CallRecordConfig, ConsoleAclConfig, ConsoleConfig};
 use crate::console::i18n::{I18n, LocaleConfig, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::models::rbac::{role_permission, user_role};
 use crate::proxy::server::SipServerRef;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
@@ -79,6 +79,11 @@ pub enum ReloadTarget {
 pub struct ConsoleState {
     db: DatabaseConnection,
     config: ConsoleConfig,
+    /// Hot-reloadable `[console.acl]` snapshot (`reload_acl_config`). The
+    /// rest of `[console]` is fixed for the process lifetime; only the ACL
+    /// follows the repo's reload contract, mirroring the proxy
+    /// `DataContext::acl_rules` pattern (swap under lock, readers snapshot).
+    acl_config: Arc<RwLock<ConsoleAclConfig>>,
     session_key: Vec<u8>,
     http_client: reqwest::Client,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
@@ -128,9 +133,11 @@ impl ConsoleState {
 
         let locale_config = LocaleConfig::from(&config);
         let i18n = Arc::new(I18n::new(locale_config));
+        let acl_config = Arc::new(RwLock::new(config.acl.clone()));
 
         Ok(Arc::new(Self {
             db,
+            acl_config,
             config,
             session_key,
             http_client: crate::http_util::build_keepalive_client(None, None)?,
@@ -747,6 +754,37 @@ impl ConsoleState {
 
     pub fn pending_reload_targets(&self) -> BTreeSet<ReloadTarget> {
         self.pending_reload.read().unwrap().clone()
+    }
+
+    /// Snapshot of the active `[console.acl]`. Readers clone per request;
+    /// the reload path swaps it under the lock.
+    pub fn acl_config_snapshot(&self) -> ConsoleAclConfig {
+        self.acl_config.read().unwrap().clone()
+    }
+
+    /// Swap the active `[console.acl]`. Startup seeds it from `config`;
+    /// afterwards only `reload_acl_config` writes.
+    pub fn set_acl_config(&self, acl: ConsoleAclConfig) {
+        *self.acl_config.write().unwrap() = acl;
+    }
+
+    /// Re-read the configuration file and apply its `[console.acl]` section.
+    ///
+    /// The file is fully re-parsed before the swap: a malformed config
+    /// aborts the reload and leaves the running ACL untouched (fail-closed,
+    /// same contract as the proxy config reloads).
+    pub async fn reload_acl_config(&self, config_path: &str) -> Result<ConsoleAclConfig> {
+        let config = crate::config::Config::load_async(config_path)
+            .await
+            .context("failed to load configuration for console ACL reload")?;
+        // No `[console]` section at all: startup would have produced the
+        // default (loopback-only bootstrap), so the reload mirrors that.
+        let acl = config
+            .console
+            .map(|console| console.acl)
+            .unwrap_or_default();
+        self.set_acl_config(acl.clone());
+        Ok(acl)
     }
 
     pub fn set_sip_server(&self, server: Option<SipServerRef>) {

@@ -1016,6 +1016,64 @@ pub struct ConsoleConfig {
     /// account whose e-mail address they know.
     #[serde(default)]
     pub expose_reset_link_dev: bool,
+    /// Source-address ACL for the console, notably who may reach the
+    /// unauthenticated bootstrap that creates the first (superuser) account.
+    #[serde(default)]
+    pub acl: ConsoleAclConfig,
+}
+
+/// Source-address ACL for the console registration endpoints
+/// (`[console.acl]`).
+///
+/// The FIRST console account is created on the unauthenticated `/register`
+/// page and automatically becomes the superuser, so by default only loopback
+/// sources may bootstrap. `[console.acl] bootstrap` replaces that default
+/// with an explicit allow-list (it does not implicitly keep loopback).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ConsoleAclConfig {
+    /// Sources allowed to create the first (superuser) account. Supports
+    /// exact IPs, CIDR ranges, and "*" (any). Unset = loopback only.
+    #[serde(default)]
+    pub bootstrap: Option<Vec<String>>,
+    /// Optional restriction for the whole `/register` endpoint (bootstrap
+    /// and later self-registration alike). Unset = no extra restriction;
+    /// the registration policy still governs whether signup is open.
+    #[serde(default)]
+    pub registration: Option<Vec<String>>,
+}
+
+impl ConsoleAclConfig {
+    /// Entry match semantics mirror `AmiConfig::is_allowed`: exact address,
+    /// CIDR range, or the "*" wildcard.
+    fn entry_allows(entry: &str, ip: IpAddr) -> bool {
+        let entry = entry.trim();
+        entry == "*"
+            || entry
+                .parse::<IpAddr>()
+                .is_ok_and(|allowed| allowed == ip)
+            || entry
+                .parse::<IpNet>()
+                .is_ok_and(|network| network.contains(&ip))
+    }
+
+    /// May requests from `ip` create the first (superuser) account? An unset
+    /// list means the conservative default: loopback only.
+    pub fn bootstrap_allows(&self, ip: IpAddr) -> bool {
+        match &self.bootstrap {
+            None => ip.is_loopback(),
+            Some(entries) => entries.iter().any(|entry| Self::entry_allows(entry, ip)),
+        }
+    }
+
+    /// May requests from `ip` reach `/register` at all? An unset list adds no
+    /// address restriction (the registration policy still governs whether
+    /// signup is open); a configured list must match.
+    pub fn registration_allows(&self, ip: IpAddr) -> bool {
+        match &self.registration {
+            None => true,
+            Some(entries) => entries.iter().any(|entry| Self::entry_allows(entry, ip)),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1043,6 +1101,7 @@ impl Default for ConsoleConfig {
             static_path: None,
             api_tokens: Vec::new(),
             expose_reset_link_dev: false,
+            acl: ConsoleAclConfig::default(),
         }
     }
 }
@@ -3076,6 +3135,77 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_acl_bootstrap_defaults_to_loopback_only() {
+        let acl = ConsoleAclConfig::default();
+        assert!(acl.bootstrap_allows("127.0.0.1".parse().unwrap()));
+        assert!(acl.bootstrap_allows("::1".parse().unwrap()));
+        assert!(!acl.bootstrap_allows("192.168.1.10".parse().unwrap()));
+        // Missing ConnectInfo leaves the 0.0.0.0 placeholder, which must not
+        // pass the loopback default (fail-closed).
+        assert!(!acl.bootstrap_allows("0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn console_acl_bootstrap_explicit_list_is_authoritative() {
+        let acl = ConsoleAclConfig {
+            bootstrap: Some(vec!["192.168.1.0/24".into(), "10.0.0.5".into()]),
+            registration: None,
+        };
+        assert!(acl.bootstrap_allows("192.168.1.10".parse().unwrap()));
+        assert!(acl.bootstrap_allows("10.0.0.5".parse().unwrap()));
+        // An explicit list replaces the implicit loopback allowance.
+        assert!(!acl.bootstrap_allows("127.0.0.1".parse().unwrap()));
+        assert!(!acl.bootstrap_allows("192.168.2.10".parse().unwrap()));
+
+        let any = ConsoleAclConfig {
+            bootstrap: Some(vec!["*".into()]),
+            registration: None,
+        };
+        assert!(any.bootstrap_allows("203.0.113.9".parse().unwrap()));
+    }
+
+    #[test]
+    fn console_acl_registration_unset_adds_no_restriction() {
+        let acl = ConsoleAclConfig::default();
+        assert!(acl.registration_allows("203.0.113.9".parse().unwrap()));
+
+        let gated = ConsoleAclConfig {
+            bootstrap: None,
+            registration: Some(vec!["10.0.0.0/8".into()]),
+        };
+        assert!(gated.registration_allows("10.1.2.3".parse().unwrap()));
+        assert!(!gated.registration_allows("192.168.1.10".parse().unwrap()));
+    }
+
+    #[test]
+    fn console_acl_parses_from_toml() {
+        let raw = r#"
+[console]
+base_path = "/console"
+
+[console.acl]
+bootstrap = ["192.168.1.0/24", "::1"]
+registration = ["10.0.0.0/8"]
+"#;
+        let doc: toml::Value = toml::from_str(raw).expect("parse config");
+        let console: ConsoleConfig = doc["console"].clone().try_into().expect("console section");
+        let acl = console.acl;
+        assert!(acl.bootstrap_allows("192.168.1.10".parse().unwrap()));
+        assert!(acl.bootstrap_allows("::1".parse().unwrap()));
+        assert!(!acl.bootstrap_allows("127.0.0.1".parse().unwrap()));
+        assert!(!acl.bootstrap_allows("10.9.9.9".parse().unwrap()));
+        assert!(acl.registration_allows("10.9.9.9".parse().unwrap()));
+        assert!(!acl.registration_allows("192.168.1.10".parse().unwrap()));
+
+        // Without an [console.acl] section the bootstrap default stays
+        // loopback-only and registration is unrestricted.
+        let bare: ConsoleConfig = toml::from_str("").expect("parse empty console");
+        assert!(bare.acl.bootstrap_allows("127.0.0.1".parse().unwrap()));
+        assert!(!bare.acl.bootstrap_allows("192.168.1.10".parse().unwrap()));
+        assert!(bare.acl.registration_allows("192.168.1.10".parse().unwrap()));
+    }
 
     #[test]
     fn recording_policy_parses_sources_and_record_ringing() {

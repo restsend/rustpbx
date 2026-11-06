@@ -15,6 +15,7 @@ use axum::{
 };
 use sea_orm::EntityTrait;
 use serde_json::json;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -261,7 +262,49 @@ pub async fn logout(
     response
 }
 
-pub async fn register_page(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+/// Source-address gate for the registration endpoints (`[console.acl]`).
+///
+/// The first-account (superuser) bootstrap is unauthenticated by design, so
+/// absent an explicit `[console.acl] bootstrap` list it is loopback-only.
+/// Denials stay opaque on the wire: the response must not reveal whether
+/// this instance is still un-provisioned, so the specific rule is only
+/// logged. A missing `ConnectInfo` leaves the placeholder 0.0.0.0 address,
+/// which fails the loopback default — fail-closed.
+fn registration_acl_denial(
+    state: &ConsoleState,
+    policy: &RegistrationPolicy,
+    client_ip: IpAddr,
+) -> Option<Response> {
+    let acl = state.acl_config_snapshot();
+    let (allowed, rule) = if policy.first_user {
+        (
+            acl.bootstrap_allows(client_ip),
+            "first-account bootstrap denied by [console.acl]",
+        )
+    } else {
+        (
+            acl.registration_allows(client_ip),
+            "registration denied by [console.acl]",
+        )
+    };
+    if allowed {
+        return None;
+    }
+    warn!("console registration ACL: {} from {}", rule, client_ip);
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            "Registration is not available from this address\n",
+        )
+            .into_response(),
+    )
+}
+
+pub async fn register_page(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+    ClientAddr { addr: client, .. }: ClientAddr,
+) -> Response {
     let policy = match state.registration_policy().await {
         Ok(policy) => policy,
         Err(err) => {
@@ -273,6 +316,10 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>, headers: Head
                 .into_response();
         }
     };
+
+    if let Some(denial) = registration_acl_denial(&state, &policy, client.ip()) {
+        return denial;
+    }
 
     let superuser_notice = if policy.first_user {
         Some(SUPERUSER_NOTICE.to_string())
@@ -304,6 +351,7 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>, headers: Head
 pub async fn register_post(
     headers: HeaderMap,
     State(state): State<Arc<ConsoleState>>,
+    ClientAddr { addr: client, .. }: ClientAddr,
     Form(form): Form<RegisterForm>,
 ) -> Response {
     let policy = match state.registration_policy().await {
@@ -317,6 +365,10 @@ pub async fn register_post(
                 .into_response();
         }
     };
+
+    if let Some(denial) = registration_acl_denial(&state, &policy, client.ip()) {
+        return denial;
+    }
 
     if !policy.allowed {
         let mut response = state.render_with_headers(
@@ -997,6 +1049,250 @@ mod tests {
             .oneshot(builder.body(Body::empty()).expect("build request"))
             .await
             .expect("send request")
+    }
+
+    /// Like `post_form` / `get_uri`, but attaches a `ConnectInfo` extension
+    /// so the request carries a client source address for `[console.acl]`.
+    fn request_from(
+        method: &str,
+        uri: String,
+        body: Option<String>,
+        addr: std::net::SocketAddr,
+    ) -> axum::http::Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(addr));
+        if let Some(body) = body {
+            builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            builder.body(Body::from(body)).expect("build request")
+        } else {
+            builder.body(Body::empty()).expect("build request")
+        }
+    }
+
+    async fn send(app: &axum::Router, request: axum::http::Request<Body>) -> Response {
+        app.clone()
+            .oneshot(request)
+            .await
+            .expect("send request")
+    }
+
+    fn register_form(email: &str, username: &str) -> String {
+        format!(
+            "email={email}&username={username}&password=password123&confirm_password=password123"
+        )
+    }
+
+    #[tokio::test]
+    async fn first_account_bootstrap_is_loopback_only_by_default() {
+        let state = state_with_config(ConsoleConfig {
+            allow_registration: false,
+            ..Default::default()
+        })
+        .await;
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+        let remote: std::net::SocketAddr = "192.168.1.50:41000".parse().unwrap();
+        let local: std::net::SocketAddr = "127.0.0.1:41001".parse().unwrap();
+
+        // Both the page and the POST are denied from a non-loopback source,
+        // before any form validation runs.
+        let response = send(
+            &app,
+            request_from("GET", format!("{}/register", base), None, remote),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("owner@rustpbx.com", "owner")),
+                remote,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Loopback can still bootstrap; the earlier denied attempt must not
+        // have consumed the first-user slot.
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("owner@rustpbx.com", "owner")),
+                local,
+            ),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+        let policy = state.registration_policy().await.expect("policy");
+        assert!(!policy.first_user);
+        assert!(!policy.allowed);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_acl_config_replaces_loopback_default() {
+        let state = state_with_config(ConsoleConfig {
+            acl: crate::config::ConsoleAclConfig {
+                bootstrap: Some(vec!["192.168.1.0/24".into()]),
+                registration: None,
+            },
+            ..Default::default()
+        })
+        .await;
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        // No user yet, so the bootstrap rule applies: loopback is no longer
+        // implicitly trusted once an explicit list is configured.
+        let local: std::net::SocketAddr = "127.0.0.1:41010".parse().unwrap();
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("root@rustpbx.com", "root")),
+                local,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Inside the configured CIDR the bootstrap succeeds.
+        let remote: std::net::SocketAddr = "192.168.1.77:41011".parse().unwrap();
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("root@rustpbx.com", "root")),
+                remote,
+            ),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+        let policy = state.registration_policy().await.expect("policy");
+        assert!(!policy.first_user);
+    }
+
+    #[tokio::test]
+    async fn registration_acl_restricts_register_endpoint() {
+        let state = state_with_config(ConsoleConfig {
+            allow_registration: true,
+            acl: crate::config::ConsoleAclConfig {
+                bootstrap: None,
+                registration: Some(vec!["10.0.0.0/8".into()]),
+            },
+            ..Default::default()
+        })
+        .await;
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        // Bootstrap the superuser from loopback (unset bootstrap = default).
+        let local: std::net::SocketAddr = "127.0.0.1:41020".parse().unwrap();
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("admin@rustpbx.com", "admin")),
+                local,
+            ),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+
+        // With users present, /register is plain self-registration, gated by
+        // [console.acl] registration.
+        let allowed: std::net::SocketAddr = "10.20.30.40:41021".parse().unwrap();
+        let response = send(
+            &app,
+            request_from("GET", format!("{}/register", base), None, allowed),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let denied: std::net::SocketAddr = "192.168.1.50:41022".parse().unwrap();
+        let response = send(
+            &app,
+            request_from("GET", format!("{}/register", base), None, denied),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = send(
+            &app,
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("member@rustpbx.com", "member")),
+                denied,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn console_acl_reload_applies_config_file() {
+        let state = state_with_config(ConsoleConfig {
+            allow_registration: false,
+            ..Default::default()
+        })
+        .await;
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+        let remote: std::net::SocketAddr = "192.168.9.60:41030".parse().unwrap();
+        let local: std::net::SocketAddr = "127.0.0.1:41031".parse().unwrap();
+        let register = |addr| {
+            request_from(
+                "POST",
+                format!("{}/register", base),
+                Some(register_form("owner@rustpbx.com", "owner")),
+                addr,
+            )
+        };
+
+        // Default ACL: remote bootstrap denied.
+        let response = send(&app, register(remote)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[proxy]\naddr = \"0.0.0.0\"\n\n[console.acl]\nbootstrap = [\"192.168.9.0/24\"]\n",
+        )
+        .expect("write config");
+        let path_str = path.to_str().expect("utf8 path");
+
+        let applied = state
+            .reload_acl_config(path_str)
+            .await
+            .expect("reload acl");
+        assert_eq!(applied.bootstrap, Some(vec!["192.168.9.0/24".to_string()]));
+
+        // Explicit list is authoritative: loopback loses the implicit
+        // allowance while the first-user slot is still open...
+        let response = send(&app, register(local)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // ...and the configured subnet bootstraps successfully.
+        let response = send(&app, register(remote)).await;
+        assert!(response.status().is_redirection());
+
+        // Malformed file: reload aborts and the running ACL is untouched.
+        std::fs::write(&path, "[console.acl\nbroken").expect("write broken config");
+        assert!(state.reload_acl_config(path_str).await.is_err());
+        assert_eq!(
+            state.acl_config_snapshot().bootstrap,
+            Some(vec!["192.168.9.0/24".to_string()])
+        );
     }
 
     #[tokio::test]
