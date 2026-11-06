@@ -83,7 +83,6 @@ regression/**/*-snapshots/
 # acceptance-plan materials (kept out of the repo per delivery scope)
 e2e_test.md
 regression/reports/PHASE_REPORT_*.md
-src/addons/cc/acceptance-e2e/
 
 # Playwright platform-specific visual baselines (machine-local)
 *-snapshots/

@@ -98,6 +98,10 @@ impl ObservabilityAddon {
                 ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0],
             )?
+            // `rustpbx_cc_*` histogram buckets: these metrics are RECORDED by
+            // the contact-center addon (rustpbx-cc), not by core — the bucket
+            // registration lives here because it must precede the exporter's
+            // first scrape regardless of whether the addon is loaded.
             .set_buckets_for_metric(
                 metrics_exporter_prometheus::Matcher::Full(
                     "rustpbx_cc_queue_wait_time_seconds".to_string(),

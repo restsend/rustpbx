@@ -33,10 +33,14 @@ logger = logging.getLogger(__name__)
 # once (console + all addons used by the suite) means no session ever needs to
 # recompile: `cargo build` only runs when the stable copy is missing.
 #
-# NOTE: `addon-sbc` is not a Cargo feature in this workspace (the sbc addon is
-# not gated behind a feature), so it must not be passed to `--features`.
-# commerce is required for the AMI /cluster/* control plane (dual-node suites)
-FULL_E2E_FEATURES = ["default", "contact-center", "addon-wholesale", "commerce"]
+# Binary name and feature set are environment-parameterized: the community
+# core only ships `default`/`commerce` features; a full deployment tree
+# rebuilds with e.g.
+#   RUSTPBX_E2E_FEATURES=default,contact-center,addon-wholesale,commerce
+# (`addon-sbc` is not a Cargo feature in this workspace — the sbc addon is
+# not gated behind a feature — so it must not be passed to `--features`;
+# commerce is required for the AMI /cluster/* control plane (dual-node suites).)
+FULL_E2E_FEATURES = os.environ.get("RUSTPBX_E2E_FEATURES", "default,commerce").split(",")
 
 # Acceptance 3.2.1.2: replace-mode overflow pair (ovf-prime → ovf-backup at
 # max_wait_secs=5). `overflow_mode = "replace"` narrows each escalation step
@@ -126,9 +130,9 @@ def find_or_build_binary(project_root: Path, features: Optional[list[str]] = Non
     # Prefer a stable, feature-complete binary copy that survives concurrent
     # `cargo build` invocations overwriting target/debug/rustpbx. Reusing it
     # avoids a multi-minute full rebuild of the ~1GB binary on every session.
-    stable = project_root / "target" / "debug" / "rustpbx-cc-e2e"
+    stable = project_root / "target" / "debug" / "rustpbx-e2e"
     if stable.exists() and stable.is_file():
-        logger.info("Using stable cc binary at %s", stable)
+        logger.info("Using stable e2e binary at %s", stable)
         return stable
 
     # NOTE: do NOT silently fall back to target/debug/rustpbx — a plain
@@ -267,17 +271,17 @@ class PbxServer:
     ) -> Path:
         """Build binary, generate config, return config path.
 
-        Uses the full E2E feature set (default + contact-center + addon-sbc +
-        addon-wholesale) so every addon used by the suite is compiled in. The
-        stable `target/debug/rustpbx-cc-e2e` copy is reused when present —
-        building only happens once per machine.
+        Uses the full E2E feature set (see FULL_E2E_FEATURES /
+        RUSTPBX_E2E_FEATURES) so every addon used by the suite is compiled
+        in. The stable `target/debug/rustpbx-e2e` copy is reused when
+        present — building only happens once per machine.
         """
         features = list(extra_features) if extra_features else []
         if build:
             self.binary = find_or_build_binary(self.project_root, features)
         elif self.binary is None:
             override = os.environ.get("RUSTPBX_E2E_BIN")
-            stable = self.project_root / "target" / "debug" / "rustpbx-cc-e2e"
+            stable = self.project_root / "target" / "debug" / "rustpbx-e2e"
             if override and Path(override).is_file():
                 self.binary = Path(override)
             elif stable.exists():

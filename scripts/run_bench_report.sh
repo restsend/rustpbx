@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# RustPBX benchmark + regression automation.
+# RustPBX benchmark automation.
 #
-# One-shot pipeline: build → functional regression (p2p + wholesale) →
-# performance (P2P bench) → memory leak → consolidated markdown report.
+# One-shot pipeline: build → performance (P2P bench) → memory leak →
+# consolidated markdown report.
 #
 # Usage:
 #   ./scripts/run_bench_report.sh                     # full run (build + all stages)
 #   ./scripts/run_bench_report.sh --skip-build        # reuse existing binaries
-#   ./scripts/run_bench_report.sh --skip-perf         # regression + memleak + report
-#   ./scripts/run_bench_report.sh --skip-memleak      # regression + perf + report
-#   ./scripts/run_bench_report.sh --only-regression   # regression only
+#   ./scripts/run_bench_report.sh --skip-perf         # memleak + report only
+#   ./scripts/run_bench_report.sh --skip-memleak      # perf + report only
 #   ./scripts/run_bench_report.sh --help
 #
 # Env overrides:
@@ -23,7 +22,9 @@
 #   BENCH_LEAK_TOTAL    memleak total calls (default 9000)
 #   BENCH_LEAK_BATCH    memleak batch size (default 200)
 #   BENCH_LOG_DIR       bench.py log dir (default $REPORT_DIR/bench)
-#   RUSTPBX_E2E_ADDONS  e2e addons (default cc)
+#   RUSTPBX_RELEASE_FEATURES  release build features (default "default,commerce";
+#                       a full deployment tree adds its own addon features here)
+#   RUSTPBX_E2E_FEATURES      e2e debug build features (default "default,commerce")
 #
 # Requires: cargo, python3, sipbot on PATH, MySQL on 127.0.0.1:13306
 # (bench config uses tests/bench/config_bench.toml).
@@ -37,8 +38,10 @@ PY="${PYTHON:-python3}"
 BENCH_DIR="tests/bench"
 BENCH_PY="$BENCH_DIR/bench.py"
 REPORT_GEN="$BENCH_DIR/report_gen.py"
-RUSTPBX_RELEASE="target/release/rustpbx"
-RUSTPBX_E2E_BIN="target/debug/rustpbx-cc-e2e"
+RUSTPBX_RELEASE="${RUSTPBX_RELEASE:-target/release/rustpbx}"
+RUSTPBX_E2E_BIN="${RUSTPBX_E2E_BIN:-target/debug/rustpbx-e2e}"
+RUSTPBX_RELEASE_FEATURES="${RUSTPBX_RELEASE_FEATURES:-default,commerce}"
+RUSTPBX_E2E_FEATURES="${RUSTPBX_E2E_FEATURES:-default,commerce}"
 
 # --- Defaults ---------------------------------------------------------------
 TOTAL="${BENCH_TOTAL:-500}"
@@ -52,10 +55,8 @@ RESULTS_DIR="${BENCH_RESULTS_DIR:-$BENCH_DIR/results_auto}"
 
 # --- Flags ------------------------------------------------------------------
 SKIP_BUILD=0
-SKIP_REG=0
 SKIP_PERF=0
 SKIP_LEAK=0
-ONLY_REG=0
 
 usage() {
   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -65,19 +66,12 @@ usage() {
 for arg in "$@"; do
   case "$arg" in
     --skip-build)  SKIP_BUILD=1 ;;
-    --skip-regression) SKIP_REG=1 ;;
     --skip-perf)   SKIP_PERF=1 ;;
     --skip-memleak) SKIP_LEAK=1 ;;
-    --only-regression) ONLY_REG=1 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $arg" >&2; usage 1 ;;
   esac
 done
-
-if [[ "$ONLY_REG" == "1" ]]; then
-  SKIP_PERF=1
-  SKIP_LEAK=1
-fi
 
 # --- Helpers ----------------------------------------------------------------
 now() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -115,87 +109,17 @@ build_all() {
     log "skip build (reusing existing binaries)"
     return 0
   fi
-  step "build release binary (features: default,commerce,wholesale,contact-center)"
+  step "build release binary (features: $RUSTPBX_RELEASE_FEATURES)"
   export CC=clang RUST_MIN_STACK=1073741824
-  cargo build --release --features default,commerce,wholesale,contact-center
-  step "build e2e debug binary (features: default,contact-center,addon-wholesale)"
-  cargo build --features default,contact-center,addon-wholesale
+  cargo build --release --features "$RUSTPBX_RELEASE_FEATURES"
+  step "build e2e debug binary (features: $RUSTPBX_E2E_FEATURES)"
+  cargo build --features "$RUSTPBX_E2E_FEATURES"
   cp target/debug/rustpbx "$RUSTPBX_E2E_BIN"
   log "✓ release: $RUSTPBX_RELEASE, e2e: $RUSTPBX_E2E_BIN"
 }
 
 # ---------------------------------------------------------------------------
-# 2. Functional regression
-# ---------------------------------------------------------------------------
-run_regression() {
-  mkdir -p "$REPORT_DIR"
-  local reg_json="$REPORT_DIR/regression.json"
-  local p2p_log="$REPORT_DIR/e2e_p2p.log"
-  local ws_log="$REPORT_DIR/e2e_wholesale.log"
-  local rust_log="$REPORT_DIR/wholesale_rust.log"
-
-  step "regression: p2p (e2e, marker=p2p)"
-  ( cd e2e && ./run.sh p2p ) 2>&1 | tee "$p2p_log" || true
-
-  step "regression: wholesale e2e (marker=wholesale)"
-  ( cd e2e && ./run.sh wholesale ) 2>&1 | tee "$ws_log" || true
-
-  step "regression: wholesale Rust integration tests"
-  export CC=clang
-  cargo test --features default,wholesale,contact-center --test e2e_addons -- wholesale:: 2>&1 | tee "$rust_log" || true
-
-  # --- parse summaries ---
-  local p2p_total p2p_passed p2p_failed p2p_skipped p2p_secs
-  local ws_total ws_passed ws_failed ws_skipped ws_secs
-  local rust_passed rust_failed rust_ignored rust_secs
-
-  # pytest: "... == N passed, M deselected ... in SS.SSs"
-  p2p_line="$(grep -E '===+ .* passed' "$p2p_log" | tail -1 || true)"
-  ws_line="$(grep -E '===+ .* passed' "$ws_log" | tail -1 || true)"
-
-  p2p_passed="$(echo "$p2p_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)"
-  p2p_failed="$(echo "$p2p_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)"
-  p2p_skipped="$(echo "$p2p_line" | grep -oE '[0-9]+ (skipped|deselected)' | grep -oE '[0-9]+' || echo 0)"
-  p2p_secs="$(echo "$p2p_line" | grep -oE 'in [0-9.]+s' | grep -oE '[0-9.]+' || echo 0)"
-  p2p_total=$((p2p_passed + p2p_failed))
-
-  ws_passed="$(echo "$ws_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)"
-  ws_failed="$(echo "$ws_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)"
-  ws_skipped="$(echo "$ws_line" | grep -oE '[0-9]+ (skipped|deselected)' | grep -oE '[0-9]+' || echo 0)"
-  ws_secs="$(echo "$ws_line" | grep -oE 'in [0-9.]+s' | grep -oE '[0-9.]+' || echo 0)"
-  ws_total=$((ws_passed + ws_failed))
-
-  # cargo test: "test result: ok. 151 passed; 0 failed; ... finished in 23.58s"
-  rust_line="$(grep -E '^test result:' "$rust_log" | tail -1 || true)"
-  rust_passed="$(echo "$rust_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)"
-  rust_failed="$(echo "$rust_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)"
-  rust_ignored="$(echo "$rust_line" | grep -oE '[0-9]+ ignored' | grep -oE '[0-9]+' || echo 0)"
-  rust_secs="$(echo "$rust_line" | grep -oE 'in [0-9.]+s' | grep -oE '[0-9.]+' || echo 0)"
-
-  cat > "$reg_json" <<EOF
-{
-  "p2p": {
-    "passed": ${p2p_passed:-0}, "failed": ${p2p_failed:-0},
-    "skipped": ${p2p_skipped:-0}, "total": ${p2p_total:-0},
-    "duration_s": ${p2p_secs:-0}, "ok": $([ "${p2p_failed:-1}" == "0" ] && echo true || echo false)
-  },
-  "wholesale_e2e": {
-    "passed": ${ws_passed:-0}, "failed": ${ws_failed:-0},
-    "skipped": ${ws_skipped:-0}, "total": ${ws_total:-0},
-    "duration_s": ${ws_secs:-0}, "ok": $([ "${ws_failed:-1}" == "0" ] && echo true || echo false)
-  },
-  "wholesale_rust": {
-    "passed": ${rust_passed:-0}, "failed": ${rust_failed:-0},
-    "ignored": ${rust_ignored:-0}, "total": $((rust_passed + rust_failed)),
-    "duration_s": ${rust_secs:-0}, "ok": $([ "${rust_failed:-1}" == "0" ] && echo true || echo false)
-  }
-}
-EOF
-  log "✓ regression summary -> $reg_json"
-}
-
-# ---------------------------------------------------------------------------
-# 3. Performance
+# 2. Performance
 # ---------------------------------------------------------------------------
 run_perf() {
   step "performance test (scenarios: $SCENARIOS, total=$TOTAL cps=$CPS duration=${DURATION}s uas=$UAS_COUNT)"
@@ -215,7 +139,7 @@ run_perf() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Memory leak
+# 3. Memory leak
 # ---------------------------------------------------------------------------
 run_memleak() {
   step "memory leak test (total=$LEAK_TOTAL batch=$LEAK_BATCH cps=$CPS duration=${DURATION}s)"
@@ -227,7 +151,7 @@ run_memleak() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Report
+# 4. Report
 # ---------------------------------------------------------------------------
 gen_report() {
   step "generate report"
@@ -248,7 +172,7 @@ TS="$(date '+%Y%m%d_%H%M%S')"
 REPORT_DIR="${BENCH_REPORT_DIR:-$RESULTS_DIR/$TS}"
 mkdir -p "$REPORT_DIR"
 
-log "starting benchmark & regression automation"
+log "starting benchmark automation"
 log "  results dir : $REPORT_DIR"
 log "  scenarios   : $SCENARIOS"
 log "  perf        : total=$TOTAL cps=$CPS duration=${DURATION}s uas=$UAS_COUNT"
@@ -257,7 +181,6 @@ echo
 
 preflight
 build_all
-[[ "$SKIP_REG" == "0" ]] && run_regression
 [[ "$SKIP_PERF" == "0" ]] && run_perf
 [[ "$SKIP_LEAK" == "0" ]] && run_memleak
 gen_report

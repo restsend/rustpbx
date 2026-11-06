@@ -32,6 +32,7 @@ OUT = RUSTPBX / "screenshots/cc-dev-shots"
 TMP = Path("/tmp/opencode/cc-dev-shots")
 CONF = RUSTPBX / "config.toml.dev"
 DB = RUSTPBX / "rustpbx.sqlite3"
+BINARY = Path(os.environ.get("RUSTPBX_E2E_BIN", str(RUSTPBX / "target/debug/rustpbx-e2e")))
 
 TOKEN = "dev"                      # [[console.api_tokens]] in config.toml.dev
 PBX_HTTP = 8082                    # http_addr in config.toml.dev
@@ -228,7 +229,7 @@ async def main() -> int:
 
     server_log = open(TMP / "rustpbx.log", "w")
     proc = subprocess.Popen(
-        [str(RUSTPBX / "target/debug/rustpbx-cc-e2e"), "--conf", str(CONF)],
+        [str(BINARY), "--conf", str(CONF)],
         cwd=str(RUSTPBX), stdout=server_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
