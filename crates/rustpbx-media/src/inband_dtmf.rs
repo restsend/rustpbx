@@ -859,6 +859,11 @@ mod tests {
     /// these files.
     #[test]
     fn voice_corpus_produces_no_digits() {
+        // The prompt corpus is self-contained under the crate's test-assets/
+        // (it used to live in the regression harness, which moved to the
+        // rustpbx-cc repository); CARGO_MANIFEST_DIR keeps the paths valid
+        // from any working directory.
+        let prompts = concat!(env!("CARGO_MANIFEST_DIR"), "/test-assets/prompts");
         let mut paths: Vec<String> = [
             "bridge-demo.wav",
             "goodbye.wav",
@@ -868,10 +873,10 @@ mod tests {
             "welcome.wav",
         ]
         .iter()
-        .map(|name| format!("../../regression/assets/prompts/{name}"))
+        .map(|name| format!("{prompts}/{name}"))
         .collect();
-        paths.push("../../fixtures/hello_book_course_zh_16k.wav".to_string());
-        paths.push("../../fixtures/sample.wav".to_string());
+        paths.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/hello_book_course_zh_16k.wav").to_string());
+        paths.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/sample.wav").to_string());
         for path in &paths {
             let (rate, samples) = read_wav_mono(path);
             let block = rate as usize * 20 / 1000;

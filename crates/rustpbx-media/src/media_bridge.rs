@@ -1502,8 +1502,19 @@ fn spawn_bridge_stats_task(
                 let mut g = legs_shared.lock();
                 if finishing { std::mem::take(&mut *g) } else { (g.0.clone(), g.1.clone()) }
             };
-            let mut sa = if let Some(leg) = &la { Some(sample_leg(leg).await) } else { None };
-            let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg).await) } else { None };
+            // The closing pass reuses the last tick's samples: teardown stops
+            // the legs before this task gets scheduled, and the rustrtc close
+            // path reclaims the transceiver receivers, so a fresh sample here
+            // would be a degraded snapshot (missing PC stats) replacing a
+            // complete one. The last tick IS the final state — packets stop
+            // flowing well before close, and the tap/transport counters are
+            // cumulative.
+            let mut sa = if finishing {
+                sample_a.clone()
+            } else if let Some(leg) = &la { Some(sample_leg(leg).await) } else { None };
+            let mut sb = if finishing {
+                sample_b.clone()
+            } else if let Some(leg) = &lb { Some(sample_leg(leg).await) } else { None };
             // A closed leg has no inbound transport reading, not a counter
             // reset: keep the last cumulative rx (teardown stops legs before
             // the sampler's final pass). Sender-side tx survives close.
