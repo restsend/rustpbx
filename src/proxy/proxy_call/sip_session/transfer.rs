@@ -1115,6 +1115,17 @@ impl SipSession {
                 TransferTarget::Sip { .. }
             )
         {
+            // This route will not run; release only its policy reservation,
+            // leaving the original call's concurrency holds intact.
+            if let Some(crate::config::RouteResult::Forward(_, Some(hints))) = prepared_route.take()
+                && let Some(limiter) = self.server.frequency_limiter.as_ref()
+            {
+                crate::call::policy::PolicyGuard::release_concurrency_holds(
+                    &hints.concurrency_holds,
+                    limiter.as_ref(),
+                )
+                .await;
+            }
             return crate::call::runtime::CommandResult::failure_with_kind(
                 "Unresolvable or external transfer target",
                 crate::call::runtime::CommandFailureKind::InvalidTarget,
@@ -1190,17 +1201,22 @@ impl SipSession {
         // legacy path below anchors on the `caller` slot instead and
         // inverts the parties on agent-dialed calls — see
         // [`Self::peer_handoff_transfer_if_attributed`]. Non-CC sessions
-        // and unresolvable shapes fall through untouched. `AwaitResult`
-        // keeps the legacy outcome-channel semantics.
+        // and unresolvable shapes fall through untouched. SIP REFER already
+        // carries the actual dialog source; only API hints need inference.
+        // `AwaitResult` keeps the legacy outcome-channel semantics.
         if !attended
-            && disposition != TransferDisposition::AwaitResult
+            && !matches!(disposition, TransferDisposition::AwaitResult | TransferDisposition::Refer)
             && let Some(result) = self
                 .peer_handoff_transfer_if_attributed(&target, &headers, callee_state_rx)
                 .await
         {
             return result;
         }
-        let leg_id = if leg_id.as_str() == "callee" { self.resolve_transfer_leg() } else { leg_id };
+        let leg_id = if disposition != TransferDisposition::Refer && leg_id.as_str() == "callee" {
+            self.resolve_transfer_leg()
+        } else {
+            leg_id
+        };
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {
             return Err(anyhow!(
@@ -2221,20 +2237,20 @@ impl SipSession {
         // A plain extension / trunk target keeps `purpose = None` — the
         // agent-leg Call-ID scheme and marker must not leak onto it (and it
         // must not inherit the departing agent's attribution).
-        let target_is_agent = match (
-            Self::uri_user_part(&location.aor.to_string()),
-            self.server.agent_registry.as_ref(),
-        ) {
-            (Some(user), Some(registry)) => registry.get_agent(&user).await.is_some(),
-            _ => false,
-        };
-        let transfer_purpose = target_is_agent.then_some(crate::call::domain::LegPurpose::Agent);
+        let registered_aor = location.registered_aor.as_ref().map(ToString::to_string);
+        let target_agent = self
+            .resolve_registered_agent_user(&[
+                location.registered_username.as_deref().unwrap_or(""),
+                registered_aor.as_deref().unwrap_or(""),
+                target,
+            ])
+            .await;
         self.handle_add_leg_routed(
             target.to_string(),
             Some(target_leg.clone()),
             sip_headers,
             Some(customer_leg.clone()),
-            transfer_purpose,
+            target_agent,
             location,
         )
         .await?;

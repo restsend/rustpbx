@@ -2,7 +2,184 @@ use crate::log_capture::LogCapture;
 use crate::media::leg::{LegConfig, LegInner};
 use std::time::Duration;
 
-// Real leg construction, asynchronous sampler and terminal quality/CDR boundary;
+async fn feed_ingress_review_packet(
+    socket: &tokio::net::UdpSocket,
+    leg: &crate::media::leg::Leg,
+    seq: u16,
+) {
+    let before = leg.pc().received_rtp_packets();
+    let mut packet = vec![0x80, 0];
+    packet.extend_from_slice(&seq.to_be_bytes());
+    packet.extend_from_slice(&(u32::from(seq) * 160).to_be_bytes());
+    packet.extend_from_slice(&1234u32.to_be_bytes());
+    packet.extend_from_slice(&[0xff; 160]);
+    let advertised: std::net::SocketAddr = leg.advertised_addr().unwrap().parse().unwrap();
+    socket.send_to(&packet, advertised).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while leg.pc().received_rtp_packets() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("UDP packet must reach accepted RTP before testing a stall");
+}
+
+async fn assert_ingress_review_reaches_session(name: &str) {
+    use super::*;
+    use crate::call::{DialDirection, Dialplan, Location, MediaConfig};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "customer",
+        None,
+        "example.test",
+        None,
+    );
+    let plan = Dialplan::new(
+        "ingress-review-session".into(),
+        request,
+        DialDirection::Inbound,
+    )
+    .with_media(
+        MediaConfig::new()
+            .with_bind_ip(Some("127.0.0.1".into()))
+            .with_ingress_stall_warn_secs(Some(1)),
+    );
+    let (mut session, _handle, mut commands) = build_session_with_cmd_rx(plan).await;
+    let id = LegId::from(name);
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let sdp = format!(
+        "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+        socket.local_addr().unwrap().port(),
+    );
+    if name == "callee" {
+        session
+            .ensure_media_leg(LegSide::B, &sdp, rustrtc::TransportMode::Rtp)
+            .await
+            .unwrap();
+    } else {
+        session
+            .legs
+            .insert(id.clone(), crate::call::domain::Leg::new(id.clone()));
+        let location = Location {
+            aor: format!("sip:agent@{}", socket.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+            ..Default::default()
+        };
+        session.initiate_sip_leg(&id, location, None).await.unwrap();
+    }
+    let peer = session.media_leg(&id).unwrap();
+    peer.apply_sdp(
+        &sdp,
+        if name == "callee" {
+            rustrtc::SdpType::Offer
+        } else {
+            rustrtc::SdpType::Answer
+        },
+    )
+    .await
+    .unwrap();
+    peer.accept();
+    feed_ingress_review_packet(&socket, &peer, 1).await;
+    let detail = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let command = commands.recv().await.unwrap();
+            if let CallCommand::ReportCallError { code, detail, .. } = &command {
+                assert_eq!(code, "proxy.ingress_stalled");
+                let detail = detail.clone().unwrap();
+                assert!(session.execute_command(command, None).await.success);
+                let record = session.record_snapshot();
+                assert!(
+                    record.metadata["trace"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["code"] == "proxy.ingress_stalled"
+                            && entry["detail"]["leg_id"] == name)
+                );
+                break detail;
+            }
+        }
+    })
+    .await
+    .expect("the production leg attachment must forward its stall");
+    assert_eq!(detail["leg_id"], name);
+    session.cancel_token.cancel();
+    peer.stop();
+}
+
+#[tokio::test]
+async fn vendor_review_regression_callee_ingress_reaches_session() {
+    assert_ingress_review_reaches_session("callee").await;
+}
+
+#[tokio::test]
+async fn vendor_review_regression_dynamic_ingress_reaches_session() {
+    assert_ingress_review_reaches_session("queue-agent").await;
+}
+
+#[tokio::test]
+async fn vendor_review_regression_ingress_logs_keep_full_session_identity() {
+    let (logs, _guard, _interest) = LogCapture::start_filtered("debug");
+    let mut config = LegConfig::rtp_pcmu();
+    config.call_id = Some("ingress-full-session-1234567890abcdef".into());
+    config.ingress_stall_warn_secs = 1;
+    config.bind_ip = Some("127.0.0.1".into());
+    let leg = LegInner::new("callee", &config, None).unwrap();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let offer = format!(
+        "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+        socket.local_addr().unwrap().port(),
+    );
+    leg.apply_sdp(&offer, rustrtc::SdpType::Offer)
+        .await
+        .unwrap();
+    leg.accept();
+    let mut events = leg.subscribe_ingress_stall();
+    feed_ingress_review_packet(&socket, &leg, 1).await;
+    let stalled = tokio::time::timeout(Duration::from_secs(4), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stalled.kind,
+        crate::media::ingress_stall::IngressStallKind::Stalled
+    );
+    feed_ingress_review_packet(&socket, &leg, 2).await;
+    let resumed = tokio::time::timeout(Duration::from_secs(3), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resumed.kind,
+        crate::media::ingress_stall::IngressStallKind::Resumed
+    );
+    leg.stop();
+    let output = logs.text();
+    let rows: Vec<_> = output
+        .lines()
+        .filter(|line| {
+            line.contains("ingress watch tick")
+                || line.contains("leg ingress stalled")
+                || line.contains("leg ingress resumed")
+        })
+        .collect();
+    assert!(rows.iter().any(|line| line.contains("leg ingress stalled")));
+    assert!(rows.iter().any(|line| line.contains("leg ingress resumed")));
+    for row in rows {
+        assert!(
+            row.contains("session_id=ingress-full-session-1234567890abcdef"),
+            "{row}"
+        );
+        assert!(row.contains("leg_id=callee"), "{row}");
+        assert!(row.contains("direction=\"peer_to_pbx\""), "{row}");
+    }
+}
+
+// Real leg construction and terminal quality/CDR boundary, without an extra sampler;
 // no bridge is installed, matching an IVR or queue waiting for an agent.
 #[test]
 fn packet_diagnostics_survive_prebridge_and_stop_at_info() {
@@ -36,8 +213,8 @@ fn packet_diagnostics_survive_prebridge_and_stop_at_info() {
             .filter(|line| line.contains("media.packet_stages"))
             .collect();
         assert!(
-            diagnostics.len() >= 3,
-            "initial, async periodic and final diagnostics missing: {rows}"
+            diagnostics.len() == 2,
+            "prebridge lifecycle must emit start/end only, without periodic logging: {rows}"
         );
         for row in &diagnostics {
             assert!(
@@ -58,12 +235,7 @@ fn packet_diagnostics_survive_prebridge_and_stop_at_info() {
                 .count(),
             1
         );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|row| row.contains("event=\"periodic\"") && row.contains("packet-log-media")),
-            "periodic output must come from the actual separate media runtime: {rows}"
-        );
+        assert!(!rows.contains("media.packet_send_tail"));
         let report = serde_json::to_value(leg.quality_report("A")).unwrap();
         assert!(
             report["packetDiagnostics"].is_object(),
@@ -74,10 +246,8 @@ fn packet_diagnostics_survive_prebridge_and_stop_at_info() {
             report["packetDiagnostics"]["snapshot_scope"],
             "leg_stopping"
         );
-        assert_eq!(
-            report["packetDiagnostics"]["async_send_results_in_cdr_final"],
-            false
-        );
+        assert!(report["packetDiagnostics"]["unmeasured_boundaries"].as_array().unwrap()
+            .iter().any(|value| value == "socket_send_completion"));
         let found = logs.search("diagnostic-full-session-12ab").await;
         assert_eq!(
             found
@@ -87,23 +257,19 @@ fn packet_diagnostics_survive_prebridge_and_stop_at_info() {
             diagnostics.len()
         );
 
-        // Disabled config must not secretly start another sampler.
-        config.call_id = Some("diagnostic-disabled-session".into());
+        // Core lifecycle evidence is unconditional, even with quality sampling disabled.
+        config.call_id = Some("diagnostic-quality-disabled-session".into());
         config.quality_stats.enabled = false;
         let disabled = LegInner::new("disabled-leg", &config, None).unwrap();
         disabled.stop();
-        assert!(
-            !logs
-                .text()
-                .lines()
-                .any(|row| row.contains("media.packet_stages")
-                    && row.contains("diagnostic-disabled-session"))
-        );
+        assert_eq!(logs.text().lines().filter(|row| row.contains("media.packet_stages")
+            && row.contains("diagnostic-quality-disabled-session")).count(), 2);
+
     });
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn packet_diagnostics_real_udp_gap_recovery_and_hold_are_observations() {
+async fn packet_diagnostics_real_udp_logs_only_core_boundaries_across_gap_and_hold() {
     use rustrtc::SdpType;
     use tokio::net::UdpSocket;
     let (logs, _guard, _interest) = LogCapture::start_filtered_timestamped("info");
@@ -143,46 +309,27 @@ async fn packet_diagnostics_real_udp_gap_recovery_and_hold_are_observations() {
     }
     tokio::time::sleep(Duration::from_millis(350)).await;
     let before_hold = logs.text();
-    let stages: Vec<_> = before_hold
+    assert_eq!(leg.pc().received_rtp_packets(), 16);
+    assert_eq!(
+        before_hold
+            .lines()
+            .filter(
+                |row| row.contains("media.packet_stages") && row.contains("leg_id=remote-caller")
+            )
+            .count(),
+        1,
+        "only start is logged before teardown, no timer-driven stage output: {before_hold}"
+    );
+    let accepted: Vec<_> = before_hold
         .lines()
-        .filter(|r| r.contains("media.packet_stages") && r.contains("leg_id=remote-caller"))
+        .filter(|row| row.contains("stage=\"rtp_accepted\"") && row.contains("remote-caller"))
         .collect();
     assert_eq!(
-        stages
-            .iter()
-            .filter(|r| r.contains("rtp_accepted:no_growth"))
-            .count(),
+        accepted.len(),
         1,
-        "{before_hold}"
+        "only first accepted RTP is logged despite gap/recovery: {before_hold}"
     );
-    assert_eq!(
-        stages
-            .iter()
-            .filter(|r| r.contains("rtp_accepted:resumed"))
-            .count(),
-        1,
-        "{before_hold}"
-    );
-    for row in &stages {
-        assert!(row.contains("session_id=node-session-34cd"), "{row}");
-        assert!(row.contains("root_session_id=root-session-56ef"), "{row}");
-        assert!(
-            row.contains("stage_observation_only_dtx_or_hold_may_be_silent"),
-            "{row}"
-        );
-    }
-    assert!(
-        stages
-            .iter()
-            .filter(|r| r.contains("rtp_accepted:no_growth"))
-            .all(|r| r.contains("agent-leg")),
-        "gap snapshot must include peer leg"
-    );
-    assert!(
-        stages.len() < 12,
-        "per-packet or repeated idle logs: {}",
-        stages.len()
-    );
+    assert!(accepted[0].contains("node-session-34cd"));
     leg.set_app_paused(true);
     tokio::time::sleep(Duration::from_millis(5500)).await;
     leg.stop();
@@ -196,16 +343,35 @@ async fn packet_diagnostics_real_udp_gap_recovery_and_hold_are_observations() {
     let report = serde_json::to_value(leg.quality_report("A")).unwrap();
     let diagnostics = &report["packetDiagnostics"];
     assert_eq!(diagnostics["accepted_rtp"], 16);
-    assert_eq!(diagnostics["stages"]["ice"]["udp_read"]["packets"], 17);
-    assert_eq!(
-        diagnostics["stages"]["transports"][0]["rtp_parse_errors"]["packets"],
-        1
+    for stage in ["reader_started", "udp_read", "rtp_accepted"] {
+        let rows: Vec<_> = after
+            .lines()
+            .filter(|row| {
+                row.contains(&format!("stage=\"{stage}\"")) && row.contains("remote-caller")
+            })
+            .collect();
+        let expected = if stage == "reader_started" { 2 } else { 1 };
+        assert_eq!(rows.len(), expected,
+            "RTP and non-mux RTCP each start one reader; packet milestones do not repeat: {after}");
+        if stage == "reader_started" {
+            assert_ne!(rows[0].split("local_addr=").last(), rows[1].split("local_addr=").last(),
+                "reader starts must describe the two distinct sockets");
+        }
+        assert!(rows[0].contains("node-session-34cd"));
+    }
+    assert!(
+        after
+            .lines()
+            .any(|row| row.contains("stage=\"rtp_parse_failed\"")
+                && row.contains("node-session-34cd")),
+        "{after}"
     );
     assert!(
-        diagnostics["stages"]["transports"][0]["rtp_accepted"]["last_age_ms"]
-            .as_u64()
+        diagnostics["unmeasured_boundaries"]
+            .as_array()
             .unwrap()
-            > 5000
+            .iter()
+            .any(|value| value == "raw_socket_reads")
     );
     // Save actual emitted records for the implementation handoff, not synthetic examples.
     std::fs::write(
@@ -253,8 +419,7 @@ async fn packet_diagnostics_udp_arrival_is_not_srtp_acceptance() {
     socket.send_to(&unauthenticated, destination).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let value = serde_json::to_value(a.quality_report("A")).unwrap();
-            if value["packetDiagnostics"]["stages"]["transports"][0]["srtp_unprotect_errors"]["packets"] == 1 {
+            if logs.text().contains("stage=\"srtp_unprotect_failed\"") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -262,14 +427,7 @@ async fn packet_diagnostics_udp_arrival_is_not_srtp_acceptance() {
     }).await.expect("invalid encrypted datagram must reach actual UDP and SRTP boundaries");
     let value = serde_json::to_value(a.quality_report("A")).unwrap();
     assert_eq!(value["packetDiagnostics"]["accepted_rtp"], 0);
-    assert_eq!(
-        value["packetDiagnostics"]["stages"]["ice"]["udp_read"]["packets"],
-        1
-    );
-    assert_eq!(
-        value["packetDiagnostics"]["stages"]["transports"][0]["conn"]["rtp"]["packets"],
-        1
-    );
+    assert!(logs.text().contains("stage=\"udp_read\""));
     b.play(
         Box::new(
             crate::media::audio_source::ToneAudioSource::new(440, Duration::from_secs(1), 8000)
@@ -292,15 +450,14 @@ async fn packet_diagnostics_udp_arrival_is_not_srtp_acceptance() {
     b.stop();
     let value = serde_json::to_value(a.quality_report("A")).unwrap();
     assert!(value["packetDiagnostics"]["accepted_rtp"].as_u64().unwrap() > 0);
-    assert_eq!(
-        value["packetDiagnostics"]["stages"]["transports"][0]["srtp_unprotect_errors"]["packets"],
-        1
-    );
     let text = logs.text();
-    assert!(text.lines().any(|row| row.contains("media.packet_stages")
-        && row.contains("session_id=encrypted-node-session")
-        && row.contains("leg_id=encrypted-receiver")
-        && row.contains("srtp_unprotect_errors")));
+    assert!(
+        text.lines()
+            .any(|row| row.contains("stage=\"srtp_unprotect_failed\"")
+                && row.contains("encrypted-node-session")
+                && row.contains("encrypted-receiver")),
+        "{text}"
+    );
 }
 
 // Both real PC transports are created after the configured leg sampler. The
@@ -365,21 +522,10 @@ async fn packet_diagnostics_real_hold_direction_drop_is_not_stage_error() {
     }
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert_eq!(a.pc().received_rtp_packets(), 8);
-    // Configured before SDP, installed on the actual later-created PC transport.
-    assert!(
-        a.pc().packet_diagnostics().transports[0]
-            .conn
-            .deferred_send_observer_installed
-    );
-    assert!(
-        b.pc().packet_diagnostics().transports[0]
-            .conn
-            .deferred_send_observer_installed
-    );
     let held = serde_json::to_value(b.quality_report("B")).unwrap();
     assert_eq!(
-        held["packetDiagnostics"]["stages"]["transports"][0]["send_direction_dropped"]["packets"],
-        8
+        held["packetDiagnostics"]["pipeline_egress"], 0,
+        "a held target must not claim plaintext egress"
     );
     let after = logs.text();
     assert!(
@@ -395,7 +541,7 @@ async fn packet_diagnostics_real_hold_direction_drop_is_not_stage_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn packet_diagnostics_rtcp_closed_listener_triggers_peer_snapshot() {
+async fn packet_diagnostics_rtcp_closed_listener_is_logged_at_delivery() {
     let (logs, _guard, _interest) = LogCapture::start_filtered_timestamped("info");
     let (a, b, mut bridge, socket) = diagnostic_bridge_with_held_target().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -415,21 +561,10 @@ async fn packet_diagnostics_rtcp_closed_listener_triggers_peer_snapshot() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(
-        transport.packet_diagnostics().rtcp_listener_closed.packets,
-        1
-    );
     let after = logs.text();
-    assert!(
-        after[before..]
-            .lines()
-            .any(|row| row.contains("media.packet_stages")
-                && row.contains("leg_id=source-leg")
-                && row.contains("stage_error:first_in_burst")
-                && row.contains("held-leg")
-                && row.contains("rtcp_listener_closed")),
-        "RTCP failure needs immediate context for both legs: {after}"
-    );
+    assert!(after[before..].lines().any(|row|
+        row.contains("stage=\"rtcp_listener_closed\"") && row.contains("source-leg")),
+        "real RTCP delivery failure must be visible in its owner log: {after}");
     a.stop();
     b.stop();
     bridge.close();

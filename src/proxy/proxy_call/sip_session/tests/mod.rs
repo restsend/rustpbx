@@ -3189,6 +3189,136 @@ async fn inbound_refer_to_app_target_marks_transferred_and_resolves_transferor_e
     assert!(ctx.transferred);
 }
 
+#[tokio::test]
+async fn adversarial_customer_refer_preserves_actual_transferor() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "test-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("test-queue".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let gateway = RwiGateway::new();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+    let dialog_id = server_dialog.id();
+
+    let context = CallContext {
+        session_id: "refer-app-target".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "refer-app-target".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:1002@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    // Actual SIP REFER source is the customer caller dialog; the served
+    // agent is its live callee peer. A role hint must never invert this.
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    let mut agent = Leg::new(LegId::from("callee"));
+    agent.state = LegState::Connected;
+    agent.agent_id = Some("2002".into());
+    agent.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    session.legs.insert(LegId::from("callee"), agent);
+    let agent_request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "2002",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (agent_tx, _) = create_transaction(agent_request).await;
+    let (agent_states, _agent_rx) = mpsc::unbounded_channel();
+    let agent_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&agent_tx, agent_states, None, None)
+        .unwrap();
+    let agent_dialog_id = agent_dialog.id();
+    session
+        .legs
+        .set_dialog(LegId::from("callee"), Dialog::Invite(agent_dialog));
+    session.session_ext_set("resolved_agent_id", "2002");
+    let result = session
+        .handle_inbound_refer(
+            dialog_id.clone(),
+            "queue:test-queue".to_string(),
+            HashMap::new(),
+            &mut callee_rx,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "in-session REFER to a queue target must succeed: {result:?}"
+    );
+
+    assert!(session.meta.transferred);
+    assert!(
+        session.legs.contains_key(&LegId::from("caller")),
+        "REFER source must remain until its own BYE"
+    );
+    assert!(
+        session.legs.contains_key(&LegId::from("callee")),
+        "customer REFER must preserve its agent peer"
+    );
+    assert_eq!(
+        *session.app_media_leg.read(),
+        Some(LegId::from("callee")),
+        "queue media belongs to the actual transferor peer"
+    );
+    assert!(
+        !session.pending_hangup.contains(&agent_dialog_id),
+        "actual agent peer must not receive eager BYE"
+    );
+    assert!(
+        !session.pending_hangup.contains(&dialog_id),
+        "customer REFER source must not receive an eager BYE"
+    );
+}
+
 /// PRD s25 S5（C2 双写/丧行）：attended transfer 完成后，服务坐席（转场发起
 /// 方 A）的腿离场 —— 会话归因必须**冻结为 A**。旧行为：直拨入呼没有 pin，
 /// `agent_id_from_context` 落到 Priority 3（`connected_callee`）——而跨会话
@@ -14727,4 +14857,213 @@ async fn child_leg_role_normalizes_to_agent_for_registered_target() {
         ringing["leg_role"], "consult",
         "non-agent target keeps its declared role: {ringing:?}"
     );
+}
+
+#[tokio::test]
+async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
+    use crate::call::app::agent_registry::{AgentRegistry, PresenceState, memory::MemoryRegistry};
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::{
+        build_session_with_cmd_rx_on, setup_recording_test_media,
+    };
+    use rsipstack::sip::{Method, SipMessage};
+    use rsipstack::transport::{SipAddr, udp::UdpConnection};
+    for (identity, command) in [
+        ("registered-username", OutboundTransferCommand::CustomerApi),
+        ("registered-username", OutboundTransferCommand::RwiCallerLeg),
+        (
+            "registered-username",
+            OutboundTransferCommand::ConsoleCalleeLeg,
+        ),
+        ("registered-aor", OutboundTransferCommand::CustomerApi),
+        ("trunk", OutboundTransferCommand::CustomerApi),
+    ] {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let (mut server, _) = create_test_server().await;
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(
+                "canonical-agent".into(),
+                "Target".into(),
+                "sip:2002@example.test".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence("canonical-agent", PresenceState::Idle)
+            .await
+            .unwrap();
+        registry
+            .register(
+                "opaque-random-contact".into(),
+                "Unrelated".into(),
+                "sip:unrelated@example.test".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .register(
+                "2002".into(),
+                "Unrelated canonical ID".into(),
+                "sip:other-endpoint@example.test".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        Arc::get_mut(&mut server).unwrap().agent_registry = Some(registry);
+        let endpoint = server.endpoint.inner.clone();
+        for local in endpoint.transport_layer.get_addrs() {
+            endpoint.transport_layer.del_transport(&local);
+        }
+        endpoint.transport_layer.add_transport(
+            UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap()
+                .into(),
+        );
+        let serving_endpoint = endpoint.clone();
+        let serving = tokio::spawn(async move {
+            serving_endpoint.serve().await.unwrap();
+        });
+        let target = if identity == "registered-username" {
+            "2002"
+        } else {
+            "transfer-target"
+        };
+        let target_uri = format!("sip:{target}@example.test");
+        server
+            .locator
+            .register(
+                target,
+                None,
+                Location {
+                    aor: format!("sip:opaque-random-contact@{address}")
+                        .parse()
+                        .unwrap(),
+                    expires: 3600,
+                    registered_username: (identity == "registered-username").then(|| "2002".into()),
+                    registered_aor: (identity == "registered-aor")
+                        .then(|| "sip:2002@example.test".parse().unwrap()),
+                    home_proxy: Some(SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Udp),
+                        addr: address.to_string().as_str().try_into().unwrap(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+        let plan = Dialplan::new("opaque-root-call".into(), request, DialDirection::Inbound)
+            .with_caller("sip:customer@example.test".parse().unwrap());
+        let (mut session, _handle, _commands) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.id = "0b9e6c1e1b404e8f9c212f5a8d3e7b61".into();
+        session.context.session_id = "0b9e6c1e1b404e8f9c212f5a8d3e7b61".into();
+        let _cancel = session.cancel_token.clone().drop_guard();
+        setup_recording_test_media(&mut session).await;
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+        let agent = session.legs.get_mut(&LegId::from("callee")).unwrap();
+        agent.state = LegState::Connected;
+        agent.agent_id = Some("departing-agent".into());
+        SipSession::set_pinned_agent_id(&session.extensions, "departing-agent");
+        let (tx, mut states) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(tx);
+        let transfer = match command {
+            OutboundTransferCommand::CustomerApi => CallCommand::BlindTransferCustomer {
+                target: target_uri,
+                headers: HashMap::new(),
+                application_only: false,
+                completion: None,
+            },
+            OutboundTransferCommand::RwiCallerLeg => CallCommand::Transfer {
+                target: target_uri,
+                leg_id: LegId::from("caller"),
+                attended: false,
+            },
+            OutboundTransferCommand::ConsoleCalleeLeg => CallCommand::Transfer {
+                target: target_uri,
+                leg_id: LegId::from("callee"),
+                attended: false,
+            },
+        };
+        let result = session.execute_command(transfer, Some(&mut states)).await;
+        assert!(result.success, "{identity}: {:?}", result.message);
+        let mut buffer = [0u8; 65536];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        let SipMessage::Request(invite) =
+            SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap()
+        else {
+            panic!("INVITE required")
+        };
+        assert_eq!(invite.method, Method::Invite);
+        let uui = crate::call::uui::extract_cc_uui(&invite.headers);
+        if identity == "trunk" {
+            assert!(uui.is_none(), "trunk must not inherit agent purpose");
+        } else {
+            let uui = uui.unwrap_or_else(|| {
+                panic!("{identity}: actual opaque-contact INVITE needs call-center marker")
+            });
+            assert_eq!(uui.leg.as_deref(), Some("agent"));
+            assert_eq!(uui.session_id, session.id.to_string());
+            let (mut home, _) = create_test_server().await;
+            Arc::get_mut(&mut home).unwrap().cluster_peer_ips = vec![address.ip()];
+            let (tx, _) = crate::proxy::tests::common::create_transaction(invite.clone()).await;
+            let (events, _rx) = mpsc::unbounded_channel();
+            let dialog = home
+                .dialog_layer
+                .get_or_create_server_invite(&tx, events, None, None)
+                .unwrap();
+            let cookie = crate::call::TransactionCookie::default();
+            cookie.insert_extension(crate::call::CallerPeerContext(address.to_string()));
+            let context = CallContext {
+                session_id: format!("child-{identity}-{command:?}"),
+                dialplan: Arc::new(Dialplan::new(
+                    "child".into(),
+                    invite,
+                    DialDirection::Inbound,
+                )),
+                cookie,
+                start_time: Instant::now(),
+                original_caller: "sip:customer@example.test".into(),
+                original_callee: "sip:2002@example.test".into(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            };
+            let (child, _, _) =
+                SipSession::new(home, CancellationToken::new(), None, context, dialog, false);
+            assert_eq!(child.meta.child_leg_role.as_deref(), Some("agent"));
+            assert_eq!(
+                child.meta.root_session_id.as_deref(),
+                Some("0b9e6c1e1b404e8f9c212f5a8d3e7b61")
+            );
+        }
+        let transfer_leg = session
+            .legs
+            .iter()
+            .find(|(_, leg)| {
+                leg.endpoint
+                    .as_deref()
+                    .is_some_and(|endpoint| endpoint.contains(target))
+            })
+            .map(|(_, leg)| leg)
+            .unwrap();
+        assert_eq!(
+            transfer_leg.agent_id.as_deref(),
+            (identity != "trunk").then_some("canonical-agent"),
+            "{identity}: target identity must be canonical before events"
+        );
+        serving.abort();
+    }
 }

@@ -20,7 +20,7 @@ use glob::Pattern;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
-use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::{Transport, prelude::HeadersExt};
 use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -1750,15 +1750,16 @@ impl CallModule {
 
     /// Build a session cancel token.
     ///
-    /// For reliable transports (TCP/TLS/WS/WSS) the token is derived from the
-    /// transport's cancel token, so a connection drop automatically cancels
-    /// every session on that transport — no watcher task needed.
-    ///
-    /// For UDP (connectionless, shared socket) the token is derived from the
-    /// server's cancel token, matching pre-`bac8444` behaviour.
+    /// WebSocket signaling can reconnect while the original media and dialog
+    /// remain active. Bind those sessions to the server; SipSession::serve
+    /// retains flow-loss cancellation until the caller ACK confirms the dialog.
+    /// BYE, media inactivity and call timers still perform normal teardown.
+    /// Other reliable transports retain their connection-scoped lifetime.
     fn build_session_token(&self, tx: &Transaction) -> CancellationToken {
         if let Some(ref conn) = tx.connection {
-            if conn.is_reliable() {
+            if conn.is_reliable()
+                && !matches!(conn.get_addr().r#type, Some(Transport::Ws | Transport::Wss))
+            {
                 if let Some(transport_token) = conn.cancel_token() {
                     return transport_token.child_token();
                 }
@@ -2816,6 +2817,62 @@ mod tests {
     use crate::proxy::proxy_call::sip_session::SipSession;
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
+
+    #[tokio::test]
+    async fn websocket_session_survives_transport_loss_but_stops_with_server() {
+        use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use rsipstack::transport::{SipAddr, channel::ChannelConnection};
+
+        for (transport, cancelled_on_loss) in [
+            (Transport::Ws, false),
+            (Transport::Wss, false),
+            (Transport::Tcp, true),
+            (Transport::Tls, true),
+        ] {
+            let (server, config) = create_test_server().await;
+            let request = create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            );
+            let (mut transaction, _) = create_transaction(request).await;
+            let transport_cancel = CancellationToken::new();
+            let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outgoing, _outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut addr: SipAddr = "127.0.0.1:5060"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into();
+            addr.r#type = Some(transport);
+            transaction.connection = Some(
+                ChannelConnection::create_connection(
+                    incoming_rx,
+                    outgoing,
+                    addr,
+                    Some(transport_cancel.clone()),
+                )
+                .await
+                .unwrap()
+                .into(),
+            );
+            let module = CallModule::new(config, server.clone());
+            let session = module.build_session_token(&transaction);
+
+            transport_cancel.cancel();
+            assert_eq!(
+                session.is_cancelled(),
+                cancelled_on_loss,
+                "{transport}: call lifetime after signaling loss"
+            );
+            server.cancel_token.cancel();
+            assert!(
+                session.is_cancelled(),
+                "server shutdown must still cancel the call"
+            );
+        }
+    }
 
     fn make_loc() -> Vec<Location> {
         vec![Location {
