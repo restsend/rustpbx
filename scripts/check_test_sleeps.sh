@@ -112,6 +112,11 @@ TEST_SLEEP_BASELINE=(
   "tests/queue_e2e/test_queue_no_answer_requeue_rwi_e2e.rs"
   "tests/queue_e2e/test_queue_no_answer_rotation_e2e.rs"
   "tests/queue_e2e/test_queue_rejected_rwi_e2e.rs"
+  # Rolling-handover e2e: the successor drives the handover with 2s hello
+  # intervals and drain-phase polls; fixed sleeps are the scenario's clock,
+  # not event waits. Convert to wait_until when the handover harness grows
+  # event hooks.
+  "tests/rolling_handover.rs"
 )
 
 violations=0

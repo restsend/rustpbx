@@ -37,8 +37,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/reload/trunks", post(reload_trunks_handler))
         .route("/trunk_registrations", get(trunk_registrations_handler))
         .route("/reload/routes", post(reload_routes_handler))
-        .route("/reload/acl", post(reload_acl_handler))
-        .route("/reload/console_acl", post(reload_console_acl_handler))
+        .route("/reload/acl", post(reload_acl_handler));
+    #[cfg(feature = "console")]
+    let r = r.route("/reload/console_acl", post(reload_console_acl_handler));
+    let r = r
         .route("/reload/app", post(reload_app_handler))
         .route("/reload/queues", post(reload_queues_handler))
         .route("/reload/ivr", post(reload_ivr_handler))
@@ -622,6 +624,7 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
 /// The config file is re-parsed in full first: a malformed file aborts the
 /// reload with 422 and leaves the running ACL untouched (fail-closed, same
 /// contract as `load_proxy_config_override`).
+#[cfg(feature = "console")]
 async fn reload_console_acl_handler(
     State(state): State<AppState>,
     client_ip: ClientAddr,

@@ -6477,7 +6477,13 @@ async fn test_step_provider_start_transport_recovers_before_first_step() {
     let provider =
         StepProvider::new(&server.url, reqwest::Client::new()).with_retry(RetryConfig {
             max_retries: 3,
-            timeout_ms: 20,
+            // Per-request budget for the /step round trip (the start endpoint
+            // budgets itself from `effective_timeout`). Keep enough headroom
+            // that the recovery attempt's response BODY read completes on a
+            // loaded machine: a body read that trips the timeout degrades to
+            // an empty payload, routes the flow into the error prompt branch,
+            // and this harness never feeds `audio_complete` for it.
+            timeout_ms: 300,
             retry_delay_ms: 1,
             fallback_action: None,
         });
