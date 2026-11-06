@@ -10,10 +10,11 @@
 //!   unregister failed or that never terminated) stops being refreshed and is
 //!   reclaimed by the sweeper instead of being kept alive forever.
 //! - SWEA sweeper deletes stale rows once per minute in bounded batches: ids
-//!   are selected with a non-locking read, then deleted by primary key with
-//!   deadlock retry (a plain range `DELETE` takes next-key/gap locks under
-//!   REPEATABLE READ and deadlocks against concurrent `register` upserts and
-//!   other nodes' sweepers).  The age-based cut `started_at < now - max_age`
+//!   are selected with a non-locking read, then deleted in short transactions
+//!   with deadlock retry. MySQL cleanup uses the existing primary key at READ
+//!   COMMITTED, avoiding range/gap locks against concurrent writers. The age
+//!   cut advances through the primary key without repeatedly sorting the table.
+//!   The age-based cut `started_at < now - max_age`
 //!   bounds any possible ghost regardless of heartbeat freshness.
 
 use std::sync::Arc;
@@ -24,8 +25,9 @@ use async_trait::async_trait;
 use sea_orm::PaginatorTrait;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
-    Set,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, ExprTrait,
+    IdenStatic, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    TransactionTrait,
 };
 use tokio::task::JoinHandle;
 
@@ -48,6 +50,11 @@ const SWEEP_MAX_BATCHES: usize = 200;
 /// SQLSTATE 40001, Postgres 40P01). The victim is rolled back instantly, so
 /// retrying the same chunk is always safe.
 const SWEEP_DEADLOCK_RETRIES: u32 = 3;
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_SWEEP_DELETE: std::cell::RefCell<Option<futures::future::BoxFuture<'static, ()>>>;
+}
 
 /// Classify a deadlocked statement: the transaction was chosen as victim and
 /// rolled back immediately — the statement can simply be retried. Matches
@@ -146,15 +153,9 @@ impl DbSessionRegistry {
 
     /// Delete rows whose `column` is older than `cutoff`, in bounded batches.
     ///
-    /// A plain `DELETE WHERE column < cutoff` scans the index range and, under
-    /// REPEATABLE READ, takes next-key/gap locks across it — which deadlocks
-    /// against concurrent `register` upserts (insert-intention locks into the
-    /// locked gap) and against other nodes' sweepers scanning the same range.
-    /// Instead, select one batch of ids with a non-locking read, then delete
-    /// them by primary key (record locks only), re-checking staleness inside
-    /// the DELETE so a row refreshed between select and delete survives. A
-    /// chunk that still loses a deadlock race retries with backoff instead of
-    /// failing — and reporting a `db_write_failed` event for — the sweep.
+    /// The unindexed age cut walks the existing primary key once per tick.
+    /// The freshness cut retains its indexed timestamp lookup. Selection is
+    /// non-locking; deletion rechecks staleness so a new heartbeat wins safely.
     async fn sweep_stale(
         &self,
         column: Column,
@@ -162,12 +163,22 @@ impl DbSessionRegistry {
         batch_size: usize,
         max_batches: usize,
     ) -> Result<(), sea_orm::DbErr> {
+        let by_age = matches!(column, Column::StartedAt);
+        let mut after: Option<String> = None;
         for _ in 0..max_batches {
-            let ids: Vec<String> = Entity::find()
+            let mut query = Entity::find()
                 .select_only()
                 .column(Column::CallId)
-                .filter(column.lt(cutoff))
-                .order_by_asc(column)
+                .filter(column.lt(cutoff));
+            if by_age {
+                if let Some(after) = &after {
+                    query = query.filter(Column::CallId.gt(after.clone()));
+                }
+                query = query.order_by_asc(Column::CallId);
+            } else {
+                query = query.order_by_asc(column);
+            }
+            let mut ids: Vec<String> = query
                 .limit(batch_size as u64)
                 .into_tuple::<String>()
                 .all(&self.db)
@@ -175,13 +186,20 @@ impl DbSessionRegistry {
             if ids.is_empty() {
                 return Ok(());
             }
+            if by_age {
+                after = ids.last().cloned();
+            }
+            // Keep write acquisition ordered independently of timestamp order.
+            ids.sort_unstable();
+            #[cfg(test)]
+            if let Ok(Some(before_delete)) =
+                BEFORE_SWEEP_DELETE.try_with(|hook| hook.borrow_mut().take())
+            {
+                before_delete.await;
+            }
             let mut attempt = 0u32;
             loop {
-                let result = Entity::delete_many()
-                    .filter(Column::CallId.is_in(ids.clone()))
-                    .filter(column.lt(cutoff))
-                    .exec(&self.db)
-                    .await;
+                let result = self.delete_stale_batch(column, cutoff, &ids).await;
                 match result {
                     Ok(_) => break,
                     Err(error) if attempt < SWEEP_DEADLOCK_RETRIES && is_deadlock(&error) => {
@@ -204,6 +222,46 @@ impl DbSessionRegistry {
             }
         }
         Ok(())
+    }
+
+    async fn delete_stale_batch(
+        &self,
+        column: Column,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        ids: &[String],
+    ) -> Result<(), sea_orm::DbErr> {
+        if self.db.get_database_backend() != DbBackend::MySql {
+            Entity::delete_many()
+                .filter(Column::CallId.is_in(ids.iter().cloned()))
+                .filter(column.lt(cutoff))
+                .exec(&self.db)
+                .await?;
+            return Ok(());
+        }
+
+        // IN alone may still choose the timestamp index and lock fresh rows.
+        // PRIMARY already exists on deployed schemas. READ COMMITTED also
+        // avoids gap locks for IDs another sweeper deleted after selection.
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let mut values: Vec<sea_orm::Value> = ids.iter().cloned().map(Into::into).collect();
+        values.push(cutoff.into());
+        let statement = Statement::from_sql_and_values(
+            DbBackend::MySql,
+            format!(
+                "DELETE `cluster_sessions` FROM `cluster_sessions` FORCE INDEX (`PRIMARY`) \
+                 WHERE `call_id` IN ({placeholders}) AND `{}` < ?",
+                column.as_str()
+            ),
+            values,
+        );
+        // Only this cleanup transaction changes isolation; pool/session defaults
+        // and all business writers keep their existing behavior.
+        let transaction = self
+            .db
+            .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+            .await?;
+        transaction.execute_raw(statement).await?;
+        transaction.commit().await
     }
 }
 
@@ -733,6 +791,229 @@ mod tests {
             );
         }
         assert!(r.lookup("fresh").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_heartbeat_and_handles_peer_deleted_candidates() {
+        use futures::FutureExt;
+        let (registry, db) = reg_short().await;
+        for id in ["refreshed", "peer-deleted", "expired"] {
+            registry.register(&info(id, "node-1")).await.unwrap();
+            backdate_row(&db, id, 120, 120).await;
+        }
+        let peer = registry.clone();
+        let between_read_and_delete = async move {
+            peer.heartbeat_node("node-1", &["refreshed".into()])
+                .await
+                .unwrap();
+            peer.unregister(&info("peer-deleted", "node-1"))
+                .await
+                .unwrap();
+        }
+        .boxed();
+        BEFORE_SWEEP_DELETE
+            .scope(
+                std::cell::RefCell::new(Some(between_read_and_delete)),
+                registry.sweep(),
+            )
+            .await
+            .unwrap();
+        assert!(registry.lookup("refreshed").await.is_some());
+        assert!(registry.lookup("peer-deleted").await.is_none());
+        assert!(registry.lookup("expired").await.is_none());
+    }
+
+    // These fixtures create only uniquely named test databases on the supplied
+    // server. The configured URL is a server URL without a business database.
+    async fn mysql_sweep_fixture() -> (DatabaseConnection, DatabaseConnection, String) {
+        use sea_orm::ConnectionTrait;
+        let base = std::env::var("RUSTPBX_TEST_MYSQL_URL")
+            .expect("RUSTPBX_TEST_MYSQL_URL must point at an isolated MySQL server");
+        let name = format!("rustpbx_sweep_test_{}", uuid::Uuid::new_v4().simple());
+        let admin = sea_orm::Database::connect(&base).await.unwrap();
+        admin
+            .execute_unprepared(&format!("CREATE DATABASE `{name}`"))
+            .await
+            .unwrap();
+        let mut options =
+            sea_orm::ConnectOptions::new(format!("{}/{name}", base.trim_end_matches('/')));
+        // A single pool connection makes session handler counters meaningful.
+        options.max_connections(1).min_connections(1);
+        let db = sea_orm::Database::connect(options).await.unwrap();
+        crate::models::cluster_session::Migration
+            .up(&SchemaManager::new(&db))
+            .await
+            .unwrap();
+        db.execute_unprepared("SET SESSION innodb_lock_wait_timeout = 1")
+            .await
+            .unwrap();
+        db.execute_unprepared("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .unwrap();
+        (admin, db, name)
+    }
+
+    async fn seed_mysql_sweep_rows(
+        db: &DatabaseConnection,
+        fresh: usize,
+        expired: usize,
+        by_age: bool,
+    ) {
+        use chrono::Timelike;
+        use sea_orm::ConnectionTrait;
+        let now = chrono::Utc::now().with_nanosecond(0).unwrap();
+        let old = now - chrono::Duration::hours(13);
+        for start in (0..fresh + expired).step_by(500) {
+            Entity::insert_many((start..(start + 500).min(fresh + expired)).map(|i| {
+                let stale = i >= fresh;
+                SessionActiveModel {
+                    call_id: Set(format!("{}-{i:05}", if stale { "stale" } else { "fresh" })),
+                    node_id: Set("node-1".into()),
+                    caller: Set("1001".into()),
+                    callee: Set("1002".into()),
+                    direction: Set("inbound".into()),
+                    target_session_id: Set(None),
+                    started_at: Set(if stale && by_age { old } else { now }),
+                    last_updated_at: Set(if stale && !by_age { old } else { now }),
+                }
+            }))
+            .exec_without_returning(db)
+            .await
+            .unwrap();
+        }
+        db.execute_unprepared("ANALYZE TABLE cluster_sessions")
+            .await
+            .unwrap();
+    }
+
+    async fn mysql_handler_reads(db: &DatabaseConnection) -> u64 {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        db.query_all_raw(Statement::from_string(
+            DbBackend::MySql,
+            "SHOW SESSION STATUS WHERE Variable_name IN \
+             ('Handler_read_rnd_next','Handler_read_next','Handler_read_first','Handler_read_key')",
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            row.try_get::<String>("", "Value")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        })
+        .sum()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_TEST_MYSQL_URL pointing at an isolated MySQL server"]
+    async fn mysql_sweep_does_not_lock_unselected_fresh_rows() {
+        use futures::FutureExt;
+        use sea_orm::{ConnectionTrait, QuerySelect, TransactionTrait};
+        let (admin, db, name) = mysql_sweep_fixture().await;
+        seed_mysql_sweep_rows(&db, 10_000, 500, false).await;
+        let registry = DbSessionRegistry::new(
+            db.clone(),
+            Duration::from_secs(3600),
+            Duration::from_secs(43200),
+        );
+        registry.sweeper_cancel.cancel();
+        let base = std::env::var("RUSTPBX_TEST_MYSQL_URL").unwrap();
+        let peer_db = sea_orm::Database::connect(format!("{}/{name}", base.trim_end_matches('/')))
+            .await
+            .unwrap();
+        let holder = peer_db.begin().await.unwrap();
+        Entity::find_by_id("fresh-00000")
+            .lock_exclusive()
+            .one(&holder)
+            .await
+            .unwrap()
+            .unwrap();
+        // A busy writer of a fresh record outside the candidate IDs must not
+        // delay cleanup. The old range-index DELETE times out on this row.
+        let peer = DbSessionRegistry::new(
+            peer_db.clone(),
+            Duration::from_secs(3600),
+            Duration::from_secs(43200),
+        );
+        peer.sweeper_cancel.cancel();
+        let between_read_and_delete = async move {
+            peer.unregister(&info("stale-10000", "node-1"))
+                .await
+                .unwrap();
+            peer.heartbeat_node("node-1", &["stale-10001".into()])
+                .await
+                .unwrap();
+        }
+        .boxed();
+        let result = BEFORE_SWEEP_DELETE
+            .scope(
+                std::cell::RefCell::new(Some(between_read_and_delete)),
+                registry.sweep(),
+            )
+            .await;
+        holder.rollback().await.unwrap();
+        let fresh_survived = registry.lookup("fresh-00000").await.is_some();
+        let heartbeat_survived = registry.lookup("stale-10001").await.is_some();
+        let remaining = registry.active_count().await;
+        let isolation: String = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::MySql,
+                "SELECT @@session.transaction_isolation AS isolation_level",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "isolation_level")
+            .unwrap();
+        drop(registry);
+        db.close().await.unwrap();
+        peer_db.close().await.unwrap();
+        admin
+            .execute_unprepared(&format!("DROP DATABASE `{name}`"))
+            .await
+            .unwrap();
+        assert!(
+            result.is_ok(),
+            "cleanup locked an unselected fresh row: {result:?}"
+        );
+        assert!(fresh_survived);
+        assert!(heartbeat_survived);
+        assert_eq!(remaining, 10_001);
+        assert_eq!(
+            isolation, "REPEATABLE-READ",
+            "cleanup must not change pool defaults"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RUSTPBX_TEST_MYSQL_URL pointing at an isolated MySQL server"]
+    async fn mysql_age_sweep_reads_table_once_across_batches() {
+        use sea_orm::ConnectionTrait;
+        let (admin, db, name) = mysql_sweep_fixture().await;
+        seed_mysql_sweep_rows(&db, 10_000, 1_000, true).await;
+        let registry = DbSessionRegistry::new(
+            db.clone(),
+            Duration::from_secs(3600),
+            Duration::from_secs(43200),
+        );
+        registry.sweeper_cancel.cancel();
+        let before = mysql_handler_reads(&db).await;
+        registry.sweep().await.unwrap();
+        let reads = mysql_handler_reads(&db).await - before;
+        let remaining = registry.active_count().await;
+        drop(registry);
+        db.close().await.unwrap();
+        admin
+            .execute_unprepared(&format!("DROP DATABASE `{name}`"))
+            .await
+            .unwrap();
+        eprintln!("MySQL age sweep: 11000 rows, 1000 expired, {reads} handler reads");
+        assert_eq!(remaining, 10_000);
+        assert!(
+            reads < 24_000,
+            "age cleanup repeatedly scanned the fresh prefix: {reads}"
+        );
     }
 
     #[test]
