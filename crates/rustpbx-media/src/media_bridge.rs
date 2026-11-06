@@ -260,7 +260,6 @@ impl MediaBridge {
     /// Monitor RTP activity for each selected peer and forward compatibility
     /// DTMF events. The transport counter advances before fast-path forwarding.
     fn wire_leg(&mut self, side: LegSide, leg: &Leg) {
-        leg.set_packet_diagnostic_bridge(Arc::downgrade(&self.legs_shared));
         // Cancel any prior monitor task for this side first (e.g. after a
         // transfer / REFER replaced the leg) so old tasks don't leak and keep
         // the old PeerConnection / IngressTap / RTP timeout state alive.
@@ -1331,7 +1330,8 @@ async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
                                 })
                             });
                     }
-                    Err(error) => warn!(leg_id = %leg.id(), %error, "failed to sample inbound media quality"),
+                    Err(error) => warn!(session_id = leg.pc().config().label.as_deref(), leg_id = %leg.id(),
+                        direction = "peer_to_pbx", %error, "failed to sample inbound media quality"),
                 }
             }
         }

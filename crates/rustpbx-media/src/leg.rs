@@ -359,7 +359,8 @@ impl LegInner {
         let pc = {
             let handle = tokio::runtime::Handle::try_current();
             let _guard = handle.as_ref().ok().map(|h| h.enter());
-            PeerConnection::new(rtc_config)
+            let span = tracing::info_span!("media_leg", session_id = rtc_config.label.as_deref(), leg_id = %label);
+            span.in_scope(|| PeerConnection::new(rtc_config))
         };
 
         // Egress audio track: create the push/source pair and add the track to
@@ -563,6 +564,7 @@ impl LegInner {
         if cfg.ingress_stall_warn_secs > 0 {
             let handle = crate::ingress_stall::spawn_ingress_watch(
                 leg.id.to_string(),
+                cfg.call_id.clone(),
                 leg.pc.clone(),
                 Arc::clone(&leg.tap),
                 Arc::clone(&leg.rtcp_stats),
@@ -1238,8 +1240,7 @@ impl LegInner {
     /// tokio::spawn).
     pub fn stop(&self) {
         if let Some(state) = self.packet_diagnostics.lock().as_mut() {
-            state.sample(self, true);
-            if let Some(task) = state.task.take() { task.abort(); }
+            state.finish(self);
         }
         self.disarm_rtp_timeout();
         self.egress.stop();
