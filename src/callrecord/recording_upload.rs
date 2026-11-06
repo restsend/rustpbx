@@ -12,6 +12,8 @@ use object_store::{Attribute, Attributes, PutOptions};
 use serde_json::json;
 use tracing::{info, warn};
 
+use super::recording_artifacts::upload_success_marker_path;
+
 use crate::{
     call_errors::{ErrSeverity, TraceEvent, TraceKind, append_trace},
     callrecord::{
@@ -1011,7 +1013,7 @@ impl RecordingUploadManager {
                 )],
             )
             .await;
-            settle_uploaded_local(policy.effective_keep_local_days(), &pending.path).await;
+            settle_uploaded_local(policy.effective_keep_local_days(), &pending.path, call_id).await;
         }
     }
 }
@@ -1025,32 +1027,58 @@ pub struct RecordingRetryWorker {
     db: Option<sea_orm::DatabaseConnection>,
 }
 
-/// Post-upload local file settlement. `[recording].keep_local_days > 0`
-/// defers deletion to the retry worker's retention sweep; `0` removes the
-/// file immediately (historical behaviour). The failure marker is dropped
-/// either way — the upload succeeded, so a stale marker would only block
-/// later sweeps.
-async fn settle_uploaded_local(keep_local_days: u32, path: &Path) {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UploadedLocalReceipt {
+    uploaded_at: chrono::DateTime<chrono::Utc>,
+    call_id: Option<String>,
+}
+
+/// Only a successful upload can authorize retention cleanup. Old or unqueued
+/// WAVs without a receipt must remain available for recovery.
+async fn settle_uploaded_local(keep_local_days: u32, path: &Path, call_id: Option<&str>) {
+    let receipt_path = upload_success_marker_path(path);
+    if keep_local_days > 0 {
+        let receipt = UploadedLocalReceipt {
+            uploaded_at: chrono::Utc::now(),
+            call_id: call_id.map(str::to_owned),
+        };
+        let data = match serde_json::to_vec(&receipt) {
+            Ok(data) => data,
+            Err(error) => {
+                warn!(call_id, path = %path.display(), %error, "recording retention receipt serialization failed; local file retained");
+                return;
+            }
+        };
+        if let Err(error) = tokio::fs::write(&receipt_path, data).await {
+            warn!(call_id, path = %path.display(), %error, "recording retention receipt write failed; local file retained");
+            return;
+        }
+    }
     let marker = crate::callrecord::upload_failed_marker_path(Path::new(path));
-    let _ = tokio::fs::remove_file(marker).await;
+    if let Err(error) = tokio::fs::remove_file(marker).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(call_id, path = %path.display(), %error, "failed to clear recording upload failure marker");
+    }
     if keep_local_days > 0 {
         return;
     }
     if let Err(err) = tokio::fs::remove_file(path).await {
         warn!(
+            call_id,
             path = %path.display(),
             %err,
             "failed to remove local recording after upload"
         );
+    } else if let Err(error) = tokio::fs::remove_file(receipt_path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(call_id, path = %path.display(), %error, "failed to clear recording upload receipt");
     }
 }
 
-/// Retention sweep for `[recording].keep_local_days`: remove local WAV
-/// files older than `cutoff` that carry no `.upload_failed`
-/// marker (marker = still pending retry — never swept). Files that were
-/// never attempted within the window would only exist if the upload
-/// pipeline died entirely; the failure-marker check plus the retry
-/// worker's own failure markers keep that edge observable.
+/// Retention starts at confirmed upload success, independently of WAV mtime.
+/// Pending retries and files without a readable success receipt are never swept.
 async fn sweep_uploaded_locals(root: &Path, cutoff: std::time::Duration) -> Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1074,32 +1102,47 @@ async fn sweep_uploaded_locals(root: &Path, cutoff: std::time::Duration) -> Resu
             if path.extension().and_then(|e| e.to_str()) != Some("wav") {
                 continue;
             }
-            let Ok(meta) = entry.metadata().await else {
+            let marker = crate::callrecord::upload_failed_marker_path(&path);
+            if marker.exists() {
                 continue;
+            }
+            let receipt_path = upload_success_marker_path(&path);
+            let data = match tokio::fs::read(&receipt_path).await {
+                Ok(data) => data,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    warn!(path = %receipt_path.display(), %error, "recording retention receipt unreadable; local file retained");
+                    continue;
+                }
             };
-            let Ok(modified) = meta.modified() else {
-                continue;
+            let receipt: UploadedLocalReceipt = match serde_json::from_slice(&data) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    warn!(path = %receipt_path.display(), %error, "recording retention receipt invalid; local file retained");
+                    continue;
+                }
             };
-            let Ok(age) = modified.elapsed() else {
+            let Ok(age) = (chrono::Utc::now() - receipt.uploaded_at).to_std() else {
                 continue;
             };
             if age < cutoff {
                 continue;
             }
-            let marker = crate::callrecord::upload_failed_marker_path(&path);
-            if marker.exists() {
-                continue;
-            }
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {
                     info!(
+                        call_id = receipt.call_id.as_deref(),
                         path = %path.display(),
                         cutoff_secs = cutoff.as_secs(),
                         "recording local retention sweep removed uploaded file"
                     );
+                    if let Err(error) = tokio::fs::remove_file(receipt_path).await {
+                        warn!(call_id = receipt.call_id.as_deref(), path = %path.display(), %error, "failed to clear recording upload receipt");
+                    }
                 }
                 Err(err) => {
                     warn!(
+                        call_id = receipt.call_id.as_deref(),
                         path = %path.display(),
                         %err,
                         "recording local retention sweep failed to remove file"
@@ -1260,7 +1303,12 @@ impl RecordingRetryWorker {
                 if latency > policy.effective_upload_sla_secs() as f64 {
                     crate::metrics::recording::upload_sla_breach(dest);
                 }
-                settle_uploaded_local(policy.effective_keep_local_days(), &source).await;
+                settle_uploaded_local(
+                    policy.effective_keep_local_days(),
+                    &source,
+                    marker.call_id.as_deref(),
+                )
+                .await;
                 let _ = tokio::fs::remove_file(marker_path).await;
                 info!(
                     path = %source.display(),
@@ -2138,6 +2186,7 @@ impl CallRecordHook for RecordingUploadHook {
                                 settle_uploaded_local(
                                     policy.effective_keep_local_days(),
                                     std::path::Path::new(path.as_str()),
+                                    Some(&record.call_id),
                                 )
                                 .await;
                                 segment_summaries.push(json!({
@@ -2953,34 +3002,54 @@ mod tests {
         assert!(parsed.get("error").is_some());
     }
 
-    /// §3.2.5 归档保留（keep_local_days）：清扫只删「超过保留窗且无失败
-    /// 标记」的 WAV——带标记（重试中）永不删、非 WAV 不删；cutoff 反向
-    /// （窗口极长）时什么都不删。
+    /// Retention requires successful upload evidence, not merely no failure marker.
     #[tokio::test]
-    async fn retention_sweep_removes_only_uploaded_old_wav_files() {
+    async fn retention_sweep_removes_only_uploaded_old_wav_files_vendor_review_regression() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sub = dir.path().join("20261101");
         tokio::fs::create_dir_all(&sub).await.expect("mkdir");
-        tokio::fs::write(sub.join("old.wav"), b"x").await.expect("write");
-        tokio::fs::write(sub.join("pending.wav"), b"x").await.expect("write");
-        tokio::fs::write(dir.path().join("notes.txt"), b"x").await.expect("write");
+        tokio::fs::write(sub.join("old.wav"), b"x")
+            .await
+            .expect("write");
+        tokio::fs::write(sub.join("pending.wav"), b"x")
+            .await
+            .expect("write");
+        tokio::fs::write(sub.join("unqueued.wav"), b"x")
+            .await
+            .expect("write");
+        tokio::fs::write(dir.path().join("notes.txt"), b"x")
+            .await
+            .expect("write");
+        settle_uploaded_local(10, &sub.join("old.wav"), Some("retention-call")).await;
         let pending_marker = crate::callrecord::upload_failed_marker_path(&sub.join("pending.wav"));
-        tokio::fs::write(&pending_marker, b"{}").await.expect("write marker");
+        tokio::fs::write(&pending_marker, b"{}")
+            .await
+            .expect("write marker");
 
-        // cutoff = 0：一切超过保留窗 → 无标记的 WAV 被清扫，带标记/非 WAV 保留。
+        // A zero window expires confirmed uploads, but cannot authorize unknown files.
         sweep_uploaded_locals(dir.path(), std::time::Duration::from_secs(0))
             .await
             .expect("sweep");
         assert!(!sub.join("old.wav").exists(), "old uploaded wav swept");
         assert!(
+            sub.join("unqueued.wav").exists(),
+            "unconfirmed upload must retain its only copy"
+        );
+        assert!(
             sub.join("pending.wav").exists(),
             "pending (failure marker present) must never be swept"
         );
-        assert!(dir.path().join("notes.txt").exists(), "non-wav files untouched");
+        assert!(
+            dir.path().join("notes.txt").exists(),
+            "non-wav files untouched"
+        );
         assert!(pending_marker.exists(), "pending marker kept with its file");
 
         // 反向：窗口极长（10 天）→ 什么都不删。
-        tokio::fs::write(sub.join("old2.wav"), b"x").await.expect("write");
+        tokio::fs::write(sub.join("old2.wav"), b"x")
+            .await
+            .expect("write");
+        settle_uploaded_local(10, &sub.join("old2.wav"), Some("retention-call-2")).await;
         sweep_uploaded_locals(dir.path(), std::time::Duration::from_secs(86_400 * 10))
             .await
             .expect("sweep");
@@ -2988,7 +3057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_worker_clears_marker_after_http_success() {
+    async fn retry_worker_clears_marker_after_http_success_vendor_review_regression() {
         use axum::{Router, body::Bytes, routing::post};
         use std::net::SocketAddr;
         use std::sync::{
@@ -2996,66 +3065,80 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         };
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("retry.wav");
-        tokio::fs::write(&path, b"wav-bytes")
-            .await
-            .expect("write recording");
-        let marker = crate::callrecord::upload_failed_marker_path(&path);
-        let body = serde_json::json!({
-            "time": chrono::Utc::now().to_rfc3339(),
-            "address": "http://placeholder",
-            "duration_ms": 1,
-            "error": "previous failure",
-            "attempts": 1,
-            "call_id": "retry-call",
-        });
-        tokio::fs::write(&marker, serde_json::to_vec_pretty(&body).unwrap())
-            .await
-            .expect("write marker");
+        for keep_local_days in [0, 10] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("retry.wav");
+            tokio::fs::write(&path, b"wav-bytes")
+                .await
+                .expect("write recording");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 86_400),
+                ))
+                .unwrap();
+            let marker = crate::callrecord::upload_failed_marker_path(&path);
+            let body = serde_json::json!({
+                "time": chrono::Utc::now().to_rfc3339(),
+                "address": "http://placeholder",
+                "duration_ms": 1,
+                "error": "previous failure",
+                "attempts": 1,
+                "call_id": "retry-call",
+            });
+            tokio::fs::write(&marker, serde_json::to_vec_pretty(&body).unwrap())
+                .await
+                .expect("write marker");
 
-        let hit = Arc::new(AtomicBool::new(false));
-        let hit_flag = hit.clone();
-        let app = Router::new().route(
-            "/recording",
-            post(move |_body: Bytes| {
-                let hit_flag = hit_flag.clone();
-                async move {
-                    hit_flag.store(true, Ordering::SeqCst);
-                    axum::http::StatusCode::OK
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr: SocketAddr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.ok();
-        });
+            let hit = Arc::new(AtomicBool::new(false));
+            let hit_flag = hit.clone();
+            let app = Router::new().route(
+                "/recording",
+                post(move |_body: Bytes| {
+                    let hit_flag = hit_flag.clone();
+                    async move {
+                        hit_flag.store(true, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr: SocketAddr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
 
-        let policy = RecordingPolicy {
-            enabled: Some(true),
-            recording_type: Some(RecordingType::Http),
-            path: Some(dir.path().to_string_lossy().into_owned()),
-            url: Some(format!("http://{addr}/recording")),
-            retry_interval_secs: Some(60),
-            retry_max_attempts: Some(5),
-            upload_sla_secs: Some(600),
-            ..Default::default()
-        };
-        let worker =
-            RecordingRetryWorker::with_runtime(Arc::new(RecordingUploadRuntime::for_policy(
-                Some(policy),
-            )));
-        worker
-            .scan_once(worker.runtime.resolve_targets().ok().flatten())
-            .await
-            .expect("scan");
+            let policy = RecordingPolicy {
+                enabled: Some(true),
+                recording_type: Some(RecordingType::Http),
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                url: Some(format!("http://{addr}/recording")),
+                retry_interval_secs: Some(60),
+                retry_max_attempts: Some(5),
+                upload_sla_secs: Some(600),
+                keep_local_days: Some(keep_local_days),
+                ..Default::default()
+            };
+            let worker = RecordingRetryWorker::with_runtime(Arc::new(
+                RecordingUploadRuntime::for_policy(Some(policy)),
+            ));
+            worker
+                .scan_once(worker.runtime.resolve_targets().ok().flatten())
+                .await
+                .expect("scan");
 
-        assert!(hit.load(Ordering::SeqCst), "upload endpoint hit");
-        assert!(!path.exists(), "local file removed after retry success");
-        assert!(!marker.exists(), "marker cleared after retry success");
+            assert!(hit.load(Ordering::SeqCst), "upload endpoint hit");
+            assert_eq!(
+                path.exists(),
+                keep_local_days > 0,
+                "retention starts at successful upload, not file modification"
+            );
+            assert!(!marker.exists(), "marker cleared after retry success");
+        }
     }
 
     #[test]
