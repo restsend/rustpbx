@@ -994,34 +994,26 @@ impl SipServerBuilder {
         locator.set_event_sender(Some(locator_events.clone()));
         locator.set_event_lock(Some(locator_event_lock.clone()));
 
-        let locator_local_addrs = endpoint_local_addrs;
+        let locator_local_addrs = endpoint_local_addrs.clone();
         let cluster_enabled = !self.cluster_peers.is_empty();
-
-        endpoint_builder = endpoint_builder
-            .with_target_locator(DialogTargetLocator::new(
-                locator.clone(),
-                locator_local_addrs,
-                cluster_enabled,
-            ))
-            .with_transport_inspector(TransportInspectorLocator::new(
-                locator.clone(),
-                locator_events.clone(),
-                locator_event_lock.clone(),
-            ));
-
-        let endpoint = endpoint_builder.build();
 
         // Resolve this node's cluster-internal address from `[cluster].peers` by
         // matching a peer `addr:sip_port` entry against the local endpoint
         // listeners. The matching peer entry IS this node; its address is what
         // other peers use to reach us, so it is stamped as `home_proxy` on
         // registrations instead of a possibly-NATed/external endpoint address.
+        // Resolved BEFORE the target locator exists: the locator's local-home
+        // decision must compare against this same deterministic identity —
+        // with a wildcard listener (docker / multi-homed host) the bare
+        // listener-address comparison misreads the node's OWN registrations as
+        // remote and loops in-dialog requests back to the node's own listener
+        // ("dialog not found" on its own call layer — 2026-11-06 PRD
+        // consult_state relay regression).
         let cluster_self_addr = self.cluster_config.as_ref().and_then(|cc| {
             if cc.peers.is_empty() {
                 return None;
             }
-            let mut local_addr_strs: Vec<String> = endpoint
-                .get_addrs()
+            let mut local_addr_strs: Vec<String> = locator_local_addrs
                 .iter()
                 .map(|a| a.addr.to_string())
                 .collect();
@@ -1041,6 +1033,21 @@ impl SipServerBuilder {
                 }
             }
         });
+
+        endpoint_builder = endpoint_builder
+            .with_target_locator(DialogTargetLocator::new(
+                locator.clone(),
+                locator_local_addrs,
+                cluster_enabled,
+                cluster_self_addr.clone(),
+            ))
+            .with_transport_inspector(TransportInspectorLocator::new(
+                locator.clone(),
+                locator_events.clone(),
+                locator_event_lock.clone(),
+            ));
+
+        let endpoint = endpoint_builder.build();
 
         let mut call_router = self.call_router;
         if call_router.is_none()

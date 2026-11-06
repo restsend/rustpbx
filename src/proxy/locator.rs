@@ -415,6 +415,15 @@ pub struct DialogTargetLocator {
     locator: Arc<Box<dyn Locator>>,
     local_addrs: Vec<SipAddr>,
     cluster_enabled: bool,
+    /// This node's deterministic cluster-internal identity, resolved from
+    /// `[cluster].peers` against the listeners AND the host interfaces
+    /// (server.rs `resolve_cluster_self_addr`). The registrar stamps exactly
+    /// this value as `home_proxy`, so the local-home decision must compare
+    /// against it — a wildcard listener (`0.0.0.0`, docker) never enumerates
+    /// the interface IPs and the `local_addrs` fallback would misread the
+    /// node's OWN registrations as remote, looping in-dialog requests to the
+    /// node's own listener (2026-11-06 PRD consult_state relay regression).
+    cluster_self_addr: Option<SipAddr>,
 }
 
 impl DialogTargetLocator {
@@ -423,15 +432,27 @@ impl DialogTargetLocator {
         locator: Arc<Box<dyn Locator>>,
         local_addrs: Vec<SipAddr>,
         cluster_enabled: bool,
+        cluster_self_addr: Option<SipAddr>,
     ) -> Box<dyn TargetLocator> {
         Box::new(Self {
             locator,
             local_addrs,
             cluster_enabled,
+            cluster_self_addr,
         }) as Box<dyn TargetLocator>
     }
 
     fn is_local_home_proxy(&self, home_proxy: &SipAddr) -> bool {
+        // Deterministic identity wins: home_proxy is stamped from
+        // cluster_self_addr at REGISTER time, so exact equality is the
+        // authoritative local-home test. The local_addrs fallback only
+        // applies when the cluster identity is unresolved — and a wildcard
+        // listener never enumerates interface IPs, which is exactly the
+        // multi-homed/docker shape that misread the node's own registrations
+        // as remote and looped in-dialog sends to its own listener.
+        if let Some(self_addr) = &self.cluster_self_addr {
+            return self_addr.addr.to_string() == home_proxy.addr.to_string();
+        }
         self.local_addrs
             .iter()
             .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
@@ -1534,7 +1555,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true, None);
         let result = target_locator.locate(&target_uri).await.unwrap();
         assert_eq!(
             result, home_proxy,
@@ -1575,7 +1596,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&gruu_uri).await.unwrap();
 
         assert_eq!(result, destination);
@@ -1633,7 +1654,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         // The BYE Request-URI is the .invalid contact
         let result = target_locator.locate(&contact_uri).await.unwrap();
@@ -1641,6 +1662,69 @@ mod tests {
             result, home_proxy,
             "DialogTargetLocator must route .invalid contact to remote home_proxy in cluster, \
              not to the remote node's private WS destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_local_home_proxy_with_wildcard_listener_returns_destination() {
+        // 2026-11-06 PRD regression (consult_state relay self-loop): a
+        // multi-homed host runs the node with a wildcard listener
+        // (`0.0.0.0:35061`) while the cluster identity / home_proxy is the
+        // interface form (`192.168.3.51:35061`). The weak local_addrs
+        // comparison read the node's OWN registration as REMOTE and handed
+        // back home_proxy — the node's own listener — so every relayed
+        // in-dialog UPDATE looped to itself and died with `dialog not found`
+        // on its own call layer; the consulted phone never received the
+        // merge marker. With the deterministic cluster identity passed in,
+        // the local decision wins and the registered destination is returned.
+        let locator = MemoryLocator::new();
+        let registered_aor: rsipstack::sip::Uri = "sip:1002@192.168.3.9".try_into().unwrap();
+        let contact: rsipstack::sip::Uri = "sip:1002@192.168.3.51:42151".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.3.51:42151").unwrap(),
+        };
+        let cluster_self_addr = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.3.51:35061").unwrap(),
+        };
+
+        locator
+            .register(
+                "1002",
+                Some("192.168.3.9"),
+                Location {
+                    aor: contact.clone(),
+                    expires: 300,
+                    destination: Some(destination.clone()),
+                    home_proxy: Some(cluster_self_addr.clone()),
+                    registered_aor: Some(registered_aor.clone()),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Wildcard listener — the interface IP (192.168.3.51) is NOT in the
+        // list; the cluster identity must decide locality instead.
+        let local_addrs = vec![SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("0.0.0.0:35061").unwrap(),
+        }];
+        let target_locator = DialogTargetLocator::new(
+            Arc::new(Box::new(locator)),
+            local_addrs,
+            true,
+            Some(cluster_self_addr.clone()),
+        );
+
+        // The relayed UPDATE's Request-URI is the registered contact form.
+        let result = target_locator.locate(&contact).await.unwrap();
+        assert_eq!(
+            result, destination,
+            "own registration must resolve to the endpoint destination, not loop via home_proxy"
         );
     }
 
@@ -1684,7 +1768,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         // Lookup by canonical AoR — uri.host (rustpbx.com) != home_proxy.addr.
         let result = target_locator.locate(&canonical_aor).await.unwrap();
@@ -1737,7 +1821,7 @@ mod tests {
             addr: HostWithPort::try_from("10.0.0.6:5060").unwrap(),
         };
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![node_b], true, None);
 
         let result = target_locator.locate(&contact_uri).await.unwrap();
         assert_eq!(
@@ -1779,7 +1863,7 @@ mod tests {
             .unwrap();
 
         let target_locator =
-            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false);
+            DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1820,7 +1904,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -1879,7 +1963,7 @@ mod tests {
             rsipstack::EndpointBuilder::new()
                 .with_cancel_token(cancel.clone())
                 .with_inspector(Box::new(NatInspector::new()))
-                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false))
+                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false, None))
                 .build(),
         );
         let serving = {
@@ -2057,7 +2141,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&dialog_contact).await.unwrap();
 
         assert_eq!(
@@ -2113,7 +2197,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&exact_contact).await.unwrap();
 
         assert_eq!(
@@ -2186,7 +2270,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false, None);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
