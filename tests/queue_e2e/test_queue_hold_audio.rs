@@ -9,7 +9,7 @@
 //! style) so the server's latched return path lands where we listen.
 //!
 //! Anti-fake-e2e: packet counts alone passed even while silence was relayed
-//! (Python-side twin: `regression/suites/queue/test_queue.py::test_queue_hold_music_audio`),
+//! (Python-side twin lives in rustpbx-cc: `regression/suites/queue/test_queue.py::test_queue_hold_music_audio`),
 //! so the captured μ-law payloads are decoded to PCM and analyzed with a
 //! Goertzel filter: the 600 Hz custom tone must dominate, in both the first
 //! and the last second of the capture.

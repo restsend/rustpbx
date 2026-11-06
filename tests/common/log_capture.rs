@@ -27,12 +27,6 @@ impl LogCapture {
         Self::start_filtered_with_timer(filter, ())
     }
 
-    pub(crate) fn start_filtered_timestamped(
-        filter: &str,
-    ) -> (Self, tracing::subscriber::DefaultGuard, tracing::Dispatch) {
-        Self::start_filtered_with_timer(filter, tracing_subscriber::fmt::time::SystemTime)
-    }
-
     fn start_filtered_with_timer<
         T: tracing_subscriber::fmt::time::FormatTime + Send + Sync + 'static,
     >(

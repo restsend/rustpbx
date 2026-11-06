@@ -1,7 +1,7 @@
 //! Audio content analysis for receive-path RTP verification.
 //!
 //! Mirrors the "anti-fake-e2e" philosophy of the Python regression helpers
-//! (`regression/helpers/audio_verifier.py`): assert on the *content* of the
+//! (rustpbx-cc `regression/helpers/audio_verifier.py`): assert on the *content* of the
 //! received media (dominant frequency / loudness), not just packet counts, so
 //! a silent stream can never fake a pass. The Rust-native implementation
 //! works on μ-law (PCMU) RTP payloads captured straight off the wire.

@@ -69,26 +69,20 @@ package-lock.json
 node_modules/
 tests/bench/
 !scripts/run_bench_report.sh
-!scripts/run_full_regression.sh
 todo_lists/
 recordings/
 records/
 e2e-artifacts/
 e2e-screenshots/
 tests/logs/
-regression/artifacts/
-regression/report*
-regression/**/*-snapshots/
 
 # acceptance-plan materials (kept out of the repo per delivery scope)
 e2e_test.md
-regression/reports/PHASE_REPORT_*.md
 
 # Playwright platform-specific visual baselines (machine-local)
 *-snapshots/
 node_modules/
 test-results/
-regression/suites/addons/cc/report/
 /*.html
 scripts/seed_verif_session.py
 scripts/verif_shots.py
