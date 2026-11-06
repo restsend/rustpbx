@@ -1,18 +1,24 @@
-//! E2E regression: hold must not lose recording audio nor break the RTP
+//! E2E regression: hold must keep the recording aligned with the hold-music-only
+//! recording contract (xlsx 表(2) P13 / Q2.A) and must not break the RTP
 //! timeline on a bridged B2BUA call.
 //!
-//! Two production defects are pinned here (both fire when a leg is held on a
+//! Two production behaviors are pinned here (both fire when a leg is held on a
 //! call whose media bridge was active — e.g. the CTI `call.hold` flow):
 //!
-//! 1. **Recording loss during hold.** Tearing down the media bridge stops the
-//!    far party's audio from transiting the caller leg's recording tap, so the
-//!    hold window of the stereo WAV loses that party's voice. Contract after
-//!    the fix: during hold the recorder's B channel switches to the callee
-//!    leg's ingress (the agent mic's original RTP), so both parties' live
-//!    speech stays in the recording for the whole call.
+//! 1. **Hold-window recording contract (Q2.A).** While a leg is held the
+//!    recording keeps only the hold audio, on the held party's own lane:
+//!    the held party's mic drops out and their lane continues with what they
+//!    actually hear (the MOH egress), and every other party's live mic
+//!    capture is switched off — speech during hold is not call content
+//!    (`apply_hold_recording_routes`; enforced by the
+//!    `hold_unhold_flips_recording_capture_routes` unit test). This test
+//!    resolves the built-in default MOH file, so the held party's lane
+//!    carries the hold music while the non-held party's lane stays silent
+//!    during the hold window. Pre/post windows must still carry each party's
+//!    own tone on their usual lane.
 //! 2. **Choppy hold audio.** Switching the held leg's egress from the rewrite
 //!    relay to the paced pipeline used to adopt only the wire RTP *timestamp*,
-//!    not the *sequence number* — hold music went out with a stale sequence on
+//!    not the *sequence number* — hold audio went out with a stale sequence on
 //!    the same SSRC and receivers dropped it as stale retransmissions.
 //!    Contract after the fix: the pipeline continues the relay's sequence
 //!    space across hold and unhold (no backward jumps / big gaps).
@@ -361,7 +367,7 @@ async fn test_hold_keeps_both_parties_in_recording_and_rtp_continuous() -> Resul
     let wav_path = record.recorder[0].path.clone();
     assert!(!wav_path.is_empty());
 
-    // ── Recording content: both parties present in every phase ───────────
+    // ── Recording content per the hold-music-only contract (Q2.A) ─────────
     let (format, channels, rate, data) = parse_wav(&wav_path)?;
     assert_eq!(format, 7, "auto-start WAV must be μ-law (PCMU)");
     assert_eq!(channels, 2, "auto-start recording must be stereo");
@@ -390,18 +396,51 @@ async fn test_hold_keeps_both_parties_in_recording_and_rtp_continuous() -> Resul
         window(&callee_channel, HOLD_WINDOW.0, HOLD_WINDOW.1),
         window(&callee_channel, POST_WINDOW.0, POST_WINDOW.1),
     ];
+    // Pre/post windows: both parties' live call content, each party on their
+    // own lane.
     for (phase, w) in caller_windows.iter().enumerate() {
+        if phase == 1 {
+            continue;
+        }
         let label = format!("caller channel phase {phase} (rms {:.0})", rms(w));
         assert_tone(w, rate, CALLER_TONE_HZ, &label);
     }
     for (phase, w) in callee_windows.iter().enumerate() {
-        let label = if phase == 1 {
-            format!("callee channel DURING HOLD (rms {:.0})", rms(w))
-        } else {
-            format!("callee channel phase {phase} (rms {:.0})", rms(w))
-        };
+        if phase == 1 {
+            continue;
+        }
+        let label = format!("callee channel phase {phase} (rms {:.0})", rms(w));
         assert_tone(w, rate, CALLEE_TONE_HZ, &label);
     }
+    // Hold window (Q2.A): live mics stay out of the recording. The caller is
+    // the non-held party — their mic capture is switched off entirely. The
+    // held callee's own lane carries what they hear: the MOH file (resolved
+    // from the server's config sounds directory).
+    assert!(
+        rms(caller_windows[1]) < RMS_FLOOR,
+        "caller channel DURING HOLD (rms {:.0}) must stay silent: live mics are \
+         excluded from the hold window (Q2.A)",
+        rms(caller_windows[1])
+    );
+    assert!(
+        rms(callee_windows[1]) > RMS_FLOOR,
+        "callee channel DURING HOLD (rms {:.0}) must carry the hold audio the held \
+         party hears (Q2.A)",
+        rms(callee_windows[1])
+    );
+    let (hold_dominant, _) = dominant_frequency(callee_windows[1], rate, &CANDIDATE_HZ);
+    assert!(
+        (hold_dominant - CALLEE_TONE_HZ).abs() > FREQ_TOLERANCE_HZ,
+        "callee channel DURING HOLD carries the callee's own tone \
+         (dominant {hold_dominant:.0} Hz) — live mic leaked into the hold window (Q2.A)"
+    );
+    let (hold_dominant, _) = dominant_frequency(caller_windows[1], rate, &CANDIDATE_HZ);
+    assert!(
+        rms(caller_windows[1]) < RMS_FLOOR
+            || (hold_dominant - CALLER_TONE_HZ).abs() > FREQ_TOLERANCE_HZ,
+        "caller channel DURING HOLD carries the caller's own tone \
+         (dominant {hold_dominant:.0} Hz) — live mic leaked into the hold window (Q2.A)"
+    );
 
     // ── RTP timeline continuity on the held leg's downlink ───────────────
     // The callee receives relayed caller audio (pre/post) and hold music
