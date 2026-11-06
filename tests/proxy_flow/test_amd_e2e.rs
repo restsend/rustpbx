@@ -199,7 +199,7 @@ async fn test_amd_detects_voicemail_on_outbound_callee_leg() -> Result<()> {
 
     let alice = Arc::new(server.create_ua(CALLER).await?);
     // create_ua registers the callee so the outbound INVITE can locate him.
-    let mut bob = server.create_ua(CALLEE).await?;
+    let bob = server.create_ua(CALLEE).await?;
     sleep(Duration::from_millis(300)).await;
 
     // Bob's answer advertises a plain UDP port the test will send RTP from
