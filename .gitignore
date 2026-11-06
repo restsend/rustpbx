@@ -89,3 +89,6 @@ regression/suites/addons/cc/report/
 scripts/seed_verif_session.py
 scripts/verif_shots.py
 Weixin*.png
+
+# Rotated runtime logs
+*.log.*
