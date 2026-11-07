@@ -10,6 +10,7 @@ static SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// 与显式 seed/restore 的用例互斥，避免并行交错读到错误模式）。
 fn lock_settings_serial() -> parking_lot::MutexGuard<'static, ()> {
     SETTINGS_LOCK.lock()
+}
 
 #[tokio::test]
 async fn session_id_peer_dialog_query_does_not_confuse_correlation_with_control() {

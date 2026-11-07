@@ -280,7 +280,6 @@ pub struct LegInner {
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
-    pub(crate) packet_diagnostics: Mutex<Option<crate::packet_diagnostics::LegPacketDiagnostics>>,
 }
 
 /// DTMF sink bookkeeping on the shared analysis tap.
@@ -1463,7 +1462,6 @@ impl LegInner {
         let remote_addr = self.remote_media_addr();
         crate::leg_stats::LegQualityReport {
             side,
-            packet_diagnostics: self.packet_diagnostic_snapshot(),
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
                 leg_id: self.id.to_string(),
                 egress_mode: crate::media_health::MediaEgressMode::PcmPacing,
@@ -1664,9 +1662,6 @@ impl LegInner {
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
-        if let Some(state) = self.packet_diagnostics.lock().as_mut() {
-            state.finish(self);
-        }
         self.disarm_rtp_timeout();
         self.egress.stop();
         // Tear the shared analysis tap down synchronously (Drop cancels its

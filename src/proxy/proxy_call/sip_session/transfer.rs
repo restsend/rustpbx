@@ -1117,7 +1117,8 @@ impl SipSession {
         {
             // This route will not run; release only its policy reservation,
             // leaving the original call's concurrency holds intact.
-            if let Some(crate::config::RouteResult::Forward(_, Some(hints))) = prepared_route.take()
+            if let Some(crate::config::RouteResult::Forward(targets)) = prepared_route.take()
+                && let Some(hints) = targets.first().and_then(|t| t.hints.as_ref())
                 && let Some(limiter) = self.server.frequency_limiter.as_ref()
             {
                 crate::call::policy::PolicyGuard::release_concurrency_holds(
