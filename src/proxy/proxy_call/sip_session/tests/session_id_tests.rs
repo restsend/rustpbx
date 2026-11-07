@@ -64,11 +64,6 @@ async fn session_id_peer_dialog_query_does_not_confuse_correlation_with_control(
     }
 }
 
-/// Settings 全局是进程级的：本模块内有用例改写 `header_mode`（Rfc7989），
-/// 有用例断言 Native 行为——并行交错会让后者读到错误模式（间歇红）。
-/// 本模块的 settings 依赖用例一律在此串行锁下执行。
-static SETTINGS_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[tokio::test]
 async fn vendor_review_regression_statistics_owner_survives_attribution_reset() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
@@ -150,12 +145,6 @@ async fn vendor_review_regression_statistics_owner_survives_attribution_reset() 
             "changing the served agent must not change the session's statistics writer",
         );
     }
-}
-
-fn lock_settings_serial() -> std::sync::MutexGuard<'static, ()> {
-    SETTINGS_TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
 }
 
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {

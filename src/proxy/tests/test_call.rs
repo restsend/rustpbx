@@ -2526,3 +2526,63 @@ async fn live_local_root_id_blocks_adoption() {
         "a live local session with the root id must block adoption"
     );
 }
+
+/// Agent-outbound teardown attribution (0.5.1 line, 25098309 companion): the
+/// call's lifetime token must track the signaling transport's reliability —
+/// WS/WSS flows survive a transport loss (the client reconnects), TCP/TLS
+/// flows die with the connection. Server shutdown cancels in every case.
+#[tokio::test]
+async fn websocket_session_survives_transport_loss_but_stops_with_server() {
+    use crate::proxy::tests::common::{create_test_request, create_transaction};
+    use rsipstack::transport::{SipAddr, channel::ChannelConnection};
+
+    for (transport, cancelled_on_loss) in [
+        (rsipstack::sip::transport::Transport::Ws, false),
+        (rsipstack::sip::transport::Transport::Wss, false),
+        (rsipstack::sip::transport::Transport::Tcp, true),
+        (rsipstack::sip::transport::Transport::Tls, true),
+    ] {
+        let (server, config) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (mut transaction, _) = create_transaction(request).await;
+        let transport_cancel = CancellationToken::new();
+        let (_incoming, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (outgoing, _outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut addr: SipAddr = "127.0.0.1:5060"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into();
+        addr.r#type = Some(transport);
+        transaction.connection = Some(
+            ChannelConnection::create_connection(
+                incoming_rx,
+                outgoing,
+                addr,
+                Some(transport_cancel.clone()),
+            )
+            .await
+            .unwrap()
+            .into(),
+        );
+        let module = CallModule::new(config, server.clone());
+        let session = module.build_session_token(&transaction);
+
+        transport_cancel.cancel();
+        assert_eq!(
+            session.is_cancelled(),
+            cancelled_on_loss,
+            "{transport}: call lifetime after signaling loss"
+        );
+        server.cancel_token.cancel();
+        assert!(
+            session.is_cancelled(),
+            "server shutdown must still cancel the call"
+        );
+    }
+}

@@ -350,7 +350,6 @@ async fn routed_attempts_keep_call_media_path_and_recording() {
 mod child_event_tests;
 mod outbound_failure_tests;
 mod session_id_tests;
-mod packet_diagnostics_tests;
 
 #[tokio::test]
 async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {

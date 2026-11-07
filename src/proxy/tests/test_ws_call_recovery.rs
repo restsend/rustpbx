@@ -179,7 +179,7 @@ async fn exercise_outbound_connection_loss(loss: FlowLoss) {
             async move |client: crate::handler::middleware::clientaddr::ClientAddr,
                         upgrade: axum::extract::WebSocketUpgrade| {
                 upgrade.protocols(["sip"]).on_upgrade(async move |socket| {
-                    crate::proxy::ws::sip_ws_handler(ws_cancel, client, socket, endpoint).await;
+                    crate::proxy::ws::sip_ws_handler(ws_cancel, client, socket, endpoint, None).await;
                 })
             },
         ),

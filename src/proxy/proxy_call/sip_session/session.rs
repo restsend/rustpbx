@@ -1748,7 +1748,7 @@ impl SipSession {
         // Seed + authoritative stamp happen inside; `call_created` resolves
         // the caller leg's role via the typed LegRef authority — stamped →
         // "agent", otherwise positional "caller".
-        Self::seed_originating_agent_attribution(
+        let agent_outbound_seeded = Self::seed_originating_agent_attribution(
             &server,
             &mut session,
             &auth_user,
@@ -2680,7 +2680,7 @@ impl SipSession {
     }
 
     /// Every installed media leg reports ingress stalls through the session error path.
-    fn attach_media_leg(&mut self, id: &LegId, peer: crate::media::leg::Leg) {
+    pub(crate) fn attach_media_leg(&mut self, id: &LegId, peer: crate::media::leg::Leg) {
         self.legs.set_media_leg(id, peer);
         if let Some(task) = self.spawn_leg_ingress_stall_forwarder(id) {
             self.legs.push_task(id.clone(), task);
