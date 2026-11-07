@@ -312,10 +312,9 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
             init_settings(self.0.length, self.0.header_mode, self.0.inherit_callid);
         }
     }
-    // The production wire builder reads process settings. Held under
-    // SETTINGS_LOCK together with the other settings-dependent tests, and
-    // restored even on panic.
-    let _guard = SETTINGS_LOCK.lock();
+    // The production wire builder reads process settings. The module serial
+    // lock (already held above) guards these settings together with the other
+    // settings-dependent tests; the seed is restored even on panic.
     let _restore = RestoreSettings(settings());
     init_settings(16, SessionIdHeaderMode::Rfc7989, true);
     let short = "0b9e6c1e1b404e8f";

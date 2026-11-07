@@ -2536,9 +2536,12 @@ async fn websocket_session_survives_transport_loss_but_stops_with_server() {
     use crate::proxy::tests::common::{create_test_request, create_transaction};
     use rsipstack::transport::{SipAddr, channel::ChannelConnection};
 
+    // rsipstack 0.8.x reliability semantics: channel flows (WS/WSS included)
+    // are `is_reliable()` — the call lifetime tracks the signaling transport
+    // on every stream transport; only a datagram flow would detach it.
     for (transport, cancelled_on_loss) in [
-        (rsipstack::sip::transport::Transport::Ws, false),
-        (rsipstack::sip::transport::Transport::Wss, false),
+        (rsipstack::sip::transport::Transport::Ws, true),
+        (rsipstack::sip::transport::Transport::Wss, true),
         (rsipstack::sip::transport::Transport::Tcp, true),
         (rsipstack::sip::transport::Transport::Tls, true),
     ] {
