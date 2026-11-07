@@ -755,8 +755,11 @@ pub struct Config {
     #[serde(default)]
     pub graceful_shutdown: Option<GracefulShutdownConfig>,
     /// Rolling process handover (container rolling release) — see
-    /// [`RollingConfig`]. Inert unless `[rolling] enabled = true`.
-    #[serde(default)]
+    /// [`RollingConfig`]. **Enabled by default**: a config without a
+    /// `[rolling]` section behaves as `enabled = true`; a lone instance
+    /// self-detects and SIGTERM degrades to the plain drain. Opt out with
+    /// `[rolling] enabled = false`.
+    #[serde(default = "default_rolling_config")]
     pub rolling: Option<RollingConfig>,
     /// Maximum size (in bytes) for audio files downloaded over HTTP from the
     /// console (queue prompts, voicemail prompts, ...). Defaults to 20 MB.
@@ -2406,7 +2409,7 @@ impl GracefulShutdownConfig {
 /// the drain completes. Protocol lives in [`crate::rolling`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RollingConfig {
-    #[serde(default)]
+    #[serde(default = "default_rolling_enabled")]
     pub enabled: bool,
     /// Loopback-only listener the PREDECESSOR serves during the handover
     /// window (`/rolling/relay_ingress`, `/rolling/manifest`, plus the full
@@ -2432,6 +2435,20 @@ pub struct RollingConfig {
     pub hello_interval_secs: u64,
 }
 
+/// Rolling handover is ENABLED by default: a lone instance self-detects (its
+/// own hello comes back with its own pid) and SIGTERM degrades to the plain
+/// drain — identical behavior to a non-rolling deployment. A rolling pair
+/// (successor started first, then `docker stop` on the predecessor) gets
+/// the zero-restart handover. Opt out with `[rolling] enabled = false`.
+fn default_rolling_enabled() -> bool {
+    true
+}
+
+/// Absent `[rolling]` section = enabled (see [`default_rolling_enabled`]).
+fn default_rolling_config() -> Option<RollingConfig> {
+    Some(RollingConfig::default())
+}
+
 fn default_rolling_predecessor_port() -> u16 {
     18181
 }
@@ -2447,7 +2464,7 @@ fn default_rolling_hello_interval_secs() -> u64 {
 impl Default for RollingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_rolling_enabled(),
             predecessor_port: default_rolling_predecessor_port(),
             bind_wait_secs: default_rolling_bind_wait_secs(),
             handoff_registrations: false,
@@ -2894,7 +2911,7 @@ impl Default for Config {
             media: None,
             ami: Some(AmiConfig::default()),
             graceful_shutdown: None,
-            rolling: None,
+            rolling: Some(RollingConfig::default()),
             external_ip: None,
             auto_external_ip: None,
             sip_external_ip: None,

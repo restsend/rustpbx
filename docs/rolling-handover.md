@@ -5,6 +5,23 @@
 UDP in-dialog 信令经 loopback HTTP 在两代之间双向摆渡；WS 客户端被限速
 驱逐后秒级重连落到新代。
 
+## 镜像默认支持（cc / commerce / wholesale / community）
+
+自 core `489095f8` 起，**所有镜像默认启用滚动交接**（`[rolling]` 缺省
+`enabled = true`），零配置即得：
+
+- **单实例部署**：启动时自识别（hello 回包带自身 PID）——SIGTERM 走
+  普通排水，**行为与非滚动部署完全一致**，零额外开销。
+- **滚动对部署**：先起新容器再 `docker stop` 老容器 → 交接自动发生。
+- 显式退出：config 加 `[rolling] enabled = false`。
+- 三个产品 example 配置（`config/{cc,wholesale,commerce}.example.toml`）
+  已带说明段。
+
+唯一行为差异提醒（默认启用后）：HTTPS/WSS 走手工 TLS accept 循环（为
+关监听保留存量连接所必需），证书文件更新后需重启进程生效（滚动发布本身
+即自然的证书更新点）；依赖 ACME 热加载的部署可 `[rolling] enabled=false`
+回到 axum_server 路径。
+
 ## 操作时序
 
 ```
@@ -31,6 +48,9 @@ UDP in-dialog 信令经 loopback HTTP 在两代之间双向摆渡；WS 客户端
 ```
 
 ## 配置（[rolling]）
+
+**缺省即启用**（见上节）——本节仅调优。显式配置示例（cc 镜像的
+`config/cc.example.toml`，wholesale/commerce 同形）：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|

@@ -641,3 +641,95 @@ async fn ami_forward_hangup_reaches_predecessor() -> Result<()> {
     run_old.abort();
     Ok(())
 }
+
+// ── TLS smoke: with certs configured, the rolling manual HTTPS accept
+// loop (tokio-rustls path) must terminate TLS and serve the rolling
+// endpoints — this is the WSS-bearing path every HTTPS deployment takes
+// now that rolling is enabled by default. ────────────────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_manual_accept_loop_serves_rolling_endpoints() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    // Production installs the ring provider in main_with_addons; the test
+    // process builds the app directly and must install it before rustls.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    let _serial = E2E_SERIALIZER.lock().await;
+
+    // Self-signed cert via openssl (present on dev/CI images; the test
+    // degrades to a no-op if the tooling is missing).
+    let dir = tempfile::Builder::new()
+        .prefix("rolling-tls")
+        .tempdir()
+        .unwrap();
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    let gen_out = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            key.to_str().unwrap(),
+            "-out",
+            cert.to_str().unwrap(),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+        ])
+        .output()?;
+    if !gen_out.status.success() {
+        eprintln!("openssl unavailable — skipping TLS smoke test");
+        return Ok(());
+    }
+
+    let http_port = free_port();
+    let https_port = free_port();
+    let sip_port = free_udp_port(&[]);
+    let predecessor_port = free_port();
+    let mut cfg = gen_config(
+        http_port,
+        sip_port,
+        predecessor_port,
+        22000,
+        &dir.path().join("tls.db"),
+    );
+    cfg.https_addr = Some(format!("127.0.0.1:{}", https_port));
+    cfg.ssl_certificate = Some(cert.to_string_lossy().into_owned());
+    cfg.ssl_private_key = Some(key.to_string_lossy().into_owned());
+
+    let rolling =
+        rustpbx::rolling::RollingRuntime::new(cfg.rolling.clone().unwrap(), &cfg.http_addr);
+    let state = build_generation(&cfg, &rolling).await?;
+    let router = create_router(state.clone());
+    let run = tokio::spawn(rustpbx::app::run(state.clone(), router));
+    sleep(Duration::from_millis(800)).await;
+
+    // curl -k: skip the self-signed cert validation; we only need proof of
+    // a working TLS handshake + HTTP/1.1 + rolling route behind it.
+    let url = format!("https://127.0.0.1:{}/ami/v1/health", https_port);
+    let out = std::process::Command::new("curl")
+        .args(["-sk", "--max-time", "10", &url])
+        .output()?;
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success() && body.contains("\"status\""),
+        "manual TLS accept loop must serve HTTPS (body={body})"
+    );
+
+    // Takeover completed marker: the successor's own takeover also rides
+    // the manual loop — a second GET proves the loop keeps serving.
+    let out2 = std::process::Command::new("curl")
+        .args(["-sk", "--max-time", "10", &format!("{url}?again=1")])
+        .output()?;
+    assert!(
+        out2.status.success() && String::from_utf8_lossy(&out2.stdout).contains("\"status\""),
+        "manual TLS accept loop must keep serving"
+    );
+
+    run.abort();
+    Ok(())
+}

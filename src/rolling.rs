@@ -87,8 +87,15 @@ pub struct RollingRuntime {
     /// Loopback port of the management listener (from `http_addr`).
     http_port: u16,
     role: AtomicU8,
-    /// predecessor side: last successor heartbeat (unix ms).
+    /// predecessor side: last FOREIGN successor heartbeat (unix ms).
+    /// Self-pings (a lone instance probing its own loopback) are ignored —
+    /// otherwise every standalone process would believe a handover pair
+    /// exists and SIGTERM would attempt a handover to itself.
     last_hello_ms: AtomicI64,
+    /// Random per-instance id for hello self-detection: a lone instance
+    /// probing its own loopback sees ITS OWN id; a rolling pair sees the
+    /// peer's (different even for two generations in one process).
+    instance_id: u64,
     /// successor side: public listeners are owned (handover done).
     bind_done: AtomicBool,
     /// successor side: last manifest refresh (unix ms).
@@ -143,6 +150,7 @@ impl RollingRuntime {
             config,
             http_port,
             role: AtomicU8::new(ROLE_IDLE),
+            instance_id: rand::random::<u64>(),
             last_hello_ms: AtomicI64::new(0),
             bind_done: AtomicBool::new(false),
             manifest_ms: AtomicI64::new(0),
@@ -250,6 +258,7 @@ impl RollingRuntime {
                     return;
                 }
                 let payload = serde_json::json!({
+                    "instance_id": runtime.instance_id,
                     "pid": std::process::id(),
                     "version": env!("CARGO_PKG_VERSION"),
                 });
@@ -448,8 +457,14 @@ impl RollingRuntime {
     // predecessor side
     // ─────────────────────────────────────────────────────────────
 
-    /// hello heartbeat from the successor.
-    pub fn note_hello(&self) {
+    /// hello heartbeat from the successor. Self-pings (a lone instance
+    /// probing its own loopback) are IGNORED — they must never make a
+    /// standalone process believe a handover pair exists.
+    pub fn note_hello(&self, instance_id: u64) {
+        if instance_id == self.instance_id {
+            debug!("rolling hello: self-ping ignored");
+            return;
+        }
         self.last_hello_ms.store(Self::now_ms(), Ordering::SeqCst);
     }
 
@@ -1376,11 +1391,28 @@ async fn read_json<T: serde::de::DeserializeOwned>(body: axum::body::Body) -> Op
     serde_json::from_slice(&bytes).ok()
 }
 
-async fn hello_handler(State(state): State<AppState>) -> Response {
+#[derive(serde::Deserialize, Default)]
+struct HelloPayload {
+    #[serde(default)]
+    instance_id: u64,
+    #[serde(default)]
+    pid: u32,
+}
+
+async fn hello_handler(State(state): State<AppState>, req: Request) -> Response {
+    let payload = read_json::<HelloPayload>(req.into_body())
+        .await
+        .unwrap_or_default();
+    let own = state
+        .rolling
+        .as_ref()
+        .map(|r| r.instance_id)
+        .unwrap_or_default();
     if let Some(rolling) = &state.rolling {
-        rolling.note_hello();
+        rolling.note_hello(payload.instance_id);
     }
-    StatusCode::OK.into_response()
+    axum::Json(serde_json::json!({ "instance_id": own, "pid": std::process::id() }))
+        .into_response()
 }
 
 async fn manifest_handler(State(state): State<AppState>, req: Request) -> Response {
@@ -1729,7 +1761,7 @@ mod tests {
     fn test_manifest_freshness_and_heartbeat() {
         let rt = test_runtime();
         assert!(!rt.predecessor_alive(), "no manifest yet → not alive");
-        rt.note_hello();
+        rt.note_hello(0xDEAD_BEEF);
         assert!(rt.successor_heartbeat_fresh());
         rt.note_manifest(vec!["call-1".into(), "call-2".into()]);
         assert!(rt.predecessor_alive());
