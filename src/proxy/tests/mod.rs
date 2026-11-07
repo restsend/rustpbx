@@ -42,6 +42,8 @@ pub mod rtp_utils;
 // (test-support / e2e-testing consumers; see src/prelude.rs contract).
 #[cfg(any(test, feature = "test-support", feature = "e2e-testing"))]
 pub mod test_sip_session_regressions;
+#[cfg(any(test, feature = "test-support", feature = "e2e-testing"))]
+pub mod test_ws_call_recovery;
 #[cfg(test)]
 mod test_trunk_config_tests;
 #[cfg(test)]

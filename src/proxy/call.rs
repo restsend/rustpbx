@@ -1787,15 +1787,32 @@ impl CallModule {
 
     /// Build a session cancel token.
     ///
-    /// For reliable transports (TCP/TLS/WS/WSS) the token is derived from the
-    /// transport's cancel token, so a connection drop automatically cancels
-    /// every session on that transport — no watcher task needed.
+    /// Call-lifetime policy per signaling transport:
     ///
-    /// For UDP (connectionless, shared socket) the token is derived from the
-    /// server's cancel token, matching pre-`bac8444` behaviour.
+    /// - **TCP/TLS**: the session token is a child of the transport's cancel
+    ///   token — a connection drop kills the call (a stream client that lost
+    ///   its socket cannot re-attach mid-dialog).
+    /// - **WS/WSS**: the token derives from the SERVER's cancel token — the
+    ///   call survives a WebSocket loss so the client can reconnect,
+    ///   re-REGISTER and resume (softphones on unstable networks; in-dialog
+    ///   requests from the new flow re-route to the live session by
+    ///   Call-ID). Pending (un-ACKed) setups still cancel on flow loss —
+    ///   see the WS setup guard in `SipSession::process` — and a permanent
+    ///   client loss is bounded by `max_call_duration` + the cc offline
+    ///   watchdog. (0.5.1-line semantics, a9ef551f.)
+    /// - **UDP** (connectionless, shared socket): server token, matching
+    ///   pre-`bac8444` behaviour.
     pub(crate) fn build_session_token(&self, tx: &Transaction) -> CancellationToken {
         if let Some(ref conn) = tx.connection {
-            if conn.is_reliable() {
+            // rsipstack 0.8.x: `is_reliable()` is `!Udp` — WS/WSS channel
+            // flows count as "reliable" for REGISTER keepalive semantics
+            // (user.rs), but the CALL lifetime must still detach from them.
+            let ws_flow = matches!(
+                conn.get_addr().r#type,
+                Some(rsipstack::sip::transport::Transport::Ws)
+                    | Some(rsipstack::sip::transport::Transport::Wss)
+            );
+            if conn.is_reliable() && !ws_flow {
                 if let Some(transport_token) = conn.cancel_token() {
                     return transport_token.child_token();
                 }
