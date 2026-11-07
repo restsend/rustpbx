@@ -569,6 +569,13 @@ pub struct QueueApp {
 }
 
 impl QueueApp {
+    /// Test seam (cc dispatch tests preload already-joined escalation
+    /// stages to exercise the genuine wait-retention dispatch entry).
+    #[cfg(feature = "test-support")]
+    pub fn set_escalated_groups_for_test(&mut self, groups: Vec<String>) {
+        self.escalated_groups = groups;
+    }
+
     /// Create a new `QueueApp` from a [`QueuePlan`] and [`QueueConfig`].
     pub fn new(plan: QueuePlan, config: QueueConfig) -> Self {
         Self {
