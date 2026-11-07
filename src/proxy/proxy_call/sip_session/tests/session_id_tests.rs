@@ -10,6 +10,151 @@ static SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// 与显式 seed/restore 的用例互斥，避免并行交错读到错误模式）。
 fn lock_settings_serial() -> parking_lot::MutexGuard<'static, ()> {
     SETTINGS_LOCK.lock()
+
+#[tokio::test]
+async fn session_id_peer_dialog_query_does_not_confuse_correlation_with_control() {
+    for (from_peer, role, local_queue) in [
+        (false, Some("agent"), false),
+        (true, Some("agent"), false),
+        (true, Some("consult"), false),
+        (true, None, false),
+        (true, Some("agent"), true),
+    ] {
+        let mut session = inherited_delivery_session(
+            "aabbccddeeff0011",
+            Some("aabbccddeeff0011"),
+            true,
+            role,
+            from_peer,
+            false,
+        )
+        .await;
+        if local_queue {
+            session.meta.queue_name = Some("locally-owned-queue".into());
+        }
+        let caller_id = session.caller_dialog.as_ref().unwrap().id().call_id;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        assert!(
+            session
+                .execute_command(CallCommand::QueryPeerDialog { reply }, None)
+                .await
+                .success
+        );
+        let upstream = result.await.unwrap();
+        if from_peer && role.is_some() && !local_queue {
+            assert_eq!(
+                upstream,
+                Some((
+                    caller_id,
+                    "192.0.2.44:5060".parse().unwrap(),
+                    role.unwrap().into()
+                ))
+            );
+        } else {
+            assert!(
+                upstream.is_none(),
+                "correlation and external declarations cannot redirect control"
+            );
+        }
+        assert_eq!(
+            session.meta.root_session_id.as_deref(),
+            Some("aabbccddeeff0011")
+        );
+    }
+}
+
+/// Settings 全局是进程级的：本模块内有用例改写 `header_mode`（Rfc7989），
+/// 有用例断言 Native 行为——并行交错会让后者读到错误模式（间歇红）。
+/// 本模块的 settings 依赖用例一律在此串行锁下执行。
+static SETTINGS_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tokio::test]
+async fn vendor_review_regression_statistics_owner_survives_attribution_reset() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+
+    const ROOT: &str = "11111111111141118111111111111111";
+    for (trusted, local_id, expected_owner) in [
+        (true, ROOT, false),
+        (true, "22222222222242228222222222222222", true),
+        (false, ROOT, true),
+    ] {
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let (mut server, _) = create_test_server_with_rwi_gateway(
+            Default::default(),
+            Arc::new(parking_lot::RwLock::new(gateway)),
+        )
+        .await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.10".parse().unwrap()];
+        let mut request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "source",
+            None,
+            "example.test",
+            None,
+        );
+        request.headers.push(crate::call::uui::build_uui_header(
+            ROOT,
+            None,
+            None,
+            None,
+            Some("agent"),
+        ));
+        let (tx, _) = create_transaction(request.clone()).await;
+        let (state_tx, _states) = mpsc::unbounded_channel();
+        let dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .unwrap();
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(crate::call::CallerPeerContext(
+            if trusted {
+                "192.0.2.10:5060"
+            } else {
+                "192.0.2.99:5060"
+            }
+            .into(),
+        ));
+        let context = CallContext {
+            session_id: local_id.into(),
+            dialplan: Arc::new(Dialplan::new(
+                local_id.into(),
+                request,
+                DialDirection::Inbound,
+            )),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:source@example.test".into(),
+            original_callee: "sip:agent@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, _commands) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            dialog,
+            false,
+        );
+        assert_eq!(session.session_hook_ctx().owns_statistics, expected_owner);
+        // The production blind-transfer boundary clears the previous agent's role.
+        session.clear_agent_attribution();
+        assert_eq!(
+            session.session_hook_ctx().owns_statistics,
+            expected_owner,
+            "changing the served agent must not change the session's statistics writer",
+        );
+    }
+}
+
+fn lock_settings_serial() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {
@@ -21,6 +166,17 @@ async fn inherited_session_id_session_with_enabled(
     uui_id: Option<&str>,
     enabled: bool,
 ) -> SipSession {
+    inherited_delivery_session(header_id, uui_id, enabled, Some("agent"), false, false).await
+}
+
+async fn inherited_delivery_session(
+    header_id: &str,
+    uui_id: Option<&str>,
+    enabled: bool,
+    role: Option<&str>,
+    from_peer: bool,
+    use_media_proxy: bool,
+) -> SipSession {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::proxy::tests::common::{
@@ -28,11 +184,12 @@ async fn inherited_session_id_session_with_enabled(
     };
 
     let gateway = crate::rwi::gateway::RwiGateway::new();
-    let (server, _) = create_test_server_with_rwi_gateway(
+    let (mut server, _) = create_test_server_with_rwi_gateway(
         ProxyConfig::default(),
         Arc::new(parking_lot::RwLock::new(gateway)),
     )
     .await;
+    Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.44".parse().unwrap()];
     let mut request = create_test_request(
         rsipstack::sip::Method::Invite,
         "alice",
@@ -40,20 +197,18 @@ async fn inherited_session_id_session_with_enabled(
         "example.test",
         None,
     );
-    request.headers.push(
-        rsipstack::sip::headers::SessionId::new(format!(
-            "{header_id};remote={}",
-            rsipstack::sip::headers::SessionId::NIL
-        ))
-        .into(),
-    );
+    if !header_id.is_empty() {
+        request.headers.push(
+            rsipstack::sip::headers::SessionId::new(format!(
+                "{header_id};remote={}",
+                rsipstack::sip::headers::SessionId::NIL
+            ))
+            .into(),
+        );
+    }
     if let Some(id) = uui_id {
         request.headers.push(crate::call::uui::build_uui_header(
-            id,
-            None,
-            None,
-            None,
-            Some("agent"),
+            id, None, None, None, role,
         ));
     }
     let (tx, _) = create_transaction(request.clone()).await;
@@ -66,13 +221,17 @@ async fn inherited_session_id_session_with_enabled(
     let dialplan = Dialplan::new(local_id.into(), request, DialDirection::Inbound)
         .with_caller("sip:alice@example.test".parse().unwrap())
         .with_session_id_enabled(enabled);
+    let cookie = TransactionCookie::default();
+    if from_peer {
+        cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
+    }
     let context = CallContext {
         session_id: local_id.into(),
         dialplan: Arc::new(dialplan),
-        cookie: TransactionCookie::default(),
+        cookie,
         start_time: Instant::now(),
         original_caller: "alice".into(),
-        original_callee: "bob".into(),
+        original_callee: "sip:bob@example.test".into(),
         max_forwards: 70,
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
@@ -83,7 +242,7 @@ async fn inherited_session_id_session_with_enabled(
         None,
         context,
         dialog,
-        false,
+        use_media_proxy,
     );
     session
 }
@@ -152,6 +311,7 @@ async fn session_id_native_inherited_length_survives_outgoing_boundary() {
 
 #[tokio::test]
 async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
+    let _settings_serial = lock_settings_serial();
     use crate::call::session_id::{
         SessionIdHeaderMode, SessionIdSettings, init_settings, settings,
     };
@@ -239,6 +399,126 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
             );
         } else {
             assert_eq!(uui_headers.len(), 1);
+        }
+    }
+}
+
+/// Both older peers (root UUI without a role) and new peers carry one root
+/// through hook context, actual delivered events, and the CDR snapshot.
+#[tokio::test]
+async fn session_id_peer_delivery_preserves_root_without_collapsing_local_ids() {
+    let root = "0b9e6c1e1b404e8f";
+    for wire_header in [root, ""] {
+        for role in [None, Some("agent")] {
+            for from_peer in [false, true] {
+                let mut session = inherited_delivery_session(
+                    wire_header,
+                    Some(root),
+                    true,
+                    role,
+                    from_peer,
+                    true,
+                )
+                .await;
+                let mut events = session
+                    .server
+                    .rwi_gateway
+                    .as_ref()
+                    .unwrap()
+                    .read()
+                    .subscribe_events();
+                assert_eq!(session.session_hook_ctx().logical_session_id(), root);
+                assert_ne!(
+                    session.context.session_id, root,
+                    "local leg identity must remain unique"
+                );
+                assert_eq!(
+                    session.meta.child_leg_role.as_deref(),
+                    if from_peer { role } else { None }
+                );
+                assert_eq!(
+                    session.record_snapshot().root_session_id.as_deref(),
+                    Some(root)
+                );
+                // Exercise actual recording commands and CDR publication, not
+                // only generation of a recording identity or configuration.
+                use crate::proxy::tests::test_sip_session_regressions::setup_recording_test_media;
+                use rustrtc::peer_connection::RtpObserver;
+                use rustrtc::rtp::{RtpHeader, RtpPacket};
+                setup_recording_test_media(&mut session).await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("peer-transfer.wav");
+                let recording_id = "33333333-3333-4333-8333-333333333333";
+                let started = session
+                    .execute_command(
+                        CallCommand::StartRecording {
+                            config: crate::call::domain::RecordConfig {
+                                path: path.to_string_lossy().into_owned(),
+                                unique_id: Some(recording_id.into()),
+                                notify_app: Some(false),
+                                ..Default::default()
+                            },
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(started.success, "{started:?}");
+                let caller = session.media_leg(&LegId::from("caller")).unwrap();
+                let tap = caller.ingress_tap();
+                let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+                for seq in 0..10u16 {
+                    let packet = RtpPacket::new(
+                        RtpHeader::new(0, seq, u32::from(seq) * 160, 1234),
+                        encoder.encode(&vec![8000; 160]).to_vec(),
+                    );
+                    tap.on_ingress(&packet, "127.0.0.1:12345".parse().unwrap());
+                }
+                let (records, mut received) = mpsc::channel(1);
+                session.reporter = Some(CallReporter {
+                    server: session.server.clone(),
+                    context: session.context.clone(),
+                    call_record_sender: Some(records),
+                });
+                session.cleanup().await;
+                assert!(
+                    !session
+                        .media
+                        .recording
+                        .recorder_status()
+                        .await
+                        .unwrap()
+                        .active
+                );
+                let wav = std::fs::read(&path).unwrap();
+                assert!(
+                    wav.len() > 44
+                        && wav[44..]
+                            .chunks_exact(2)
+                            .any(|sample| i16::from_le_bytes([sample[0], sample[1]]) != 0)
+                );
+                let record = received.try_recv().expect("CDR must be published");
+                assert_eq!(record.session_id.as_deref(), Some(root));
+                assert_eq!(record.recorder.len(), 1);
+                assert_eq!(record.recorder[0].unique_id.as_deref(), Some(recording_id));
+                assert_eq!(
+                    record.recorder[0].extra.as_ref().unwrap()["session_id"],
+                    root
+                );
+                let mut hangups = Vec::new();
+                while let Ok(entry) = events.try_recv() {
+                    if entry.event.event_type == "call_hangup" {
+                        hangups.push(entry.event);
+                    }
+                }
+                assert!(!hangups.is_empty());
+                for event in hangups {
+                    assert_eq!(event.payload["session_id"], root, "{event:?}");
+                    assert_eq!(
+                        event.call_id.as_deref(),
+                        Some("1234567890abcdef1234567890abcdef")
+                    );
+                }
+            }
         }
     }
 }

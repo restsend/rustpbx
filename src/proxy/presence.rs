@@ -559,6 +559,25 @@ impl PresenceManager {
         };
 
         if source.is_local() {
+            if let Some(old) = &old_state {
+                if old.status == state.status
+                    && old.note == state.note
+                    && old.activity == state.activity
+                {
+                    tracing::debug!(
+                        identity = %identity,
+                        status = ?state.status,
+                        "presence: identical re-projection (NOTIFY seq churn source)"
+                    );
+                } else {
+                    tracing::debug!(
+                        identity = %identity,
+                        from = ?old.status,
+                        to = ?state.status,
+                        "presence: state update"
+                    );
+                }
+            }
             // Cluster sync first (parallel fire-and-forget) — no partial borrow issues
             let msg = crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
             if let Some(ref sync) = *self.cluster_sync.read() {

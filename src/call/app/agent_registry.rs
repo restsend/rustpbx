@@ -593,6 +593,7 @@ pub trait AgentRegistry: Send + Sync {
         _call_id: &str,
         _fair: bool,
         include_primary: bool,
+        excluded_agent_ids: &[String],
     ) -> Vec<String> {
         let mut uris = Vec::new();
         if include_primary {
@@ -602,9 +603,15 @@ pub trait AgentRegistry: Send + Sync {
             uris.extend(self.resolve_target(&format!("skill-group:{group}")).await);
         }
         // Dedup preserving order — overlapping groups (an agent belonging to
-        // both the primary and an escalation group) must be dialled once.
+        // both the primary and an escalation group) must be dialled once —
+        // and drop the no-answer rotation exclusions so a single-call widen
+        // never re-offers the agent that just failed.
         let mut seen = std::collections::HashSet::new();
-        uris.retain(|uri| seen.insert(uri.clone()));
+        uris.retain(|uri| {
+            let id = crate::models::call_record::extract_sip_username(uri)
+                .unwrap_or_else(|| uri.to_string());
+            !excluded_agent_ids.contains(&id) && seen.insert(uri.clone())
+        });
         uris
     }
 

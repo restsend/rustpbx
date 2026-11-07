@@ -16,6 +16,8 @@ mod test_presence_subscription_leak;
 #[cfg(test)]
 mod test_proxy;
 #[cfg(test)]
+mod test_ws_call_recovery;
+#[cfg(test)]
 mod test_registrar;
 pub mod test_ua;
 #[cfg(test)]

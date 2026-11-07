@@ -1803,6 +1803,10 @@ mod tests {
 
     // ── Escalation ──
 
+    /// Cumulative escalation over a skill-group union: the primary agent's
+    /// leg is ringing when the threshold fires — the check must be SKIPPED
+    /// (in-flight offer runs to its terminal first); after the ring terminal
+    /// the re-armed timer resolves the widened union and dials the new agent.
     #[tokio::test]
     async fn test_cumulative_escalation_does_not_crash() {
         use std::sync::Arc;
@@ -1837,19 +1841,58 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "LegAdd-primary", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-            })
-            .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, target, .. }
+                if target.to_string().contains("agent1@example.com") =>
+            {
+                leg_id.clone()
+            }
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
 
+        // 振铃中（在途 offer）阈值到点 → 溢出必须被跳过：不拨宽、不消费 step。
+        // 旧行为（已废弃）会在主腿振铃时把扩宽坐席一起拨出。
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal（no-answer）→ 回等待态 → 重新武装的定时器触发扩宽。
         // The auto-armed escalation timer must resolve the widened group and
         // dial the new agent — NOT hang up, even though the widened group
         // came back as a fresh union.
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue, // hold music / prompts around the re-entry
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed check must dial the widened agent"
+        );
 
         // No Hangup and no spurious dial after the escalation.
         assert!(
@@ -1892,6 +1935,9 @@ mod tests {
         /// (rotated per call). When empty, falls through to `inner`.
         resolve_uris: Vec<Vec<String>>,
         resolve_calls: std::sync::Mutex<usize>,
+        /// Late retry admission: target, call, priority, excluded agent ids.
+        retry_resolves: std::sync::Mutex<Vec<(String, String, i32, Vec<String>)>>,
+        release_requests: std::sync::Mutex<Vec<(String, String)>>,
         abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
         timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
         fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
@@ -1927,6 +1973,8 @@ mod tests {
                 escalation_uris: Vec::new(),
                 resolve_uris: Vec::new(),
                 resolve_calls: std::sync::Mutex::new(0),
+                retry_resolves: std::sync::Mutex::new(Vec::new()),
+                release_requests: std::sync::Mutex::new(Vec::new()),
                 abandoned: std::sync::Mutex::new(Vec::new()),
                 timeouts: std::sync::Mutex::new(Vec::new()),
                 fallbacks: std::sync::Mutex::new(Vec::new()),
@@ -1987,6 +2035,14 @@ mod tests {
 
         async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
             self.inner.unregister(agent_id).await
+        }
+
+        async fn release_call(&self, agent_id: &str, call_id: &str) -> bool {
+            self.release_requests
+                .lock()
+                .unwrap()
+                .push((agent_id.to_owned(), call_id.to_owned()));
+            false
         }
 
         async fn get_agent(
@@ -2052,6 +2108,38 @@ mod tests {
             self.skill_group_dispatch
         }
 
+        async fn resolve_target_with_exclusions(
+            &self,
+            target_uri: &str,
+            policy: Option<&str>,
+            call_id: &str,
+            priority: i32,
+            excluded_agent_ids: &[String],
+        ) -> Vec<String> {
+            self.retry_resolves.lock().unwrap().push((
+                target_uri.to_string(),
+                call_id.to_string(),
+                priority,
+                excluded_agent_ids.to_vec(),
+            ));
+            let targets = self
+                .resolve_target_with_priority(target_uri, policy, call_id, priority)
+                .await;
+            let mut admitted = Vec::new();
+            for uri in targets {
+                let agent_id = self
+                    .inner
+                    .find_agent_by_uri(&uri)
+                    .await
+                    .map(|agent| agent.agent_id)
+                    .unwrap_or_else(|| uri.clone());
+                if !excluded_agent_ids.contains(&agent_id) {
+                    admitted.push(uri);
+                }
+            }
+            admitted
+        }
+
         async fn resolve_escalation_targets(
             &self,
             primary_target_uri: &str,
@@ -2059,6 +2147,7 @@ mod tests {
             _call_id: &str,
             fair: bool,
             include_primary: bool,
+            excluded_agent_ids: &[String],
         ) -> Vec<String> {
             self.escalation_calls.lock().unwrap().push((
                 primary_target_uri.to_string(),
@@ -2074,6 +2163,13 @@ mod tests {
                 .get(calls - 1)
                 .cloned()
                 .unwrap_or_default()
+                .into_iter()
+                .filter(|uri| {
+                    let id = crate::models::call_record::extract_sip_username(uri)
+                        .unwrap_or_else(|| uri.clone());
+                    !excluded_agent_ids.contains(&id)
+                })
+                .collect()
         }
 
         async fn fifo_register_wait(
@@ -2172,7 +2268,8 @@ mod tests {
     /// The escalation timer must arm itself in `on_enter` and fire WITHOUT
     /// any manual `stack.timeout("escalation_check")` — the dormant-path
     /// regression (timer only ever re-armed after firing) is exactly what
-    /// this test forbids.
+    /// this test forbids. While the primary leg is ringing the check is
+    /// skipped; the re-armed timer fires after the ring terminal.
     #[tokio::test]
     async fn test_escalation_timer_auto_arms_and_widens_fairly() {
         use std::sync::Arc;
@@ -2212,18 +2309,57 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(2000, "LegAdd-primary", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, target, .. }
+                if target.to_string().contains("agent1@example.com") =>
+            {
+                leg_id.clone()
+            }
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
 
-        // The auto-armed escalation timer fires by itself after the 1s
-        // threshold; the widened union resolves and dials ONLY the new agent
-        // (the duplicate primary leg is filtered out).
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        // The auto-armed timer fires after the 1s threshold — but the primary
+        // leg is RINGING: the check must be skipped (in-flight offer runs to
+        // its terminal), no resolve, no widened dial.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal (no-answer) → back to wait retention → the re-armed
+        // timer resolves the widened union and dials ONLY the new agent (the
+        // duplicate primary leg is filtered out).
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must widen fairly"
+        );
 
         // No further LegAdd beyond the two above within a quiet window.
         assert!(
@@ -2252,7 +2388,9 @@ mod tests {
     }
 
     /// Once every timeline step has triggered the escalation timer stops
-    /// re-arming — no idle wake-ups for the rest of the call.
+    /// re-arming — no idle wake-ups for the rest of the call. While the
+    /// primary leg is ringing the check is skipped; the step is consumed
+    /// only after the ring terminal returns the call to wait retention.
     #[tokio::test]
     async fn test_escalation_timer_stops_after_all_steps() {
         use std::sync::Arc;
@@ -2284,15 +2422,51 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "LegAdd-primary", |c| {
-                matches!(c, CallCommand::LegAdd { .. })
-            })
-            .await;
-        stack.assert_cmd(4000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone(),
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+
+        // The primary leg is ringing: the 1s threshold fires while the offer
+        // is in flight — the check must be SKIPPED.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal → wait retention → the re-armed timer consumes the
+        // step (widened dial).
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must consume the step"
+        );
 
         // The historical behavior re-armed a 10s wake-up forever even after
         // the last step; give the timer ample time to misfire.
@@ -2310,12 +2484,13 @@ mod tests {
         let _ = stack.join().await;
     }
 
-    /// Replace-mode escalation over a skill-group union: when the widened
-    /// resolve returns the already-dialled primary agent plus a new agent,
-    /// Replace must (1) tear down the pending primary leg via LegRemove,
-    /// (2) skip the duplicate primary, and (3) dial ONLY the new agent.
+    /// Replace-mode escalation over a skill-group union: while the primary
+    /// leg is ringing the check is SKIPPED; after the ring terminal the
+    /// widened resolve returns the already-dialled primary agent plus a new
+    /// agent — Replace must (1) skip the duplicate primary and (2) dial ONLY
+    /// the new agent (the ring terminal already released the primary leg).
     #[tokio::test]
-    async fn test_escalation_replace_mode_removes_pending_leg_and_dials_union() {
+    async fn test_escalation_replace_mode_defers_while_ringing_then_dials_union() {
         use std::sync::Arc;
 
         let mut config = build_simple_queue_config();
@@ -2356,19 +2531,48 @@ mod tests {
         let ringback = stack.next_cmd(2000).await.expect("agent ringback");
         assert_eq!(play_path(&ringback), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
 
-        // Replace escalation: the pending primary leg is removed first …
-        stack
-            .assert_cmd(4000, "LegRemove-primary", |c| {
-                matches!(c, CallCommand::LegRemove { .. })
-            })
-            .await;
-        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
-        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
-        // … then ONLY the widened agent is dialled (no duplicate primary).
-        stack.assert_cmd(2000, "LegAdd-widened", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
-        })
-        .await;
+        // Replace escalation fires while the primary leg is RINGING: the
+        // check must be SKIPPED — no LegRemove, no widened dial (an in-flight
+        // offer runs to its terminal first).
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "replace escalation must be SKIPPED while the primary leg is ringing"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal (no-answer) → back to wait retention → the re-armed
+        // timer runs the Replace step: the (now released) primary has no
+        // pending leg left, the widened agent is dialled.
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut widened_seen = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    widened_seen = true;
+                    break;
+                }
+                Some(_) => continue, // hold music / prompts around the re-entry
+                None => break,
+            }
+        }
+        assert!(
+            widened_seen,
+            "after the ring terminal the re-armed timer must dial the widened agent"
+        );
         assert!(
             stack.next_cmd(1200).await.is_none(),
             "replace escalation must not re-dial the removed primary"
@@ -2753,6 +2957,443 @@ mod tests {
         assert!(
             targets.iter().any(|t| t == "skill-group:stage_b"),
             "retention poll must target the CURRENT stage group, got {targets:?}"
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|t| t != "skill-group:support"),
+            "after a sequential switch the departed stage must NEVER be polled again, got {targets:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Cumulative escalation consumes its step ONE-SHOT even when the widened
+    /// resolve came back empty (overflow group all busy at the trigger), and
+    /// the escalation timer stops re-arming after the last step. The
+    /// wait-retention poll must therefore WIDEN to the escalated overflow
+    /// group: once its agents turn schedulable, the poll offers them instead
+    /// of waiting on the primary group forever. Regression for the
+    /// one-shot-consumption gap ("overflow fired but nobody ever rang").
+    #[tokio::test]
+    async fn test_wait_retention_polls_escalated_group_after_trigger() {
+        use std::sync::Arc;
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        // Overflow resolve AT the trigger returns NOTHING (the group was all
+        // busy). Poll resolves: the 1st wait-retention poll of the primary
+        // group is empty; every later poll returns the overflow agent —
+        // modelling the overflow agent turning Idle after the trigger.
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![], vec!["sip:l2agent@example.com".to_string()]]),
+        );
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-ovf-recovery".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Trigger the escalation: the widened union resolves EMPTY — the step
+        // is consumed, the timer stops, and NO leg is dialed from it.
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            registry.escalation_calls.lock().unwrap().len(),
+            1,
+            "escalation fired exactly once"
+        );
+        assert!(
+            registry
+                .escalation_include_primary
+                .lock()
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap_or(false),
+            "cumulative widening must include the primary group"
+        );
+        stack.drain_cmds();
+
+        // Wait-retention poll: primary group still empty → the widened poll
+        // hits the escalated overflow group and offers its now-idle agent.
+        stack.timeout("queue_retry");
+        let mut dial = None;
+        for _ in 0..4 {
+            match stack.next_cmd(2000).await {
+                Some(cmd) => {
+                    if matches!(&cmd, CallCommand::LegAdd { target, .. }
+                        if target.contains("l2agent@example.com"))
+                    {
+                        dial = Some(cmd);
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let dial = dial.expect("overflow agent must be offered from the escalated group");
+        assert!(
+            matches!(&dial, CallCommand::LegAdd { target, .. }
+                if target.contains("l2agent@example.com")),
+            "wait retention must dial the escalated overflow group's agent, got {dial:?}"
+        );
+        let targets = registry.resolve_targets.lock().unwrap().clone();
+        assert!(
+            targets.iter().any(|t| t == "skill-group:support_l2"),
+            "retention poll must widen to the escalated overflow group, got {targets:?}"
+        );
+        assert!(
+            targets.first().map(String::as_str) == Some("skill-group:support"),
+            "the call's own group must still be polled first, got {targets:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    async fn overflow_offer_blocks_retry_and_next_escalation_before_180(
+        mode: crate::call::app::queue::EscalationMode,
+    ) {
+        use crate::call::app::queue::EscalationStep;
+        {
+            let mut config = build_simple_queue_config();
+            config.skill_group = Some("primary".into());
+            config.skill_routing_enabled = true;
+            config.agents.clear();
+            config.strategy = DialStrategy::Sequential(vec![]);
+            config.retry_interval_secs = 3600;
+            config.escalation_mode = mode.clone();
+            config.escalation_timeline = vec![
+                EscalationStep {
+                    threshold_secs: 0,
+                    add_skill_group: "overflow".into(),
+                    fair: false,
+                },
+                EscalationStep {
+                    threshold_secs: 0,
+                    add_skill_group: "last".into(),
+                    fair: false,
+                },
+            ];
+            let registry = Arc::new(
+                HookRecordingRegistry::new()
+                    .with_resolve_uris(vec![vec![]])
+                    .with_escalation_uris(vec![
+                        vec!["sip:overflow@example.com".into()],
+                        vec!["sip:last@example.com".into()],
+                    ]),
+            );
+            let queue = QueueApp::new(config.to_plan(), config)
+                .with_agent_registry(registry.clone())
+                .with_call_id("overflow-before-180".into());
+            let mut stack = MockCallStack::run(Box::new(queue), "caller", "primary");
+            stack
+                .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack.timeout("escalation_check");
+            let offered_leg = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(CallCommand::LegAdd {
+                        target,
+                        leg_id: Some(leg),
+                        ..
+                    }) = stack.next_cmd(100).await
+                    {
+                        assert!(target.contains("overflow@"));
+                        break leg;
+                    }
+                }
+            })
+            .await
+            .expect("overflow offer");
+            let resolves = registry.resolve_targets.lock().unwrap().len();
+            stack.timeout("queue_retry");
+            stack.timeout("escalation_check");
+            assert!(
+                stack.next_cmd(200).await.is_none(),
+                "{mode:?}: an offer before 180 must remain the only leg"
+            );
+            assert_eq!(
+                registry.escalation_calls.lock().unwrap().len(),
+                1,
+                "{mode:?}: no second reservation"
+            );
+            assert_eq!(
+                registry.resolve_targets.lock().unwrap().len(),
+                resolves,
+                "{mode:?}: retry must not resolve while dialing"
+            );
+            stack.timeout("agent_ring_timeout");
+            stack.assert_cmd(2000, "original overflow ring timer", |c| matches!(c, CallCommand::LegRemove { leg_id, .. } if leg_id == &offered_leg)).await;
+            stack.cancel();
+            let _ = stack.join().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn adversarial_cumulative_offer_before_180() {
+        overflow_offer_blocks_retry_and_next_escalation_before_180(
+            crate::call::app::queue::EscalationMode::Cumulative,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn adversarial_replace_offer_before_180() {
+        overflow_offer_blocks_retry_and_next_escalation_before_180(
+            crate::call::app::queue::EscalationMode::Replace,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn adversarial_sequential_offer_before_180() {
+        overflow_offer_blocks_retry_and_next_escalation_before_180(
+            crate::call::app::queue::EscalationMode::Sequential,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adversarial_comfort_completion_keeps_inflight_offer_exclusive() {
+        use crate::call::app::queue::EscalationStep;
+        let mut config = build_simple_queue_config();
+        config.skill_group = Some("primary".into());
+        config.escalation_timeline = vec![EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "overflow".into(),
+            fair: false,
+        }];
+        config.voice_prompts = Some(VoicePrompts {
+            comfort_prompts: vec![crate::call::ComfortPrompt {
+                audio_file: "comfort.wav".into(),
+                interval_secs: 0,
+            }],
+            ..Default::default()
+        });
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![]])
+                .with_escalation_uris(vec![vec!["sip:overflow@example.com".into()]]),
+        );
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_call_id("comfort-offer-call".into())
+            .with_agent_registry(registry.clone());
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(queue),
+            queue_test_context(
+                "queue_comfort_prompt_enabled = true\nqueue_transfer_prompt_enabled = false",
+            ),
+        );
+        stack
+            .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let hold = stack.next_cmd(2000).await.expect("hold music");
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "primary INVITE", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        stack.audio_complete(play_track_id(&hold));
+        let comfort = stack.next_cmd(2000).await.expect("comfort prompt");
+        assert_eq!(play_path(&comfort), "comfort.wav");
+        stack.audio_complete(play_track_id(&comfort));
+        let hold = stack
+            .next_cmd(2000)
+            .await
+            .expect("hold resumes after comfort");
+        assert_eq!(play_path(&hold), "sounds/hold_music.wav");
+        let resolves = registry.resolve_targets.lock().unwrap().len();
+        stack.timeout("queue_retry");
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(200).await.is_none(),
+            "comfort playback must preserve the only in-flight leg"
+        );
+        assert_eq!(registry.resolve_targets.lock().unwrap().len(), resolves);
+        assert!(registry.escalation_calls.lock().unwrap().is_empty());
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    async fn stale_terminal_keeps_next_offer(terminal: &str) {
+        let mut config = build_sequential_queue_config();
+        config.hold = None;
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_call_id("same-call-delayed-terminal".into());
+        let mut stack = MockCallStack::run_with_context(
+            Box::new(queue),
+            queue_test_context("queue_transfer_prompt_enabled = false"),
+        );
+        stack
+            .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let Some(CallCommand::LegAdd {
+            leg_id: Some(first),
+            ..
+        }) = stack.next_cmd(2000).await
+        else {
+            panic!("first offer")
+        };
+        let failure = serde_json::json!({"agent_id": "agent1", "agent_uri": "sip:agent1@example.com", "leg_id": first.0});
+        stack.custom("agent_no_answer", failure.clone());
+        let Some(CallCommand::LegAdd {
+            target,
+            leg_id: Some(second),
+            ..
+        }) = stack.next_cmd(2000).await
+        else {
+            panic!("second offer")
+        };
+        assert!(target.contains("agent2@"));
+        stack.custom(terminal, failure);
+        assert!(
+            stack.next_cmd(200).await.is_none(),
+            "late {terminal} of A must not advance B to C"
+        );
+        stack.timeout("agent_ring_timeout");
+        stack
+            .assert_cmd(
+                2000,
+                "original B ring timer",
+                |c| matches!(c, CallCommand::LegRemove { leg_id, .. } if leg_id == &second),
+            )
+            .await;
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn adversarial_delayed_no_answer_preserves_current_offer() {
+        stale_terminal_keeps_next_offer("agent_no_answer").await;
+    }
+    #[tokio::test]
+    async fn adversarial_delayed_reject_preserves_current_offer() {
+        stale_terminal_keeps_next_offer("agent_busy").await;
+    }
+
+    /// Sequential overflow must NOT touch a call whose agent leg is ringing:
+    /// at the threshold the check is skipped (no leg cancel, no group
+    /// switch, no resolve); after the ring terminal returns the call to wait
+    /// retention, the re-armed check performs the stage switch and dials the
+    /// new stage's agent. Regression for "已分配坐席等待振铃的呼叫被溢出重新分配".
+    #[tokio::test]
+    async fn test_sequential_escalation_skipped_while_leg_ringing() {
+        use std::sync::Arc;
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "stage_b".to_string(),
+            fair: false,
+        }];
+        config.skill_group = Some("support".to_string());
+        // The primary agent IS dialable (a real ringing leg), unlike the
+        // wait-retention-only sequential tests.
+        config.skill_routing_enabled = false;
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_escalation_uris(vec![vec!["sip:l2agent@example.com".to_string()]]),
+        );
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-ring".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match &primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone(),
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+        stack.custom("agent_ringing", serde_json::json!({ "leg_id": primary_leg }));
+        stack.drain_cmds();
+
+        // Threshold fires while the leg is ringing → the whole stage switch
+        // must be skipped.
+        stack.timeout("escalation_check");
+        assert!(
+            stack.next_cmd(300).await.is_none(),
+            "sequential stage switch must be SKIPPED while the agent leg is ringing"
+        );
+        assert!(
+            registry.group_switches.lock().unwrap().is_empty(),
+            "no group switch may happen while the offer is in flight"
+        );
+        assert!(
+            registry.escalation_calls.lock().unwrap().is_empty(),
+            "a skipped check must not reach the registry"
+        );
+
+        // Ring terminal → wait retention → the re-armed check switches the
+        // stage: the departed leg was already released, ONLY the new stage's
+        // agent is dialled.
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({
+                "leg_id": primary_leg,
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent1",
+                "reason": "timeout",
+            }),
+        );
+        let mut switched = false;
+        for _ in 0..5 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::LegAdd { ref target, .. })
+                    if target.to_string().contains("l2agent@example.com") =>
+                {
+                    switched = true;
+                    break;
+                }
+                // The stale pending entry of the DEAD primary leg may be
+                // cleaned up at the switch (harmless remove of a leg the
+                // ring terminal already killed). Cancelling anything else is
+                // forbidden.
+                Some(CallCommand::LegRemove { leg_id, .. })
+                    if primary_leg.as_ref() == Some(&leg_id) =>
+                continue,
+                Some(CallCommand::LegRemove { leg_id, .. }) => {
+                    panic!("stage switch cancelled a LIVE leg: {leg_id:?}")
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            switched,
+            "after the ring terminal the re-armed check must dial the new stage's agent"
+        );
+        assert_eq!(
+            registry.group_switches.lock().unwrap().clone(),
+            vec![("support".to_string(), "stage_b".to_string())],
+            "the stage switch must be paired-accounted exactly once"
         );
 
         stack.cancel();
@@ -4060,17 +4701,20 @@ mod tests {
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "OriginateCall", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
-            })
-            .await;
+        let offered_leg = match stack.next_cmd(2000).await.expect("OriginateCall") {
+            CallCommand::LegAdd {
+                target,
+                leg_id: Some(leg),
+                ..
+            } if target == "sip:agent1@example.com" => leg,
+            other => panic!("expected actual first agent offer, got {other:?}"),
+        };
 
         // The agent rejects with 486 → the SIP session reports agent_busy.
         stack.custom(
             "agent_busy",
             serde_json::json!({
-                "leg_id": "agent-leg-1",
+                "leg_id": offered_leg,
                 "agent_uri": "sip:agent1@example.com",
                 "agent_id": "agent-001",
                 "reason": "Rejected with 486",
@@ -4096,7 +4740,7 @@ mod tests {
         assert_eq!(rejected["queue_id"], "test-queue");
         assert_eq!(rejected["agent_id"], "agent-001");
         assert_eq!(
-            rejected["leg_id"], "agent-leg-1",
+            rejected["leg_id"].as_str(), Some(offered_leg.as_str()),
             "rejection must bind to the dialed leg"
         );
 
@@ -4178,17 +4822,20 @@ mod tests {
             .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack
-            .assert_cmd(2000, "OriginateCall", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
-            })
-            .await;
+        let offered_leg = match stack.next_cmd(2000).await.expect("OriginateCall") {
+            CallCommand::LegAdd {
+                target,
+                leg_id: Some(leg),
+                ..
+            } if target == "sip:agent1@example.com" => leg,
+            other => panic!("expected actual first agent offer, got {other:?}"),
+        };
 
         // The agent rejects with 486.
         stack.custom(
             "agent_busy",
             serde_json::json!({
-                "leg_id": "agent-leg-1",
+                "leg_id": offered_leg,
                 "agent_uri": "sip:agent1@example.com",
                 "agent_id": "agent-001",
                 "reason": "Rejected with 486",
@@ -4240,6 +4887,215 @@ mod tests {
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_skill_group_busy_retry_resolves_before_dialing_stale_suffix() {
+        use crate::call::app::agent_registry::PresenceState;
+
+        for skill_group_dispatch in [true, false] {
+            let (logs, _log_guard, _interest_guard) = capture_queue_logs();
+            let registry = Arc::new(
+                HookRecordingRegistry::new()
+                    .with_skill_group_dispatch(skill_group_dispatch)
+                    .with_resolve_uris(vec![vec![
+                        "sip:agent1@example.com".into(),
+                        "sip:agent3@example.com".into(),
+                    ]]),
+            );
+            for (id, uri) in [
+                ("agent-001", "sip:agent1@example.com"),
+                ("agent-002", "sip:agent2@example.com"),
+                ("agent-003", "sip:agent3@example.com"),
+            ] {
+                registry
+                    .register(id.into(), id.into(), uri.into(), vec!["support".into()], 1)
+                    .await
+                    .unwrap();
+            }
+            let call_id = "late-busy-retry-call";
+            registry
+                .update_presence(
+                    "agent-001",
+                    PresenceState::Ringing {
+                        call_id: Some(call_id.into()),
+                    },
+                )
+                .await
+                .unwrap();
+            let mut config = build_sequential_queue_config();
+            config.hold = None;
+            config.priority = 7;
+            if skill_group_dispatch {
+                config.skill_group = Some("support".into());
+            }
+            let queue = QueueApp::new(config.to_plan(), config)
+                .with_agent_registry(registry.clone())
+                .with_call_id(call_id.into());
+            let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+            stack
+                .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack.custom("dial_next_agent", serde_json::json!({}));
+            let first_leg = match stack.next_cmd(2000).await.expect("primary dial") {
+                CallCommand::LegAdd { target, leg_id, .. } => {
+                    assert_eq!(target, "sip:agent1@example.com");
+                    leg_id.unwrap().to_string()
+                }
+                other => panic!("expected primary LegAdd, got {other:?}"),
+            };
+            assert!(
+                registry.retry_resolves.lock().unwrap().is_empty(),
+                "the reserved primary must not be selected twice"
+            );
+
+            // The original suffix is stale: agent2 is still Idle, but its
+            // current definition no longer has the group's required skill.
+            registry.unregister("agent-002").await.unwrap();
+            registry
+                .register(
+                    "agent-002".into(),
+                    "Bob".into(),
+                    "sip:agent2@example.com".into(),
+                    vec![],
+                    1,
+                )
+                .await
+                .unwrap();
+            stack.custom(
+                "agent_busy",
+                serde_json::json!({
+                    "agent_id": "agent-001", "agent_uri": "sip:agent1@example.com", "leg_id": first_leg,
+                }),
+            );
+            let target = loop {
+                match stack.next_cmd(2000).await.expect("retry dial") {
+                    CallCommand::LegAdd { target, .. } => break target,
+                    CallCommand::InjectAppEvent { .. } => continue,
+                    other => panic!("expected retry LegAdd, got {other:?}"),
+                }
+            };
+            if skill_group_dispatch {
+                assert_eq!(
+                    target, "sip:agent3@example.com",
+                    "late skill-group retry must use fresh admission, not its stale suffix"
+                );
+                assert_eq!(
+                    *registry.retry_resolves.lock().unwrap(),
+                    vec![(
+                        "skill-group:support".into(),
+                        call_id.into(),
+                        7,
+                        vec!["agent-001".into()],
+                    )],
+                    "one retry selection must carry exclusions before reservation/assignment"
+                );
+                assert_eq!(
+                    *registry.resolve_calls.lock().unwrap(),
+                    1,
+                    "do not advance routing twice for one retry"
+                );
+                assert_queue_log_call(&logs, call_id, &["Queue: re-resolved sequential retry"]);
+            } else {
+                assert_eq!(
+                    target, "sip:agent2@example.com",
+                    "static queues keep their configured sequential order"
+                );
+                assert!(registry.retry_resolves.lock().unwrap().is_empty());
+            }
+            stack.cancel();
+            let _ = stack.join().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_skill_group_originate_failure_resolves_with_exclusion_before_waiting() {
+        use crate::call::app::agent_registry::PresenceState;
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_skill_group_dispatch(true)
+                .with_resolve_uris(vec![vec!["sip:agent1@example.com".into()]]),
+        );
+        for (id, uri) in [
+            ("agent-001", "sip:agent1@example.com"),
+            ("agent-002", "sip:agent2@example.com"),
+        ] {
+            registry
+                .register(id.into(), id.into(), uri.into(), vec!["support".into()], 1)
+                .await
+                .unwrap();
+        }
+        let call_id = "late-originate-retry-call";
+        registry
+            .update_presence(
+                "agent-001",
+                PresenceState::Ringing {
+                    call_id: Some(call_id.into()),
+                },
+            )
+            .await
+            .unwrap();
+        let mut config = build_sequential_queue_config();
+        config.skill_group = Some("support".into());
+        config.hold = None;
+        config.priority = 7;
+        config.retry_interval_secs = 60;
+        let mut queue = QueueApp::new(config.to_plan(), config)
+            .with_agent_registry(registry.clone())
+            .with_call_id(call_id.into());
+        // Real session backpressure: PinAgentMeta + Trace fill the channel,
+        // so the primary LegAdd fails before any SIP INVITE is sent.
+        let (commands, mut command_rx) = tokio::sync::mpsc::channel(2);
+        let handle =
+            crate::proxy::proxy_call::sip_session::SipSessionHandle::new_for_test(call_id, commands);
+        let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mut ctrl, _timers) = crate::call::app::CallController::new(handle, events_rx);
+        let ctx = queue_test_context("");
+        queue.on_enter(&mut ctrl, &ctx).await.unwrap();
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            CallCommand::Answer { .. }
+        ));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            queue.on_external_event(
+                crate::call::app::AppEvent::Custom {
+                    name: "dial_next_agent".into(),
+                    data: serde_json::json!({}),
+                },
+                &mut ctrl,
+                &ctx,
+            ),
+        )
+        .await
+        .expect("failed primary must not synchronously retry forever");
+        assert!(
+            ctrl.timeout_is_armed("queue_retry"),
+            "failed originate must retain the caller instead of burning the stale suffix/fallback: {result:?}"
+        );
+        result.unwrap();
+        assert_eq!(
+            *registry.retry_resolves.lock().unwrap(),
+            vec![(
+                "skill-group:support".into(),
+                call_id.into(),
+                7,
+                vec!["agent-001".into()],
+            )]
+        );
+        assert_eq!(
+            *registry.resolve_calls.lock().unwrap(),
+            1,
+            "exhausted exclusions wait for a later rotation poll"
+        );
+        // This core test observes the cleanup request at the registry boundary.
+        // The CC adapter tests verify the actual bound Ringing -> Idle transition.
+        assert_eq!(
+            registry.release_requests.lock().unwrap().first(),
+            Some(&("agent-001".into(), call_id.into())),
+            "the unsent offer must request release of its own reservation"
+        );
     }
 
     /// `queue_joined` must be emitted exactly once per queue entry:

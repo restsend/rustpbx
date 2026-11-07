@@ -10,6 +10,146 @@ use crate::proxy::tests::test_sip_session_regressions::{
 /// Model an addon resolving identity at ringing, without coupling core tests to CC.
 struct RingingIdentity;
 
+#[tokio::test]
+async fn scoped_transfer_review_keeps_selected_agent_identity() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry};
+    let registry = Arc::new(MemoryRegistry::new());
+    // A is a canonical agent ID; the same text is also B's dialable endpoint.
+    registry
+        .register(
+            "agent-a".into(),
+            "A".into(),
+            "sip:agent-a@other.test".into(),
+            vec![],
+            1,
+        )
+        .await
+        .unwrap();
+    registry
+        .register(
+            "agent-b".into(),
+            "B".into(),
+            "sip:agent-a@rustpbx.com".into(),
+            vec![],
+            1,
+        )
+        .await
+        .unwrap();
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        crate::config::ProxyConfig {
+            route_originated_calls: false,
+            ..Default::default()
+        },
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    Arc::get_mut(&mut server).unwrap().agent_registry = Some(registry);
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new("selected-agent".into(), request, DialDirection::Inbound)
+        .with_caller("sip:alice@rustpbx.com".parse().unwrap());
+    let (mut session, _, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+    session.extensions.set_agent_attribution("agent-a");
+    let leg_id = LegId::from("selected-agent");
+    let added = session
+        .execute_command(
+            CallCommand::LegAdd {
+                source_leg: Some(LegId::from("caller")),
+                target: "sip:agent-a@rustpbx.com".into(),
+                leg_id: Some(leg_id.clone()),
+                headers: vec![],
+                purpose: Some(crate::call::domain::LegPurpose::Agent),
+            },
+            None,
+        )
+        .await;
+    assert!(added.success, "{added:?}");
+    session.update_leg_state(&leg_id, LegState::Ringing);
+    let mut ringing = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "call_ringing" {
+            ringing.push(entry.event);
+        }
+    }
+    assert_eq!(ringing.len(), 1);
+    assert_eq!(ringing[0].payload["agent_id"], "agent-a");
+    session.cleanup().await;
+}
+
+#[tokio::test]
+async fn scoped_transfer_review_rejected_route_keeps_concurrency_available() {
+    use crate::call::policy::{FrequencyLimiter, InMemoryFrequencyLimiter, PolicyGuard};
+    use crate::models::policy::{ConcurrencyLimit, PolicySpec};
+    let limiter = InMemoryFrequencyLimiter::new();
+    let mut config = super::test_forward_route_config();
+    config.route_originated_calls = false;
+    config.routes.as_mut().unwrap()[0].policy = Some(PolicySpec {
+        concurrency: Some(ConcurrencyLimit {
+            max_total: 1,
+            max_per_account: HashMap::new(),
+        }),
+        ..Default::default()
+    });
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        config,
+        Arc::new(parking_lot::RwLock::new(
+            crate::rwi::gateway::RwiGateway::new(),
+        )),
+    )
+    .await;
+    Arc::get_mut(&mut server).unwrap().frequency_limiter = Some(limiter.clone());
+    let mut routing = crate::call::RoutingState::new();
+    routing.policy_guard = Some(Arc::new(PolicyGuard::new(limiter.clone())));
+    *server.routing_state.write() = Arc::new(routing);
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new("rejected-transfer".into(), request, DialDirection::Inbound)
+        .with_caller("sip:alice@rustpbx.com".parse().unwrap());
+    let (mut session, _, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+    let mut agent = crate::call::domain::Leg::new(LegId::from("callee"));
+    agent.agent_id = Some("agent-a".into());
+    agent.state = LegState::Connected;
+    session.legs.insert(LegId::from("callee"), agent);
+    let (_, mut states) = mpsc::unbounded_channel();
+    let result = session
+        .execute_command(
+            CallCommand::BlindTransferCustomer {
+                target: "sip:9000@rustpbx.com".into(),
+                headers: HashMap::new(),
+                application_only: true,
+                completion: None,
+            },
+            Some(&mut states),
+        )
+        .await;
+    assert!(!result.success);
+    assert!(session.legs.contains_key(&LegId::from("callee")));
+    assert!(
+        limiter
+            .check_concurrency("outbound-gw", "caller", "alice", 1)
+            .await
+            .unwrap(),
+        "a rejected transfer must leave the routing concurrency slot available"
+    );
+    limiter
+        .release_concurrency("outbound-gw", "caller", "alice")
+        .await
+        .unwrap();
+    session.cleanup().await;
+}
+
 #[async_trait::async_trait]
 impl CallSessionHook for RingingIdentity {
     async fn on_call_ringing(&self, ctx: &CallSessionContext, _: bool) {

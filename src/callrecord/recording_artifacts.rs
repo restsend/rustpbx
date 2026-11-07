@@ -239,6 +239,13 @@ pub fn upload_failed_marker_path(source: &Path) -> PathBuf {
         .join(format!(".upload_failed.{}", file_name))
 }
 
+/// Receipt retained with an uploaded local file until its retention window expires.
+pub(crate) fn upload_success_marker_path(source: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".upload_succeeded.");
+    name.push(source.file_name().unwrap_or_default());
+    source.with_file_name(name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadFailedMarker {
     pub time: String,

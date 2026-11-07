@@ -25,6 +25,7 @@ use rustrtc::PeerConnection;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 use tracing::{debug, info, warn};
 
 /// Default silence window before the watcher reports (`ingress_stall_warn_secs`).
@@ -225,6 +226,7 @@ fn read_kernel_udp() -> Option<KernelUdpSnapshot> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_ingress_watch(
     leg_id: String,
+    call_id: Option<String>,
     pc: PeerConnection,
     tap: std::sync::Arc<IngressTap>,
     rtcp: std::sync::Arc<LegRtcpStats>,
@@ -234,7 +236,7 @@ pub(crate) fn spawn_ingress_watch(
     rtp_timeout: std::sync::Arc<crate::leg::RtpTimeoutState>,
     quiet_expected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    let watcher = async move {
         let mut state = IngressWatchState::new(warn_after);
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -257,7 +259,9 @@ pub(crate) fn spawn_ingress_watch(
                             || rtp_timeout.app_paused.load(std::sync::atomic::Ordering::Relaxed);
                     let accepted = pc.received_rtp_packets();
                     debug!(
+                        session_id = %call_id.as_deref().unwrap_or("-"),
                         leg_id = %leg_id,
+                        direction = "peer_to_pbx",
                         suppressed,
                         accepted,
                         quiet_expected = quiet_expected.load(std::sync::atomic::Ordering::Relaxed),
@@ -291,7 +295,9 @@ pub(crate) fn spawn_ingress_watch(
                                 episode,
                             };
                             warn!(
+                                session_id = %call_id.as_deref().unwrap_or("-"),
                                 leg_id = %leg_id,
+                                direction = "peer_to_pbx",
                                 silent_secs = event.silent_secs,
                                 lifetime_accepted = event.lifetime_accepted,
                                 tap_ingress = event.tap_ingress,
@@ -308,7 +314,9 @@ pub(crate) fn spawn_ingress_watch(
                         }
                         IngressWatchDecision::Resumed { silent_for } => {
                             info!(
+                                session_id = %call_id.as_deref().unwrap_or("-"),
                                 leg_id = %leg_id,
+                                direction = "peer_to_pbx",
                                 silent_for_secs = silent_for.as_secs(),
                                 "leg ingress resumed after stall"
                             );
@@ -331,7 +339,8 @@ pub(crate) fn spawn_ingress_watch(
                 }
             }
         }
-    })
+    };
+    tokio::spawn(watcher.with_current_subscriber())
 }
 
 #[cfg(test)]

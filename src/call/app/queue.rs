@@ -498,8 +498,8 @@ pub struct QueueApp {
     /// Skill groups already escalated (to avoid duplicates).
     pub(crate) escalated_groups: Vec<String>,
     /// Overflow / escalation stage the call is CURRENTLY queued in. `None`
-    /// while still in the primary group — all non-sequential paths (and the
-    /// period before the first sequential switch) keep the legacy behavior.
+    /// while still in the primary group; Replace and Sequential retain only
+    /// the current stage, while Cumulative keeps the joined groups.
     pub(crate) current_group: Option<String>,
     /// When the current overflow stage started (sequential mode). Stage
     /// thresholds are evaluated against this timer, which resets at every
@@ -1083,7 +1083,8 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<AppAction> {
-        if self.call_already_connected() {
+        // Comfort playback may temporarily own the state while an offer rings.
+        if self.call_already_connected() || !self.pending_agents.is_empty() {
             return Ok(AppAction::Continue);
         }
         if self.fallback_executed {
@@ -1102,24 +1103,52 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
-        // Poll the group the call is queued in NOW: after a sequential
-        // overflow switch that is the current stage group, otherwise the
-        // primary group (legacy behavior).
-        let target_group = self
-            .current_group
-            .clone()
-            .or_else(|| self.config.skill_group.clone());
-        let Some(ref sg) = target_group else {
+        // Poll groups in a fixed order:
+        // - Replace / Sequential overflow: ONLY the current stage group. The previous
+        //   stage was dequeued at the switch (`queue_left` + group-switch
+        //   accounting) — polling it would resurrect the departed queue.
+        // - Cumulative: the primary group first, then every group
+        //   whose escalation step already triggered. `check_escalation`
+        //   consumes each step ONE-SHOT (`escalated_groups`) even when the
+        //   widened resolve came back empty (overflow group all busy at the
+        //   trigger), and the escalation timer stops re-arming once every
+        //   step has fired — without widening the poll here, those overflow
+        //   agents would never be offered again even after turning Idle.
+        //   The widened poll is the recovery path for that window.
+        let poll_groups: Vec<String> = if let Some(stage) = self.current_group.clone() {
+            vec![stage]
+        } else {
+            let mut groups = self
+                .config
+                .skill_group
+                .clone()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for group in &self.escalated_groups {
+                if !groups.contains(group) {
+                    groups.push(group.clone());
+                }
+            }
+            groups
+        };
+        if poll_groups.is_empty() {
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
-        };
+        }
         let Some(ref registry) = self.agent_registry else {
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
         };
 
-        let target = format!("skill-group:{}", sg);
         let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
+        // The first group keeps the legacy poll verbatim (exclusion rotation +
+        // targeted self-heal): it is the queue the call is booked under.
+        // Escalated overflow groups are opportunistic widening — plain polls
+        // with the same exclusion rotation, taken only when the first group
+        // came back empty this tick.
+        let mut poll_iter = poll_groups.iter();
+        let poll_group = poll_iter.next().expect("poll list is non-empty");
+        let target = format!("skill-group:{}", poll_group);
         let mut uris = registry
             .resolve_target_with_exclusions(
                 &target,
@@ -1129,24 +1158,13 @@ impl QueueApp {
                 &self.no_answer_agents,
             )
             .await;
-        // Exclusions must reach the resolver BEFORE it reserves or announces
-        // an agent. Once every eligible agent has rung, start a new rotation;
-        // keep the history if even an unrestricted poll has no candidates.
-        if uris.is_empty() && !self.no_answer_agents.is_empty() {
-            uris = registry
-                .resolve_target_with_priority(&target, None, &self.call_id, priority)
-                .await;
-            if !uris.is_empty() {
-                self.no_answer_agents.clear();
-            }
-        }
         if uris.is_empty() {
             // Self-heal, then re-poll: heals this caller within one poll
             // instead of waiting for the periodic watchdog.
             if !self.targeted_recovery && registry.reconcile_dead_call_bindings().await > 0 {
                 info!(
                     queue = %self.config.name,
-                    skill_group = %sg,
+                    skill_group = %poll_group,
                     "Queue: dead agent bindings healed — re-polling candidates"
                 );
                 uris = registry
@@ -1160,14 +1178,58 @@ impl QueueApp {
                     .await;
             }
         }
+        // Escalated overflow groups (cumulative/replace recovery): offer an
+        // agent from them only after the call's own group had no candidate
+        // this tick. Each keeps its own FIFO gate (plain resolve path).
         if uris.is_empty() {
-            debug!(skill_group = %sg, "Queue: wait retention poll — still no Idle agent");
+            for overflow_group in poll_iter {
+                let overflow_target = format!("skill-group:{}", overflow_group);
+                let candidate = registry
+                    .resolve_target_with_exclusions(
+                        &overflow_target,
+                        None,
+                        &self.call_id,
+                        priority,
+                        &self.no_answer_agents,
+                    )
+                    .await;
+                if !candidate.is_empty() {
+                    info!(
+                        queue = %self.config.name,
+                        skill_group = %overflow_group,
+                        "Queue: escalated overflow group has an Idle agent — offering"
+                    );
+                    uris = candidate;
+                    break;
+                }
+            }
+        }
+        // Start a new rotation only after every joined group has had a
+        // chance to reserve a candidate that has not already no-answered.
+        if uris.is_empty() && !self.no_answer_agents.is_empty() {
+            for group in &poll_groups {
+                uris = registry
+                    .resolve_target_with_priority(
+                        &format!("skill-group:{group}"),
+                        None,
+                        &self.call_id,
+                        priority,
+                    )
+                    .await;
+                if !uris.is_empty() {
+                    self.no_answer_agents.clear();
+                    break;
+                }
+            }
+        }
+        if uris.is_empty() {
+            debug!(skill_group = %poll_group, "Queue: wait retention poll — still no Idle agent");
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
         }
 
         info!(
-            skill_group = %sg,
+            skill_group = %poll_group,
             agents = uris.len(),
             "Queue: Idle agent available — leaving wait retention"
         );
@@ -1737,6 +1799,10 @@ impl QueueApp {
             Some(failed) => self.pending_agents.retain(|(_, leg)| leg != failed),
             None => self.pending_agents.clear(),
         }
+        // A sequential terminal ends the sole offer even when the next
+        // action is wait retention rather than another immediate dial — a
+        // stale ring-timeout arm must not fire into the next dial round.
+        ctrl.cancel_timeout("agent_ring_timeout");
         self.current_agent_idx += 1;
         self.dial_attempts += 1;
 
@@ -1768,6 +1834,22 @@ impl QueueApp {
             return self.enter_waiting_for_agent(ctrl).await;
         }
 
+        if self.allows_wait_retention()
+            && !self.fallback_executed
+            && !self.abandoned_recorded
+            && self
+                .agent_registry
+                .as_ref()
+                .is_some_and(|registry| registry.supports_skill_group_dispatch())
+        {
+            // A rejection ended the assignment round. The next agent must be
+            // admitted by the dispatcher, rather than taken from its old suffix.
+            self.emit_queue_rejoined();
+            if ringback_ended && self.ringing_agent_legs.is_empty() {
+                self.start_hold_music(ctrl).await?;
+            }
+            return self.dial_next_agent(ctrl).await;
+        }
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             if self.fallback_executed {
@@ -1973,6 +2055,12 @@ impl QueueApp {
             );
             return Ok(AppAction::Continue);
         }
+        let skill_group_dispatch = !self.is_parallel()
+            && self.config.skill_group.is_some()
+            && self
+                .agent_registry
+                .as_ref()
+                .is_some_and(|registry| registry.supports_skill_group_dispatch());
         // Skip agents that became unavailable since this queue's target list
         // was resolved (e.g. reserved by or busy on another concurrent call)
         // so sequential fallback never INVITEs an agent already on a call.
@@ -2003,6 +2091,67 @@ impl QueueApp {
             info!(agent = %next_uri, ?availability, "Queue: skipping agent (no longer available)");
             self.current_agent_idx += 1;
             self.dial_attempts += 1;
+            // A skipped agent must not be offered again on the retry round:
+            // record it so the skill-group re-resolution below excludes it
+            // (retry-revalidation semantics from the 0.5.1 line).
+            if skill_group_dispatch {
+                let agent_id = self.agent_id_for_uri(&next_uri).await;
+                self.record_no_answer_agent(agent_id);
+            }
+        }
+        if skill_group_dispatch && self.current_agent_idx > 0 {
+            if self.abandoned_recorded
+                || matches!(
+                    self.state,
+                    QueueState::PlayingBusyPrompt
+                        | QueueState::PlayingNoAnswerPrompt
+                        | QueueState::PlayingFinalPrompt
+                        | QueueState::ExecutingFallback
+                        | QueueState::Done
+                )
+            {
+                return Ok(AppAction::Continue);
+            }
+            let group = self
+                .current_group
+                .clone()
+                .or_else(|| self.config.skill_group.clone())
+                .expect("skill-group dispatch has a group");
+            let registry = self
+                .agent_registry
+                .as_ref()
+                .expect("skill-group dispatch has a registry")
+                .clone();
+            self.pending_agents.clear();
+            ctrl.cancel_timeout("agent_ring_timeout");
+            let uris = registry
+                .resolve_target_with_exclusions(
+                    &format!("skill-group:{group}"),
+                    None,
+                    &self.call_id,
+                    crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                    &self.no_answer_agents,
+                )
+                .await;
+            info!(call_id = %self.call_id, skill_group = %group, excluded_agent_ids = ?self.no_answer_agents,
+                    target_count = uris.len(), "Queue: re-resolved sequential retry");
+            self.current_agent_idx = 0;
+            if uris.is_empty() {
+                // A later poll may start another rotation; synchronous failures
+                // must not clear exclusions and spin through the same agents.
+                self.release_phantom_agents(None).await;
+                self.dynamic_agents = None;
+                return self.enter_waiting_for_agent(ctrl).await;
+            }
+            let locations = uris
+                .into_iter()
+                .map(|uri| Location {
+                    aor: uri.parse().unwrap_or_default(),
+                    contact_raw: Some(uri),
+                    ..Default::default()
+                })
+                .collect();
+            self.dynamic_agents = Some(self.enrich_locations(locations).await);
         }
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
@@ -2076,7 +2225,7 @@ impl QueueApp {
                 self.pending_agents.push((uri, call_id));
             }
             Err(e) => {
-                warn!("Queue: failed to dial agent {}: {}", uri, e);
+                warn!(call_id = %self.call_id, agent = %uri, error = %e, "Queue: failed to dial agent");
                 // The resolve-time reservation (Idle → Ringing) is still held:
                 // the INVITE never went out, so the agent must be released
                 // immediately or it stays Ringing forever.
@@ -2087,11 +2236,15 @@ impl QueueApp {
                         registry.release_call(&attempt_agent_id, &self.call_id).await
                     }
                 {
-                    info!(agent = %uri, "Queue: released reservation after originate failure");
+                    info!(call_id = %self.call_id, agent = %uri, "Queue: released reservation after originate failure");
                 }
                 // Advance to the next agent instead of falling back immediately.
                 self.current_agent_idx += 1;
                 self.dial_attempts += 1;
+                if skill_group_dispatch {
+                    self.record_no_answer_agent(attempt_agent_id);
+                    return Box::pin(self.dial_next_agent(ctrl)).await;
+                }
                 if self.current_agent_idx >= self.get_agents().len() {
                     return self
                         .play_unavailable_prompt_and_then_fallback(
@@ -2162,22 +2315,29 @@ impl QueueApp {
     ///   dispatcher group-switch accounting), then re-queue into the new one —
     ///   one stage at a time, per-stage dwell measured from the switch.
     async fn check_escalation(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
-        if self.config.escalation_timeline.is_empty() {
+        // A comfort prompt is also a waiting state, but must not replace a live offer.
+        if self.config.escalation_timeline.is_empty() || !self.pending_agents.is_empty() {
             return Ok(());
         }
         // Only escalate while actually parked in the queue's waiting states.
         // After max_wait/abandon the call is owned by the fallback path (or
         // gone entirely) — originating escalation legs there produces ghost
         // rings nobody collects.
+        //
+        // `DialingAgents` and `PlayingTransferPrompt { connected_agent: None
+        // }` are deliberately NOT in the list: an in-flight agent offer (leg
+        // dialing/ringing, prompt playing before the answer) must run to its
+        // terminal first — escalating then would either cancel a ringing leg
+        // mid-ring (sequential / replace re-assign) or pile more legs onto a
+        // call that already has an agent's phone ringing (cumulative). Ring
+        // terminal (no-answer / reject / timeout) returns the call to a
+        // waiting state, and the next re-armed check fires the pending step
+        // immediately.
         if !matches!(
             self.state,
             QueueState::WaitingForAgent
                 | QueueState::PlayingHold { .. }
                 | QueueState::PlayingComfortPrompt
-                | QueueState::DialingAgents { .. }
-                | QueueState::PlayingTransferPrompt {
-                    connected_agent: None
-                }
         ) {
             debug!(state = ?self.state, "Queue: escalation check skipped — not waiting");
             return Ok(());
@@ -2202,6 +2362,13 @@ impl QueueApp {
                 if matches!(self.config.escalation_mode, EscalationMode::Sequential) {
                     let from_group = self.skill_queue_id().to_string();
                     if from_group != step.add_skill_group {
+                        // Dispatcher: paired waiting-depth accounting
+                        // (dequeue `from`, enqueue the new stage) + the
+                        // dispatcher-family `skill_group_call_moved` marker —
+                        // emitted BEFORE queue_left so consumers see the
+                        // skill-group departure first.
+                        self.notify_group_switch(&from_group, &step.add_skill_group)
+                            .await;
                         // RWI: the call left the queue/stage it was queued in.
                         // skill_groups lists everything queued SO FAR (up to
                         // and including the stage being left).
@@ -2216,10 +2383,6 @@ impl QueueApp {
                                 Some(groups)
                             },
                         });
-                        // Dispatcher: paired waiting-depth accounting
-                        // (dequeue `from`, enqueue the new stage).
-                        self.notify_group_switch(&from_group, &step.add_skill_group)
-                            .await;
                     }
                 }
 
@@ -2254,6 +2417,7 @@ impl QueueApp {
                                     &self.call_id,
                                     step.fair,
                                     include_primary,
+                                    &self.no_answer_agents,
                                 )
                                 .await
                         }
@@ -2276,23 +2440,37 @@ impl QueueApp {
                         })
                         .collect();
 
+                    // ── Single-call invariant (单呼) ──────────────────────────
+                    // A queued call has at most ONE in-flight agent leg. The
+                    // resolve atomically reserved exactly one agent and put
+                    // it at the head of the union — dial THAT one only. The
+                    // rest of the union stays a re-resolvable pool: after the
+                    // offer's ring terminal the wait-retention poll (which
+                    // covers primary + already-triggered overflow groups)
+                    // offers the next candidate one at a time. The old
+                    // ring-all widening (dial the whole union = 群振) is
+                    // retired — cumulative widening means the CANDIDATE POOL
+                    // widens, never "more legs ring simultaneously".
+                    let dial_head: &[String] = &agent_uris[..agent_uris.len().min(1)];
+
                     match self.config.escalation_mode {
                         EscalationMode::Cumulative => {
-                            // Add new agents alongside existing
+                            // Pool widened: dial the reserved head alongside
+                            // existing legs (there may be none pending).
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: cumulative escalation - added agent",
                                 "Queue: cumulative escalation - failed to add agent",
                             )
                             .await;
                         }
                         EscalationMode::Replace => {
-                            // Cancel existing legs and dial new agents
+                            // Cancel existing legs and dial the new stage's head.
                             Self::cancel_pending_legs(self, ctrl).await;
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: replace escalation - dialed agent",
                                 "Queue: replace escalation - failed to dial agent",
                             )
@@ -2300,24 +2478,29 @@ impl QueueApp {
                         }
                         EscalationMode::Sequential => {
                             // Stage switch: drop the previous stage's legs,
-                            // dial ONLY the new stage's candidates, then move
-                            // the stage timer. When the new group resolves to
-                            // zero candidates the switch still counts (the
-                            // call IS queued there) — wait retention keeps
-                            // polling the new group and the next escalation
-                            // check advances the chain.
+                            // dial ONLY the new stage's head candidate, then
+                            // move the stage timer. When the new group
+                            // resolves to zero candidates the switch still
+                            // counts (the call IS queued there) — wait
+                            // retention keeps polling the new group and the
+                            // next escalation check advances the chain.
                             Self::cancel_pending_legs(self, ctrl).await;
                             self.dial_agents(
                                 ctrl,
-                                &agent_uris,
+                                dial_head,
                                 "Queue: sequential overflow - dialed agent",
                                 "Queue: sequential overflow - failed to dial agent",
                             )
                             .await;
-                            self.current_group = Some(step.add_skill_group.clone());
-                            self.stage_started_at = Some(Instant::now());
                         }
                     }
+                }
+
+                if !matches!(self.config.escalation_mode, EscalationMode::Cumulative) {
+                    self.current_group = Some(step.add_skill_group.clone());
+                }
+                if matches!(self.config.escalation_mode, EscalationMode::Sequential) {
+                    self.stage_started_at = Some(Instant::now());
                 }
 
                 self.escalated_groups.push(step.add_skill_group.clone());
@@ -2403,6 +2586,8 @@ impl QueueApp {
         // arm the ring timeout for this dial batch too (escalation-originated
         // legs previously had none at all).
         if originated {
+            self.state = QueueState::DialingAgents { attempt: self.dial_attempts };
+            ctrl.cancel_timeout("queue_retry");
             self.arm_ring_timeout(ctrl);
         }
     }
@@ -3175,6 +3360,15 @@ impl CallApp for QueueApp {
                     // the call on — a second round of
                     // handle_agent_unavailable would skip the next sequential
                     // agent / re-enter wait retention spuriously.
+                    // A terminal from an earlier offer must not release or
+                    // advance the current offer, including within the same call.
+                    if let Some(leg) = leg_id.as_deref()
+                        && !self.pending_agents.iter().any(|(_, pending)| pending == leg)
+                    {
+                        debug!(call_id = %self.call_id, leg_id = %leg,
+                            "Queue: ignoring terminal for an inactive agent offer");
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(leg) = leg_id.as_deref()
                         && self.timed_out_legs.remove(leg)
                     {
@@ -3284,6 +3478,15 @@ impl CallApp for QueueApp {
                     }
                     // 487/408 crossed with a ring-timeout CANCEL — already
                     // handled by the timeout handler (see the busy case above).
+                    // A terminal from an earlier offer must not release or
+                    // advance the current offer, including within the same call.
+                    if let Some(leg) = leg_id.as_deref()
+                        && !self.pending_agents.iter().any(|(_, pending)| pending == leg)
+                    {
+                        debug!(call_id = %self.call_id, leg_id = %leg,
+                            "Queue: ignoring terminal for an inactive agent offer");
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(leg) = leg_id.as_deref()
                         && self.timed_out_legs.remove(leg)
                     {

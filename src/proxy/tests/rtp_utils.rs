@@ -288,6 +288,27 @@ impl RtpSender {
         Ok(self.socket.local_addr()?)
     }
 
+    /// Receive media sent back to this endpoint, discarding buffered older packets.
+    pub async fn receive_latest(&self, timeout: Duration) -> Result<RtpPacket> {
+        let mut buffer = [0u8; 2048];
+        // A media endpoint may receive STUN connectivity checks before audio.
+        let mut packet = tokio::time::timeout(timeout, async {
+            loop {
+                let (len, _) = self.socket.recv_from(&mut buffer).await?;
+                if let Ok(packet) = RtpPacket::decode(&buffer[..len]) {
+                    break Ok::<_, anyhow::Error>(packet);
+                }
+            }
+        })
+        .await??;
+        while let Ok((len, _)) = self.socket.try_recv_from(&mut buffer) {
+            if let Ok(next) = RtpPacket::decode(&buffer[..len]) {
+                packet = next;
+            }
+        }
+        Ok(packet)
+    }
+
     /// Send a sequence of RTP packets to target address
     pub async fn send_sequence(
         &self,

@@ -765,13 +765,23 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
             let target_sdp = caller_sdp.replace(&format!("m=audio {}", caller_rtp.local_addr().unwrap().port()),
                 &format!("m=audio {}", target_rtp.local_addr().unwrap().port()));
             charlie.answer_call(&target_dialog, Some(target_sdp)).await.unwrap();
+            // Answer transmission is asynchronous. Start checking media only
+            // after the owner has actually selected the transferred bridge.
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let entry = rwi_events.recv().await.unwrap();
+                    if entry.event.event_type == "call_transferred" { break; }
+                }
+            }).await.expect("answered target must complete the transfer");
             let sender = tokio::spawn({
                 let a = caller_rtp.clone();
                 let c = target_rtp.clone();
                 async move {
-                    for seq in 0..150u16 {
+                    let mut seq = 0u16;
+                    loop {
                         a.send_to(&RtpPacket::new(0, seq, u32::from(seq) * 160, 1234, vec![0x33; 160]).encode(), pbx_caller_rtp).await.unwrap();
                         c.send_to(&RtpPacket::new(0, seq, u32::from(seq) * 160, 9876, vec![0x77; 160]).encode(), pbx_target_rtp).await.unwrap();
+                        seq = seq.wrapping_add(1);
                         sleep(Duration::from_millis(20)).await;
                     }
                 }
@@ -787,7 +797,7 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
             }
             sender.abort();
             assert_eq!(server.get_active_calls().len(), 1);
-            let mut transferred = 0;
+            let mut transferred = 1; // The bridge-completion barrier consumed one event.
             while let Ok(entry) = rwi_events.try_recv() {
                 if entry.event.event_type == "call_transferred" { transferred += 1; }
             }
@@ -1567,4 +1577,483 @@ async fn test_inbound_refer_caller_customer_bye_releases_session() {
     })
     .await
     .expect("customer BYE must stop the IVR and release the root session");
+}
+
+#[tokio::test]
+async fn test_http_application_start_failure_preserves_call() {
+    for inbound in [false, true] {
+        let call = CallerIvrHandoff::connected(false, inbound).await;
+        for (target, status) in [
+            ("8999", axum::http::StatusCode::UNPROCESSABLE_ENTITY),
+            ("+12025550123", axum::http::StatusCode::FORBIDDEN),
+            (
+                "skill-group:missing",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            assert_eq!(
+                call.http_transfer(target, serde_json::json!({})).await,
+                status
+            );
+        }
+        assert_eq!(
+            call.http_transfer("888", serde_json::json!({"Authorization":"forbidden"}))
+                .await,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let status = call.http_transfer("889", serde_json::json!({})).await;
+        assert!(
+            status.is_server_error(),
+            "app start failure must reach HTTP caller: {status}"
+        );
+        sleep(Duration::from_millis(100)).await;
+        for ua in [&call.agent, &call.customer] {
+            assert!(
+                !ua.process_dialog_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
+                "failed transfer must preserve both parties"
+            );
+        }
+        assert_eq!(call.owner.snapshot().unwrap().leg_count, 2);
+        let packet = crate::common::rtp_utils::RtpPacket::new(0, 99, 15840, 4567, vec![0x44; 160]);
+        call.customer_rtp
+            .send_to(&packet.encode(), call.customer_endpoint)
+            .await
+            .unwrap();
+        let mut buffer = [0; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = call.agent_rtp.recv_from(&mut buffer).await.unwrap();
+                if crate::common::rtp_utils::RtpPacket::decode(&buffer[..len])
+                    .is_ok_and(|packet| packet.payload == vec![0x44; 160])
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("original bridge must still forward voice");
+        assert_eq!(
+            call.http_transfer("888", serde_json::json!({})).await,
+            axum::http::StatusCode::OK
+        );
+        call.customer.hangup(&call.customer_dialog).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_http_application_route_uses_transfer_headers() {
+    for inbound in [false, true] {
+        let call = CallerIvrHandoff::connected(true, inbound).await;
+        assert_eq!(
+            call.http_transfer("890", serde_json::json!({"X-Route-Mode":"survey"}))
+                .await,
+            axum::http::StatusCode::OK
+        );
+        let mut buffer = [0; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = call.customer_rtp.recv_from(&mut buffer).await.unwrap();
+                if crate::common::rtp_utils::RtpPacket::decode(&buffer[..len]).is_ok_and(|packet| {
+                    packet
+                        .payload
+                        .iter()
+                        .any(|byte| !matches!(byte, 0xff | 0x7f))
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("matched application must play customer audio");
+        call.customer.hangup(&call.customer_dialog).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_http_named_ivr_passes_headers_to_provider() {
+    for inbound in [false, true] {
+        let capture = crate::common::webhook_capture::WebhookCapture::start_with_response(
+            &["/hook", "/hook/{event}"],
+            serde_json::json!({"type":"hangup"}),
+        )
+        .await;
+        let call = CallerIvrHandoff::connected(false, inbound).await;
+        std::fs::write(call._ivr.path(), format!("[ivr]\nname = \"handoff-menu\"\nivr_mode = \"step\"\n[ivr.provider]\nurl = \"{}\"\n", capture.url)).unwrap();
+        let target = format!(
+            "ivr:{}",
+            call._ivr.path().file_stem().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            call.http_transfer(&target, serde_json::json!({"X-Context-Id":"survey-direct"}))
+                .await,
+            axum::http::StatusCode::OK
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if !capture.received.lock().unwrap().is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("IVR provider must receive start request");
+        let requests = std::mem::take(&mut *capture.received.lock().unwrap());
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["sip_headers"]
+                    .as_object()
+                    .is_some_and(|headers| headers
+                        .iter()
+                        .any(|(name, value)| name.eq_ignore_ascii_case("X-Context-Id")
+                            && value == "survey-direct"))),
+            "provider request missing transfer headers"
+        );
+    }
+}
+
+/// A REFER blind transfer to a REGISTERED AGENT target must carry the same
+/// dial intent as the CTI transfer path on the target's INVITE: the RFC 7433
+/// UUI declares the root session id (`session-id` correlation for the
+/// target's side) plus `leg=agent`, and the target leg uses the agent-leg
+/// Call-ID scheme. (2026-11-05: the in-session REFER used to dial the target
+/// with empty headers / no purpose — the CTI path carried the UUI, the
+/// REFER path didn't, so the transfer target lost its call correlation.)
+#[tokio::test]
+async fn test_inbound_refer_to_registered_agent_carries_session_id_uui() {
+    assert_refer_agent_identity(&[0, 1], &[None, Some("0b9e6c1e1b404e8f")]).await;
+}
+
+#[tokio::test]
+async fn test_inbound_refer_contact_cannot_claim_another_agent() {
+    assert_refer_agent_identity(&[2], &[None]).await;
+}
+
+async fn assert_refer_agent_identity(target_kinds: &[u8], inherited_roots: &[Option<&str>]) {
+    let _ = tracing_subscriber::fmt::try_init();
+    for &target_kind in target_kinds {
+        let registered_target = target_kind != 0;
+        for &inherited_root in inherited_roots {
+            let mut config = crate::common::test_helpers::test_proxy_config(
+                portpicker::pick_unused_port().unwrap(),
+            );
+            config.media_proxy = MediaProxyMode::All;
+            let mut users = crate::common::test_helpers::standard_test_users();
+            for user in &mut users {
+                user.is_support_webrtc = false;
+            }
+            use crate::common::agent_registry::StaticRegistry;
+            use rustpbx::call::app::agent_registry::AgentRegistry;
+            let registry = Arc::new(StaticRegistry::default());
+            let gateway = RwiGateway::new();
+            let mut events = gateway.subscribe_events();
+            let gateway = Arc::new(parking_lot::RwLock::new(gateway));
+            let server = Arc::new(
+                E2eTestServer::start_with_inject(
+                    config,
+                    E2eTestServerInject {
+                        users,
+                        agent_registry: Some(registry.clone()),
+                        rwi_gateway: Some(gateway),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("E2E server start failed"),
+            );
+
+            let alice = server
+                .create_ua("alice")
+                .await
+                .expect("create alice failed");
+            let bob = server.create_ua("bob").await.expect("create bob failed");
+            let bob_sdp = "v=0\r\n\
+        o=- 789012 789012 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 54321 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+                .to_string();
+
+            // Alice (customer) calls Bob; Bob answers.
+            let alice_sdp = "v=0\r\n\
+        o=- 123456 123456 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 12345 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+                .to_string();
+            let incoming_headers = inherited_root
+                .map(|root| {
+                    vec![(
+                        "User-to-User".into(),
+                        format!("{root};encoding=hex;purpose=call-center"),
+                    )]
+                })
+                .unwrap_or_default();
+            let caller_handle = rustpbx::utils::spawn({
+                let a = alice.clone();
+                let sdp = alice_sdp.clone();
+                async move {
+                    a.make_call_with_headers("bob", Some(sdp), incoming_headers)
+                        .await
+                }
+            });
+            let mut bob_dialog_id = None;
+            for _ in 0..50 {
+                let events = bob
+                    .process_dialog_events()
+                    .await
+                    .expect("process events failed");
+                for event in events {
+                    if let TestUaEvent::IncomingCall(id, _) = event {
+                        bob.answer_call(&id, Some(bob_sdp.clone()))
+                            .await
+                            .expect("bob answer failed");
+                        bob_dialog_id = Some(id.clone());
+                        break;
+                    }
+                }
+                if bob_dialog_id.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            assert!(bob_dialog_id.is_some(), "Bob should receive the call");
+            let _ = tokio::time::timeout(Duration::from_secs(5), caller_handle)
+                .await
+                .expect("call setup timed out")
+                .expect("call failed");
+
+            // The root session id the UUI must carry — the owning session of the
+            // original call (registry-resolved from the transferor's dialog).
+            let calls = &server.server_ref.active_call_registry;
+            let owner = calls
+                .get_handle_by_dialog(&bob_dialog_id.as_ref().unwrap().call_id)
+                .expect("original call must resolve for REFER");
+            let root_session_id = inherited_root.unwrap_or(owner.session_id()).to_string();
+            if inherited_root.is_some() {
+                assert_ne!(
+                    root_session_id,
+                    owner.session_id(),
+                    "child and root IDs must be distinct"
+                );
+            }
+
+            // Charlie (registered agent) answers the transferred call.
+            let charlie = server
+                .create_ua("charlie")
+                .await
+                .expect("create charlie failed");
+            let charlie_uri = format!("sip:charlie@127.0.0.1:{}", charlie.local_port());
+            // The SIP extension differs from the canonical agent ID. Lookup must
+            // use the registry's URI mapping, rather than treating charlie as an ID.
+            let agent_uri = match target_kind {
+                0 | 1 => server.server_ref.locator
+                    .lookup(&charlie_uri.parse().unwrap()).await.unwrap()[0]
+                    .registered_aor.as_ref().expect("registered canonical AOR").to_string(),
+                _ => format!("sip:bob@127.0.0.1:{}", charlie.local_port()),
+            };
+            registry
+                .register(
+                    "agent-charlie".into(),
+                    "Charlie".into(),
+                    agent_uri.clone(),
+                    vec![],
+                    1,
+                )
+                .await
+                .unwrap();
+            if target_kind == 2 {
+                // A non-agent's arbitrary Contact user must not claim another agent.
+                let aor = "sip:charlie@127.0.0.1".parse().unwrap();
+                let mut location = server
+                    .server_ref
+                    .locator
+                    .lookup(&aor)
+                    .await
+                    .unwrap()
+                    .remove(0);
+                location.aor = agent_uri.parse().unwrap();
+                location.registered_aor = Some(aor);
+                server
+                    .server_ref
+                    .locator
+                    .register("charlie", Some("127.0.0.1"), location)
+                    .await
+                    .unwrap();
+            }
+            let charlie_sdp = "v=0\r\n\
+        o=- 111111 111111 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        c=IN IP4 127.0.0.1\r\n\
+        t=0 0\r\n\
+        m=audio 33333 RTP/AVP 0 101\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=rtpmap:101 telephone-event/8000\r\n\
+        a=sendrecv\r\n"
+                .to_string();
+            let mut ringing_events = server
+                .server_ref
+                .rwi_gateway
+                .as_ref()
+                .unwrap()
+                .read()
+                .subscribe_events();
+            let charlie_clone = charlie.clone();
+            let charlie_answer_handle = rustpbx::utils::spawn(async move {
+                let mut charlie_dialog_id = None;
+                for _ in 0..50 {
+                    let events = charlie_clone
+                        .process_dialog_events()
+                        .await
+                        .expect("charlie events failed");
+                    for event in events {
+                        if let TestUaEvent::IncomingCall(id, _) = event {
+                            charlie_clone.send_ringing(&id, None).await.unwrap();
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                loop {
+                                    let entry = ringing_events.recv().await.unwrap();
+                                    if entry.event.event_type == "call_ringing"
+                                        && entry.event.payload["leg_id"]
+                                            .as_str()
+                                            .is_some_and(|id| id.starts_with("transfer-"))
+                                    {
+                                        break;
+                                    }
+                                }
+                            })
+                            .await
+                            .expect("REFER target must deliver its ringing event");
+                            charlie_clone
+                                .answer_call(&id, Some(charlie_sdp.clone()))
+                                .await
+                                .expect("charlie answer failed");
+                            charlie_dialog_id = Some(id);
+                            break;
+                        }
+                    }
+                    if charlie_dialog_id.is_some() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+                charlie_dialog_id
+            });
+            sleep(Duration::from_millis(300)).await;
+
+            // Bob (the transferor) blind-transfers to the registered agent via
+            // in-dialog REFER — the URL-handler / panel single-step path with the
+            // CTI switch off.
+            let refer_target = if registered_target {
+                "sip:charlie@127.0.0.1".to_string()
+            } else {
+                charlie_uri.clone()
+            };
+            let refer_status = bob
+                .send_refer(bob_dialog_id.as_ref().unwrap(), &refer_target)
+                .await
+                .expect("send_refer failed");
+            assert_eq!(refer_status, 202, "REFER should be accepted with 202");
+
+            let charlie_dialog_id =
+                tokio::time::timeout(Duration::from_secs(5), charlie_answer_handle)
+                    .await
+                    .expect("Charlie answer timeout")
+                    .expect("charlie answer task failed");
+            assert!(
+                charlie_dialog_id.is_some(),
+                "Charlie should receive and answer the transfer call"
+            );
+
+            // The transferred INVITE must declare the root session id + the
+            // `leg=agent` dial intent (CTI-path parity).
+            let uui = charlie
+                .incoming_invite_header(charlie_dialog_id.as_ref().unwrap(), "User-to-User")
+                .await;
+            let uui = uui.unwrap_or_default();
+            if target_kind == 2 {
+                assert!(
+                    uui.is_empty(),
+                    "a Contact username must not claim an agent: {uui}"
+                );
+            } else {
+                assert!(
+                    uui.to_ascii_lowercase().contains("purpose=call-center"),
+                    "target INVITE must carry the CC UUI, got {uui:?}"
+                );
+                assert!(
+                    uui.contains("leg=agent"),
+                    "target INVITE must declare leg=agent, got {uui:?}"
+                );
+                let root = uui.split(';').next().unwrap_or_default().trim().to_string();
+                assert_eq!(
+                    root, root_session_id,
+                    "UUI root must be the original call's session id: uui={uui:?} root_session_id={root_session_id}"
+                );
+            }
+            let final_state = charlie_dialog_id.unwrap();
+            assert!(!final_state.call_id.is_empty());
+            if target_kind != 2 {
+                assert_eq!(final_state.call_id, owner.session_id(),
+                    "UUI root inheritance must not change the first agent leg's SIP Call-ID");
+            }
+            bob.hangup(bob_dialog_id.as_ref().unwrap()).await.unwrap();
+            charlie.hangup(&final_state).await.unwrap();
+            let records = server
+                .cdr_capture
+                .wait_for_records(1, Duration::from_secs(5))
+                .await
+                .expect("transferred call must publish its CDR");
+            assert_eq!(
+                records[0].session_id.as_deref(),
+                Some(root_session_id.as_str())
+            );
+            let mut target_ringing = Vec::new();
+            let mut hangups = Vec::new();
+            while let Ok(entry) = events.try_recv() {
+                if entry.event.event_type == "call_ringing"
+                    && entry.event.payload["agent_id"] == "agent-charlie"
+                {
+                    target_ringing.push(entry.event.clone());
+                }
+                if entry.event.event_type == "call_hangup" {
+                    hangups.push(entry.event);
+                }
+            }
+            if target_kind == 2 {
+                assert!(
+                    target_ringing.is_empty(),
+                    "ordinary extension must not inherit an agent"
+                );
+            } else {
+                assert_eq!(
+                    target_ringing.len(),
+                    1,
+                    "target leg must use its canonical agent identity"
+                );
+                assert_eq!(target_ringing[0].payload["leg_role"], "agent");
+                assert_eq!(target_ringing[0].payload["session_id"], root_session_id);
+                assert!(
+                    hangups.iter().any(|event| event.payload["leg_id"]
+                        == target_ringing[0].payload["leg_id"]
+                        && event.payload["leg_role"] == "agent"
+                        && event.payload["session_id"] == root_session_id),
+                    "the same target leg must report its teardown"
+                );
+            }
+            server.stop();
+        }
+    }
 }

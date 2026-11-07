@@ -376,6 +376,14 @@ pub enum CallCommand {
         reply: oneshot::Sender<bool>,
     },
 
+    /// Read the upstream dialog of a trusted cluster child that is still
+    /// serving its inherited leg. Returns (SIP Call-ID, peer, declared role).
+    /// Correlation headers alone never establish upstream control ownership.
+    #[serde(skip)]
+    QueryPeerDialog {
+        reply: oneshot::Sender<Option<(String, std::net::SocketAddr, String)>>,
+    },
+
     /// Start live transcription. Reference-counted: the transcription pump
     /// starts on the first request and runs until the matching number of
     /// `StopTranscription` commands (or call end).
