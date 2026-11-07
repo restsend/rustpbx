@@ -22,6 +22,11 @@ pub(crate) mod reporter;
 pub mod session_hooks;
 pub(crate) mod session_timer;
 pub mod sip_session;
+/// Test seam: cc owner tests build a live [`CallContext`] to drive
+/// `SipSession::new` for transfer-attribution assertions.
+#[cfg(feature = "test-support")]
+pub mod state;
+#[cfg(not(feature = "test-support"))]
 pub(crate) mod state;
 
 /// Build a [`CallContext`] shared by both the live session path and the

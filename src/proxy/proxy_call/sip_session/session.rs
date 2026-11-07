@@ -2973,7 +2973,10 @@ impl SipSession {
     }
 
     /// Plant/update the pinned agent id in an extensions bag.
-    pub(crate) fn set_pinned_agent_id(
+    /// Test seam (cc owner tests build a live SipSession to assert the
+    /// served-agent attribution survives a customer-anchored transfer).
+    #[cfg(feature = "test-support")]
+    pub fn set_pinned_agent_id(
         extensions: &crate::proxy::proxy_call::session_hooks::SessionExtensions,
         agent_id: &str,
     ) {
@@ -3435,7 +3438,10 @@ impl SipSession {
     /// is confirmed (200 OK) and attached as the caller dialog, so addons
     /// learn the call connected — the CC addon transitions the agent
     /// Ringing/Idle → Busy.
-    pub(crate) async fn fire_on_call_connected_hooks(&self, leg_id: &LegId) {
+    /// Test seam: fire `on_call_connected` for a leg without driving the
+    /// SIP answer state machine (cc owner tests).
+    #[cfg(feature = "test-support")]
+    pub async fn fire_on_call_connected_hooks(&self, leg_id: &LegId) {
         if self.server.session_hooks.is_empty() {
             return;
         }
