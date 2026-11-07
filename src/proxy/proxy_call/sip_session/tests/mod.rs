@@ -3781,7 +3781,6 @@ async fn transfer_verdict_freezes_served_agent_pin_and_skips_non_agent() {
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
     };
-    use crate::rwi::event::TransferSource;
     use crate::rwi::gateway::RwiGateway;
 
     let gateway = RwiGateway::new();
@@ -4913,7 +4912,7 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
 #[tokio::test]
 async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
     let OutboundTransferFixture {
-        mut session,
+        session,
         target,
         customer_dialog,
         agent_states: _agent_states,
@@ -4951,7 +4950,7 @@ async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
 #[tokio::test]
 async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
     let OutboundTransferFixture {
-        mut session,
+        session,
         target,
         customer_dialog,
         agent_states: _agent_states,

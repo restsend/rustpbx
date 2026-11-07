@@ -2976,7 +2976,11 @@ impl SipSession {
     /// Test seam (cc owner tests build a live SipSession to assert the
     /// served-agent attribution survives a customer-anchored transfer).
     #[cfg(feature = "test-support")]
-    pub fn set_pinned_agent_id(
+    pub fn set_pinned_agent_id_for_test(extensions: &crate::proxy::proxy_call::session_hooks::SessionExtensions, agent_id: &str) {
+        Self::set_pinned_agent_id(extensions, agent_id);
+    }
+
+    pub(crate) fn set_pinned_agent_id(
         extensions: &crate::proxy::proxy_call::session_hooks::SessionExtensions,
         agent_id: &str,
     ) {
@@ -3441,7 +3445,11 @@ impl SipSession {
     /// Test seam: fire `on_call_connected` for a leg without driving the
     /// SIP answer state machine (cc owner tests).
     #[cfg(feature = "test-support")]
-    pub async fn fire_on_call_connected_hooks(&self, leg_id: &LegId) {
+    pub async fn fire_on_call_connected_hooks_for_test(&self, leg_id: &LegId) {
+        self.fire_on_call_connected_hooks(leg_id).await;
+    }
+
+    pub(crate) async fn fire_on_call_connected_hooks(&self, leg_id: &LegId) {
         if self.server.session_hooks.is_empty() {
             return;
         }
