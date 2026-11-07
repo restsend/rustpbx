@@ -112,7 +112,7 @@ impl SipSession {
             LegSide::B => crate::media::CaptureRoute::Deferred,
         };
         let leg = crate::media::create_leg(leg_name, &cfg, recorder_sender, route)?;
-        self.legs.set_media_leg(&LegId::from(leg_name), leg);
+        self.attach_media_leg(&LegId::from(leg_name), leg);
         if side == LegSide::A {
             self.spawn_dtmf_forwarder();
         }
@@ -626,7 +626,7 @@ impl SipSession {
                 crate::call::domain::Leg::new(leg_id.clone()),
             );
         }
-        self.legs.set_media_leg(&leg_id, peer);
+        self.attach_media_leg(&leg_id, peer);
         // Custom-SDP-attribute gate for fork legs: same treatment as the
         // shared callee offer (copy caller attrs into the fresh offer).
         let offer = self.apply_custom_sdp_attr_policy_to_offer(offer);
