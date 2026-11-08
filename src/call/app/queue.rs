@@ -2341,10 +2341,8 @@ impl QueueApp {
                     let from_group = self.skill_queue_id().to_string();
                     if from_group != step.add_skill_group {
                         // Dispatcher: paired waiting-depth accounting
-                        // (dequeue `from`, enqueue the new stage) + the
-                        // dispatcher-family `skill_group_call_moved` marker —
-                        // emitted BEFORE queue_left so consumers see the
-                        // skill-group departure first.
+                        // (dequeue `from`, enqueue the new stage). Runs
+                        // BEFORE queue_left so the row move lands first.
                         self.notify_group_switch(&from_group, &step.add_skill_group)
                             .await;
                         // RWI: the call left the queue/stage it was queued in.
