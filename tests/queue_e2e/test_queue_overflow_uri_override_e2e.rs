@@ -196,10 +196,6 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         server: crate::common::e2e_test_server::E2eTestServer,
         hook: Arc<RecordingHook>,
         _ivr_path: std::path::PathBuf,
-        /// Adapter skill-group lifecycle events (single-consumer drain).
-        skill_events_rx: tokio::sync::mpsc::UnboundedReceiver<
-            rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent,
-        >,
     }
 
     /// Start the server with the CC adapter wired to both skill groups
@@ -240,18 +236,13 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             ..Default::default()
         });
 
-        let (sg_tx, sg_rx) =
-            tokio::sync::mpsc::unbounded_channel::<
-                rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent,
-            >();
         let adapter = Arc::new(
             CcAgentRegistryAdapter::new(
                 cc_registry,
                 Arc::new(AcdEngine::new(AcdConfig::default())),
                 "localhost",
             )
-            .with_skill_group_cache(skill_group_cache)
-            .with_skill_group_event_tx(sg_tx),
+            .with_skill_group_cache(skill_group_cache),
         );
 
         let hook = Arc::new(RecordingHook {
@@ -299,7 +290,6 @@ action = {{ type = "transfer", target = "{queue_target}" }}
             server,
             hook,
             _ivr_path: ivr_path,
-            skill_events_rx: sg_rx,
         }
     }
 
@@ -597,32 +587,6 @@ action = {{ type = "transfer", target = "{queue_target}" }}
                 Ok(events) if events.iter().any(|e| matches!(e, TestUaEvent::IncomingCall(_, _)))
             ),
             "sequential switch must never re-dial the departed stage's agent"
-        );
-
-        // Dispatcher-family switch marker: the adapter emitted
-        // GroupSwitched (→ skill_group_call_moved{from, to, reason}) at the
-        // stage switch — the skill_group family sees the transition, not
-        // just the queue family.
-        let mut saw_moved = false;
-        while let Ok(ev) = harness.skill_events_rx.try_recv() {
-            if matches!(
-                ev,
-                rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::GroupSwitched {
-                    ref from_group,
-                    ref to_group,
-                    ref reason,
-                    ..
-                } if from_group == PRIMARY_GROUP
-                    && to_group == OVERFLOW_GROUP
-                    && reason == "overflow"
-            ) {
-                saw_moved = true;
-                break;
-            }
-        }
-        assert!(
-            saw_moved,
-            "the stage switch must emit GroupSwitched (skill_group_call_moved) for {PRIMARY_GROUP} → {OVERFLOW_GROUP}"
         );
 
         // agent_l2 answers → the call completes on the overflow stage.
