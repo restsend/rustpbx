@@ -1914,15 +1914,16 @@ mod tests {
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
         let mut dialog = None;
         let mut old_token: Option<CancellationToken> = None;
+        let mut old_connection: Option<SipConnection> = None;
         let (bye_tx, mut bye_rx) = mpsc::unbounded_channel();
         let mut peers = Vec::new();
 
         for flow in [&old_flow, &new_flow] {
-            if let Some(token) = old_token.take() {
+            if let (Some(token), Some(connection)) = (old_token.take(), old_connection.take()) {
                 // Axum's WSS adapter cancels the old flow and removes its
                 // cached connection before a replacement is registered.
                 token.cancel();
-                endpoint.inner.transport_layer.del_connection(&old_flow);
+                endpoint.inner.transport_layer.remove_connection(&connection);
             }
             let flow_token = cancel.child_token();
             let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -1941,6 +1942,7 @@ mod tests {
                 .inner
                 .transport_layer
                 .add_connection(connection.clone());
+            old_connection = Some(connection.clone());
             let peer_connection = connection.clone();
             let peer_flow = flow.clone();
             let bye_tx = bye_tx.clone();

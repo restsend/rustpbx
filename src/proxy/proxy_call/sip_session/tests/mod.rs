@@ -5957,7 +5957,8 @@ fn test_filter_video_caps_strips_all_rtcp_feedback() {
     assert!(result[0].rtcp_fbs.is_empty());
 }
 
-/// VP8 is accepted when configured while unsupported VP9 is discarded.
+/// Codecs outside the allow-list (VP9 here) are discarded even when
+/// individually supported; VP8 matches because it is configured.
 #[test]
 fn test_filter_video_caps_configured_vp8_but_not_vp9() {
     let caps = vec![

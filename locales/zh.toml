@@ -973,7 +973,7 @@ field_nat_fix = "SIP NAT 修正"
 field_nat_fix_hint = "将来自该中继的私网 IP Contact 改写为实际来源地址。默认跟随全局 proxy nat_fix。"
 field_audio_codecs = "音频编解码器（每行一个）"
 field_video_codecs = "视频编解码器（每行一个）"
-field_codecs_hint = "常用: PCMU, PCMA, G722, G729, OPUS, H264, VP8"
+field_codecs_hint = "常用: PCMU, PCMA, G722, G729, OPUS, H264, VP8, H265, VP9"
 
 # Header passthrough section
 section_header_passthrough = "SIP 头透传"

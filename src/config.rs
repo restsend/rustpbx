@@ -1966,8 +1966,9 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
-    /// Video codecs allowed for pass-through relay. Only H264 and VP8 are
-    /// accepted; both are enabled when this setting is omitted.
+    /// Video codecs allowed for pass-through relay. H264, VP8, H265 and VP9
+    /// are accepted; H264 and VP8 are enabled when this setting is omitted.
+    /// Recording only muxes H264 — non-H264 video relays but is not recorded.
     #[serde(
         default = "default_video_codecs",
         deserialize_with = "deserialize_video_codecs"
@@ -2224,12 +2225,14 @@ where
     D: Deserializer<'de>,
 {
     let codecs = Vec::<String>::deserialize(deserializer)?;
-    if let Some(codec) = codecs
-        .iter()
-        .find(|codec| !codec.eq_ignore_ascii_case("H264") && !codec.eq_ignore_ascii_case("VP8"))
-    {
+    if let Some(codec) = codecs.iter().find(|codec| {
+        !codec.eq_ignore_ascii_case("H264")
+            && !codec.eq_ignore_ascii_case("VP8")
+            && !codec.eq_ignore_ascii_case("H265")
+            && !codec.eq_ignore_ascii_case("VP9")
+    }) {
         return Err(serde::de::Error::custom(format!(
-            "unsupported video codec `{codec}`; supported codecs are H264 and VP8"
+            "unsupported video codec `{codec}`; supported codecs are H264, VP8, H265 and VP9"
         )));
     }
     Ok(codecs)
@@ -3542,17 +3545,31 @@ bucket = "default-recordings"
         .unwrap();
         assert_eq!(configured.video_codecs, vec!["H264", "VP8"]);
 
+        // Pass-through codecs beyond the defaults: H265 / VP9 relay like
+        // H264 / VP8 (name-matched negotiation, no transcoding).
+        let extended: ProxyConfig = toml::from_str(
+            r#"
+            addr = "::"
+            video_codecs = ["H264", "VP8", "H265", "VP9"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            extended.video_codecs,
+            vec!["H264", "VP8", "H265", "VP9"]
+        );
+
         let unsupported = toml::from_str::<ProxyConfig>(
             r#"
             addr = "::"
-            video_codecs = ["H265"]
+            video_codecs = ["AV1"]
             "#,
         )
         .expect_err("unsupported video codec must fail configuration parsing");
         assert!(
             unsupported
                 .to_string()
-                .contains("supported codecs are H264 and VP8")
+                .contains("supported codecs are H264, VP8, H265 and VP9")
         );
     }
 

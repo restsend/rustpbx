@@ -653,6 +653,7 @@ async fn cross_node_wss_bye_with_locator(
     let (phone_bye_tx, mut phone_bye_rx) = mpsc::unbounded_channel();
     let mut phones = Vec::new();
     let mut old_token: Option<CancellationToken> = None;
+    let mut last_phone_connection: Option<SipConnection> = None;
     let mut dialog = None;
     let (state_tx, _state_rx) = mpsc::unbounded_channel();
     for (flow, endpoint, home) in [
@@ -667,9 +668,11 @@ async fn cross_node_wss_bye_with_locator(
             addr("192.0.2.11:5060", Transport::Udp),
         ),
     ] {
-        if let Some(token) = old_token.take() {
+        if let (Some(token), Some(connection)) =
+            (old_token.take(), last_phone_connection.take())
+        {
             token.cancel();
-            endpoint_a.inner.transport_layer.del_connection(&old_flow);
+            endpoint_a.inner.transport_layer.remove_connection(&connection);
         }
         let flow_token = cancel.child_token();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -684,6 +687,7 @@ async fn cross_node_wss_bye_with_locator(
         .unwrap()
         .into();
         endpoint.transport_layer.add_connection(connection.clone());
+        last_phone_connection = Some(connection.clone());
         let phone_bye_tx = phone_bye_tx.clone();
         let phone_contact = contact.clone();
         let phone_flow = flow.clone();
@@ -833,11 +837,15 @@ async fn cross_node_wss_bye_with_locator(
     if matches!(phone_behavior, PhoneByeBehavior::MissingFlow) {
         // The registration still points here, but the connection cache no
         // longer contains the reconnected flow. Do not dial its NAT address.
-        server_b
-            .endpoint
-            .inner
-            .transport_layer
-            .del_connection(&new_flow);
+        // `last_phone_connection` is the new-flow connection created in the
+        // phone loop above (registered on server_b's transport layer).
+        if let Some(connection) = last_phone_connection.as_ref() {
+            server_b
+                .endpoint
+                .inner
+                .transport_layer
+                .remove_connection(connection);
+        }
     }
     let hangup = timeout(Duration::from_secs(5), dialog.unwrap().hangup()).await;
     let reached_b = timeout(Duration::from_secs(2), node_bye_rx.recv()).await;
