@@ -1123,6 +1123,9 @@ impl SipServerBuilder {
 
         // Wire up the SIP endpoint for trunk registration BEFORE reconciling,
         // so trunks with register_enabled=true are registered on startup.
+        data_context.trunk_registrar().set_network_profiles(
+            network_profiles.clone(), default_network_profile_id.clone(), config.as_ref().clone(),
+        );
         data_context
             .trunk_registrar()
             .set_endpoint(endpoint.inner.clone());
@@ -2119,6 +2122,10 @@ impl SipServerInner {
             .store(Arc::new(config.effective_network_profiles()));
         self.default_network_profile_id
             .store(Arc::new(config.default_network_profile_id()));
+        self.data_context.trunk_registrar().set_network_profiles(
+            config.effective_network_profiles(), config.default_network_profile_id(), config.proxy.clone(),
+        );
+        self.data_context.trunk_registrar().reconcile(&self.data_context.trunks_snapshot()).await;
         self.media_proxy.store(Arc::new(config.proxy.media_proxy));
         self.recording_policy
             .store(Arc::new(new_proxy.recording.clone()));
