@@ -1342,7 +1342,9 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         dest,
         outbound_proxy: backup_dest.clone(),
         backup_dest,
-        username: model.auth_username,
+        username: model.register_username.filter(|user| !user.trim().is_empty())
+            .or_else(|| model.auth_username.clone()),
+        auth_username: model.auth_username,
         password: model.auth_password,
         codec: Vec::new(),
         disabled: Some(!model.is_active),
@@ -2480,6 +2482,41 @@ file = "db://ivr/lf-step-ivr.generated.toml"
             cfg.ringback.is_none(),
             "no ringback field → ringback should be None"
         );
+    }
+
+    #[tokio::test]
+    async fn registration_identity_migration_preserves_existing_auth() {
+        use sea_orm::{ConnectionTrait, Database, Statement, DbBackend};
+        use sea_orm_migration::{MigrationTrait, SchemaManager};
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared("CREATE TABLE rustpbx_sip_trunks (id INTEGER PRIMARY KEY, auth_username VARCHAR(160))").await.unwrap();
+        db.execute_unprepared("INSERT INTO rustpbx_sip_trunks (id, auth_username) VALUES (1, 'legacy@ims.test')").await.unwrap();
+        let manager = SchemaManager::new(&db);
+        let migration = crate::models::add_sip_trunk_register_username::Migration;
+        migration.up(&manager).await.unwrap();
+        migration.up(&manager).await.unwrap();
+        let row = db.query_one_raw(Statement::from_string(DbBackend::Sqlite,
+            "SELECT auth_username, register_username FROM rustpbx_sip_trunks WHERE id = 1"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<String>("", "auth_username").unwrap(), "legacy@ims.test");
+        assert_eq!(row.try_get::<Option<String>>("", "register_username").unwrap(), None);
+    }
+
+    #[test]
+    fn convert_trunk_separates_registration_and_digest_identity() {
+        for identity in [None, Some(""), Some("+12025550123")] {
+            let model = sip_trunk::Model {
+                name: "ims".into(),
+                sip_server: Some("ims.example.com".into()),
+                register_username: identity.map(str::to_string),
+                auth_username: Some("12025550123@ims.example.com".into()),
+                ..Default::default()
+            };
+            let (_, trunk) = convert_trunk(model).unwrap();
+            assert_eq!(trunk.username.as_deref(), Some(identity.filter(|s| !s.is_empty())
+                .unwrap_or("12025550123@ims.example.com")));
+            assert_eq!(trunk.auth_username.as_deref(), Some("12025550123@ims.example.com"));
+        }
     }
 
     #[test]

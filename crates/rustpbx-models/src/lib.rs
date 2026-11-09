@@ -15,6 +15,7 @@ pub mod runtime_snapshot;
 pub mod security_ban;
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;
+pub mod add_sip_trunk_register_username;
 pub mod add_sip_trunk_rewrite_hostport;
 pub mod add_user_mfa_columns;
 pub mod add_user_session_epoch;

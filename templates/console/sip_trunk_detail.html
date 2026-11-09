@@ -298,6 +298,13 @@ default('RustPBX') }}{% endblock %}
                     <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_auth" | t }}</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_register_username" | t }}
+                            <input type="text" x-model.trim="form.register_username" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="+12025550123">
+                            <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_register_username_hint" | t }}</p>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_auth_username" | t }}
                             <input type="text" x-model.trim="form.auth_username" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -679,6 +686,7 @@ default('RustPBX') }}{% endblock %}
                 sip_server: '',
                 sip_transport: 'udp',
                 outbound_proxy: '',
+                register_username: '',
                 auth_username: '',
                 auth_password: '',
                 max_cps: '',
@@ -764,6 +772,7 @@ default('RustPBX') }}{% endblock %}
                 this.form.sip_transport = (model.sip_transport || 'udp').toLowerCase();
                 this.form.sip_server = model.sip_server || '';
                 this.form.outbound_proxy = model.outbound_proxy || '';
+                this.form.register_username = model.register_username || '';
                 this.form.auth_username = model.auth_username || '';
                 this.form.auth_password = model.auth_password || '';
                 this.authPasswordRevealed = false;
@@ -1025,6 +1034,7 @@ default('RustPBX') }}{% endblock %}
 
                 if (this.form.sip_server.trim()) payload.sip_server = this.form.sip_server.trim();
                 if (this.form.outbound_proxy.trim()) payload.outbound_proxy = this.form.outbound_proxy.trim();
+                payload.register_username = this.form.register_username.trim();
                 if (this.form.auth_username.trim()) payload.auth_username = this.form.auth_username.trim();
                 if (this.form.auth_password.trim()) payload.auth_password = this.form.auth_password.trim();
 

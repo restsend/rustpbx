@@ -703,6 +703,9 @@ fn apply_form_to_active_model(
     if !is_update || form.outbound_proxy.is_some() {
         active.outbound_proxy = Set(super::normalize_optional_string(&form.outbound_proxy));
     }
+    if !is_update || form.register_username.is_some() {
+        active.register_username = Set(super::normalize_optional_string(&form.register_username));
+    }
     if !is_update || form.auth_username.is_some() {
         active.auth_username = Set(super::normalize_optional_string(&form.auth_username));
     }
@@ -990,6 +993,35 @@ mod tests {
         form.sip_server = Some("sip.example.com".into());
         let resp = create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn registration_identity_persists_and_can_be_cleared() {
+        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel};
+        let state = setup_state().await;
+        let mut active: SipTrunkActiveModel = Default::default();
+        let form = SipTrunkForm {
+            name: Some("ims-identities".into()),
+            sip_server: Some("ims.test".into()),
+            register_username: Some(" +12025550123 ".into()),
+            auth_username: Some("12025550123@ims.test".into()),
+            ..Default::default()
+        };
+        apply_form_to_active_model(&mut active, &form, Utc::now(), false).unwrap();
+        let model = active.insert(state.db()).await.unwrap();
+        let stored = SipTrunkEntity::find_by_id(model.id).one(state.db()).await.unwrap().unwrap();
+        assert_eq!(stored.register_username.as_deref(), Some("+12025550123"));
+        assert_eq!(stored.auth_username.as_deref(), Some("12025550123@ims.test"));
+        let mut active = stored.into_active_model();
+        apply_form_to_active_model(&mut active, &SipTrunkForm::default(), Utc::now(), true).unwrap();
+        let stored = active.update(state.db()).await.unwrap();
+        assert_eq!(stored.register_username.as_deref(), Some("+12025550123"));
+        let mut active = stored.into_active_model();
+        let clear = SipTrunkForm { register_username: Some(String::new()), ..Default::default() };
+        apply_form_to_active_model(&mut active, &clear, Utc::now(), true).unwrap();
+        let stored = active.update(state.db()).await.unwrap();
+        assert_eq!(stored.register_username, None);
+        assert_eq!(stored.auth_username.as_deref(), Some("12025550123@ims.test"));
     }
 
     // ── ICE-lite switch → metadata.sbc.ice_lite merge ──────────────────────

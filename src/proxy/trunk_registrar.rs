@@ -148,6 +148,7 @@ impl TrunkRegistrar {
                     && previous.dest == config.dest
                     && previous.outbound_proxy == config.outbound_proxy
                     && previous.username == config.username
+                    && previous.auth_username == config.auth_username
                     && previous.password == config.password
                     && previous.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
                         == config.register_expires.unwrap_or(DEFAULT_REGISTER_EXPIRES)
@@ -277,13 +278,13 @@ async fn registration_loop(
     let credential = match (&config.username, &config.password) {
         (Some(user), Some(pass)) => Some(Credential {
             username: user.clone(),
-            auth_username: None, // falls back to `username` for the digest
+            auth_username: config.auth_username.clone(),
             password: pass.clone(),
             realm: None, // extracted from server challenge
         }),
         (Some(user), None) => Some(Credential {
             username: user.clone(),
-            auth_username: None,
+            auth_username: config.auth_username.clone(),
             password: String::new(),
             realm: None,
         }),

@@ -727,6 +727,9 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
+# username = "+12025550123"           # REGISTER From/To user
+# auth_username = "12025550123@ims.example.com" # Optional separate Digest identity
+#                                       # Omit auth_username to authenticate as username.
 # profile = "wan"                       # [[network_profile]] id (Console: Media → Network profile)
 # external_ip = "100.64.0.5"            # optional per-trunk RTP/SDP override (wins over profile)
 # bind_ip = "100.64.0.5"                # optional per-trunk RTP bind override

@@ -1010,6 +1010,8 @@ none = "None"
 
 # Access / Authentication section
 section_auth = "Authentication & routing"
+field_register_username = "Registration username"
+field_register_username_hint = "User part of REGISTER From/To (e.g. +12025550123). Leave blank to use the auth username. The auth username may include a domain."
 field_auth_username = "Auth username"
 field_auth_username_placeholder = "Provided by carrier"
 field_auth_password = "Auth password"

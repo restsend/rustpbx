@@ -97,7 +97,11 @@ pub struct TrunkConfig {
     /// is not resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbound_proxy: Option<String>,
+    /// User part of the REGISTER identity; also the default Digest username.
     pub username: Option<String>,
+    /// Independent Digest username, e.g. an IMS private identity including its domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_username: Option<String>,
     pub password: Option<String>,
     #[serde(
         default,
@@ -573,6 +577,7 @@ impl Default for TrunkConfig {
             amd: None,
             outbound_proxy: None,
             username: None,
+            auth_username: None,
             password: None,
             codec: Vec::new(),
             disabled: None,
