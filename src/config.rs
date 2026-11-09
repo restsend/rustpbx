@@ -1558,6 +1558,19 @@ pub struct ProxyConfig {
     /// only `Session-ID` headers inherit and every originate gets a fresh id.
     #[serde(default = "default_session_id_inherit_callid")]
     pub session_id_inherit_callid: bool,
+    /// Custom inbound correlation headers consulted (in order) for the global
+    /// session id, after the standard `Session-ID` header and before Call-ID
+    /// reuse. TRUNK-ONLY: the headers are read only when the request arrives
+    /// from a configured carrier trunk / upstream PBX (resolved by source IP
+    /// at the ACL layer) — registered clients and anonymous peers cannot
+    /// merge calls by planting them. Values are any safe caller-chosen
+    /// string: non-empty, at most 120 chars, characters from `A-Za-z0-9._@-`
+    /// (safe as a Call-ID part, filename component, and DB value); unsafe or
+    /// empty values are skipped with a warning. Non-hex values correlate
+    /// through the internal channels (events / CDR / CallMeta) and skip the
+    /// RFC wire channels (`Session-ID` header / UUI).
+    #[serde(default)]
+    pub session_id_source_headers: Option<Vec<String>>,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -2351,6 +2364,7 @@ impl Default for ProxyConfig {
             session_id_length: default_session_id_length(),
             session_id_header_mode: Default::default(),
             session_id_inherit_callid: default_session_id_inherit_callid(),
+            session_id_source_headers: None,
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),

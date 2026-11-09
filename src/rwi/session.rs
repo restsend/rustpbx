@@ -527,6 +527,15 @@ impl RwiCommandPayload {
 pub struct OriginateRequest {
     #[serde(default)]
     pub call_id: String,
+    /// Explicit global session id override. Any safe caller-chosen string:
+    /// non-empty, at most 120 characters, drawn from `A-Za-z0-9._@-`; it is
+    /// adopted verbatim (no hex/UUID shape requirement). Takes precedence
+    /// over the Call-ID derivation; an invalid value fails the originate
+    /// instead of silently generating a fresh id. Id-shaped (hex) values
+    /// propagate downstream via the `Session-ID` header and the CC UUI data;
+    /// non-hex values correlate through events / CDR only.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub destination: String,
     pub caller_id: Option<String>,

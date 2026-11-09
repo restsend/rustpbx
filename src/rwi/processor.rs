@@ -824,6 +824,31 @@ impl RwiCommandProcessor {
         format!("sip:{user}@{realm}")
     }
 
+    /// Global session id for an originate: the explicit `session_id` override
+    /// wins; an invalid override FAILS (the caller asked for a specific id —
+    /// silently generating a fresh one would break their correlation). The
+    /// override is any safe caller-chosen string ([`normalize_custom`] — no
+    /// hex/UUID shape requirement). Without an override the Call-ID
+    /// derivation applies ([`derive_from_call_id`]: id-shaped Call-IDs
+    /// reused per `session_id_inherit_callid`, else a fresh id).
+    pub(crate) fn resolve_originate_session_id(
+        session_id: Option<&str>,
+        call_id: &str,
+    ) -> Result<String, CommandError> {
+        match session_id {
+            Some(explicit) => crate::call::session_id::normalize_custom(explicit).ok_or_else(
+                || {
+                    CommandError::CommandFailed(
+                        "invalid session_id: must be a non-empty string of at most 120 \
+                         characters from A-Za-z0-9._@-"
+                            .to_string(),
+                    )
+                },
+            ),
+            None => Ok(crate::call::session_id::derive_from_call_id(call_id)),
+        }
+    }
+
     /// Resolve a named originate trunk to its config, rejecting unknown/unloaded
     /// trunks and DISABLED trunks (apply_trunk_config only stamps routing fields and
     /// does not enforce `disabled`). Shared by the apply helper and the parallel
@@ -904,20 +929,33 @@ impl RwiCommandProcessor {
         // stays client-addressable, but the session id carried in the
         // Session-ID header / UUI / CallMeta is normalized to the canonical
         // hex form (length per `proxy.session_id_length`) so downstream nodes
-        // inherit one stable id.
-        let global_session_id = crate::call::session_id::derive_from_call_id(&req.call_id);
+        // inherit one stable id. An explicit `session_id` override wins; an
+        // invalid override fails the originate instead of silently
+        // generating (see resolve_originate_session_id).
+        let global_session_id =
+            Self::resolve_originate_session_id(req.session_id.as_deref(), &req.call_id)?;
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         // Root session id via RFC 7433 UUI — the originate call is a session
         // root; the header lets external legs re-attach on the way back in.
-        headers.push(crate::call::uui::build_uui_header(
-            &global_session_id,
-            None,
-            None,
-            None,
-            None,
-        ));
+        // Id-shaped values only: a custom (non-hex) session id correlates
+        // through the internal channels (events / CDR / CallMeta) and must
+        // not be declared `encoding=hex` on the wire.
+        if crate::call::session_id::is_session_id_like(&global_session_id) {
+            headers.push(crate::call::uui::build_uui_header(
+                &global_session_id,
+                None,
+                None,
+                None,
+                None,
+            ));
+        } else {
+            info!(
+                session_id = %global_session_id,
+                "custom non-id-shaped session id: skipping UUI wire stamp (internal correlation only)"
+            );
+        }
         for (k, v) in &req.extra_headers {
             headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
         }
@@ -3981,6 +4019,60 @@ mod tests {
             .await
             .expect("drop must remove its sender without another registration");
         }
+    }
+
+    // ── originate explicit session_id override ──────────────────────────────
+
+    /// Accepted explicit ids: any safe caller-chosen string rides VERBATIM —
+    /// hex, dashed UUIDs, arbitrary word-char tokens; there is no shape
+    /// normalization on the custom channel.
+    #[test]
+    fn originate_explicit_session_id_wins_verbatim() {
+        for explicit in [
+            "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
+            "0b9e6c1e-1b40-4e8f-9c21-2f5a8d3e7b61",
+            "call-2026-00042",
+            "tenant_a.batch.99",
+            "1234567890",
+        ] {
+            assert_eq!(
+                RwiCommandProcessor::resolve_originate_session_id(Some(explicit), "client-call-id")
+                    .unwrap(),
+                explicit,
+                "custom session id must ride verbatim"
+            );
+        }
+    }
+
+    /// Invalid explicit ids FAIL the originate instead of silently
+    /// generating: empty/whitespace, over the 120-char bound, or characters
+    /// outside the safe set (path separators, control chars, spaces).
+    #[test]
+    fn originate_invalid_explicit_session_id_fails() {
+        let overlong = "a".repeat(crate::call::session_id::CUSTOM_ID_MAX + 1);
+        for junk in ["", "   ", "path/traversal", "back\\slash", "has space", "a\nb", &overlong] {
+            let err = RwiCommandProcessor::resolve_originate_session_id(Some(junk), "call-id")
+                .expect_err("invalid explicit session_id must fail");
+            assert!(
+                err.to_string().contains("invalid session_id"),
+                "error must name the invalid field: {err}"
+            );
+        }
+    }
+
+    /// No override → the legacy Call-ID derivation. A garbage Call-ID
+    /// (host part) yields a fresh generated id — settings-agnostic shape
+    /// assertions only.
+    #[test]
+    fn originate_without_override_derives_from_call_id() {
+        let derived = RwiCommandProcessor::resolve_originate_session_id(None, "leg@host")
+            .expect("no override never fails");
+        assert!(derived.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(
+            (crate::call::session_id::LENGTH_MIN..=crate::call::session_id::LENGTH_MAX)
+                .contains(&derived.len())
+        );
+        assert!(derived.bytes().any(|b| b != b'0'));
     }
 }
 

@@ -570,6 +570,24 @@ impl CallModule {
             return root;
         }
         if session_id_enabled {
+            // Custom correlation headers (`proxy.session_id_source_headers`)
+            // ride the same seam — after the standard `Session-ID` header
+            // (which re-attaches existing roots later in the session
+            // constructor), before Call-ID reuse. They are a TRUNK-ONLY
+            // channel: consulted only when the ACL layer resolved the
+            // source to a configured trunk (`TrunkContext` on the cookie).
+            // Registered clients and anonymous peers must not merge calls
+            // by planting the header — they would otherwise share the
+            // config surface with trusted upstream PBXs.
+            if crate::call::session_id::extract_inherited(original).is_none()
+                && cookie.get_extension::<TrunkContext>().is_some()
+            {
+                if let Some(id) =
+                    crate::call::session_id::extract_configured_source_headers(original)
+                {
+                    return id;
+                }
+            }
             crate::call::session_id::derive_from_call_id(dialog_id)
         } else {
             dialog_id.to_string()
@@ -5169,6 +5187,243 @@ mod tests {
         assert_ne!(
             resolved, root,
             "a live local session with the root id must block adoption"
+        );
+    }
+
+    // ── custom session-id source headers (`proxy.session_id_source_headers`) ──
+
+    /// INVITE carrying an arbitrary custom header — the shape an upstream
+    /// PBX sends when configured to correlate calls through it.
+    fn source_header_invite(
+        header_name: &str,
+        header_value: &str,
+        call_id: &str,
+    ) -> rsipstack::sip::Request {
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(rsipstack::sip::Header::CallId(
+            rsipstack::sip::headers::CallId::new(call_id.to_string()),
+        ));
+        headers.push(rsipstack::sip::Header::Other(
+            header_name.to_string(),
+            header_value.to_string(),
+        ));
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:1001@rustpbx.com".parse().unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    /// Settings guard mirroring `call::session_id`'s swap-and-restore: the
+    /// generator settings are process-global, so install and restore around
+    /// each assertion. The second field holds the process-wide settings
+    /// test lock for the whole test — sibling settings-dependent tests
+    /// (this module, `call::session_id`, sip_session tests) must not
+    /// interleave with the installed window.
+    struct SourceHeaderSettings(
+        crate::call::session_id::SessionIdSettings,
+        std::sync::MutexGuard<'static, ()>,
+    );
+    impl SourceHeaderSettings {
+        fn install(names: &[&str]) -> Self {
+            let serial = crate::call::session_id::settings_test_lock();
+            let prev = crate::call::session_id::settings();
+            let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            crate::call::session_id::init_settings(
+                32,
+                crate::call::session_id::SessionIdHeaderMode::Native,
+                true,
+                Some(std::sync::Arc::from(owned)),
+            );
+            Self(prev, serial)
+        }
+    }
+    impl Drop for SourceHeaderSettings {
+        fn drop(&mut self) {
+            crate::call::session_id::init_settings(
+                self.0.length,
+                self.0.header_mode,
+                self.0.inherit_callid,
+                self.0.source_headers.clone(),
+            );
+        }
+    }
+
+    /// Cookie as the ACL layer leaves it for a TRUNK-sourced INVITE — the
+    /// only source the custom correlation headers accept.
+    fn trunk_cookie() -> TransactionCookie {
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: Some(1),
+            name: "upstream-pbx".to_string(),
+            did_numbers: vec![],
+        });
+        cookie
+    }
+
+    /// A configured source header wins over an id-shaped Call-ID — it sits
+    /// BEFORE Call-ID reuse in the resolution order (trunk-sourced INVITE,
+    /// any safe string value).
+    #[tokio::test]
+    async fn source_header_session_id_adopted_before_call_id() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let (server, _config) = create_test_server().await;
+        let cookie = trunk_cookie();
+        let request = source_header_invite(
+            "X-Call-Session-Id",
+            "call-2026-00042",
+            "aabbccddeeff00112233445566778899",
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "aabbccddeeff00112233445566778899",
+            true,
+        );
+        assert_eq!(
+            resolved, "call-2026-00042",
+            "the configured source header must win over Call-ID reuse"
+        );
+    }
+
+    /// A REGISTERED CLIENT (no `TrunkContext`) must NOT merge calls by
+    /// planting the header — the custom channel is trunk-only; the leg id
+    /// stays the Call-ID derivation.
+    #[tokio::test]
+    async fn registered_client_source_header_ignored() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let (server, _config) = create_test_server().await;
+        // Plain default cookie: no TrunkContext — a registered/anonymous
+        // source as far as the custom channel is concerned.
+        let cookie = TransactionCookie::default();
+        let request = source_header_invite(
+            "X-Call-Session-Id",
+            "call-2026-00042",
+            "aabbccddeeff00112233445566778899",
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "aabbccddeeff00112233445566778899",
+            true,
+        );
+        assert_eq!(
+            resolved, "aabbccddeeff00112233445566778899",
+            "a non-trunk source must not adopt the planted header"
+        );
+    }
+
+    /// With BOTH a standard `Session-ID` header and a configured source
+    /// header, the standard channel owns root linkage (the session
+    /// constructor re-attaches the root later); the dialplan seam must not
+    /// short-circuit it — the leg id stays the Call-ID derivation.
+    #[tokio::test]
+    async fn standard_session_id_header_suppresses_source_headers() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let (server, _config) = create_test_server().await;
+        let cookie = trunk_cookie();
+        let mut request = source_header_invite(
+            "X-Call-Session-Id",
+            "call-2026-00042",
+            "aabbccddeeff00112233445566778899",
+        );
+        request.headers.push(
+            rsipstack::sip::headers::SessionId::from_local("aabbccddeeff00112233445566778899")
+                .expect("32-hex passes rsipstack validation")
+                .into(),
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "aabbccddeeff00112233445566778899",
+            true,
+        );
+        assert_eq!(
+            resolved, "aabbccddeeff00112233445566778899",
+            "a standard Session-ID header must keep the source header out of the seam"
+        );
+    }
+
+    /// An unusable source header value (empty, overlong, unsafe charset)
+    /// degrades to Call-ID reuse (warn, not fail) — the header is a
+    /// correlation channel, not a hard constraint.
+    #[tokio::test]
+    async fn unusable_source_header_value_falls_back_to_call_id() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let (server, _config) = create_test_server().await;
+        let cookie = trunk_cookie();
+        let request = source_header_invite(
+            "X-Call-Session-Id",
+            "path/traversal",
+            "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
+            true,
+        );
+        assert_eq!(resolved, "0b9e6c1e1b404e8f9c212f5a8d3e7b61");
+    }
+
+    /// Plain internal P2P calls keep the legacy raw Call-ID even when a
+    /// source header is configured, present, and trunk-sourced —
+    /// `session_id_enabled == false` gates the whole session-id machinery,
+    /// custom channels included (orthogonal to the trunk gate).
+    #[tokio::test]
+    async fn p2p_calls_ignore_source_headers() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let (server, _config) = create_test_server().await;
+        let cookie = trunk_cookie();
+        let request = source_header_invite(
+            "X-Call-Session-Id",
+            "call-2026-00042",
+            "raw-p2p-call-id",
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "raw-p2p-call-id",
+            false,
+        );
+        assert_eq!(
+            resolved, "raw-p2p-call-id",
+            "legacy P2P behaviour must survive configured source headers"
+        );
+    }
+
+    /// Cluster child-leg adoption still outranks the custom channel: a peer
+    /// INVITE with the CC leg intent adopts the declared root, regardless of
+    /// any source header on the wire.
+    #[tokio::test]
+    async fn cluster_child_adoption_outranks_source_header() {
+        let _settings = SourceHeaderSettings::install(&["X-Call-Session-Id"]);
+        let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+        let (server, cookie) = peer_server_and_cookie().await;
+        cookie.insert_extension(TrunkContext {
+            id: Some(1),
+            name: "upstream-pbx".to_string(),
+            did_numbers: vec![],
+        });
+        let call_id = SipSession::agent_leg_call_id(root, 1);
+        let mut request = child_leg_invite(&call_id, root);
+        request.headers.push(rsipstack::sip::Header::Other(
+            "X-Call-Session-Id".to_string(),
+            "call-2026-00042".to_string(),
+        ));
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, &call_id, true,
+        );
+        assert_eq!(
+            resolved, root,
+            "cluster child-leg adoption must outrank a configured source header"
         );
     }
 }

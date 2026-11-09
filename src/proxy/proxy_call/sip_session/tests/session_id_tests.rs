@@ -52,10 +52,7 @@ async fn session_id_peer_dialog_query_does_not_confuse_correlation_with_control(
     }
 }
 
-/// Settings 全局是进程级的：本模块内有用例改写 `header_mode`（Rfc7989），
-/// 有用例断言 Native 行为——并行交错会让后者读到错误模式（间歇红）。
-/// 本模块的 settings 依赖用例一律在此串行锁下执行。
-static SETTINGS_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// settings 依赖用例一律在 crate 级共享串行锁下执行（见 lock_settings_serial）。
 
 #[tokio::test]
 async fn vendor_review_regression_statistics_owner_survives_attribution_reset() {
@@ -140,10 +137,12 @@ async fn vendor_review_regression_statistics_owner_survives_attribution_reset() 
     }
 }
 
+/// Settings 全局是进程级的：本模块内有用例改写 `header_mode`（Rfc7989），
+/// 有用例断言 Native 行为——并行交错会让后者读到错误模式（间歇红）。
+/// settings 依赖用例一律在 crate 级共享串行锁（`session_id::settings_test_lock`，
+/// 与 `call::session_id` / proxy `call.rs` 的 settings 用例同一把锁）下执行。
 fn lock_settings_serial() -> std::sync::MutexGuard<'static, ()> {
-    SETTINGS_TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    crate::call::session_id::settings_test_lock()
 }
 
 async fn inherited_session_id_session(header_id: &str, uui_id: Option<&str>) -> SipSession {
@@ -294,13 +293,18 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
     struct RestoreSettings(SessionIdSettings);
     impl Drop for RestoreSettings {
         fn drop(&mut self) {
-            init_settings(self.0.length, self.0.header_mode, self.0.inherit_callid);
+            init_settings(
+                self.0.length,
+                self.0.header_mode,
+                self.0.inherit_callid,
+                self.0.source_headers.clone(),
+            );
         }
     }
     // The production wire builder reads process settings. This module is run
     // serially with other settings-dependent tests, and restores even on panic.
     let _restore = RestoreSettings(settings());
-    init_settings(16, SessionIdHeaderMode::Rfc7989, true);
+    init_settings(16, SessionIdHeaderMode::Rfc7989, true, None);
     let short = "0b9e6c1e1b404e8f";
     let supplied_uui = crate::call::uui::build_uui_header(
         short,

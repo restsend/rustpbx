@@ -320,6 +320,7 @@ async fn test_agent_outbound_originate_records_agent_segment_impl() -> Result<()
     let result = processor
         .process_command(rustpbx::rwi::session::RwiCommandPayload::Originate(
             OriginateRequest {
+                session_id: None,
                 call_id: call_id.clone(),
                 destination: customer_addr,
                 // The agent's identity rides as caller — the CC hook resolves

@@ -791,6 +791,7 @@ async fn test_originate_no_server_returns_error() {
     let result = processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: "new-call".into(),
                 destination: "sip:test@local".into(),
                 caller_id: None,
@@ -818,6 +819,7 @@ async fn test_originate_invalid_destination_returns_error() {
     let result = processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: "new-call-2".into(),
                 destination: "not-a-sip-uri".into(),
                 caller_id: None,
@@ -879,6 +881,7 @@ async fn test_originate_routes_when_enabled_and_reject_aborts() {
     let result = processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: "route-reject".into(),
                 destination: "sip:9001@rustpbx.com".into(),
                 caller_id: None,
@@ -952,6 +955,7 @@ async fn test_originate_explicit_trunk_skips_route() {
     let result = processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: "trunk-wins".into(),
                 destination: "sip:9001@rustpbx.com".into(),
                 caller_id: None,
@@ -1049,6 +1053,7 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
     processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: call_id.clone(),
                 destination,
                 caller_id: Some("sip:1001@127.0.0.1".into()),
@@ -1235,6 +1240,7 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
     processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: call_id.clone(),
                 destination,
                 caller_id: Some("sip:1001@127.0.0.1".into()),
@@ -1371,6 +1377,7 @@ async fn test_originate_rejected_releases_agent_and_emits_call_hangup() {
     processor
         .process_command(RwiCommandPayload::Originate(
             rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
                 call_id: call_id.clone(),
                 destination: format!("sip:bob@127.0.0.1:{}", bob.local_port()),
                 caller_id: Some("sip:1001@127.0.0.1".into()),
