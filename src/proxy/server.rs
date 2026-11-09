@@ -914,10 +914,7 @@ impl SipServerBuilder {
             config.session_id_length,
             config.session_id_header_mode,
             config.session_id_inherit_callid,
-            config
-                .session_id_source_headers
-                .as_deref()
-                .map(Arc::from),
+            config.session_id_default_header.clone(),
         );
         if session_id_length != config.session_id_length {
             warn!(

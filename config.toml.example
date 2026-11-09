@@ -198,6 +198,18 @@ media_proxy = "auto"
 # gets a fresh id (removes forked-INVITE / spoofed-Call-ID collision risk at
 # the cost of correlation with legacy upstreams).
 # session_id_inherit_callid = true
+# Default custom correlation header for the global session id — TRUNK-sourced
+# INVITEs only (registered clients / anonymous peers cannot merge calls by
+# planting it). The trunk-level `session_id_header` (per-trunk config) wins
+# over this default. Value: any safe string (non-empty, ≤120 chars,
+# A-Za-z0-9._@-), adopted verbatim — no hex/UUID shape requirement. Inbound:
+# the header's value BECOMES the session id (outranks the standard
+# `Session-ID` header and Call-ID reuse). Outbound: INVITEs routed to a
+# trunk with this config stamp the header with the current session id, so
+# the original value round-trips. Non-hex values correlate through events /
+# CDR; they are not stamped on the RFC `Session-ID` header.
+# Example (both sides, with a per-trunk override below):
+# session_id_default_header = "X-Correlation-Id"
 
 # Direct extension-to-extension (P2P) calls: when a callee has multiple
 # registered devices, ring ALL of them in parallel (first to answer wins).
@@ -688,6 +700,18 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # # header_passthrough = { mode = "all" }
 # # header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
 # # header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
+# #
+# # Session-id correlation header for THIS trunk — ONE header, both
+# # directions. Inbound: INVITEs from this trunk adopt the global session id
+# # from it (verbatim string, top priority after cluster child-leg adoption —
+# # outranks the standard `Session-ID` header and Call-ID reuse). Outbound:
+# # INVITEs routed to this trunk stamp it with the current session id, so
+# # the original value round-trips. Values: non-empty, ≤120 chars,
+# # A-Za-z0-9._@-. Unset → global [proxy].session_id_default_header applies.
+# # Example round trip with a customer PBX (their value need not be a UUID):
+# #   inbound  INVITE  X-Correlation-Id: ORD-88923  → session_id = ORD-88923
+# #   outbound INVITE  X-Correlation-Id: ORD-88923  ← stamped automatically
+# # session_id_header = "X-Correlation-Id"
 
 # Per-trunk ringback / early-media tones. Each value is an audio file path or a
 # `tone://frequency,duration_ms` spec rendered into a WAV.

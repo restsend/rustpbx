@@ -937,6 +937,17 @@ impl RwiCommandProcessor {
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
+        // Explicit-trunk originates stamp the trunk's correlation header
+        // with the session id (verbatim string channel) — the route-table
+        // originate path stamps inside build_target_invite_option instead.
+        if let Some(trunk_name) = req.trunk.as_deref() {
+            if let Some(name) = server.data_context.session_id_header_for(Some(trunk_name)) {
+                headers.push(rsipstack::sip::Header::Other(
+                    name,
+                    global_session_id.clone(),
+                ));
+            }
+        }
         // Root session id via RFC 7433 UUI — the originate call is a session
         // root; the header lets external legs re-attach on the way back in.
         // Id-shaped values only: a custom (non-hex) session id correlates

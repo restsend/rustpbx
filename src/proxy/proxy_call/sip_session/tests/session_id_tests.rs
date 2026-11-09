@@ -235,9 +235,131 @@ async fn inherited_delivery_session(
     session
 }
 
+/// Self-contained builder for the trunk correlation-header tests: a session
+/// whose dialplan carries `session_id` + an optional `OutboundTrunkContext`,
+/// with the trunk config installed in the server's data context.
+async fn trunk_correlation_session(with_trunk_context: bool) -> SipSession {
+    use crate::call::{DialDirection, Dialplan, OutboundTrunkContext, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::TrunkConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        ProxyConfig::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    server.data_context.trunks.insert(
+        "customer-x".to_string(),
+        TrunkConfig {
+            session_id_header: Some("X-Correlation-Id".to_string()),
+            ..Default::default()
+        },
+    );
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "example.test",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("server dialog");
+    let root = "ORD-88923";
+    let mut dialplan = Dialplan::new(root.to_string(), request, DialDirection::Outbound)
+        .with_caller("sip:alice@example.test".parse().unwrap())
+        .with_session_id_enabled(true);
+    if with_trunk_context {
+        dialplan.extensions.insert(OutboundTrunkContext {
+            id: Some(1),
+            name: "customer-x".to_string(),
+            dest: None,
+            tenant_id: None,
+        });
+    }
+    let context = CallContext {
+        session_id: root.to_string(),
+        dialplan: Arc::new(dialplan),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "alice".into(),
+        original_callee: "sip:13800000000@1.2.3.4".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (session, _handle, _cmd_rx) = SipSession::new(
+        server,
+        CancellationToken::new(),
+        None,
+        context,
+        dialog,
+        false,
+    );
+    session
+}
+
+fn correlation_header_of(
+    option: &rsipstack::dialog::invitation::InviteOption,
+) -> Option<String> {
+    option
+        .headers
+        .as_ref()?
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case("X-Correlation-Id"))
+        .map(|header| header.value().to_string())
+}
+
+/// Outbound round trip: a leg routed to a trunk with `session_id_header`
+/// stamps that header with the current session id — the verbatim string the
+/// trunk sent on ingress comes back on egress.
 #[tokio::test]
-async fn session_id_rfc_padding_preserves_original_root_without_truncating_other_ids() {
-    let _settings_serial = lock_settings_serial();
+async fn trunk_leg_stamps_correlation_header_outbound() {
+    let mut session = trunk_correlation_session(true).await;
+    let target = crate::call::Location {
+        aor: "sip:13800000000@1.2.3.4".parse().unwrap(),
+        ..Default::default()
+    };
+    let (option, _callee, _call_id, _via_home) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("trunk-bound INVITE must build");
+    assert_eq!(
+        correlation_header_of(&option),
+        Some("ORD-88923".to_string()),
+        "trunk-bound legs stamp the configured correlation header verbatim"
+    );
+}
+
+/// Internal legs (no `OutboundTrunkContext`) never stamp the correlation
+/// header — only trunk-bound legs do.
+#[tokio::test]
+async fn internal_legs_do_not_stamp_correlation_header() {
+    let mut session = trunk_correlation_session(false).await;
+    let target = crate::call::Location {
+        aor: "sip:1001@example.test".parse().unwrap(),
+        ..Default::default()
+    };
+    let (option, _callee, _call_id, _via_home) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("internal INVITE must build");
+    assert_eq!(
+        correlation_header_of(&option),
+        None,
+        "internal legs must not stamp the trunk correlation header"
+    );
+}
+
+#[tokio::test]
+async fn session_id_rfc_padding_preserves_original_root_without_truncating_other_ids() {    let _settings_serial = lock_settings_serial();
     let short = "0b9e6c1e1b404e8f";
     let padded = format!("{short:0>32}");
     // The UUI carries the original root; absent or unrelated UUI must never
@@ -297,7 +419,7 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
                 self.0.length,
                 self.0.header_mode,
                 self.0.inherit_callid,
-                self.0.source_headers.clone(),
+                self.0.source_header.clone(),
             );
         }
     }

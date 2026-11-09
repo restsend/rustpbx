@@ -709,6 +709,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
         rewrite_hostport: model.rewrite_hostport,
         call_id_mode: None,
+        session_id_header: None,
         health_check_enabled: None,
         health_check_per_ip: None,
         health_check_interval_secs: None,

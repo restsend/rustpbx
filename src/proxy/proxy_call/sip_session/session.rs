@@ -1531,14 +1531,33 @@ impl SipSession {
             ConstructMode::Uas { server_dialog } => {
                 let request = server_dialog.initial_request();
                 let cc_uui = crate::call::uui::extract_cc_uui(&request.headers);
-                let inherited = crate::call::session_id::extract_inherited(&request);
-                let uui_root = cc_uui
-                    .as_ref()
-                    .filter(|uui| {
-                        uui.leg.is_none()
-                            || crate::call::session_id::normalize_inherited(&uui.session_id).is_some()
-                    })
-                    .map(|uui| uui.session_id.clone());
+                // Trunk-level correlation header outranks the standard
+                // channels for root linkage too: a trunk declaring
+                // `session_id_header` merges/roots its calls by THAT header —
+                // a standard `Session-ID` header riding the same INVITE
+                // (e.g. added by an intermediate SBC) must not re-root it.
+                // Registered clients (no `TrunkContext`) cannot plant it.
+                let trunk_root = context
+                    .cookie
+                    .get_extension::<TrunkContext>()
+                    .and_then(|trunk| server.data_context.session_id_header_for(Some(&trunk.name)))
+                    .and_then(|name| {
+                        crate::call::session_id::extract_from_source_header(&request, &name)
+                    });
+                let (inherited, uui_root) = if trunk_root.is_some() {
+                    (None, None)
+                } else {
+                    let inherited = crate::call::session_id::extract_inherited(&request);
+                    let uui_root = cc_uui
+                        .as_ref()
+                        .filter(|uui| {
+                            uui.leg.is_none()
+                                || crate::call::session_id::normalize_inherited(&uui.session_id)
+                                    .is_some()
+                        })
+                        .map(|uui| uui.session_id.clone());
+                    (inherited, uui_root)
+                };
                 let root = match (inherited, uui_root) {
                     (Some(header), Some(uui)) => {
                         // RFC wire padding changes the representation, not the root.
@@ -4446,6 +4465,24 @@ impl SipSession {
         crate::call::session_id::normalize_inherited(candidate)
     }
 
+    /// Raw (non-hex-gated) session id candidate for OUTGOING custom
+    /// correlation headers — same precedence as
+    /// [`session_id_for_outgoing_leg`], but the value may be any safe
+    /// string (the trunk header channel carries `normalize_custom` values
+    /// verbatim).
+    fn session_id_raw_candidate(&self) -> Option<String> {
+        if !self.context.dialplan.session_id_enabled {
+            return None;
+        }
+        Some(
+            self.meta
+                .root_session_id
+                .clone()
+                .or_else(|| self.context.dialplan.session_id.clone())
+                .unwrap_or_else(|| self.context.session_id.clone()),
+        )
+    }
+
     /// True when the inbound request arrived from a configured cluster peer.
     ///
     /// Gate for the UUI `leg=` dial-intent marker: the marker changes this
@@ -4807,6 +4844,27 @@ impl SipSession {
                 headers.push(crate::call::uui::build_uui_header(
                     root, None, None, None, None,
                 ));
+            }
+        }
+
+        // Trunk-bound legs stamp the configured correlation header with the
+        // current session id (verbatim string channel) — closing the round
+        // trip for trunk-level `session_id_header` adopters: the value a
+        // trunk sent on ingress comes back on egress. Only legs actually
+        // routed to a trunk (`OutboundTrunkContext`) stamp; internal /
+        // agent-bound legs carry no correlation header.
+        if let Some(trunk) = self.context.dialplan.extensions.get::<OutboundTrunkContext>() {
+            let name = self.server.data_context.session_id_header_for(Some(&trunk.name));
+            let id = self
+                .session_id_raw_candidate()
+                .as_deref()
+                .and_then(crate::call::session_id::normalize_custom);
+            if let (Some(name), Some(id)) = (name, id) {
+                // header_passthrough may already have forwarded the
+                // ingress header — never duplicate it.
+                if !headers.iter().any(|h| h.name().eq_ignore_ascii_case(&name)) {
+                    headers.push(rsipstack::sip::Header::Other(name, id));
+                }
             }
         }
 

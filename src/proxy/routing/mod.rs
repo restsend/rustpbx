@@ -100,6 +100,16 @@ pub struct TrunkConfig {
     pub rewrite_hostport: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id_mode: Option<CallIdMode>,
+    /// Session-id correlation header for THIS trunk, both directions.
+    /// Inbound: INVITEs from this trunk adopt the global session id from
+    /// this header (verbatim, top priority after cluster child-leg
+    /// adoption — outranks the standard `Session-ID` header and Call-ID
+    /// reuse). Outbound: INVITEs routed to this trunk stamp the header with
+    /// the current session id. Values follow `normalize_custom` rules
+    /// (non-empty, ≤120 chars, `A-Za-z0-9._@-`). Unset → the global
+    /// `[proxy].session_id_default_header` applies (if set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_header: Option<String>,
 
     // SBC Health Check
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +495,7 @@ impl Default for TrunkConfig {
             register_extra_headers: None,
             rewrite_hostport: true,
             call_id_mode: None,
+            session_id_header: None,
             health_check_enabled: None,
             health_check_per_ip: None,
             health_check_interval_secs: None,

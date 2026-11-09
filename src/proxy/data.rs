@@ -71,6 +71,21 @@ pub struct GeneratedFileMetrics {
 }
 
 impl ProxyDataContext {
+    /// Session-id correlation header name for a trunk: the trunk-level
+    /// `session_id_header` override, falling back to the global
+    /// `[proxy].session_id_default_header`. `trunk` is the inbound
+    /// `TrunkContext` / outbound `OutboundTrunkContext` name; `None` (or an
+    /// unknown trunk) → global default only.
+    pub fn session_id_header_for(&self, trunk: Option<&str>) -> Option<String> {
+        trunk
+            .and_then(|name| {
+                self.trunks
+                    .get(name)
+                    .and_then(|t| t.session_id_header.clone())
+            })
+            .or_else(|| crate::call::session_id::settings().source_header.clone())
+    }
+
     pub async fn new(config: Arc<ProxyConfig>, db: Option<DatabaseConnection>) -> Result<Self> {
         let trunk_registrar = Arc::new(TrunkRegistrar::new());
 

@@ -10,15 +10,17 @@
 //! Resolution order for an inbound INVITE:
 //!
 //! 1. `Session-ID` header local part (upstream PBX/SBC already assigned one);
-//! 2. the configured custom correlation headers (`proxy.session_id_source_headers`,
-//!    in order) — consulted only when no `Session-ID` header is present AND
+//! 2. the configured custom correlation header (`proxy.session_id_default_header`,
+//!    or the trunk-level `session_id_header` override) — consulted only when
 //!    the request is trunk-sourced (the trunk-only trust gate lives at the
 //!    proxy seam, `CallModule::resolve_inbound_session_id`, which owns the
-//!    request cookie). Values are any safe caller-chosen string
-//!    ([`normalize_custom`]: `A-Za-z0-9._@-`, ≤120 chars) — no hex/UUID
-//!    shape requirement. Non-hex values correlate through the internal
-//!    channels only (events / CDR / CallMeta); they skip the RFC wire
-//!    channels (`build_wire_header` never stamps a non-id-shaped value);
+//!    request cookie) and BEFORE the standard `Session-ID` header — a trunk
+//!    declaring its own correlation header wins over anything else. Values
+//!    are any safe caller-chosen string ([`normalize_custom`]:
+//!    `A-Za-z0-9._@-`, ≤120 chars) — no hex/UUID shape requirement. Non-hex
+//!    values correlate through the internal channels only (events / CDR /
+//!    CallMeta); they skip the RFC wire channels (`build_wire_header` never
+//!    stamps a non-id-shaped `Session-ID` header);
 //! 3. the SIP Call-ID when it is id-shaped (32 hex chars or the configured
 //!    length; dashed RFC 4122 form is normalized) — unless
 //!    `session_id_inherit_callid` is disabled;
@@ -34,7 +36,7 @@
 //! header and fall back to Call-ID correlation), `rfc7989` zero-pads the id
 //! to 32 hex chars so the header always satisfies the RFC.
 
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use rsipstack::sip::{Header, HeadersExt, Request};
 
@@ -62,10 +64,11 @@ pub struct SessionIdSettings {
     pub header_mode: SessionIdHeaderMode,
     /// Reuse id-shaped incoming Call-IDs as session ids.
     pub inherit_callid: bool,
-    /// Custom inbound correlation headers (`proxy.session_id_source_headers`),
-    /// consulted in order after the standard `Session-ID` header and before
-    /// Call-ID reuse. Same trust level as the standard header.
-    pub source_headers: Option<Arc<[String]>>,
+    /// Custom inbound correlation header (`proxy.session_id_default_header`,
+    /// or the trunk-level `session_id_header` override at the proxy seam).
+    /// Consulted after cluster child-leg adoption and BEFORE the standard
+    /// `Session-ID` header. Trunk-sourced requests only.
+    pub source_header: Option<String>,
 }
 
 impl Default for SessionIdSettings {
@@ -77,7 +80,7 @@ impl Default for SessionIdSettings {
             length: 32,
             header_mode: SessionIdHeaderMode::Native,
             inherit_callid: true,
-            source_headers: None,
+            source_header: None,
         }
     }
 }
@@ -87,7 +90,7 @@ pub const LENGTH_MIN: usize = 8;
 pub const LENGTH_MAX: usize = 32;
 
 /// Upper bound for CUSTOM session ids (explicit originate override,
-/// `session_id_source_headers`): fits the CDR `session_id` column
+/// `session_id_default_header`): fits the CDR `session_id` column
 /// (VARCHAR(120)) and every artifact filename derived from it.
 pub const CUSTOM_ID_MAX: usize = 120;
 
@@ -129,7 +132,7 @@ static SETTINGS: RwLock<SessionIdSettings> = RwLock::new(SessionIdSettings {
     length: 32,
     header_mode: SessionIdHeaderMode::Native,
     inherit_callid: true,
-    source_headers: None,
+    source_header: None,
 });
 
 /// Install startup settings. Invalid lengths are clamped into
@@ -138,7 +141,7 @@ pub fn init_settings(
     length: usize,
     header_mode: SessionIdHeaderMode,
     inherit_callid: bool,
-    source_headers: Option<Arc<[String]>>,
+    source_header: Option<String>,
 ) -> usize {
     let length = length.clamp(LENGTH_MIN, LENGTH_MAX);
     if let Ok(mut settings) = SETTINGS.write() {
@@ -146,7 +149,7 @@ pub fn init_settings(
             length,
             header_mode,
             inherit_callid,
-            source_headers,
+            source_header,
         };
     }
     length
@@ -220,47 +223,45 @@ pub fn resolve_incoming(request: &Request, fallback_call_id: &str) -> String {
     normalize_or_generate(fallback_call_id)
 }
 
-/// Consult the configured custom correlation headers
-/// (`proxy.session_id_source_headers`) on an inbound request, in order.
+/// Consult the configured custom correlation header
+/// (`proxy.session_id_default_header`) on an inbound request.
 ///
-/// The standard `Session-ID` header always wins — callers must check
-/// [`extract_inherited`] first (this function deliberately does not, so the
-/// proxy seam can order its channels explicitly). The TRUNK-ONLY trust gate
-/// also lives at the proxy seam: this function trusts whatever the caller
-/// already decided about the source.
+/// This channel OUTRANKS the standard `Session-ID` header — the proxy seam
+/// checks the trunk-level override / this global default BEFORE
+/// [`extract_inherited`]. The TRUNK-ONLY trust gate also lives at the proxy
+/// seam: this function trusts whatever the caller already decided about the
+/// source.
 pub fn extract_configured_source_headers(request: &Request) -> Option<String> {
     let current = settings();
-    let headers = current.source_headers.as_deref()?;
-    extract_from_source_headers(request, headers)
+    let name = current.source_header.as_deref()?;
+    extract_from_source_header(request, name)
 }
 
-/// Extract a global session id from an explicit list of correlation header
-/// names, in order.
+/// Extract a global session id from an explicit correlation header name.
 ///
-/// Header names match case-insensitively (SIP grammar). Values go through
-/// [`normalize_custom`] — any safe caller-chosen string, no hex/UUID shape
-/// requirement. A present header whose value is unusable (empty, overlong,
-/// unsafe charset) is skipped with a warning — the headers are an explicit
-/// correlation channel, not a hard constraint, so a malformed value degrades
-/// to the next channel instead of failing the call.
-pub fn extract_from_source_headers(request: &Request, headers: &[String]) -> Option<String> {
-    for wanted in headers {
-        for header in request.headers.iter() {
-            let Header::Other(name, value) = header else {
-                continue;
-            };
-            if !name.eq_ignore_ascii_case(wanted) {
-                continue;
-            }
-            match normalize_custom(value.trim()) {
-                Some(id) => return Some(id),
-                None => {
-                    tracing::warn!(
-                        header = %name,
-                        "session_id source header value unusable (empty, over 120 chars, or \
-                         characters outside A-Za-z0-9._@-); ignoring"
-                    );
-                }
+/// Header name matches case-insensitively (SIP grammar). The value goes
+/// through [`normalize_custom`] — any safe caller-chosen string, no
+/// hex/UUID shape requirement. A present header whose value is unusable
+/// (empty, overlong, unsafe charset) is skipped with a warning — the
+/// header is an explicit correlation channel, not a hard constraint, so a
+/// malformed value degrades to the next channel instead of failing the
+/// call.
+pub fn extract_from_source_header(request: &Request, name: &str) -> Option<String> {
+    for header in request.headers.iter() {
+        let Header::Other(header_name, value) = header else {
+            continue;
+        };
+        if !header_name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        match normalize_custom(value.trim()) {
+            Some(id) => return Some(id),
+            None => {
+                tracing::warn!(
+                    header = %header_name,
+                    "session_id source header value unusable (empty, over 120 chars, or \
+                     characters outside A-Za-z0-9._@-); ignoring"
+                );
             }
         }
     }
@@ -490,7 +491,7 @@ mod tests {
         length: usize,
         header_mode: SessionIdHeaderMode,
         inherit_callid: bool,
-        source_headers: Option<&[&str]>,
+        source_header: Option<&str>,
         f: impl FnOnce() -> T,
     ) -> T {
         let _serial = super::settings_test_lock();
@@ -499,17 +500,14 @@ mod tests {
             length,
             header_mode,
             inherit_callid,
-            source_headers.map(|names| {
-                let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-                Arc::from(owned)
-            }),
+            source_header.map(str::to_string),
         );
         let out = f();
         init_settings(
             prev.length,
             prev.header_mode,
             prev.inherit_callid,
-            prev.source_headers,
+            prev.source_header,
         );
         out
     }
@@ -675,7 +673,7 @@ mod tests {
     fn source_header_is_adopted() {
         // Any safe caller-chosen string — no hex/UUID shape requirement.
         let id = "call-2026-00042";
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
             let resolved = resolve_incoming(
                 &invite_with_other_header("X-Call-Session-Id", id),
                 "ffffffffffffffffffffffffffffffff",
@@ -697,7 +695,7 @@ mod tests {
             "X-Call-Session-Id".to_string(),
             root.to_string(),
         ));
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
             assert_eq!(
                 resolve_incoming(&invite(headers), "ffffffffffffffffffffffffffffffff"),
                 "aabbccddeeff00112233445566778899",
@@ -710,7 +708,7 @@ mod tests {
     fn unusable_source_header_value_falls_back_to_call_id() {
         let overlong = "a".repeat(crate::call::session_id::CUSTOM_ID_MAX + 1);
         for junk in ["", "  ", "path/traversal", "back\\slash", "has space", "a\nb", &overlong] {
-            with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+            with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
                 let resolved = resolve_incoming(
                     &invite_with_other_header("X-Call-Session-Id", junk),
                     "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
@@ -727,7 +725,7 @@ mod tests {
     fn source_header_value_kept_verbatim() {
         // No normalization: a dashed UUID (and any other safe string) is
         // adopted exactly as the sender wrote it.
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
             assert_eq!(
                 resolve_incoming(
                     &invite_with_other_header(
@@ -745,7 +743,7 @@ mod tests {
     fn source_header_value_ignores_generator_length() {
         // The generator length setting governs GENERATED ids only — a custom
         // value of any length (within the charset bound) is accepted.
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
             assert_eq!(
                 resolve_incoming(
                     &invite_with_other_header("X-Call-Session-Id", "0b9e6c1e1b404e8f"),
@@ -759,7 +757,7 @@ mod tests {
     #[test]
     fn source_header_name_is_case_insensitive() {
         let id = "call-2026-00042";
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["x-call-session-id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("x-call-session-id"), || {
             assert_eq!(
                 resolve_incoming(
                     &invite_with_other_header("X-CALL-SESSION-ID", id),
@@ -785,44 +783,30 @@ mod tests {
     }
 
     #[test]
-    fn source_headers_are_tried_in_order() {
-        let id = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
-        with_source_settings(
-            32,
-            SessionIdHeaderMode::Native,
-            true,
-            Some(&["X-First-Choice", "X-Second-Choice"]),
-            || {
-                // Both present: the first configured name wins.
-                let mut headers = rsipstack::sip::Headers::default();
-                headers.push(Header::Other(
-                    "X-Second-Choice".to_string(),
-                    "aabbccddeeff00112233445566778899".to_string(),
-                ));
-                headers.push(Header::Other("X-First-Choice".to_string(), id.to_string()));
-                assert_eq!(
-                    resolve_incoming(&invite(headers), "ffffffffffffffffffffffffffffffff"),
-                    id
-                );
-                // Only the second present: still adopted.
-                let mut only_second = rsipstack::sip::Headers::default();
-                only_second.push(Header::Other(
-                    "X-Second-Choice".to_string(),
-                    id.to_string(),
-                ));
-                assert_eq!(
-                    resolve_incoming(&invite(only_second), "ffffffffffffffffffffffffffffffff"),
-                    id
-                );
-            },
-        );
+    fn only_one_header_value_adopted_per_name() {
+        // The config carries ONE header name; a duplicate of that name on the
+        // wire adopts the FIRST occurrence (headers keep wire order).
+        let id = "call-2026-00042";
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
+            let mut headers = rsipstack::sip::Headers::default();
+            headers.push(Header::Other("X-Call-Session-Id".to_string(), id.to_string()));
+            headers.push(Header::Other(
+                "X-Call-Session-Id".to_string(),
+                "second-value".to_string(),
+            ));
+            assert_eq!(
+                resolve_incoming(&invite(headers), "ffffffffffffffffffffffffffffffff"),
+                id,
+                "the first occurrence of the configured header wins"
+            );
+        });
     }
 
     #[test]
     fn callid_inherit_disabled_still_honours_source_header() {
         // Source headers are an explicit channel like the Session-ID header:
         // disabling Call-ID reuse must not disable them.
-        with_source_settings(32, SessionIdHeaderMode::Native, false, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, false, Some("X-Call-Session-Id"), || {
             assert_eq!(
                 resolve_incoming(
                     &invite_with_other_header("X-Call-Session-Id", "call-2026-00042"),
@@ -837,7 +821,7 @@ mod tests {
     fn all_zero_value_is_just_a_string() {
         // The nil-UUID exclusion is an RFC 7989 semantic for INHERITED hex
         // ids — a custom string id has no reserved values.
-        with_source_settings(32, SessionIdHeaderMode::Native, true, Some(&["X-Call-Session-Id"]), || {
+        with_source_settings(32, SessionIdHeaderMode::Native, true, Some("X-Call-Session-Id"), || {
             let resolved = resolve_incoming(
                 &invite_with_other_header(
                     "X-Call-Session-Id",

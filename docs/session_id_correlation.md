@@ -16,36 +16,47 @@ consult 咨询腿、外转外部网络后回落的通话。
 
 ## 定义与产生规则
 
-- **入呼**:`session_id` 解析顺序(见 `src/call/session_id.rs`):
-  1. INVITE 的 `Session-ID` 头(RFC 7989)local 部分 —— 显式继承通道,最优先;
-  2. 自定义关联头 `[proxy] session_id_source_headers`(按配置顺序,**仅 trunk
-     来源**,见下文信任边界)—— 任意安全字符串(非空、≤120 字符、仅限
-     `A-Za-z0-9._@-`),原样采纳不做归一化;不安全值 warn 后跳过走下一通道;
-  3. id 形态的 SIP Call-ID(32 hex / 配置长度;横线 UUID 归一化)—— 受
+- **入呼**:`session_id` 解析顺序(见 `src/call/session_id.rs` 与
+  `resolve_inbound_session_id`):
+  1. 集群 child 腿继承(cluster peer 声明的 UUI `leg=` intent + 根 id)——
+     内部信任缝,外部无法伪造;
+  2. **自定义关联头(仅 trunk 来源,最优先的显式通道)**:trunk 级
+     `session_id_header` > 全局 `[proxy] session_id_default_header`——
+     任意安全字符串(非空、≤120 字符、仅限 `A-Za-z0-9._@-`),原样采纳
+     不做归一化;**压过标准 `Session-ID` 头与 Call-ID 复用**;不安全值
+     warn 后跳过走下一通道;
+  3. INVITE 的 `Session-ID` 头(RFC 7989)local 部分 + CC UUI 数据
+     (根挂回通道);
+  4. id 形态的 SIP Call-ID(32 hex / 配置长度;横线 UUID 归一化)—— 受
      `[proxy] session_id_inherit_callid`(默认 true)控制;
-  4. 以上都不满足 → 随机生成(长度 `[proxy] session_id_length`,默认 32)。
+  5. 以上都不满足 → 随机生成(长度 `[proxy] session_id_length`,默认 32)。
   纯内部 P2P 呼叫(session 层未启用)不走上述机器,保持原始 Call-ID。
 - **外呼(originate)**:`session_id` = 生成的根 Call-ID(外呼即根);`call.originate`
-  / `POST /ami/v1/outbound/dial` 可传显式 `session_id` 覆盖(须 id 形态,非法值
-  直接报错而非静默生成),未传时按 Call-ID 派生
-- **originate 显式 `session_id` / 自定义关联头**:任意安全字符串即可,无
+  / `POST /ami/v1/outbound/dial` 可传显式 `session_id` 覆盖(任意安全字符串,
+  非法值直接报错而非静默生成),未传时按 Call-ID 派生
+- **显式 `session_id` / 自定义关联头的值**:任意安全字符串即可,无
   hex/UUID 形态要求 —— 非空、≤120 字符、仅限 `A-Za-z0-9._@-`(该字符集在
   Call-ID、录音文件名、DB 列三处都安全);按原样采纳不做归一化。非 hex 形态
-  只走内部关联通道(事件 / CDR / CallMeta),**跳过** `Session-ID` 头 / UUI
-  wire 通道(`build_wire_header` 拒绝非 id 形态值;UUI 声明 `encoding=hex`,
-  不对非 hex 值撒谎)。
+  只走内部关联通道(事件 / CDR / CallMeta)与自定义头,**跳过** `Session-ID`
+  头 / UUI wire 通道(`build_wire_header` 拒绝非 id 形态值;UUI 声明
+  `encoding=hex`,不对非 hex 值撒谎)。
+- **出站关联头 stamping(自定义头闭环)**:发往配置了 `session_id_header` 的
+  trunk 的 INVITE(routing 路由腿与显式 trunk originate)自动以当前
+  session id stamp 该头 —— trunk 送进来的原始值在出站原样返回;内部腿
+  (agent 腿 / 注册分机)不 stamp;`header_passthrough` 已转发的头不重复。
 - **子通话**:创建时从父通话的 CallMeta 继承 `session_id`(服务端内部继承为权威,
   不依赖信令头)
 - **`session_id == call_id`** 表示该通话是根
 
-### `session_id_source_headers` 信任边界
+### 自定义关联头的信任边界(trunk-only)
 
 自定义关联头是 **trunk-only** 通道:仅在 INVITE 来自配置的运营商 trunk / 上游
-PBX(ACL 层按来源 IP 解析出 `TrunkContext`)时才读取。注册客户端、匿名对端
-种植该头**不生效**(回落 Call-ID 派生)——避免终端伪造头把呼叫合并进已知
-session id。标准 `Session-ID` 头不受此限制,保持原有全信任语义(现有对端关联
-不破坏)。值不安全(空/超长/越界字符集)不生效(warn + 回落),不会导致呼叫
-失败。标准 `Session-ID` 头永远优先于自定义头。
+PBX(ACL 层按来源 IP 解析出 `TrunkContext`)时才读取,trunk 级
+`session_id_header` 优先于全局 `session_id_default_header`。注册客户端、匿名
+对端种植该头**不生效**(回落 Call-ID 派生)——避免终端伪造头把呼叫合并进已知
+session id。该通道**优先于**标准 `Session-ID` 头(trunk 声明了自己的关联头,
+就以它为准);标准 `Session-ID` 头本身保持原有全信任语义(现有对端关联不破坏)。
+值不安全(空/超长/越界字符集)不生效(warn + 回落),不会导致呼叫失败。
 
 ## agent 腿的 SIP Call-ID(queue 派发 / consult)
 
