@@ -196,7 +196,7 @@ async fn exercise_outbound_connection_loss(loss: FlowLoss) {
         let server = server.clone();
         async move { server.serve().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Listeners are already bound; the REGISTER response below synchronizes startup.
 
     let caller_rtp = RtpSender::bind().await.unwrap();
     let callee_rtp = Arc::new(RtpSender::bind().await.unwrap());
