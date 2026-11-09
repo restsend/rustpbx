@@ -1987,7 +1987,12 @@ mod tests {
             rsipstack::EndpointBuilder::new()
                 .with_cancel_token(cancel.clone())
                 .with_inspector(Box::new(NatInspector::new(true)))
-                .with_target_locator(DialogTargetLocator::new(locator.clone(), vec![], false))
+                .with_target_locator(DialogTargetLocator::new(
+                    locator.clone(),
+                    vec![],
+                    false,
+                    None,
+                ))
                 .build(),
         );
         let serving = {

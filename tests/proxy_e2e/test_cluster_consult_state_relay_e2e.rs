@@ -5,7 +5,7 @@ use rustpbx::proxy::call::CallModule;
 use rustpbx::proxy::registrar::RegistrarModule;
 use rustpbx::proxy::server::SipServerBuilder;
 use rustpbx::proxy::user::MemoryUserBackend;
-use rustpbx::proxy::{locator_db::DbLocator, ProxyModule};
+use rustpbx::proxy::locator_db::DbLocator;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
