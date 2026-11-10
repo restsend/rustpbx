@@ -810,3 +810,44 @@ journalctl -u realtime-quality -f
 部署后先检查 `/health`，再发起测试通话，按前文在核心 CDR 的 `metadata.trace` 查 `quality.voicemail_detected`，并检查 End 事件的服务挂断来源；录音、SIPFlow、wholesale 计费仍走原流程。健康检查成功只表示服务启动，不能代替真实通话验证。
 
 版本 tag 触发双平台发布；两个包与校验文件齐全才发布 draft。macOS CI 需要组织自托管 runner（默认标签 `mac`、`arm64`），并非 CNB 托管 Mac。源码与发布包均不包含模型、录音或测试音频；不要把本机配置、凭据和评测输出提交到任一项目。
+
+### 9. 从上一轮 wholesale 镜像升级：数据库 schema（2026-11-11）
+
+本节对比本次质检镜像之前的最近一次成功构建，而不是把本地测试库缺失的所有历史迁移都当成本次新增：
+
+| 项目 | 上一轮 | 本次质检镜像 |
+| --- | --- | --- |
+| 构建 | [2026-11-08，cnb-24k-1k6t3hnuo](https://cnb.cool/miuda.ai/wholesale/-/build/logs/cnb-24k-1k6t3hnuo) | [2026-11-11，cnb-99e-1k73gkrdj](https://cnb.cool/miuda.ai/wholesale/-/build/logs/cnb-99e-1k73gkrdj) |
+| wholesale 提交 | `320f282e` | `e8592f24` |
+| 核心版本 | 构建时浅克隆 core main，日志未记录精确 SHA | 固定 `8fa31ffb` |
+| 本次镜像 | — | `docker.cnb.cool/miuda.ai/rustpbx:wholesale-quality-20261111` |
+
+上一轮核心未固定 SHA，不能仅靠 wholesale 提交号精确重建旧镜像。本节结合旧构建日志、构建时点前后的核心迁移历史与本次固定提交核对；实际数据库是否已经执行某迁移，以迁移表和列定义为准。
+
+| 范围 | schema 变化 | 旧数据与用途 |
+| --- | --- | --- |
+| 核心 `rustpbx_sip_trunks` | 新增 `register_username VARCHAR(160) NULL`；迁移名 `add_sip_trunk_register_username` | 分离 REGISTER 用户名和 Digest 鉴权用户名。已有行保持 NULL，不改写 `auth_username`；未填写时沿用 `auth_username`。 |
+| wholesale 表和索引 | 本轮没有新增、删除或修改 | 租户／路由条目的质检策略位于 TOML `addons.wholesale.quality`，不是新增数据库列。 |
+| 质检结果／挂断记录 | 沿用 `rustpbx_call_records.metadata` 中的 trace JSON | `quality.voicemail_detected`、`detail.method`、End 的服务来源属于 JSON 内容约定；没有新增 `voicemail` 或 `quality_result` 列。 |
+| 计费与 commerce | 本轮没有 schema 变化 | `wholesale_cdrs`、余额和计费关联方式不变；质检挂断仍正常计费。 |
+
+此字段来自同步的核心 SIP trunk 改动，不是质检必需的新表。`add_call_record_quality_columns` 等既有媒体质量／报告迁移也不是本次新增。移除旧 transcript 配置类型不等于删除数据库里的历史 transcript 报告字段。
+
+升级前备份数据库和 TOML；先让一个新版本实例完成启动迁移，再启动其他实例。核心启动会执行未应用的 migration，并记录在 `seaql_migrations`；wholesale 使用 `wholesale_migrations`。新增列迁移先检查列是否存在，不需要另行手写 ALTER 或批量回填。启动账号需要执行待应用 DDL 的权限；迁移失败时先处理启动日志中的具体错误。
+
+MySQL 升级后可只读核验：
+
+```sql
+SELECT version, applied_at FROM seaql_migrations
+WHERE version = 'add_sip_trunk_register_username';
+
+SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'rustpbx_sip_trunks'
+  AND COLUMN_NAME = 'register_username';
+
+SELECT id, register_username, auth_username FROM rustpbx_sip_trunks;
+```
+
+预期新列为可空的 `varchar(160)`，旧记录未配置时为 NULL。字段确认后仍需核验 trunk 注册及基本呼叫；质检标记的数据库查询见前面的结果章节。此迁移的 `down()` 不删除该列，不能把回退应用镜像当成数据库自动回滚；需要完整回退时使用升级前备份，并恢复相应旧配置。本次文档补充没有执行新的数据库变更。
