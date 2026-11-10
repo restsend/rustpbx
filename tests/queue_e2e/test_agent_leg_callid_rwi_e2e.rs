@@ -898,18 +898,30 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
         !timeline.is_empty(),
         "no webhook events captured for the consult session {session_id}"
     );
-    // 1. NO agent-role claim anywhere: alice stays "caller", bob's callee leg
-    //    stays "callee" (plain dial never becomes an agent leg), consult legs
-    //    stay "consult". A blanket child-role stamping regression shows up
-    //    here as a leg_role="agent" leak.
+    // 1. Agent-role claims are CONFINED to the registered agent's answered
+    //    callee leg (b4 served-agent stamping, prd 2026-11-10): bob is the
+    //    only CC agent in this harness, so his confirmed callee leg
+    //    legitimately claims leg_role=agent — that attribution is exactly
+    //    what fixed the zero-row agent CDR. No leak onto the caller leg
+    //    (alice — not an agent) or the consult legs (charlie/dave — plain
+    //    extensions): a blanket child-role stamping regression still shows
+    //    up here as an agent claim outside bob's leg.
     let agent_claimed: Vec<&serde_json::Value> = timeline
         .iter()
         .filter(|v| v["event"]["leg_role"].as_str() == Some("agent"))
         .collect();
     assert!(
-        agent_claimed.is_empty(),
-        "plain-call consult flow must not claim leg_role=agent on any event: {agent_claimed:?}"
+        !agent_claimed.is_empty(),
+        "the registered agent's confirmed leg must claim leg_role=agent (b4 stamping):\n{}",
+        render_timeline(&capture, &session_id)
     );
+    for claim in &agent_claimed {
+        let leg_id = claim["event"]["leg_id"].as_str().unwrap_or("");
+        assert!(
+            leg_id == "callee",
+            "agent role claim outside the registered agent's callee leg: {claim}"
+        );
+    }
     // 2. Exactly ONE answered (and one ringing) per consult leg, each keeping
     //    its own role — `find`-style presence checks would pass on doubles.
     for leg in ["consult-1", "consult-2"] {
@@ -964,9 +976,13 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
 /// registered CC agent. alice dials bob directly — a plain dialplan B-leg,
 /// NOT a queue dispatch and NOT a consult. The RWI webhook must show:
 ///   * the caller leg (alice) as `leg_role: "caller"`, and
-///   * the callee leg (bob, the called agent) as `leg_role: "callee"` —
-///     a plain dial never gets `LegPurpose::Agent`, so it is NOT an agent leg.
-/// The hard invariant: **no** webhook event may carry `leg_role: "agent"`.
+///   * the RINGING callee leg still as `leg_role: "callee"` (the b4 served-
+///     agent stamp lands at dialog CONFIRM, not at ringing), and
+///   * bob's ANSWERED leg claiming `leg_role: "agent"` — he is a registered
+///     agent and served the call, which is exactly the attribution that
+///     fixed the zero-row agent CDR (prd 2026-11-10 b4).
+/// The hard invariant: **no** agent claim may leak onto the non-agent caller
+/// leg.
 #[tokio::test]
 async fn test_non_agent_extension_calling_agent_has_no_agent_leg_role() -> Result<()> {
     let _ = tracing_subscriber::fmt().try_init();
@@ -1066,7 +1082,9 @@ async fn test_non_agent_extension_calling_agent_has_no_agent_leg_role() -> Resul
         "non-agent caller leg must report leg_role=caller: {held}"
     );
 
-    // ── THE invariant: a plain non-agent → agent call has NO agent leg ─────
+    // ── THE invariant (b4 served-agent stamping) ─────────────────────────
+    // bob's answered leg claims leg_role=agent (registered agent, served
+    // the call); the non-agent caller side never claims agent.
     {
         let events = capture.received.lock().unwrap();
         let agent_events: Vec<&serde_json::Value> = events
@@ -1074,11 +1092,17 @@ async fn test_non_agent_extension_calling_agent_has_no_agent_leg_role() -> Resul
             .filter(|v| v["event"]["leg_role"].as_str() == Some("agent"))
             .collect();
         assert!(
-            agent_events.is_empty(),
-            "no webhook event may carry leg_role=agent for a plain non-agent→agent call, \
-             got {agent_events:#?}.\n timeline:\n{}",
+            !agent_events.is_empty(),
+            "the called registered agent's answered leg must claim leg_role=agent.\n timeline:\n{}",
             render_timeline(&capture, &session_id)
         );
+        for claim in &agent_events {
+            let leg_id = claim["event"]["leg_id"].as_str().unwrap_or("");
+            assert!(
+                leg_id != "caller",
+                "agent role must never be claimed for the non-agent caller leg: {claim:#?}"
+            );
+        }
     }
 
     // Show the real captured webhook data (run with --nocapture).

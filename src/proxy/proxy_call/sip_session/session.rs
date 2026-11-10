@@ -14506,16 +14506,27 @@ impl SipSession {
                     //（`freeze_served_agent_attribution`）按腿自身身份定归属。
                     // 会话 pin 写入仍门控 queue 语境（直拨归因由 Priority 3
                     // 兜底，保持既有语义）。
-                    if let Some(leg) = self.legs.get_mut(&leg_id) {
-                        leg.agent_id = leg_agent_id.clone();
-                    } else {
-                        // PRD s25 S5（C2）：直拨 agent 呼叫的腿同样盖章 ——
-                        // 离场冻结（`freeze_served_agent_attribution`）按腿
-                        // 自身身份定归属，没盖章的腿无从冻结。pin 写入仍
-                        // 门控 queue 语境（直拨归因由 Priority 3 兜底）。
-                        if let Some(leg) = self.legs.get_mut(&leg_id) {
-                            leg.agent_id = leg_agent_id.clone();
+                    //
+                    // BUT the stamp keys to the leg's OWN endpoint only:
+                    // `leg_agent_id` falls back to the session-level pin for
+                    // non-agent endpoints (the dispatch signal below needs
+                    // that), and stamping a consult/dynamic leg whose
+                    // endpoint is a plain extension with the pinned agent
+                    // leaked leg_role=agent onto non-agent legs (prd
+                    // 2026-11-10: the consult-1 answered event claimed the
+                    // main call's agent). Resolve the own-endpoint identity
+                    // for the stamp; keep the fallback for the signal.
+                    let own_agent = {
+                        let user = Self::uri_user_part(agent_uri.as_str());
+                        match (user, &self.server.agent_registry) {
+                            (Some(user), Some(registry)) => {
+                                registry.get_agent(&user).await.map(|_| user)
+                            }
+                            _ => None,
                         }
+                    };
+                    if let Some(leg) = self.legs.get_mut(&leg_id) {
+                        leg.agent_id = own_agent.clone();
                     }
                     if let Some(ref id) = leg_agent_id
                         && Some(id.as_str()) != self.pinned_agent_id().as_deref()

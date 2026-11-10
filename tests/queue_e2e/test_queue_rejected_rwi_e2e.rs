@@ -482,11 +482,12 @@ async fn test_agent_rejected_rwi_event_contract() -> Result<()> {
             rej < offered_rounds[0] && offered_rounds[0] < connected,
             "round ordering (rejected → offered → connected): {types:?}"
         );
-        // The winning assignment: a single resolve decided the sequential
-        // candidate order [alice, bob] — the 486 rejection dials the NEXT
-        // candidate of the SAME round (no second `skill_group_agent_assigned`),
-        // so exactly one assignment names alice, and bob is attributed by
-        // his offered/connected events.
+        // The winning assignment: the 486 rejection is a RING TERMINAL — the
+        // re-dispatch that follows is a NEW queue round with its own resolve
+        // (adapter `emit_skill_group` round-terminal semantics), so the
+        // timeline carries TWO assignments: alice (the first resolve's
+        // sequential head) and bob (the re-dispatch round's winner), with
+        // bob attributed by his offered/connected events.
         let assigned_agents: Vec<&str> = evs
             .iter()
             .filter(|v| v["event_type"].as_str() == Some("skill_group_agent_assigned"))
@@ -494,8 +495,8 @@ async fn test_agent_rejected_rwi_event_contract() -> Result<()> {
             .collect();
         assert_eq!(
             assigned_agents,
-            vec!["alice"],
-            "one resolve names the sequential candidate order head: {types:?}"
+            vec!["alice", "bob"],
+            "rejection closes the round; the re-dispatch resolves and assigns bob: {types:?}"
         );
         // No no-answer on this path (rejection is NOT a ring timeout).
         assert!(
