@@ -709,8 +709,10 @@ async fn test_p2p_unidirectional_rtp_caller_only() -> Result<()> {
 
     let ctx = MediaTestCtx::setup().await?;
 
-    let caller_port = ctx.caller_rtp_port();
-    let callee_port = ctx.callee_rtp_port();
+    let caller_media = crate::common::rtp_utils::RtpEndpoint::bind(0).await?;
+    let callee_media = crate::common::rtp_utils::RtpEndpoint::bind(0).await?;
+    let caller_port = caller_media.local_port()?;
+    let callee_port = callee_media.local_port()?;
 
     let caller_sdp = pcmu_sdp("127.0.0.1", caller_port);
     let callee_sdp = pcmu_sdp("127.0.0.1", callee_port);
@@ -744,56 +746,44 @@ async fn test_p2p_unidirectional_rtp_caller_only() -> Result<()> {
         callee_target, caller_target
     );
 
-    // 3. Only start callee receiver (we only expect caller→callee packets)
-    ctx.callee_receiver.start_receiving();
-    // Also start caller receiver to confirm no packets arrive
-    ctx.caller_receiver.start_receiving();
+    // Capture payloads on the same sockets advertised in SDP, including any
+    // PBX-generated startup silence before relay activation.
+    callee_media.start_receiving();
+    caller_media.start_receiving();
 
-    // 4. ONLY caller sends RTP — callee is silent
-    let caller_ssrc = 0xA1A1A1A1u32;
+    // Only the caller sends. Distinct payloads let us verify real forwarding
+    // and detect echo without counting legitimate PBX silence as caller audio.
     let packet_count = 100usize;
-    let caller_packets =
-        RtpPacket::create_sequence(packet_count, 1000, 50000, caller_ssrc, 0, 160, 160);
+    let caller_payloads: Vec<Vec<u8>> = (0..packet_count)
+        .map(|i| vec![i as u8; 160])
+        .collect();
+    caller_media
+        .send_pcmu_blocking(caller_target, caller_payloads.clone(), 20)
+        .await?;
 
-    ctx.caller_sender
-        .start_sending(caller_target, caller_packets, 20);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let received = callee_media.captured_pcmu_payloads();
+            if caller_payloads.iter().all(|payload| received.contains(payload)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Callee must receive every injected caller payload while callee sends no RTP");
 
-    // Wait for transmission + drain
-    sleep(Duration::from_millis(packet_count as u64 * 20 + 500)).await;
-
-    ctx.caller_sender.stop();
-
+    // Allow reverse-path packets to drain before checking for echoed audio.
     sleep(Duration::from_millis(200)).await;
-
-    let callee_stats = ctx.callee_receiver.get_stats().await;
-    let caller_stats = ctx.caller_receiver.get_stats().await;
-
+    let caller_received = caller_media.captured_pcmu_payloads();
+    assert!(
+        caller_received.iter().all(|payload| !caller_payloads.contains(payload)),
+        "Caller audio must not be echoed back to the caller"
+    );
     info!(
-        callee_received = callee_stats.packets_received,
-        callee_pts = ?callee_stats.payload_types,
-        callee_ssrcs = ?callee_stats.ssrcs,
-        caller_received = caller_stats.packets_received,
-        "Unidirectional RTP test results (caller-only sending)"
-    );
-
-    // 5. Verify callee received RTP through proxy
-    assert!(
-        callee_stats.packets_received > 0,
-        "Callee should receive RTP from caller through proxy (got 0 packets) — \
-         unidirectional forwarding is broken"
-    );
-
-    // Verify correct payload type
-    assert!(
-        callee_stats.payload_types.contains(&0),
-        "Callee should receive PCMU (PT 0), got {:?}",
-        callee_stats.payload_types
-    );
-
-    // Caller should NOT receive anything since callee didn't send
-    assert_eq!(
-        caller_stats.packets_received, 0,
-        "Caller should NOT receive RTP when callee is silent"
+        callee_received = callee_media.captured_count(),
+        caller_received = caller_media.captured_count(),
+        "Unidirectional RTP payload checks passed"
     );
 
     // 6. Hang up and verify CDR
@@ -809,6 +799,8 @@ async fn test_p2p_unidirectional_rtp_caller_only() -> Result<()> {
     .await?;
 
     info!("test_p2p_unidirectional_rtp_caller_only PASSED");
+    caller_media.stop();
+    callee_media.stop();
     ctx.cleanup();
     Ok(())
 }
