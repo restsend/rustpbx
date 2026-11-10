@@ -561,7 +561,7 @@ impl LegInner {
             negotiated: Mutex::new(None),
             advertised_addr: Mutex::new(None),
             peer_advertised_addr: Mutex::new(None),
-            gated: Arc::new(AtomicBool::new(true)),
+            gated,
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: Arc::new(AtomicBool::new(false)),
             observer_task: Mutex::new(None),
@@ -2450,6 +2450,37 @@ mod tests {
         assert_eq!(ev.digit, '1');
 
         leg.stop();
+    }
+
+    #[tokio::test]
+    async fn accepted_leg_keeps_silence_rtp_running() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let leg = LegInner::new("silence-gate", &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {port} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
+        );
+        leg.answer(&offer).await.unwrap();
+        leg.accept();
+        // Realtime barge-in switches to Silence after the SIP answer.
+        // That must not park a pipeline using a separate, still-closed gate.
+        leg.stop_playback().await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut buf = [0u8; 2048];
+            let mut timestamps = Vec::new();
+            while timestamps.len() < 3 {
+                let (n, _) = socket.recv_from(&mut buf).await.unwrap();
+                if n >= 12 && buf[0] >> 6 == 2 && buf[1] & 0x7f == 0 {
+                    timestamps.push(u32::from_be_bytes(buf[4..8].try_into().unwrap()));
+                }
+            }
+            timestamps
+        }).await;
+        leg.stop();
+        let timestamps = received.expect("answered silence must keep sending RTP");
+        for pair in timestamps.windows(2) {
+            assert_eq!(pair[1].wrapping_sub(pair[0]), 160);
+        }
     }
 
     #[tokio::test]
