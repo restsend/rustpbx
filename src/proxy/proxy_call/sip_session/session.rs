@@ -5022,18 +5022,75 @@ impl SipSession {
             };
             info!(session_id = %self.id, %phase, side = ?side, ?target_side, %leg_id,
                 "consult_state UPDATE — relaying marker to opposite side");
-            let response = self
+            let marker_headers = vec![rsipstack::sip::Header::Other(
+                "User-to-User".into(),
+                format!("consult-state={phase}").into(),
+            )];
+            // App-driven sessions (queue / IVR in-session hand-off) never
+            // register a classic callee side: the dispatched agent legs live
+            // in the leg registry under dynamic ids. When the opposite side
+            // has no dialog, fall back to every CONNECTED dynamic leg so the
+            // consulted agent still receives the merge / transfer edge
+            // (prd 2026-11-10 b3w P1b: "No dialog found for leg callee"
+            // swallowed the marker and the agent stayed on the pre-merge
+            // label although the P2P consult path relays fine).
+            use crate::call::domain::LegState;
+            let response: Option<rsipstack::sip::Response> = match self
                 .send_mid_dialog_request_to_side(
                     target_side,
                     rsipstack::sip::Method::Update,
-                    vec![rsipstack::sip::Header::Other(
-                        "User-to-User".into(),
-                        format!("consult-state={phase}").into(),
-                    )],
+                    marker_headers.clone(),
                     None,
                 )
-                .await?
-                .ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(side_err) => {
+                    let targets: Vec<crate::call::domain::LegId> = self
+                        .legs
+                        .iter()
+                        .filter(|(id, leg)| {
+                            id.as_str() != "caller"
+                                && matches!(leg.state, LegState::Connected | LegState::Hold)
+                                && self.legs.get_dialog(id).is_some()
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    if targets.is_empty() {
+                        return Err(side_err);
+                    }
+                    info!(session_id = %self.id, legs = ?targets,
+                        "consult_state UPDATE — no classic opposite side, relaying to dynamic legs");
+                    let mut delivered: Option<rsipstack::sip::Response> = None;
+                    for id in &targets {
+                        match self
+                            .send_mid_dialog_request_to_leg(
+                                id,
+                                rsipstack::sip::Method::Update,
+                                marker_headers.clone(),
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(resp) => {
+                                delivered = resp;
+                                if delivered.is_some() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id = %self.id, %e, leg_id = %id,
+                                    "consult_state UPDATE — dynamic leg relay failed");
+                            }
+                        }
+                    }
+                    Some(delivered.ok_or_else(|| {
+                        anyhow!("consult_state UPDATE relay to dynamic legs failed")
+                    })?)
+                }
+            };
+            let response =
+                response.ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
             tx_handle
                 .respond(response.status_code.clone(), None, None)
                 .await
