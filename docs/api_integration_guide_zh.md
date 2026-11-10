@@ -770,3 +770,43 @@ GET /api/call-records/{id}/recording
 完成了真实本地 SIP/PCMU/RTP → PBX → sherpa-onnx/beep 服务 → trace/hangup → 双方 BYE 的端到端测试。英语、印尼语和 1309 Hz beep 均能标记并挂断；核心测试核对连接清理、录音内容、SIPFlow 和唯一终态 CDR。wholesale 回归 113 项通过，另验证了实际通话的数据库 CDR、录音归档、计费及余额扣减。输入为合成语音／音调，不代表运营商实际样本的准确率评估，也未进行压测。
 
 配置保存、热更新和非法输入保护有自动化测试。控制台表单与时间线入口已提供，但本轮浏览器访问受站点权限阻止，**未完成登录后的视觉验证或截图**；不能把 API 验证视为浏览器操作验证。
+
+### 8. 独立质检服务部署
+
+服务源码和发布流水线位于 [miuda.ai/realtime-quality](https://cnb.cool/miuda.ai/realtime-quality)，完整参数见该仓库 README。只支持英语（`en`）、印尼语（`id`）关键词匹配及可配置频率的 beep；可以分别启用，也可以组合。关键词来自配置，未配置关键词时不能启用 ASR。检测结果表示命中配置条件，不代表通用 AI 接听检测。
+
+发布目标为 Linux x86_64 和 macOS arm64。Linux 包以 Debian 12 / glibc 2.36 为基线；模型不随可执行文件打包。下载对应 tar.gz 和 `.sha256`，校验后解压到 `/opt/realtime-quality`。macOS 可以直接前台运行，Linux 推荐随包的 systemd 单元。
+
+```bash
+shasum -a 256 -c realtime-quality-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sudo mkdir -p /opt/realtime-quality /etc/realtime-quality
+sudo tar -xzf realtime-quality-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C /opt/realtime-quality
+sudo cp /opt/realtime-quality/config.example.toml /etc/realtime-quality/config.toml
+```
+
+默认示例只启用 beep，无需模型；修改 `frequencies_hz`、持续时间和能量阈值，并按需要设置 `hangup_on_beep`。ASR 则另外下载模型到项目目录之外：
+
+```bash
+sudo python3 /opt/realtime-quality/scripts/download_models.py --directory /var/lib/realtime-quality/models --language both
+```
+
+下载器仅获取固定版本的 encoder、decoder、joiner、tokens，并校验 SHA-256，不下载音频或样本合集。Python 需要 3.11+。在配置中启用 `[models.en]`、`[models.id]` 并填写绝对路径，设置 `detector.asr_enabled = true`、`asr_languages = ["en", "id"]`，通过 `[[detector.keywords]]` 配置每种语言的短语。`hangup_on_asr` 控制命中后是否请求挂断；关闭时仍可记录质检标记。`num_threads` 按语言配置，同语言连接共享 recognizer，连接状态独立。
+
+```bash
+sudo useradd --system --home-dir /var/lib/realtime-quality --shell /usr/sbin/nologin realtime-quality
+sudo mkdir -p /var/lib/realtime-quality
+sudo chown root:realtime-quality /etc/realtime-quality/config.toml
+sudo chmod 640 /etc/realtime-quality/config.toml
+# 确保 realtime-quality 账户可以读取模型目录及其父目录。
+sudo cp /opt/realtime-quality/deploy/realtime-quality.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now realtime-quality
+curl --fail http://127.0.0.1:8095/health
+journalctl -u realtime-quality -f
+```
+
+以上健康检查端口须与配置的 `listen` 一致。示例默认只监听回环；供其他机器的 PBX 访问时，将 `listen` 改为内网 IP 或 `0.0.0.0:8095`。PBX / wholesale 的 `quality.url` 填服务内网地址的 `/v1/quality`，例如 `ws://10.0.0.12:8095/v1/quality`；独立机器部署时不能填 PBX 自己的 `127.0.0.1`。服务若设置 `token`，PBX `quality.headers` 添加匹配的 `Authorization: Bearer ...`。租户及路由条目的配置覆盖规则见前文。每条连接的 `parameters` 可覆盖服务检测默认值，包括关键词列表（整体替换）。
+
+部署后先检查 `/health`，再发起测试通话，按前文在核心 CDR 的 `metadata.trace` 查 `quality.voicemail_detected`，并检查 End 事件的服务挂断来源；录音、SIPFlow、wholesale 计费仍走原流程。健康检查成功只表示服务启动，不能代替真实通话验证。
+
+版本 tag 触发双平台发布；两个包与校验文件齐全才发布 draft。macOS CI 需要组织自托管 runner（默认标签 `mac`、`arm64`），并非 CNB 托管 Mac。源码与发布包均不包含模型、录音或测试音频；不要把本机配置、凭据和评测输出提交到任一项目。

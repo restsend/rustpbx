@@ -532,3 +532,7 @@ The console exposes **Settings → Proxy settings → Realtime quality inspectio
 A connection carries one leg's decoded mono PCM16LE at the sample rate declared by its initial `start` JSON message. Services send WebSocket Ping every 10 seconds; the PBX defaults to closing inspection after 15 seconds without an incoming message. Closing inspection does not hang up the phone call. Use an explicit `hangup` event to terminate the call.
 
 Voicemail observations use `calltrace` with `kind: "quality"`, `code: "quality.voicemail_detected"`, and `detail.method: "asr"` or `"beep"`. These are stored in `rustpbx_call_records.metadata.trace`. Service-requested termination is attributed in the terminal End trace by `detail.source: "realtime_quality"` and `detail.reason`. Join `wholesale_cdrs` by `call_id` to inspect billing; there is no dedicated voicemail column or automatic tag.
+
+### Standalone quality service deployment
+
+The service is maintained in [miuda.ai/realtime-quality](https://cnb.cool/miuda.ai/realtime-quality). Its README covers native Linux x86_64 / macOS arm64 packages, external checksum-verified English and Indonesian streaming models, configurable keywords and beep frequencies, systemd deployment, and release CI. See [the deployment section in the Chinese guide](api_integration_guide_zh.md#8-独立质检服务部署) for PBX connection setup. Models and audio are excluded from source and release packages. The macOS release job requires an organization Mac runner; Linux uses CNB hosted runners.
