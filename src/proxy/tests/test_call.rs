@@ -1487,6 +1487,65 @@ async fn default_resolve_recording_enable_hint_false_disables_global_policy() {
 }
 
 #[tokio::test]
+async fn recognized_trunk_resolves_inbound_regardless_of_uri_realms() {
+    use crate::proxy::routing::{DestConfig, RouteAction, TrunkDirection};
+
+    let mut proxy_config = ProxyConfig::default();
+    proxy_config.generated_dir =
+        format!("target/test-generated/inbound-trunk-direction-{}", std::process::id());
+    proxy_config.trunks.insert("inbound-trunk".to_string(), TrunkConfig {
+        direction: Some(TrunkDirection::Inbound),
+        ..Default::default()
+    });
+    proxy_config.trunks.insert("outbound-trunk".to_string(), TrunkConfig {
+        dest: "sip:192.0.2.20:5060".to_string(),
+        direction: Some(TrunkDirection::Outbound),
+        ..Default::default()
+    });
+    proxy_config.routes = Some(vec![RouteRule {
+        name: "trunk-to-trunk".to_string(),
+        source_trunks: vec!["inbound-trunk".to_string()],
+        action: RouteAction {
+            dest: Some(DestConfig::Single("outbound-trunk".to_string())),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    let (server, config) = create_test_server_with_config(proxy_config).await;
+    let module = CallModule::new(config, server);
+    let cookie = TransactionCookie::default();
+    cookie.insert_extension(TrunkContext {
+        id: None,
+        name: "inbound-trunk".to_string(),
+        did_numbers: vec![],
+    });
+
+    for (caller_realm, callee_realm) in [
+        ("rustpbx.com", "rustpbx.com"),
+        ("rustpbx.com", "external.example.com"),
+        ("external.example.com", "rustpbx.com"),
+        ("external.example.com", "external.example.com"),
+    ] {
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite, "caller", None, caller_realm, None,
+        );
+        request.uri = format!("sip:callee@{callee_realm}").parse().unwrap();
+        replace_to_header(&mut request, "sip:callee@other.example.com".parse().unwrap());
+        let (mut tx, _endpoint) = crate::proxy::tests::common::create_transaction(request).await;
+        let caller = SipUser::try_from(&tx).unwrap();
+        let plan = module.build_dialplan(&mut tx, cookie.clone(), &caller).await
+            .expect("recognized trunk must retain its source-scoped route");
+
+        assert_eq!(plan.direction, DialDirection::Inbound);
+        assert!(!plan.is_empty());
+        assert_eq!(
+            plan.extensions.get::<crate::call::OutboundTrunkContext>().unwrap().name,
+            "outbound-trunk",
+        );
+    }
+}
+
+#[tokio::test]
 async fn default_route_uses_acl_context_for_source_trunk() {
     let mut proxy_config = ProxyConfig::default();
     proxy_config.generated_dir =

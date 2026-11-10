@@ -686,7 +686,10 @@ impl CallModule {
 
         let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();
 
-        let direction = if caller_is_same_realm && callee_is_same_realm && !is_from_trunk {
+        let direction = if is_from_trunk {
+            // Recognized trunk ingress is inbound regardless of URI realms.
+            DialDirection::Inbound
+        } else if caller_is_same_realm && callee_is_same_realm {
             match self
                 .inner
                 .server
@@ -717,25 +720,17 @@ impl CallModule {
                     DialDirection::Internal
                 }
             }
-        } else if caller_is_same_realm && callee_is_same_realm {
-            DialDirection::Outbound
         } else if caller_is_same_realm && !callee_is_same_realm {
             DialDirection::Outbound
         } else if !caller_is_same_realm && callee_is_same_realm {
             DialDirection::Inbound
         } else {
-            if is_from_trunk {
-                // If the call comes from a trunk, we can allow it to reach an internal destination even if the callee realm doesn't match, as long as the caller realm also doesn't match (to prevent external-to-external calls).
-                // This allows for more flexible routing from trusted trunks.
-                DialDirection::Inbound
-            } else {
-                warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
-                return Err(RouteError::from((
-                    anyhow::anyhow!("Both caller and callee are external realm"),
-                    Some(rsipstack::sip::StatusCode::Forbidden),
-                ))
-                .with_code(&crate::proxy::error_catalog::EXTERNAL_REALM_BOTH));
-            }
+            warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+            return Err(RouteError::from((
+                anyhow::anyhow!("Both caller and callee are external realm"),
+                Some(rsipstack::sip::StatusCode::Forbidden),
+            ))
+            .with_code(&crate::proxy::error_catalog::EXTERNAL_REALM_BOTH));
         };
 
         let mut locs = vec![Location {
