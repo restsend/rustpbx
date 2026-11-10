@@ -755,10 +755,8 @@ pub struct Config {
     #[serde(default)]
     pub graceful_shutdown: Option<GracefulShutdownConfig>,
     /// Rolling process handover (container rolling release) — see
-    /// [`RollingConfig`]. **Enabled by default**: a config without a
-    /// `[rolling]` section behaves as `enabled = true`; a lone instance
-    /// self-detects and SIGTERM degrades to the plain drain. Opt out with
-    /// `[rolling] enabled = false`.
+    /// [`RollingConfig`]. Disabled by default, including when the
+    /// `[rolling]` section is absent. Opt in with `[rolling] enabled = true`.
     #[serde(default = "default_rolling_config")]
     pub rolling: Option<RollingConfig>,
     /// Maximum size (in bytes) for audio files downloaded over HTTP from the
@@ -2438,16 +2436,12 @@ pub struct RollingConfig {
     pub hello_interval_secs: u64,
 }
 
-/// Rolling handover is ENABLED by default: a lone instance self-detects (its
-/// own hello comes back with its own pid) and SIGTERM degrades to the plain
-/// drain — identical behavior to a non-rolling deployment. A rolling pair
-/// (successor started first, then `docker stop` on the predecessor) gets
-/// the zero-restart handover. Opt out with `[rolling] enabled = false`.
+/// Rolling handover is disabled by default. Opt in with `[rolling] enabled = true`.
 fn default_rolling_enabled() -> bool {
-    true
+    false
 }
 
-/// Absent `[rolling]` section = enabled (see [`default_rolling_enabled`]).
+/// Absent `[rolling]` section uses the disabled default.
 fn default_rolling_config() -> Option<RollingConfig> {
     Some(RollingConfig::default())
 }

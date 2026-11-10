@@ -645,7 +645,7 @@ async fn ami_forward_hangup_reaches_predecessor() -> Result<()> {
 // ── TLS smoke: with certs configured, the rolling manual HTTPS accept
 // loop (tokio-rustls path) must terminate TLS and serve the rolling
 // endpoints — this is the WSS-bearing path every HTTPS deployment takes
-// now that rolling is enabled by default. ────────────────────────────────
+// when rolling is explicitly enabled. ──────────────────────────────────
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn https_manual_accept_loop_serves_rolling_endpoints() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
