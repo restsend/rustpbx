@@ -7081,7 +7081,22 @@ async fn media_stalled_fires_when_connected_leg_receives_nothing() {
     let dialplan =
         build_dialplan_with_mode(MediaProxyMode::Auto).with_application("ivr".to_string(), None, true);
     let (mut session, _handle, mut cmd_rx) = build_session_with_cmd_rx(dialplan).await;
-    let mut mb = playable_bridge("media-stalled-test").await;
+    // Negotiate each leg with a separate, stopped endpoint. Connecting the
+    // bridge legs to each other can circulate startup RTP indefinitely, so
+    // that fixture does not represent a peer that sends no inbound RTP.
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::{LegSide, MediaBridge};
+    let mut mb = MediaBridge::new("media-stalled-test");
+    for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
+        let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
+        let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None)
+            .unwrap();
+        let offer = local.create_offer().await.unwrap();
+        let answer = remote.answer(&offer).await.unwrap();
+        local.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        remote.stop();
+        mb.replace_leg(side, local).await;
+    }
     mb.accept(crate::media::media_bridge::LegSide::A).await;
     mb.accept(crate::media::media_bridge::LegSide::B).await;
     assert!(mb.is_bridged(), "route active before arming the monitor");
@@ -7144,6 +7159,7 @@ async fn media_stalled_fires_when_connected_leg_receives_nothing() {
     assert_eq!(legs.len(), 2);
     for leg in legs {
         assert!(matches!(leg["leg_id"].as_str(), Some("caller" | "callee")));
+        assert_eq!(leg["transport_rx_packets"], 0, "silent peers must send no RTP");
         assert_eq!(leg["egress_mode"], "direct_rtp_forwarding");
         assert!(leg.get("volume_egress").is_none(), "disabled or direct media has no PCM volume");
     }

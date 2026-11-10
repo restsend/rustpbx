@@ -9354,6 +9354,12 @@ async fn consult_media_preserves_peers_body() {
     use crate::proxy::tests::common::create_test_request;
     use crate::proxy::tests::common::create_test_server_with_config;
 
+    // Silent endpoints must emit digital silence: comfort noise exceeds the
+    // audibility threshold used to verify mixer self-exclusion below.
+    let endpoint_config = LegConfig {
+        comfort_noise: false,
+        ..LegConfig::rtp_pcmu()
+    };
     for scenario in [
         "reject",
         "timeout",
@@ -9405,7 +9411,7 @@ async fn consult_media_preserves_peers_body() {
         for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
             let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
             let remote =
-                LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+                LegInner::new(format!("remote-{name}"), &endpoint_config, None).unwrap();
             let offer = local.create_offer().await.unwrap();
             if side == LegSide::A {
                 session.media.answer = Some(offer.clone());
@@ -9448,7 +9454,7 @@ async fn consult_media_preserves_peers_body() {
             .await
             .unwrap();
         session.legs.set_media_leg(&consult, peer.clone());
-        let remote = LegInner::new("remote-consult", &LegConfig::rtp_pcmu(), None).unwrap();
+        let remote = LegInner::new("remote-consult", &endpoint_config, None).unwrap();
         let answer = remote
             .answer(&offer)
             .await
