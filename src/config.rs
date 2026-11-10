@@ -2537,7 +2537,7 @@ fn default_outbound_webhook_timeout() -> u64 {
 /// without ever carrying the credential: the `api_key` lives here (or in
 /// the `OPENAI_API_KEY` / `REALTIME_API_KEY` env fallback) and travels only
 /// in the WebSocket upgrade headers, never in URLs, logs or CDRs.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RealtimePreset {
     /// Preset name referenced by app params (`{"preset": "support-bot"}`).
     pub name: String,

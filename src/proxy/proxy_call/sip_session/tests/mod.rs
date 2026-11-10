@@ -15338,3 +15338,60 @@ async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
         serving.abort();
     }
 }
+
+#[tokio::test]
+async fn realtime_preset_survives_session_configuration_and_reload() {
+    use crate::call::runtime::AppFactory;
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+    let config: crate::config::Config = toml::from_str(r#"
+[proxy]
+addr = "0.0.0.0"
+[[realtime]]
+name = "inworld"
+url = "wss://example.com/realtime"
+protocol = "openai"
+api_key = "test-preset-key"
+model = "test-model"
+"#).unwrap();
+    let (server, _) = create_test_server().await;
+    server.realtime_presets.store(Arc::new(config.realtime.clone()));
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let (tx, _caller_endpoint) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+    let context = CallContext {
+        session_id: "realtime-preset".into(),
+        dialplan: Arc::new(Dialplan::new("realtime-preset".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (session, _handle, _commands) = SipSession::new(
+        server.clone(), CancellationToken::new(), None, context, dialog, false,
+    );
+    let app_ctx = session.app_runtime.app_context().unwrap();
+    assert_eq!(app_ctx.config.realtime, config.realtime);
+    let factory = BuiltinAppFactory::new(None, None);
+    assert!(factory.create_app("realtime", Some(serde_json::json!({"preset": "inworld"})), app_ctx).await.unwrap().is_some());
+    assert!(factory.create_app("realtime", Some(serde_json::json!({"preset": "missing"})), app_ctx).await.is_err());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut updated = config.clone();
+    updated.realtime.as_mut().unwrap()[0].model = Some("updated-model".into());
+    std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+    let result = server.reload_proxy_config(path.to_str().unwrap()).await.unwrap();
+    assert!(result.contains("realtime"));
+    assert_eq!(server.realtime_presets.load().as_ref(), &updated.realtime);
+    // Existing calls retain their snapshot; subsequent calls use the reloaded presets.
+    assert_eq!(app_ctx.config.realtime, config.realtime);
+    updated.realtime = None;
+    std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+    server.reload_proxy_config(path.to_str().unwrap()).await.unwrap();
+    assert!(server.realtime_presets.load().is_none());
+}

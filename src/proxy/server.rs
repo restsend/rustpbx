@@ -105,6 +105,8 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub locator_event_lock: LocatorEventLock,
+    /// Top-level realtime presets, snapshotted when each call session is created.
+    pub realtime_presets: ArcSwap<Option<Vec<crate::config::RealtimePreset>>>,
     pub sipflow_config: Arc<arc_swap::ArcSwap<Option<SipFlowConfig>>>,
     pub recording_policy: Arc<arc_swap::ArcSwap<Option<RecordingPolicy>>>,
     pub sip_flow: Option<SipFlow>,
@@ -214,6 +216,7 @@ pub struct SipServerBuilder {
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
+    realtime_presets: Option<Vec<crate::config::RealtimePreset>>,
     sipflow_config: Option<SipFlowConfig>,
     /// Shared sipflow config slot (takes precedence over `sipflow_config`);
     /// lets the app share one live config handle between the server, the
@@ -280,6 +283,7 @@ impl SipServerBuilder {
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
             storage: None,
+            realtime_presets: None,
             sipflow_config: None,
             sipflow_config_slot: None,
             recording_policy_slot: None,
@@ -316,6 +320,11 @@ impl SipServerBuilder {
 
     pub fn with_cluster_config(mut self, config: Option<ClusterConfig>) -> Self {
         self.cluster_config = config;
+        self
+    }
+
+    pub fn with_realtime_presets(mut self, presets: Option<Vec<crate::config::RealtimePreset>>) -> Self {
+        self.realtime_presets = presets;
         self
     }
 
@@ -1332,6 +1341,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             locator_event_lock,
+            realtime_presets: ArcSwap::from_pointee(self.realtime_presets),
             sipflow_config: self.sipflow_config_slot.unwrap_or_else(|| {
                 Arc::new(ArcSwap::new(Arc::new(self.sipflow_config.clone())))
             }),
@@ -2144,6 +2154,10 @@ impl SipServerInner {
         }
 
         let mut parts: Vec<String> = Vec::new();
+        if self.realtime_presets.load().as_ref() != &config.realtime {
+            self.realtime_presets.store(Arc::new(config.realtime.clone()));
+            parts.push("realtime".to_string());
+        }
         let old = &old_proxy;
         if old.rtp_timeout != new_proxy.rtp_timeout {
             parts.push("rtp_timeout".to_string());

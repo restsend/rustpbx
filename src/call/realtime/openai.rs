@@ -2,17 +2,17 @@
 //!
 //! Wire format (wss, JSON text events; audio rides as base64 PCM16):
 //! - Uplink audio: `{"type":"input_audio_buffer.append","audio":"<b64>"}` —
-//!   mono PCM16 at 24 kHz (16 kHz also accepted; we upsample the leg).
-//! - Downlink audio: `{"type":"response.audio.delta","delta":"<b64>"}`.
+//!   mono PCM16 at 24 kHz (the bridge resamples the call audio).
+//! - Downlink audio: `{"type":"response.output_audio.delta","delta":"<b64>"}`.
 //! - Barge-in: server VAD emits `input_audio_buffer.speech_started` /
 //!   `speech_stopped`; we mute playout and send `response.cancel`.
-//! - Transcripts: `response.audio_transcript.delta` (AI speech) and
+//! - Transcripts: `response.output_audio_transcript.delta` (AI speech) and
 //!   `conversation.item.input_audio_transcription.completed` (caller speech).
 //! - Tools: `response.output_item.done` with `item.type == "function_call"`
 //!   is surfaced as a passthrough [`DownlinkEvent::FunctionCall`].
 //!
 //! Authentication travels in the upgrade request headers
-//! (`Authorization: Bearer <key>` + `OpenAI-Beta: realtime=v1`) — never in
+//! (`Authorization: Bearer <key>`) — never in
 //! the URL, which ends up in logs and CDRs.
 
 use super::{
@@ -47,11 +47,10 @@ impl RealtimeProtocol for OpenAiRealtime {
     }
 
     fn upgrade_headers(&self, params: &RealtimeParams) -> Vec<(String, String)> {
-        let mut headers = Vec::with_capacity(params.extra_headers.len() + 2);
+        let mut headers = Vec::with_capacity(params.extra_headers.len() + 1);
         if let Some(key) = params.api_key.as_deref().filter(|k| !k.is_empty()) {
             headers.push(("Authorization".to_string(), format!("Bearer {key}")));
         }
-        headers.push(("OpenAI-Beta".to_string(), "realtime=v1".to_string()));
         headers.extend(params.extra_headers.iter().cloned());
         headers
     }
@@ -60,21 +59,34 @@ impl RealtimeProtocol for OpenAiRealtime {
         let mut session = serde_json::json!({
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": {
-                    "type": "server_vad",
+                "type": "realtime",
+                "output_modalities": ["audio"],
+                "audio": {
+                    "input": {
+                        "format": { "type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE },
+                        "turn_detection": { "type": "server_vad" },
+                    },
+                    "output": {
+                        "format": { "type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE },
+                    },
                 },
             },
         });
         if let Some(voice) = params.voice.as_deref().filter(|v| !v.is_empty()) {
-            session["session"]["voice"] = serde_json::json!(voice);
+            session["session"]["audio"]["output"]["voice"] = serde_json::json!(voice);
         }
         if let Some(instructions) = params.instructions.as_deref().filter(|i| !i.is_empty()) {
             session["session"]["instructions"] = serde_json::json!(instructions);
         }
-        vec![UplinkMessage::Text(session.to_string())]
+        // Start the conversation using the configured session instructions.
+        let response = serde_json::json!({
+            "type": "response.create",
+            "response": { "output_modalities": ["audio"] },
+        });
+        vec![
+            UplinkMessage::Text(session.to_string()),
+            UplinkMessage::Text(response.to_string()),
+        ]
     }
 
     fn encode_uplink(&self, pcm: &[i16]) -> Vec<UplinkMessage> {
@@ -117,7 +129,7 @@ impl RealtimeProtocol for OpenAiRealtime {
         };
         let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match event_type {
-            "response.audio.delta" => {
+            "response.output_audio.delta" | "response.audio.delta" => {
                 let Some(delta) = value.get("delta").and_then(|v| v.as_str()) else {
                     return Vec::new();
                 };
@@ -131,7 +143,7 @@ impl RealtimeProtocol for OpenAiRealtime {
             }
             "input_audio_buffer.speech_started" => vec![DownlinkEvent::SpeechStarted],
             "input_audio_buffer.speech_stopped" => vec![DownlinkEvent::SpeechStopped],
-            "response.audio_transcript.delta" => string_event(&value, "delta", |text| {
+            "response.output_audio_transcript.delta" | "response.audio_transcript.delta" => string_event(&value, "delta", |text| {
                 DownlinkEvent::TranscriptDelta { text }
             }),
             "conversation.item.input_audio_transcription.completed" => {
@@ -211,7 +223,7 @@ mod tests {
             url: "wss://api.openai.com/v1/realtime".into(),
             protocol: RealtimeProtocolKind::OpenAi,
             api_key: Some("sk-test".into()),
-            model: Some("gpt-4o-realtime-preview".into()),
+            model: Some("gpt-realtime-2.1".into()),
             voice: Some("alloy".into()),
             instructions: Some("Be brief".into()),
             sample_rate: None,
@@ -226,7 +238,7 @@ mod tests {
         let p = OpenAiRealtime;
         assert_eq!(
             p.connect_url(&params()),
-            "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1"
         );
         let mut no_model = params();
         no_model.model = None;
@@ -244,8 +256,8 @@ mod tests {
         assert!(!url.contains("sk-test"), "key must not leak into the url");
         let headers = p.upgrade_headers(&params());
         assert!(headers.contains(&("Authorization".to_string(), "Bearer sk-test".to_string())));
-        assert!(headers.contains(&("OpenAI-Beta".to_string(), "realtime=v1".to_string())));
-        // No key configured → no Authorization header, beta header still set.
+        assert!(!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("OpenAI-Beta")));
+        // No key configured → no Authorization header.
         let mut anonymous = params();
         anonymous.api_key = None;
         let headers = p.upgrade_headers(&anonymous);
@@ -256,16 +268,42 @@ mod tests {
     fn session_update_carries_voice_and_instructions() {
         let p = OpenAiRealtime;
         let msgs = p.session_open_messages(&params());
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 2, "automatic opening response");
         let UplinkMessage::Text(text) = &msgs[0] else {
             panic!("expected text");
         };
         let v: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(v["type"], "session.update");
-        assert_eq!(v["session"]["voice"], "alloy");
+        assert_eq!(v["session"]["audio"]["output"]["voice"], "alloy");
         assert_eq!(v["session"]["instructions"], "Be brief");
-        assert_eq!(v["session"]["input_audio_format"], "pcm16");
-        assert_eq!(v["session"]["turn_detection"]["type"], "server_vad");
+        assert_eq!(v["session"]["type"], "realtime");
+        assert_eq!(v["session"]["output_modalities"], serde_json::json!(["audio"]));
+        for side in ["input", "output"] {
+            assert_eq!(v["session"]["audio"][side]["format"],
+                serde_json::json!({"type": "audio/pcm", "rate": 24000}));
+        }
+        assert_eq!(v["session"]["audio"]["input"]["turn_detection"]["type"], "server_vad");
+        for legacy in ["modalities", "input_audio_format", "output_audio_format", "voice", "turn_detection"] {
+            assert!(v["session"].get(legacy).is_none(), "legacy field {legacy}");
+        }
+    }
+
+    #[test]
+    fn opening_response_inherits_session_instructions() {
+        let protocol = OpenAiRealtime;
+        let mut params = params();
+        assert_eq!(protocol.session_open_messages(&params).len(), 2);
+        params.instructions = Some("默认使用普通话。接通后先说：您好，请问有什么可以帮您？".into());
+        let messages = protocol.session_open_messages(&params);
+        assert_eq!(messages.len(), 2);
+        let UplinkMessage::Text(text) = &messages[0] else { panic!("expected JSON") };
+        let session: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(session["session"]["instructions"], params.instructions.unwrap());
+        let UplinkMessage::Text(text) = &messages[1] else { panic!("expected JSON") };
+        let response: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(response, serde_json::json!({
+            "type": "response.create", "response": {"output_modalities": ["audio"]}
+        }));
     }
 
     #[test]
@@ -293,7 +331,7 @@ mod tests {
         // Audio delta — base64 PCM16 → AudioDelta at 24k.
         let b64 = base64::engine::general_purpose::STANDARD.encode(pcm_to_bytes(&[100, -100]));
         let events = p.decode_text(&format!(
-            r#"{{"type":"response.audio.delta","delta":"{b64}"}}"#
+            r#"{{"type":"response.output_audio.delta","delta":"{b64}"}}"#
         ));
         assert_eq!(
             events,
@@ -315,14 +353,14 @@ mod tests {
 
         // AI transcript delta.
         assert_eq!(
-            p.decode_text(r#"{"type":"response.audio_transcript.delta","delta":"Hello"}"#),
+            p.decode_text(r#"{"type":"response.output_audio_transcript.delta","delta":"Hello"}"#),
             vec![DownlinkEvent::TranscriptDelta {
                 text: "Hello".into()
             }]
         );
         // Empty deltas are dropped.
         assert!(
-            p.decode_text(r#"{"type":"response.audio_transcript.delta","delta":""}"#)
+            p.decode_text(r#"{"type":"response.output_audio_transcript.delta","delta":""}"#)
                 .is_empty()
         );
 

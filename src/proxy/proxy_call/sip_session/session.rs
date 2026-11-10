@@ -1269,6 +1269,7 @@ impl SipSession {
             call_info,
             Arc::new(crate::config::Config {
                 proxy: (*server.proxy_config.load_full()).clone(),
+                realtime: server.realtime_presets.load().as_ref().clone(),
                 ..Default::default()
             }),
             server.http_client.clone(),

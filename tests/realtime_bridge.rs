@@ -1,6 +1,7 @@
 //! Realtime bridge integration tests — drive [`run_realtime_bridge`] against
 //! an in-process scripted "OpenAI Realtime" mock server over a real
-//! localhost TCP WebSocket. No SIP, no network, no API key required.
+//! localhost TCP WebSocket. Default tests need no SIP, external network, or API key.
+//! The ignored live test uses REALTIME_TEST_CONFIG and incurs a short audio response.
 //!
 //! Covered: Bearer-header auth on the upgrade request, `?model=` URL
 //! composition, `session.update` handshake, uplink base64 audio, downlink
@@ -77,6 +78,8 @@ struct MockServer {
     auth: mpsc::Receiver<Option<String>>,
     /// `session.update` received after connect, if any.
     session_update: mpsc::Receiver<String>,
+    /// Opening response requested without any caller audio.
+    greeting: mpsc::Receiver<String>,
     /// base64 audio chunks received from the client (uplink).
     _uplink: mpsc::Receiver<String>,
     /// `response.cancel` seen?
@@ -91,6 +94,7 @@ async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
     let (path_tx, path_rx) = mpsc::channel(1);
     let (auth_tx, auth_rx) = mpsc::channel(1);
     let (session_tx, session_rx) = mpsc::channel(4);
+    let (greeting_tx, greeting_rx) = mpsc::channel(4);
     let (uplink_tx, uplink_rx) = mpsc::channel(64);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
 
@@ -134,6 +138,9 @@ async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
                                     Some("session.update") => {
                                         let _ = session_tx.try_send(t.to_string());
                                     }
+                                    Some("response.create") => {
+                                        let _ = greeting_tx.try_send(t.to_string());
+                                    }
                                     Some("input_audio_buffer.append") => {
                                         let _ = uplink_tx.try_send(
                                             v["audio"].as_str().unwrap_or_default().to_string(),
@@ -168,6 +175,7 @@ async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
             path: path_rx,
             auth: auth_rx,
             session_update: session_rx,
+            greeting: greeting_rx,
             _uplink: uplink_rx,
             cancelled: cancel_rx,
         },
@@ -255,7 +263,14 @@ async fn auth_url_and_handshake_then_disconnect() {
     .expect("session.update")
     .expect("non-empty");
     let v: serde_json::Value = serde_json::from_str(&update).unwrap();
-    assert_eq!(v["session"]["voice"], "alloy");
+    assert_eq!(v["session"]["audio"]["output"]["voice"], "alloy");
+
+    let greeting = tokio::time::timeout(std::time::Duration::from_secs(2), mock.greeting.recv())
+        .await.expect("automatic greeting").expect("greeting request");
+    let greeting: serde_json::Value = serde_json::from_str(&greeting).unwrap();
+    assert_eq!(greeting["type"], "response.create");
+    assert!(greeting["response"].get("instructions").is_none(), "inherit session instructions");
+    assert!(mock.greeting.try_recv().is_err(), "only one opening greeting");
 
     // Endpoint close surfaces as WsClosed (+ a disconnected event).
     let run = tokio::time::timeout(std::time::Duration::from_secs(3), run_rx)
@@ -272,10 +287,10 @@ async fn downlink_audio_transcript_and_function_call_reach_outputs() {
     let (mock, run_rx, mut out_rx, mut written, _mutes) = start_bridge(
         vec![
             MockStep::Send(
-                serde_json::json!({"type":"response.audio.delta","delta":audio_b64}).to_string(),
+                serde_json::json!({"type":"response.output_audio.delta","delta":audio_b64}).to_string(),
             ),
             MockStep::Send(
-                r#"{"type":"response.audio_transcript.delta","delta":"Hello"}"#.into(),
+                r#"{"type":"response.output_audio_transcript.delta","delta":"Hello"}"#.into(),
             ),
             MockStep::Send(
                 r#"{"type":"conversation.item.input_audio_transcription.completed","transcript":"hi"}"#
@@ -339,13 +354,13 @@ async fn barge_in_mutes_and_cancels_then_suppresses_playout() {
         vec![
             // First utterance: audio flows to playout.
             MockStep::Send(
-                serde_json::json!({"type":"response.audio.delta","delta":loud}).to_string(),
+                serde_json::json!({"type":"response.output_audio.delta","delta":loud}).to_string(),
             ),
             // Caller speaks → barge-in.
             MockStep::Send(r#"{"type":"input_audio_buffer.speech_started"}"#.into()),
             // AI keeps streaming (server didn't halt instantly) — must NOT play.
             MockStep::Send(
-                serde_json::json!({"type":"response.audio.delta","delta":after}).to_string(),
+                serde_json::json!({"type":"response.output_audio.delta","delta":after}).to_string(),
             ),
             MockStep::Send(r#"{"type":"input_audio_buffer.speech_stopped"}"#.into()),
             MockStep::Close,
@@ -407,4 +422,72 @@ async fn cancel_token_stops_the_bridge() {
         .expect("bridge run finishes after cancel")
         .expect("run channel");
     assert_eq!(run.reason, BridgeEndReason::Cancelled);
+}
+
+/// Explicit opt-in: exercises the production adapter against OpenAI, generating
+/// one short audio response. Never prints the config, key, or request headers.
+#[tokio::test]
+#[ignore = "requires REALTIME_TEST_CONFIG and paid/credited OpenAI Realtime access"]
+async fn live_openai_ga_audio_smoke() {
+    use rustpbx::call::realtime::{DownlinkEvent, RealtimeProtocol, UplinkMessage};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let path = std::env::var("REALTIME_TEST_CONFIG").expect("set REALTIME_TEST_CONFIG");
+    let raw = std::fs::read_to_string(path).expect("read test config");
+    let config: rustpbx::config::Config = toml::from_str(&raw)
+        .unwrap_or_else(|_| panic!("invalid test configuration (contents withheld)"));
+    let params = RealtimeParams::resolve(
+        &serde_json::json!({"preset": "openai-test"}), config.realtime.as_deref(),
+    ).expect("resolve openai-test preset");
+    assert_eq!(params.url, "wss://api.openai.com/v1/realtime");
+    let protocol = OpenAiRealtime;
+    let mut request = protocol.connect_url(&params).into_client_request().unwrap();
+    for (name, value) in protocol.upgrade_headers(&params) {
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap_or_else(|_| panic!("invalid header value")),
+        );
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await
+            .unwrap_or_else(|_| panic!("OpenAI WebSocket connection failed (details withheld)"));
+        for message in protocol.session_open_messages(&params) {
+            let UplinkMessage::Text(text) = message else { panic!("expected JSON session update") };
+            ws.send(Message::text(text)).await.expect("send session update");
+        }
+        let mut configured = false;
+        let mut samples = 0usize;
+        let mut transcript = String::new();
+        while let Some(message) = ws.next().await {
+            let Message::Text(text) = message.expect("receive WebSocket event") else { continue };
+            let event: serde_json::Value = serde_json::from_str(&text).expect("JSON event");
+            assert_ne!(event["type"], "error", "OpenAI rejected the session/request; code={}", event["error"]["code"]);
+            if event["type"] == "session.updated" && !configured {
+                configured = true;
+                assert_eq!(event["session"]["audio"]["output"]["format"]["rate"], 24000);
+                // No caller audio or test-only response.create: production
+                // session_open_messages must trigger the greeting on its own.
+            }
+            for decoded in protocol.decode_text(&text) {
+                match decoded {
+                    DownlinkEvent::AudioDelta { pcm, sample_rate } => {
+                        assert_eq!(sample_rate, 24000);
+                        samples += pcm.len();
+                    }
+                    DownlinkEvent::TranscriptDelta { text } => transcript.push_str(&text),
+                    _ => {}
+                }
+            }
+            if event["type"] == "response.done" {
+                assert_eq!(event["response"]["status"], "completed", "response failed; reason={}, code={}", event["response"]["status_details"]["reason"], event["response"]["status_details"]["error"]["code"]);
+                assert!(configured);
+                assert!(samples > 0, "adapter must decode live PCM audio");
+                assert!(!transcript.is_empty(), "adapter must decode live transcript deltas");
+                eprintln!("OpenAI GA: session update accepted; decoded {samples} PCM samples at 24 kHz; automatic greeting received; response completed.");
+                ws.close(None).await.ok();
+                return;
+            }
+        }
+        panic!("OpenAI closed before response completion");
+    }).await.expect("live audio check timed out");
 }
