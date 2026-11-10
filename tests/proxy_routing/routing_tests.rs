@@ -2652,7 +2652,7 @@ async fn test_trunk_transport_preserved_in_destination() {
 }
 
 #[test]
-fn test_apply_trunk_config_adds_p_asserted_identity() {
+fn test_apply_trunk_config_does_not_add_p_asserted_identity() {
     use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
@@ -2672,22 +2672,18 @@ fn test_apply_trunk_config_adds_p_asserted_identity() {
 
     apply_trunk_config(&mut option, &trunk).unwrap();
 
-    // Verify P-Asserted-Identity header is added when username is present
-    assert!(option.headers.is_some());
-    let headers = option.headers.unwrap();
-
-    let has_pai = headers.iter().any(|h| {
-        if let rsipstack::sip::Header::Other(name, value) = h {
-            name.to_lowercase() == "p-asserted-identity" && value.contains("sip:alice@rustpbx.com")
-        } else {
-            false
-        }
-    });
-
+    // Trunk credentials must not implicitly assert the caller's identity.
     assert!(
-        has_pai,
-        "P-Asserted-Identity header should be added when trunk has username"
+        !option.headers.iter().flatten().any(|header| header
+            .to_string()
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("P-Asserted-Identity"))),
+        "Trunk authentication must not add P-Asserted-Identity"
     );
+    let credential = option.credential.as_ref().expect("trunk credentials");
+    assert_eq!(credential.username, "auth_user");
+    assert_eq!(credential.password, "auth_pass");
+    assert_eq!(option.caller.host().to_string(), "carrier.com");
 }
 
 // ============================================================================

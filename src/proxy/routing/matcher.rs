@@ -1510,9 +1510,6 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         addr: next_hop.host_with_port,
     });
 
-    // Save original caller before potential rewrite for P-Asserted-Identity header
-    let original_caller = option.caller.clone();
-
     if trunk.rewrite_hostport {
         option.callee.host_with_port = dest_uri.host_with_port.clone();
         option.caller.host_with_port = dest_uri.host_with_port.clone();
@@ -1526,22 +1523,6 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
             password: password.clone(),
             realm: dest_uri.host().to_string().into(),
         });
-    }
-
-    // Add trunk related headers
-    if option.headers.is_none() {
-        option.headers = Some(Vec::new());
-    }
-
-    let headers = option.headers.as_mut().unwrap();
-
-    // Add P-Asserted-Identity header (using original caller, not rewritten)
-    if trunk.username.is_some() {
-        let pai_header = rsipstack::sip::Header::Other(
-            "P-Asserted-Identity".to_string(),
-            format!("<{}>", original_caller),
-        );
-        headers.push(pai_header);
     }
 
     Ok(())
