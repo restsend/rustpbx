@@ -369,10 +369,12 @@ object, `413` when the payload exceeds 16 KiB.
 object (empty object when nothing was set).
 
 ### 2.1.1 Live Call Transcription (SSE)
-Stream real-time transcription text for an active call. Transcription starts
-lazily on first subscriber and stops when the last one disconnects or the call
-ends. Requires `[proxy.transcript.remote]` (streaming ASR, Deepgram-compatible)
-in config; returns `503` when unconfigured.
+Subscribe to text emitted by an external quality service for an active call.
+Effective `[proxy.quality] enabled = true` (or a wholesale route/tenant policy)
+starts inspection automatically after answer. SSE subscriptions never start or
+stop inspection. `text`, `calltrace`, and `hangup` service responses are forwarded,
+recorded, and executed respectively; there are no separate ASR or action switches.
+The SSE endpoint returns `503` if the event gateway is unavailable.
 
 **Endpoint**: `GET /cc/calls/{call_id}/transcript` (SSE, text-only events:
 `started` / `segment` / `error` / `ended`)

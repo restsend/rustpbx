@@ -128,6 +128,7 @@ struct AssignRolesPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ProxySettingsPayload {
+    pub quality: Option<crate::call::quality::QualityConfig>,
     pub realms: Option<Vec<String>>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
@@ -576,6 +577,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "sip_contact_always_bind": config.sip_contact_always_bind,
             },
             "user_backends": config.proxy.user_backends.clone(),
+            "quality": config.proxy.quality.clone().unwrap_or_default(),
             "locator_webhook": config.proxy.locator_webhook.clone(),
             "rwi_webhook": config.rwi_webhook.clone(),
             "http_router": config.proxy.http_router.clone(),
@@ -2365,6 +2367,29 @@ pub(crate) async fn update_proxy_settings(
     let mut rwi_webhook_value = None;
     let mut remove_rwi_webhook = false;
     let table = ensure_table_mut(&mut doc, "proxy");
+
+    if let Some(quality) = payload.quality {
+        if quality.receive_timeout_secs == 0 {
+            return json_error(StatusCode::BAD_REQUEST, "Quality receive timeout must be positive");
+        }
+        if quality.enabled || !quality.url.is_empty() {
+            match url::Url::parse(&quality.url) {
+                Ok(url) if matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some() => {},
+                _ => return json_error(StatusCode::BAD_REQUEST, "Quality URL must be a ws:// or wss:// endpoint"),
+            }
+        }
+        for (name, value) in &quality.headers {
+            if axum::http::HeaderName::try_from(name.as_str()).is_err()
+                || axum::http::HeaderValue::try_from(value.as_str()).is_err() {
+                return json_error(StatusCode::BAD_REQUEST, "Invalid quality request header");
+            }
+        }
+        match serialize_to_item(&quality, "quality") {
+            Ok(item) => table["quality"] = item,
+            Err(resp) => return resp,
+        }
+        modified = true;
+    }
 
     if let Some(realms) = payload.realms {
         set_string_array(table, "realms", realms);
@@ -4801,6 +4826,36 @@ mod tests {
         std::os::unix::fs::symlink(&path, dir.path().join("runtime.log.2026-10-04.1")).unwrap();
         let response = router.oneshot(request(search_url(""))).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "a discovered symlink must never be followed");
+    }
+
+    #[tokio::test]
+    async fn quality_settings_persist_reload_and_reject_invalid_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let config = crate::config::Config { database_url: "sqlite::memory:".into(), ..Default::default() };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let app = crate::app::AppStateBuilder::new().with_config(config)
+            .with_config_metadata(Some(path.to_string_lossy().into_owned()), chrono::Utc::now())
+            .with_skip_sip_bind().build().await.unwrap();
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let quality = json!({"enabled":true, "url":"ws://127.0.0.1:8095/v1/quality",
+            "sides":"callee", "receive_timeout_secs":15, "headers":[["Authorization","Bearer example"]],
+            "parameters":{"beep_enabled":true,"asr_languages":["en","id"]}});
+        let response = update_proxy_settings(State(state.clone()), AuthRequired(superuser()),
+            Json(serde_json::from_value(json!({"quality":quality})).unwrap())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = crate::config::Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(saved.proxy.quality.unwrap()).unwrap(), quality);
+        assert_eq!(serde_json::to_value(app.sip_server().inner.proxy_config.load().quality.clone().unwrap()).unwrap(), quality);
+        for invalid in [json!({"enabled":true,"url":"https://invalid"}),
+            json!({"receive_timeout_secs":0}), json!({"headers":[["Bad Header","x"]]})] {
+            let response = update_proxy_settings(State(state.clone()), AuthRequired(superuser()),
+                Json(serde_json::from_value(json!({"quality":invalid})).unwrap())).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let saved = crate::config::Config::load(path.to_str().unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(saved.proxy.quality.unwrap()).unwrap(), quality);
+        }
     }
 
     #[tokio::test]

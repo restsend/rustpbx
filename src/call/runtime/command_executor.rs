@@ -129,14 +129,14 @@ pub fn check_media_capability(
                 }
             }
         }
-        CallCommand::StartTranscription { .. } => {
-            // Like supervision, transcription taps decoded leg media —
+        CallCommand::StartQualityCheck => {
+            // Like supervision, quality inspection taps decoded leg media —
             // impossible in bypass mode (no MediaBridge).
             if media_profile.can_supervise() {
                 MediaCapabilityCheck::Allowed
             } else {
                 MediaCapabilityCheck::Denied {
-                    reason: "transcription not supported in bypass mode".to_string(),
+                    reason: "quality inspection not supported in bypass mode".to_string(),
                 }
             }
         }

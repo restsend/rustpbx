@@ -7,7 +7,7 @@ use super::util::{
     normalize_call_hangup_by, parse_dial_target, parse_dtmf_digit,
     parse_sipfrag_status, route_outbound_leg, sip_status_to_hangup_reason,
 };
-use super::{live_transcription, transfer};
+use super::{live_quality, transfer};
 use crate::call::app::queue::QueueSignal;
 use crate::call::{DialDirection, OutboundTrunkContext, TrunkContext};
 use rsipstack::sip::{HeadersExt, ToTypedHeader};
@@ -304,8 +304,8 @@ pub struct SipSession {
     /// duration + interruption. `record_play_end` is idempotent via `remove`.
     pub(crate) active_plays: std::collections::HashMap<String, crate::proxy::proxy_call::state::ActivePlay>,
 
-    /// Live transcription state; `None` while nobody subscribes.
-    pub(crate) live_transcription: Option<live_transcription::LiveTranscription>,
+    /// Inspection state, owned by call policy or explicit administrative commands.
+    pub(crate) live_quality: Option<live_quality::LiveQuality>,
 
     /// Mid-call / auto recording state: the active recording (if any) plus
     /// completed segment history feeding CDR / `recording_segments` metadata.
@@ -841,44 +841,21 @@ impl SipSession {
         (handle, cmd_rx)
     }
 
-    /// Auto-start live transcription when `[proxy.transcript.remote]
-    /// auto_start = true` **or** the dialplan carries a per-call
-    /// [`TranscriptionPlan`]. Best-effort: failures are logged, never fatal.
-    /// No-op while a transcription is already running — unlike the
-    /// `StartTranscription` command executor, a direct re-run here would
-    /// silently REPLACE the provider and reset its reference count.
-    async fn maybe_autostart_live_transcription(&mut self, at: &'static str) {
-        if self.live_transcription.is_some() {
-            return;
+    /// Effective enable policy owns inspection; subtitle subscriptions are passive.
+    async fn maybe_autostart_live_quality(&mut self, at: &'static str) {
+        if self.live_quality.is_some() { return; }
+        let mut config = self.server.proxy_config.load().quality.clone().unwrap_or_default();
+        if let Some(plan) = self.context.dialplan.extensions.get::<crate::call::quality::QualityPlan>() {
+            config.apply(plan);
         }
-        let globally_enabled = self
-            .server
-            .proxy_config
-            .load()
-            .transcript
-            .as_ref()
-            .and_then(|t| t.remote.as_ref())
-            .and_then(|r| r.auto_start)
-            .unwrap_or(false);
-        let per_call_plan = self
-            .context
-            .dialplan
-            .extensions
-            .get::<crate::call::transcription::TranscriptionPlan>()
-            .is_some();
-        if !globally_enabled && !per_call_plan {
-            return;
-        }
-        if let Err(error) = self.start_live_transcription(None).await {
-            warn!(
-                session_id = %self.id,
-                at,
-                %error,
-                "Auto start live transcription failed"
-            );
+        if !config.enabled { return; }
+        if let Err(error) = self.start_live_quality().await {
+            warn!(session_id = %self.id, at, %error, "Auto start quality inspection failed");
+            self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
+                call_id: self.context.session_id.clone(), side: None, error: error.to_string(),
+            });
         }
     }
-
 
     /// Resolve the stereo channel assignment for this call into
     /// `option.stereo_swap`, the value every recorder backend consumes.
@@ -1346,7 +1323,7 @@ impl SipSession {
             session_registry_guard: None,
             dialog_registry_guards: HashMap::new(),
             active_plays: std::collections::HashMap::new(),
-            live_transcription: None,
+            live_quality: None,
             recording: RecordingState::default(),
             primary_leg_uac,
         };
@@ -2802,7 +2779,7 @@ impl SipSession {
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
         self.set_auto_recorder_traced(None).await;
-        self.maybe_autostart_live_transcription("originate_answer")
+        self.maybe_autostart_live_quality("originate_answer")
             .await;
         // The caller dialog is already answered when it is attached. Its
         // Confirmed state may have been consumed by the originate setup loop
@@ -8204,7 +8181,6 @@ impl SipSession {
         // The answer timing installs its recorder immediately before 200 OK.
         self.set_auto_recorder_traced(Some(crate::config::RecordingAutoStartAt::Answer))
             .await;
-        self.maybe_autostart_live_transcription("call_answer").await;
 
         if let Some(mut answer_sdp) = answer_sdp {
             if let Some(peer) = self.media_leg(&LegId::from("caller"))
@@ -8246,6 +8222,9 @@ impl SipSession {
         if let Some(peer) = self.media_leg(&LegId::from("caller")) {
             peer.accept();
         }
+
+        // PCM taps need the committed caller profile, not the provisional offer.
+        self.maybe_autostart_live_quality("call_answer").await;
 
         // A call has been answered (real callee or app) — any in-progress
         // blind transfer is over. Reconcile the watchdog: it is suppressed
@@ -8680,8 +8659,8 @@ impl SipSession {
         // and Drop.
         self.cancel_token.cancel();
 
-        // Stop live transcription (closes ASR streams, emits transcript_ended).
-        self.stop_live_transcription("call_ended").await;
+        // Stop inspection connections and emit transcript_ended.
+        self.stop_live_quality("call_ended").await;
 
         // Flush any in-flight media plays that finished naturally (without an
         // explicit stop) so the trace shows their full duration + completion.
@@ -10540,13 +10519,9 @@ impl SipSession {
                 Self::ok_or_failure(self.media.recording.resume_recording())
             }
 
-            CallCommand::StartTranscription { language } => {
-                // Reference-counted: bump the count when already running.
-                if let Some(lt) = self.live_transcription.as_mut() {
-                    lt.refs += 1;
-                    return CommandResult::success();
-                }
-                match self.start_live_transcription(language).await {
+            CallCommand::StartQualityCheck => {
+                if self.live_quality.is_some() { return CommandResult::success(); }
+                match self.start_live_quality().await {
                     Ok(_) => CommandResult::success(),
                     Err(e) => {
                         // Surface the failure to subscribers (SSE / webhook).
@@ -10560,16 +10535,10 @@ impl SipSession {
                 }
             }
 
-            CallCommand::StopTranscription => match self.live_transcription.as_mut() {
-                None => CommandResult::success(),
-                Some(lt) => {
-                    lt.refs = lt.refs.saturating_sub(1);
-                    if lt.refs == 0 {
-                        self.stop_live_transcription("stopped").await;
-                    }
-                    CommandResult::success()
-                }
-            },
+            CallCommand::StopQualityCheck => {
+                self.stop_live_quality("stopped").await;
+                CommandResult::success()
+            }
 
             CallCommand::Transfer {
                 leg_id,
@@ -11764,6 +11733,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
+        let first_hangup = self.meta.hangup_time.is_none() && !self.cancel_token.is_cancelled();
         self.meta.pending_transfer_outcome = None;
         // Kill any external (voip/realtime) bridge — media tasks must not
         // outlive the call.
@@ -11870,6 +11840,9 @@ impl SipSession {
             .is_some_and(|leg| leg.state != LegState::Ended)
         {
             return CommandResult::success();
+        }
+        if first_hangup && self.meta.hangup_trace_detail.is_none() {
+            self.meta.hangup_trace_detail = cmd.trace_detail.clone();
         }
         self.bridge.clear();
 

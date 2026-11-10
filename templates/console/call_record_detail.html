@@ -624,6 +624,7 @@
                                         <div class="flex flex-wrap items-center gap-2">
                                             <span class="text-sm font-semibold text-slate-800" x-text="traceLabel(ev)"></span>
                                             <span class="font-mono text-[11px] text-slate-400" x-text="formatTraceTs(ev.ts)"></span>
+                                            <span x-show="ev.side" class="text-xs text-slate-500" x-text="ev.side"></span>
                                             <template x-if="ev.code">
                                                 <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ring-1"
                                                     :class="traceChipClass(ev)" x-text="ev.code"></span>
@@ -2685,6 +2686,8 @@
                     case 'media_issue':
                         // minus-circle (missing media)
                         return svg('M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z');
+                    case 'quality':
+                        return svg('M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z');
                     case 'media_health':
                         // signal (per-leg media counters snapshot)
                         return svg('M2 20h.01M7 20v-4m5 4v-8m5 4V8m5 4v8');
@@ -2724,6 +2727,7 @@
                     transfer: 'Transfer',
                     play: 'Media play',
                     rtp_timeout: 'RTP timeout',
+                    quality: 'Quality',
                     media_issue: 'Media issue',
                     media_health: 'Media health',
                     recording: 'Recording',

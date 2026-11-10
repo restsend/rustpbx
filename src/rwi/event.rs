@@ -929,9 +929,9 @@ rwi_event!(RecordResumed, "record_resumed");
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptStarted {
     pub call_id: String,
-    /// Which sides carry their own ASR stream ("caller", "callee").
+    /// Which sides stream audio to the quality service ("caller", "callee").
     pub sides: Vec<String>,
-    /// Provider identifier (e.g. "deepgram").
+    /// Legacy optional identifier; external quality service output uses null.
     pub provider: Option<String>,
 }
 rwi_event!(TranscriptStarted, "transcript_started");
@@ -942,7 +942,7 @@ pub struct TranscriptSegmentEvent {
     /// "caller" | "callee"
     pub side: String,
     pub text: String,
-    /// `true` for interim hypotheses, `false` for finalized utterances.
+    /// Interim hypotheses use `true`; finalized utterances use `TranscriptFinal`.
     pub partial: bool,
     pub start_ms: u64,
     pub end_ms: u64,
@@ -970,8 +970,7 @@ rwi_event!(TranscriptEnded, "transcript_ended");
 /// One finalized utterance, published as its own event type so webhook
 /// consumers can filter server-side via `[rwi_webhook] events =
 /// ["transcript_final"]` without receiving partial (`transcript_segment`)
-/// hypotheses. Emitted in addition to the corresponding `transcript_segment`
-/// event (`partial == false`); fields are identical plus `provider`.
+/// hypotheses. Finalized text emits only this event, not a duplicate segment.
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptFinal {
     pub call_id: String,
@@ -981,7 +980,7 @@ pub struct TranscriptFinal {
     pub start_ms: u64,
     pub end_ms: u64,
     pub lang: Option<String>,
-    /// Provider identifier (e.g. "deepgram").
+    /// Legacy optional identifier; external quality service output uses null.
     pub provider: Option<String>,
 }
 rwi_event!(TranscriptFinal, "transcript_final");

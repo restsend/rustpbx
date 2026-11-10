@@ -96,3 +96,6 @@ mod test_trunk_max_call_duration;
 
 #[path = "proxy_e2e/test_unmatched_bye.rs"]
 mod test_unmatched_bye;
+
+#[path = "proxy_e2e/quality_service_e2e.rs"]
+mod quality_service_e2e;

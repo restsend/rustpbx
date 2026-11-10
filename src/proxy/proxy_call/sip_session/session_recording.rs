@@ -1233,6 +1233,7 @@ impl SipSession {
                 // The End event is pushed directly (not via record_trace), so
                 // stamp its timestamp explicitly or it would render as "+0ms".
                 let mut end = end;
+                end.detail = self.meta.hangup_trace_detail.clone();
                 end.ts = self.context.start_time.elapsed().as_millis() as i64;
                 trace.push(end);
             }

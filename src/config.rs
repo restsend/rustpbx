@@ -274,15 +274,6 @@ pub enum RecordingAutoStartAt {
     Answer,
 }
 
-/// `[proxy.transcript]` section. Only the `remote` sub-table is typed; the
-/// offline sensevoice fields (`command`, `models_path`, ...) live in the raw
-/// TOML and are parsed ad-hoc by the transcript addon.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TranscriptSection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<crate::call::transcription::remote::RemoteTranscriptConfig>,
-}
-
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default, rename_all = "snake_case")]
@@ -1943,11 +1934,9 @@ pub struct ProxyConfig {
     pub ivr_fallback: Option<IvrFallbackConfig>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
-    /// Transcription settings (`[proxy.transcript]`). Only the `remote`
-    /// sub-table is typed here (live streaming ASR); the offline sensevoice
-    /// fields are read ad-hoc from the raw TOML by the transcript addon.
+    /// External realtime inspection service; offline transcript addon is independent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<TranscriptSection>,
+    pub quality: Option<crate::call::quality::QualityConfig>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     #[serde(default)]
@@ -2807,7 +2796,7 @@ impl Default for ProxyConfig {
             ivr_endpoints: HashMap::new(),
             ivr_fallback: None,
             recording: None,
-            transcript: None,
+            quality: None,
             generated_dir: default_generated_config_dir(),
             generated_db: false,
             nat_fix: true,

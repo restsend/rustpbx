@@ -34,7 +34,7 @@ pub mod realtime;
 pub mod runtime;
 pub mod session_id;
 pub mod sip;
-pub mod transcription;
+pub mod quality;
 pub mod user;
 pub mod uui;
 

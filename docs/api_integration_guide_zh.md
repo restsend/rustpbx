@@ -359,7 +359,7 @@ REST 端点挂载在控制台的 `api_prefix` 下（默认为 `/api`，通过 `[
 
 ### 2.1.1 实时通话转写（SSE）
 
-流式输出活动通话的实时转写文本。第一个订阅者连接时才启动转写，最后一个订阅者断开或通话结束时停止。需要配置 `[proxy.transcript.remote]`（流式 ASR，兼容 Deepgram）；未配置时返回 `503`。
+订阅外部质检服务返回的实时文字。有效的 `[proxy.quality] enabled = true` 或 wholesale 租户／路由策略会在接听后自动启动质检；SSE 连接和断开只订阅／取消订阅事件，不启停质检。服务返回的 `text` 转发、`calltrace` 记录、`hangup` 执行，无需额外开关。事件网关不可用时返回 `503`。
 
 **端点**：`GET /cc/calls/{call_id}/transcript`（SSE，仅包含文本事件：`started` / `segment` / `error` / `ended`）
 
