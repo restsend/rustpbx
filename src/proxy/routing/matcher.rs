@@ -1562,7 +1562,6 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
         && trunk.profile.is_none()
         && trunk.diversion_headers.is_none()
         && trunk.history_info.is_none()
-        && trunk.amd.is_none()
     {
         return;
     }
@@ -1621,14 +1620,6 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
     if let Some(passthrough) = trunk.passthrough_custom_sdp_attrs {
         hints.passthrough_custom_sdp_attrs =
             Some(hints.passthrough_custom_sdp_attrs.unwrap_or(true) && passthrough);
-    }
-    // AMD: route hints outrank the trunk (per-field), the trunk fills gaps —
-    // the session then overlays `app_params` and falls back to `[proxy] amd`.
-    if let Some(trunk_amd) = &trunk.amd {
-        match &mut hints.amd {
-            Some(existing) => existing.overlay(trunk_amd.clone()),
-            None => hints.amd = Some(trunk_amd.clone()),
-        }
     }
 }
 

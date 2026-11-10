@@ -1363,7 +1363,6 @@ impl CallModule {
                 dialplan.busy_wait = Some(busy_wait.to_plan());
             }
             dialplan.diversion_policy = hints.diversion_policy;
-            dialplan.amd = hints.amd.take();
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             dialplan.concurrent_call_lease = hints.concurrent_call_lease;

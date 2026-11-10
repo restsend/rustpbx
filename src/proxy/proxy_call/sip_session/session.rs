@@ -175,15 +175,6 @@ struct EventProgress {
     child_role_hangup_reported: std::sync::atomic::AtomicBool,
 }
 
-/// AMD (answering-machine / AI-assistant) detection state for one session.
-/// Exists only while the `amd` config resolved at least once; the channel is
-/// replaced on each re-arm, `armed_leg` is `None` between verdicts (the
-/// disarm releases the shared analysis tap slot).
-struct AmdState {
-    outcome_rx: tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>,
-    armed_leg: Option<LegId>,
-}
-
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -247,17 +238,6 @@ pub struct SipSession {
 
     pub reporter: Option<CallReporter>,
     event_progress: EventProgress,
-    /// AMD (answering machine / AI assistant) detection: armed at answer when
-    /// the resolved `amd` config is enabled. The verdict channel is polled in
-    /// the main loop; the latest verdict lands in `amd_verdict` for the RWI
-    /// `call_amd_detected` event and CDR.
-    amd: Option<AmdState>,
-
-    /// Latest AMD verdict for this call (per callee-leg attempt: each new
-    /// answer re-arms, the last verdict wins into CDR). `None` when AMD never
-    /// armed or produced no decision.
-    pub(crate) amd_verdict: Option<crate::media::amd::AmdVerdict>,
-
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
@@ -846,107 +826,6 @@ impl SipSession {
     }
 
 
-    /// Resolve the effective AMD config for this call: global `[proxy] amd`
-    /// overlaid by the dialplan's route/trunk config (`dialplan.amd`, stamped
-    /// at routing), overlaid by an `app_params.amd` object on application
-    /// flows. `None` when detection is disabled anywhere in the chain.
-    pub(crate) fn resolve_amd_config(&self) -> Option<crate::media::amd::AmdConfig> {
-        let mut config = self
-            .server
-            .proxy_config
-            .load()
-            .amd
-            .clone()
-            .unwrap_or_default();
-        if let Some(dialplan_amd) = self.context.dialplan.amd.as_ref() {
-            config.overlay(dialplan_amd.clone());
-        }
-        if let crate::call::DialplanFlow::Application {
-            app_params: Some(params),
-            ..
-        } = &self.context.dialplan.flow
-        {
-            if let Some(value) = params.get("amd") {
-                match serde_json::from_value::<crate::media::amd::AmdConfig>(value.clone()) {
-                    Ok(app_amd) => config.overlay(app_amd),
-                    Err(error) => tracing::warn!(
-                        session_id = %self.id, %error,
-                        "amd: invalid app_params.amd object, ignoring"
-                    ),
-                }
-            }
-        }
-        (config.enabled.unwrap_or(false)).then_some(config)
-    }
-
-    /// Arm AMD detection on an outbound callee leg that just answered (see
-    /// `update_leg_state`). Best-effort: failures log and the call continues
-    /// normally — detection never blocks or breaks the media path.
-    fn arm_amd_for_leg(&mut self, leg_id: &LegId) {
-        let Some(config) = self.resolve_amd_config() else {
-            return;
-        };
-        let Some(media_leg) = self.media_leg(leg_id) else {
-            return;
-        };
-        let detector = match crate::media::amd::create_amd_detector(&config) {
-            Ok(detector) => detector,
-            Err(error) => {
-                tracing::warn!(session_id = %self.id, %error, "amd: detector creation failed");
-                return;
-            }
-        };
-        let (outcome_tx, outcome_rx) = tokio::sync::mpsc::channel(2);
-        media_leg.disarm_amd(); // fresh attempt → fresh verdict
-        media_leg.arm_amd(crate::media::amd::AmdArmament {
-            detector,
-            local_speech: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            outcome_tx,
-        });
-        self.amd = Some(match self.amd.take() {
-            Some(mut state) => {
-                state.outcome_rx = outcome_rx;
-                state.armed_leg = Some(leg_id.clone());
-                state
-            }
-            None => AmdState {
-                outcome_rx,
-                armed_leg: Some(leg_id.clone()),
-            },
-        });
-        debug!(
-            session_id = %self.id,
-            leg_id = %leg_id,
-            engine = config.engine.as_deref().unwrap_or("heuristic"),
-            "amd armed on answered callee leg"
-        );
-    }
-
-    /// Consume an AMD verdict: store (last attempt wins) and emit the RWI
-    /// `call_amd_detected` event. The leg's detector slot is released — the
-    /// verdict is final for this attempt.
-    fn handle_amd_verdict(&mut self, verdict: crate::media::amd::AmdVerdict) {
-        debug!(
-            session_id = %self.id,
-            result = %verdict.result,
-            confidence = verdict.confidence,
-            decision_time_ms = verdict.decision_time_ms,
-            "amd verdict"
-        );
-        self.amd_verdict = Some(verdict.clone());
-        // Disarm: release the shared analysis tap slot on the armed leg.
-        if let Some(leg_id) = self.amd.as_mut().and_then(|state| state.armed_leg.take()) {
-            if let Some(media_leg) = self.media_leg(&leg_id) {
-                media_leg.disarm_amd();
-            }
-        }
-        self.emit_typed_rwi_event(&crate::rwi::CallAmdDetected::from_verdict(
-            self.context.session_id.clone(),
-            &verdict,
-        ));
-    }
-
-
     pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::Receiver<CallCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
@@ -1448,8 +1327,6 @@ impl SipSession {
             pending_dynamic_dialogs: Arc::new(DashMap::new()),
             callee_guards: Vec::new(),
             reporter: None,
-            amd: None,
-            amd_verdict: None,
             event_progress: EventProgress {
                 cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 answered_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2031,8 +1908,6 @@ impl SipSession {
         mb.force_transcode().await
     }
 
-    /// Poll the AMD verdict channel; pends forever when AMD never armed so
-    /// the select arm stays dormant.
     /// Human-readable label for the leg that stopped sending RTP: the session
     /// leg's display name + endpoint when available, falling back to the
     /// routing metadata (routed / connected URI), and finally to the running
@@ -2074,18 +1949,6 @@ impl SipSession {
                 .clone()
                 .map(|a| format!("app:{}", a))
                 .unwrap_or_else(|| "unknown".to_string()),
-        }
-    }
-    async fn recv_amd_verdict(
-        rx: Option<&mut tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
-    ) -> crate::media::amd::AmdVerdict {
-        match rx {
-            Some(r) => match r.recv().await {
-                Some(verdict) => verdict,
-                // Sender dropped (leg torn down): park the arm permanently.
-                None => std::future::pending().await,
-            },
-            None => std::future::pending().await,
         }
     }
 
@@ -2245,12 +2108,6 @@ impl SipSession {
                             }
                         }
                     }
-                }
-
-                verdict = Self::recv_amd_verdict(
-                    self.amd.as_mut().map(|state| &mut state.outcome_rx),
-                ) => {
-                    self.handle_amd_verdict(verdict);
                 }
 
                 Some(result) = Self::recv_recorder_finished(&mut self.media.recording) => {
@@ -12205,12 +12062,6 @@ impl SipSession {
                         );
                     }
                     LegTransitionAction::CallAnswered => {
-                        // AMD: arm on outbound callee legs (never the caller
-                        // slot) when the resolved config enables detection —
-                        // the detector rides the leg's shared analysis tap.
-                        if leg_id.as_str() != "caller" {
-                            self.arm_amd_for_leg(leg_id);
-                        }
                         self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                             leg_id: Some(leg_id.to_string()),
                             // Child-leg session (cluster-dispatched queue

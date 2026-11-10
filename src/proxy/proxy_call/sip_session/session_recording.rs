@@ -1170,15 +1170,6 @@ impl SipSession {
                     serde_json::Value::String(side_str.to_string()),
                 );
             }
-            // AMD verdict (answering machine / AI assistant detection), when
-            // the resolved `amd` config enabled detection. Mirrored into
-            // metadata so the DB JSON column stays queryable without a schema
-            // migration; the same verdict also rides `details.amd`.
-            if let Some(ref verdict) = self.amd_verdict {
-                if let Ok(value) = serde_json::to_value(verdict) {
-                    meta.insert("amd".to_string(), value);
-                }
-            }
             if let Some(leg) = self.meta.rtp_timeout_leg.clone() {
                 meta.insert("rtpTimeoutLeg".to_string(), serde_json::Value::String(leg));
             }
@@ -1330,7 +1321,6 @@ impl SipSession {
             transferred: self.meta.transferred,
             leg_timeline: self.meta.leg_timeline.clone(),
             metadata,
-            amd: self.amd_verdict.clone(),
             media_quality,
             recording_segments: self.recording.completed_segments.clone(),
             extensions,

@@ -34,7 +34,6 @@ use tokio::sync::{broadcast, oneshot};
 use tracing::debug;
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
-use crate::amd;
 use crate::inband_dtmf;
 use crate::inband_dtmf::InbandDtmfMode;
 use crate::pcm_analysis_tap::{AnalysisSinkKind, PcmAnalysisTap, PcmBlockSink};
@@ -270,12 +269,9 @@ pub struct LegInner {
     /// many times it was (re)created. The sink itself lives in the shared
     /// analysis tap's registry.
     inband_dtmf: parking_lot::Mutex<InbandDtmfState>,
-    /// The leg's single shared ingress-audio analysis tap (in-band DTMF +
-    /// AMD sinks). Created only while at least one analyser wants audio.
+    /// The leg's ingress-audio analysis tap for in-band DTMF.
+    /// Created only while audio analysis is needed.
     analysis: parking_lot::Mutex<AnalysisState>,
-    /// Armed AMD analysis (survives tap rebuilds: the detector lives in a
-    /// shared slot, only the transport is recreated on codec changes).
-    amd: parking_lot::Mutex<AmdState>,
     /// Comfort-noise settings, preserved so `update_codec` (re-INVITE codec
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
@@ -294,30 +290,15 @@ struct InbandDtmfState {
 }
 
 /// The leg's single shared analysis tap. Exists only while at least one
-/// analyser wants ingress audio — legs that never ask (RFC 2833 negotiated,
-/// no AMD) run with no observer and no decode task at all.
+/// analyser wants ingress audio — legs using RFC 2833 without in-band
+/// detection run with no observer and no decode task at all.
 #[derive(Default)]
 struct AnalysisState {
     tap: Option<crate::pcm_analysis_tap::PcmAnalysisTap>,
     /// `(audio payload_type, clock_rate)` the running tap decodes for.
     key: Option<(u8, u32)>,
-    /// Whether the running tap was built with the DTMF / AMD sinks.
+    /// Whether the running tap was built with the DTMF sink.
     dtmf_sink: bool,
-    amd_sink: bool,
-}
-
-/// Armed AMD analysis on this leg.
-#[derive(Default)]
-struct AmdState {
-    /// Shared detector slot (`None` = not armed). Kept across tap rebuilds
-    /// so analysis state survives re-INVITE codec changes.
-    slot: Option<crate::amd::SharedDetector>,
-    local_speech: Option<Arc<AtomicBool>>,
-    outcome_tx: Option<tokio::sync::mpsc::Sender<crate::amd::AmdVerdict>>,
-    /// Codec key the AMD sink was (last) built for.
-    key: Option<(u8, u32)>,
-    /// How many times an AMD sink was (re)created.
-    generation: u64,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -579,7 +560,6 @@ impl LegInner {
             inband_dtmf_mode: AtomicU8::new(InbandDtmfMode::Auto.to_u8()),
             inband_dtmf: parking_lot::Mutex::new(InbandDtmfState::default()),
             analysis: parking_lot::Mutex::new(AnalysisState::default()),
-            amd: parking_lot::Mutex::new(AmdState::default()),
             comfort_noise,
             comfort_noise_level_db,
         }))
@@ -1033,7 +1013,7 @@ impl LegInner {
         dtmf.dtmf_clock_rate = profile.dtmf.as_ref().map(|d| d.clock_rate).unwrap_or(8000);
         drop(dtmf);
         // Shared analysis tap policy: start/stop/swap the audio analysers
-        // (in-band DTMF, AMD) for this profile (every SDP apply — including
+        // (in-band DTMF) for this profile (every SDP apply — including
         // re-INVITEs — lands here).
         self.apply_analysis_policy(profile);
         Ok(())
@@ -1041,18 +1021,15 @@ impl LegInner {
 
     /// Resolve the leg's shared analysis tap against the freshly negotiated
     /// profile. The tap exists only while at least one analyser wants ingress
-    /// audio — a leg with RFC 2833 negotiated and no AMD armed runs with no
+    /// audio — a leg using RFC 2833 without in-band detection runs with no
     /// observer and no decode task at all:
     ///
     /// - **in-band DTMF** (`Auto`/`on`/`off` policy): `Auto` wants detection
     ///   exactly when NO telephone-event was negotiated; `on` always (with
     ///   audio); `off` never.
-    /// - **AMD**: wanted while armed via [`Self::arm_amd`] (session arms at
-    ///   answer time).
     ///
     /// A codec change (PT or clock) rebuilds the tap: the DTMF sink restarts
-    /// (same as the old dedicated-tap behaviour), the AMD sink carries its
-    /// detector across so analysis state survives re-INVITEs. An unwanted tap
+    /// (same as the old dedicated-tap behaviour). An unwanted tap
     /// is dropped synchronously (`Drop` deactivates its observer and cancels
     /// the decode task).
     fn apply_analysis_policy(&self, profile: &NegotiatedLegProfile) {
@@ -1070,17 +1047,14 @@ impl LegInner {
             .map(|a| (a.payload_type, a.clock_rate));
         let session_id = self.pc.config().label.as_deref().unwrap_or_default();
 
-        // Lock order everywhere: analysis → inband_dtmf → amd.
+        // Lock order everywhere: analysis → inband_dtmf.
         let mut analysis = self.analysis.lock();
         let mut dtmf_state = self.inband_dtmf.lock();
-        let mut amd = self.amd.lock();
-        let want_amd = amd.slot.is_some() && profile.audio.is_some();
 
-        // Same codec as the running tap: adjust sinks in place so an
-        // unrelated sink change (AMD arm/disarm) never disturbs DTMF state.
+        // Same codec as the running tap: preserve DTMF state unless its
+        // detection policy changed.
         if analysis.tap.is_some() && codec_key.is_some() && analysis.key == codec_key {
             let dtmf_changed = analysis.dtmf_sink != want_dtmf;
-            let amd_changed = analysis.amd_sink != want_amd;
             {
                 let tap = analysis.tap.as_ref().expect("tap checked above");
                 if dtmf_changed {
@@ -1108,27 +1082,9 @@ impl LegInner {
                         );
                     }
                 }
-                if amd_changed {
-                    if want_amd {
-                        tap.add_sink(amd::make_sink(
-                            amd.slot.clone().expect("want_amd implies armed slot"),
-                            amd.local_speech
-                                .clone()
-                                .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-                            amd.outcome_tx
-                                .clone()
-                                .expect("armed AMD carries an outcome channel"),
-                        ));
-                        amd.generation += 1;
-                    } else {
-                        tap.remove_sink(AnalysisSinkKind::Amd);
-                    }
-                }
             }
             analysis.dtmf_sink = want_dtmf;
-            analysis.amd_sink = want_amd;
-            amd.key = if want_amd { codec_key } else { None };
-            if analysis.dtmf_sink || analysis.amd_sink {
+            if analysis.dtmf_sink {
                 return;
             }
             // Last sink gone → tear the tap down entirely.
@@ -1147,18 +1103,6 @@ impl LegInner {
                 self.id.clone(),
             ));
         }
-        if want_amd {
-            sinks.push(amd::make_sink(
-                amd.slot.clone().expect("want_amd implies armed slot"),
-                amd.local_speech
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-                amd.outcome_tx
-                    .clone()
-                    .expect("armed AMD carries an outcome channel"),
-            ));
-        }
-
         if sinks.is_empty() {
             if analysis.tap.take().is_some() {
                 debug!(
@@ -1169,9 +1113,7 @@ impl LegInner {
             }
             analysis.key = None;
             analysis.dtmf_sink = false;
-            analysis.amd_sink = false;
             dtmf_state.key = None;
-            amd.key = None;
             return;
         }
 
@@ -1187,20 +1129,14 @@ impl LegInner {
                     payload_type = audio.payload_type,
                     clock_rate = audio.clock_rate,
                     dtmf = want_dtmf,
-                    amd = want_amd,
                     "audio analysis tap started",
                 );
                 if want_dtmf {
                     dtmf_state.generation += 1;
                 }
                 dtmf_state.key = if want_dtmf { codec_key } else { None };
-                if want_amd {
-                    amd.generation += 1;
-                }
-                amd.key = if want_amd { codec_key } else { None };
                 analysis.key = codec_key;
                 analysis.dtmf_sink = want_dtmf;
-                analysis.amd_sink = want_amd;
                 analysis.tap = Some(tap);
             }
             Err(error) => {
@@ -1209,69 +1145,13 @@ impl LegInner {
                 analysis.tap.take();
                 analysis.key = None;
                 analysis.dtmf_sink = false;
-                analysis.amd_sink = false;
                 dtmf_state.key = None;
-                amd.key = None;
                 tracing::warn!(
                     session_id = %session_id,
                     leg = %self.id, %error,
                     "audio analysis tap attach failed",
                 );
             }
-        }
-    }
-
-    /// Arm AMD analysis on this leg (the session calls this when the callee
-    /// answers). The detector slot survives re-INVITE tap rebuilds;
-    /// [`Self::disarm_amd`] releases it. Takes effect immediately when an
-    /// audio profile is already negotiated; otherwise the next profile apply
-    /// attaches the sink.
-    pub fn arm_amd(&self, armament: amd::AmdArmament) {
-        let slot: amd::SharedDetector =
-            Arc::new(parking_lot::Mutex::new(Some(armament.detector)));
-        {
-            let mut state = self.amd.lock();
-            state.slot = Some(slot);
-            state.local_speech = Some(armament.local_speech);
-            state.outcome_tx = Some(armament.outcome_tx);
-        }
-        if let Some(profile) = self.negotiated() {
-            self.apply_analysis_policy(&profile);
-        }
-    }
-
-    /// Disarm AMD analysis and remove its sink from the shared tap. The last
-    /// sink going away also tears the tap down.
-    pub fn disarm_amd(&self) {
-        {
-            let mut state = self.amd.lock();
-            if state.slot.take().is_none() {
-                return;
-            }
-            state.local_speech = None;
-            state.outcome_tx = None;
-            state.key = None;
-        }
-        if let Some(profile) = self.negotiated() {
-            self.apply_analysis_policy(&profile);
-        }
-    }
-
-    /// Whether AMD is currently armed on this leg (diagnostics / tests).
-    pub fn amd_armed(&self) -> bool {
-        self.amd.lock().slot.is_some()
-    }
-
-    /// How many times an AMD sink was (re)created on this leg.
-    pub fn amd_generation(&self) -> u64 {
-        self.amd.lock().generation
-    }
-
-    /// Notify the AMD detector that the local side started speaking (extra
-    /// Human evidence; optional v1 wiring).
-    pub fn notify_amd_local_speech(&self) {
-        if let Some(flag) = self.amd.lock().local_speech.as_ref() {
-            flag.store(true, Ordering::Release);
         }
     }
 
@@ -1671,9 +1551,7 @@ impl LegInner {
             analysis.tap.take();
             analysis.key = None;
             analysis.dtmf_sink = false;
-            analysis.amd_sink = false;
             self.inband_dtmf.lock().key = None;
-            self.amd.lock().key = None;
         }
         self.ingress_stall_cancel.cancel();
         if let Some(handle) = self.ingress_stall_task.lock().take() {

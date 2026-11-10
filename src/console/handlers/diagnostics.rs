@@ -679,7 +679,6 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         dest,
         outbound_proxy: backup_dest.clone(),
         backup_dest,
-        amd: None,
         username: model.register_username.clone().filter(|user| !user.trim().is_empty())
             .or_else(|| model.auth_username.clone()),
         auth_username: model.auth_username.clone(),
