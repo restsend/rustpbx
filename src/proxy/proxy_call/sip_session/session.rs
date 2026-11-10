@@ -3825,6 +3825,22 @@ impl SipSession {
     /// - the leg-role surface (`meta.dial_leg_role` / `meta.child_leg_role`),
     /// - the RWI CallMeta `agent_id` / `agent_name` (event enrichment stops).
     pub(crate) fn clear_agent_attribution(&mut self) {
+        // Capture the SERVED agent before wiping the live surface: the agent
+        // who answered served the customer, so the end-of-call CDR must stay
+        // attributed to her even though the live pin moves to the transfer
+        // target. First writer wins for chained transfers. Fallback to the
+        // stamped legs when the pin is empty (direct-inbound sessions that
+        // answered before any pin was planted).
+        let served = self.pinned_agent_id().or_else(|| {
+            self.legs
+                .iter()
+                .filter_map(|(_, leg)| leg.agent_id.clone())
+                .find(|agent| !agent.is_empty())
+        });
+        if let Some(served) = served {
+            self.extensions
+                .set_served_agent_attribution(&served);
+        }
         {
             let mut ext = self.extensions.write();
             if let Some(existing) = ext.get_mut::<std::collections::HashMap<String, String>>() {
@@ -6940,6 +6956,31 @@ impl SipSession {
                     if self.leg_prev_state(&leg_id) != Some(LegState::Hold) {
                         self.update_leg_state(&leg_id, LegState::Connected);
                     }
+                    // Stamp agent identity when the confirmed leg is a
+                    // registered agent (transfer B-leg / app hand-off dial).
+                    // Without this the CC hook's end-of-call attribution falls
+                    // back to the session parties, which after an IVR B-leg
+                    // hand-off still point at the app URI — the answered
+                    // agent lost their cc_calls row entirely and, once a
+                    // later transfer replaced the parties, the row drifted
+                    // to the transfer target (prd 2026-11-10).
+                    let endpoint = self.legs.get(&leg_id).and_then(|leg| leg.endpoint.clone());
+                    if let Some(agent) = self.leg_agent_id(endpoint.as_deref()).await
+                        && self.pinned_agent_id().is_none()
+                    {
+                        if let Some(leg) = self.legs.get_mut(&leg_id)
+                            && leg.agent_id.is_none()
+                        {
+                            leg.agent_id = Some(agent.clone());
+                        }
+                        Self::set_pinned_agent_id(&self.extensions, &agent);
+                        info!(
+                            session_id = %self.id,
+                            leg_id = %leg_id,
+                            agent = %agent,
+                            "confirmed leg stamped with agent identity"
+                        );
+                    }
                 }
                 info!(session_id = %self.id,
                     session_id = %self.context.session_id,
@@ -9880,6 +9921,16 @@ impl SipSession {
                 "inbound answer: served agent stamped on the connected leg"
             );
             leg.agent_id = Some(agent);
+        }
+        // Pin the session attribution too (not just the leg): the CC hook's
+        // priority-1 read drives the end-of-call CDR. Direct inbound calls
+        // used to lean on the parties-based fallback, which breaks once a
+        // later transfer replaces the parties (prd 2026-11-10).
+        if let Some(ref callee_uri) = callee
+            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
+            && self.pinned_agent_id().is_none()
+        {
+            Self::set_pinned_agent_id(&self.extensions, &agent);
         }
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
