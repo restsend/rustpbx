@@ -11,7 +11,7 @@ pub enum QualitySides {
     Both,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityConfig {
     pub url: String,

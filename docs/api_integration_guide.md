@@ -522,3 +522,13 @@ auto_start = true
 `POST {ami_path}/outbound/dial` originates a call and streams every RWI
 event for it over one SSE connection. Full request/response contract and
 the `[outbound]` config: see [Outbound Dial SSE API](outbound_dial_api.md).
+
+## External realtime quality inspection
+
+For deployment, the v1 WebSocket wire protocol, an example service, wholesale policy precedence, and database queries, see [the realtime quality deployment guide](api_integration_guide_zh.md#实时语音质检部署服务协议与结果查询).
+
+The console exposes **Settings → Proxy settings → Realtime quality inspection**. It persists `[proxy.quality]` in the active TOML configuration and reloads it for new calls. Wholesale tenant and route-item policies live under `[addons.wholesale.quality]` and currently require a process restart when changed. They are not stored as tenant database columns.
+
+A connection carries one leg's decoded mono PCM16LE at the sample rate declared by its initial `start` JSON message. Services send WebSocket Ping every 10 seconds; the PBX defaults to closing inspection after 15 seconds without an incoming message. Closing inspection does not hang up the phone call. Use an explicit `hangup` event to terminate the call.
+
+Voicemail observations use `calltrace` with `kind: "quality"`, `code: "quality.voicemail_detected"`, and `detail.method: "asr"` or `"beep"`. These are stored in `rustpbx_call_records.metadata.trace`. Service-requested termination is attributed in the terminal End trace by `detail.source: "realtime_quality"` and `detail.reason`. Join `wholesale_cdrs` by `call_id` to inspect billing; there is no dedicated voicemail column or automatic tag.

@@ -2230,6 +2230,9 @@ impl SipServerInner {
         if old.max_ring_time != new_proxy.max_ring_time {
             parts.push("max_ring_time".to_string());
         }
+        if old.quality != new_proxy.quality {
+            parts.push("quality".to_string());
+        }
         if format!("{:?}", old.locator_webhook) != format!("{:?}", new_proxy.locator_webhook) {
             parts.push("locator_webhook".to_string());
         }
