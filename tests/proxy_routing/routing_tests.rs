@@ -2652,7 +2652,65 @@ async fn test_trunk_transport_preserved_in_destination() {
 }
 
 #[test]
-fn test_apply_trunk_config_adds_p_asserted_identity() {
+fn test_apply_trunk_config_pai_enabled_is_independent_of_credentials() {
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
+
+    for rewrite in [true, false] {
+        for username in [None, Some("account".to_string())] {
+            let trunk = TrunkConfig {
+                dest: "sip:ims.example.com".into(),
+                send_p_asserted_identity: Some(true),
+                rewrite_hostport: rewrite,
+                username: username.clone(),
+                ..Default::default()
+            };
+            let mut option = create_invite_option(
+                "sip:+8675789985013@36.141.49.5", "sip:10086@pbx.local",
+                None, Some("application/sdp"), None,
+            );
+            option.headers = Some(vec![
+                rsipstack::sip::Header::Other("P-Asserted-Identity".into(), "<sip:explicit@old.test>".into()),
+                rsipstack::sip::Header::Other("X-Test".into(), "keep".into()),
+            ]);
+            apply_trunk_config(&mut option, &trunk).unwrap();
+            let headers = option.headers.as_ref().unwrap();
+            let pai: Vec<_> = headers.iter().filter(|h| h.name().eq_ignore_ascii_case("P-Asserted-Identity")).collect();
+            assert_eq!(pai.len(), 2);
+            assert_eq!(pai[0].value(), "<sip:explicit@old.test>");
+            assert_eq!(pai[1].value(), "<sip:+8675789985013@36.141.49.5>");
+            let expected_host = if rewrite { "ims.example.com" } else { "36.141.49.5" };
+            assert_eq!(option.caller.host().to_string(), expected_host);
+            assert!(headers.iter().any(|h| h.name() == "X-Test" && h.value() == "keep"));
+        }
+    }
+}
+
+#[test]
+fn test_apply_trunk_config_pai_disabled_preserves_explicit_headers() {
+    use rustpbx::proxy::routing::matcher::apply_trunk_config;
+    for setting in ["", "send_p_asserted_identity = false"] {
+        let trunk: TrunkConfig = toml::from_str(&format!(r#"
+            dest = "sip:ims.example.com"
+            username = "account"
+            password = "password"
+            {setting}
+        "#)).unwrap();
+        let mut option = create_invite_option(
+            "sip:alice@pbx.local", "sip:10086@pbx.local",
+            None, Some("application/sdp"), None,
+        );
+        apply_trunk_config(&mut option, &trunk).unwrap();
+        assert!(option.headers.iter().flatten().all(|h| !h.name().eq_ignore_ascii_case("P-Asserted-Identity")));
+        option.headers = Some(vec![rsipstack::sip::Header::Other(
+            "P-Asserted-Identity".into(), "<sip:explicit@ims.example.com>".into(),
+        )]);
+        apply_trunk_config(&mut option, &trunk).unwrap();
+        assert_eq!(option.headers.as_ref().unwrap()[0].value(), "<sip:explicit@ims.example.com>");
+    }
+}
+
+#[test]
+fn test_apply_trunk_config_does_not_add_p_asserted_identity() {
     use rustpbx::proxy::routing::matcher::apply_trunk_config;
 
     let mut option = create_invite_option(
@@ -2672,22 +2730,18 @@ fn test_apply_trunk_config_adds_p_asserted_identity() {
 
     apply_trunk_config(&mut option, &trunk).unwrap();
 
-    // Verify P-Asserted-Identity header is added when username is present
-    assert!(option.headers.is_some());
-    let headers = option.headers.unwrap();
-
-    let has_pai = headers.iter().any(|h| {
-        if let rsipstack::sip::Header::Other(name, value) = h {
-            name.to_lowercase() == "p-asserted-identity" && value.contains("sip:alice@rustpbx.com")
-        } else {
-            false
-        }
-    });
-
+    // Trunk credentials must not implicitly assert the caller's identity.
     assert!(
-        has_pai,
-        "P-Asserted-Identity header should be added when trunk has username"
+        !option.headers.iter().flatten().any(|header| header
+            .to_string()
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("P-Asserted-Identity"))),
+        "Trunk authentication must not add P-Asserted-Identity"
     );
+    let credential = option.credential.as_ref().expect("trunk credentials");
+    assert_eq!(credential.username, "auth_user");
+    assert_eq!(credential.password, "auth_pass");
+    assert_eq!(option.caller.host().to_string(), "carrier.com");
 }
 
 // ============================================================================

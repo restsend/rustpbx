@@ -543,7 +543,7 @@ pub struct OriginateRequest {
     pub agent: Option<String>,
     /// Optional explicit carrier-trunk override. When set, the originate is routed
     /// out the named trunk directly: the trunk's next-hop destination, transport,
-    /// digest credential, host rewrite, and P-Asserted-Identity header are stamped
+    /// digest credential and host rewrite are applied
     /// onto the outbound INVITE (so it goes straight to the carrier). When absent,
     /// no route table is consulted and the legacy direct-to-callee behavior is
     /// preserved (a registered/reachable SIP URI). The API caller selects the trunk

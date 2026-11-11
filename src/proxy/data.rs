@@ -122,10 +122,7 @@ impl ProxyDataContext {
     }
 
     pub fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
-        self.trunks
-            .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect()
+        self.trunks.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
     }
 
     pub fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
@@ -1244,6 +1241,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     });
 
     TrunkConfig {
+        send_p_asserted_identity: from_bool(sbc.and_then(|s| s.get("send_p_asserted_identity"))),
         call_id_mode: from_str(sbc.and_then(|s| s.get("call_id_mode"))).and_then(|s| {
             match s.as_str() {
                 "transparent" => Some(CallIdMode::Transparent),
@@ -1387,6 +1385,7 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     if let Some(ref meta) = model.metadata {
         if meta.get("sbc").is_some() {
             let sbc = sbc_config_from_metadata(meta);
+            trunk.send_p_asserted_identity = sbc.send_p_asserted_identity;
             if sbc.call_id_mode.is_some() {
                 trunk.call_id_mode = sbc.call_id_mode;
             }
@@ -2500,6 +2499,45 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         )).await.unwrap().unwrap();
         assert_eq!(row.try_get::<String>("", "auth_username").unwrap(), "legacy@ims.test");
         assert_eq!(row.try_get::<Option<String>>("", "register_username").unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn trunk_pai_is_per_trunk_and_defaults_to_disabled() {
+        let generated_dir = tempfile::tempdir().unwrap();
+        let mut config = ProxyConfig::default();
+        config.generated_dir = generated_dir.path().to_string_lossy().to_string();
+        let context = ProxyDataContext::new(Arc::new(config), None).await.unwrap();
+        for (name, setting) in [("default", None), ("on", Some(true)), ("off", Some(false))] {
+            context.trunks.insert(name.into(), TrunkConfig {
+                dest: "sip:ims.example.com".into(),
+                send_p_asserted_identity: setting,
+                ..Default::default()
+            });
+        }
+        let snapshot = context.trunks_snapshot();
+        for (name, expected) in [("default", false), ("on", true), ("off", false)] {
+            assert_eq!(snapshot[name].send_p_asserted_identity.unwrap_or(false), expected);
+            assert_eq!(context.get_trunk(name).unwrap().send_p_asserted_identity.unwrap_or(false), expected);
+        }
+        assert_eq!(context.trunks.get("default").unwrap().send_p_asserted_identity, None);
+        assert!(serde_json::to_value(ProxyConfig::default()).unwrap().get("send_p_asserted_identity").is_none());
+    }
+
+    #[test]
+    fn convert_trunk_pai_option() {
+        for setting in [None, Some(false), Some(true)] {
+            let metadata = setting.map(|enabled| serde_json::json!({
+                "sbc": {"send_p_asserted_identity": enabled}
+            }));
+            let model = sip_trunk::Model {
+                name: "ims".into(),
+                sip_server: Some("ims.example.com".into()),
+                metadata,
+                ..Default::default()
+            };
+            let (_, trunk) = convert_trunk(model).unwrap();
+            assert_eq!(trunk.send_p_asserted_identity, setting);
+        }
     }
 
     #[test]

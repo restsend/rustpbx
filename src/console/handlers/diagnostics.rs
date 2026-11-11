@@ -711,6 +711,10 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
         rewrite_hostport: model.rewrite_hostport,
+        send_p_asserted_identity: model.metadata.as_ref()
+            .and_then(|meta| meta.get("sbc"))
+            .and_then(|sbc| sbc.get("send_p_asserted_identity"))
+            .and_then(|value| value.as_bool()),
         call_id_mode: None,
         health_check_enabled: None,
         health_check_per_ip: None,

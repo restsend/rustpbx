@@ -1510,7 +1510,7 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         addr: next_hop.host_with_port,
     });
 
-    // Save original caller before potential rewrite for P-Asserted-Identity header
+    // Preserve the legacy asserted identity from before trunk host rewriting.
     let original_caller = option.caller.clone();
 
     if trunk.rewrite_hostport {
@@ -1528,20 +1528,11 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         });
     }
 
-    // Add trunk related headers
-    if option.headers.is_none() {
-        option.headers = Some(Vec::new());
-    }
-
-    let headers = option.headers.as_mut().unwrap();
-
-    // Add P-Asserted-Identity header (using original caller, not rewritten)
-    if trunk.username.is_some() {
-        let pai_header = rsipstack::sip::Header::Other(
+    if trunk.send_p_asserted_identity.unwrap_or(false) {
+        option.headers.get_or_insert_with(Vec::new).push(rsipstack::sip::Header::Other(
             "P-Asserted-Identity".to_string(),
             format!("<{}>", original_caller),
-        );
-        headers.push(pai_header);
+        ));
     }
 
     Ok(())

@@ -150,6 +150,10 @@ pub struct TrunkConfig {
     pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default = "default_rewrite_hostport")]
     pub rewrite_hostport: bool,
+    /// Automatically append PAI using the original caller URI for this trunk.
+    /// Disabled when unset, independently of authentication credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_p_asserted_identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id_mode: Option<CallIdMode>,
 
@@ -594,6 +598,7 @@ impl Default for TrunkConfig {
             register_expires: None,
             register_extra_headers: None,
             rewrite_hostport: true,
+            send_p_asserted_identity: None,
             call_id_mode: None,
             health_check_enabled: None,
             health_check_per_ip: None,

@@ -711,6 +711,10 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # ]
 
 # [proxy.trunks.wuhoo]
+# send_p_asserted_identity = false       # Per-trunk automatic PAI; defaults to false.
+#                                       # Uses the original caller URI, regardless of credentials.
+#                                       # Existing explicit PAI headers are preserved.
+#                                       # Console/API: metadata.sbc.send_p_asserted_identity.
 # dest = "sip:123.456.789.00:1234"
 # username = "+12025550123"           # REGISTER From/To user
 # auth_username = "12025550123@ims.example.com" # Optional separate Digest identity
