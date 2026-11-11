@@ -2583,7 +2583,20 @@ impl CallModule {
                 } else if tx.original.method == rsipstack::sip::Method::Refer {
                     tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist).await?;
                 } else {
-                    debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                    // RFC 3261 §15.1.2/§12.2: answer 481 so the peer terminates
+                    // its transaction immediately. Silently dropping the request
+                    // left the peer's Timer F running the full 32s; a zombie
+                    // session's refresh would then die with "Request Timeout"
+                    // mid-way through the agent's NEXT call (production
+                    // 2026-10-30: the dispatch engine misread that client-side
+                    // "ended" as "agent idle" and double-booked the agent).
+                    // Note: a dropped refresh kills the dialog anyway once
+                    // Timer F fires — 481 just does it deterministically and
+                    // visibly instead of 32s later.
+                    // Ported from the 0.1.10 hotfix line (3ec9fce7, deployed
+                    // as zapbx refer-fix-1110-v3 / viafix-1110-v1).
+                    warn!(%dialog_id, method=%tx.original.method, "dialog not found; replying 481");
+                    tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist).await?;
                 }
                 return Ok(());
             }

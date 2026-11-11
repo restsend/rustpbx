@@ -8,6 +8,8 @@ mod test_auth;
 #[cfg(test)]
 mod test_inbound_refer;
 #[cfg(test)]
+mod test_indialog_unknown_dialog;
+#[cfg(test)]
 mod test_presence;
 #[cfg(test)]
 mod test_presence_e2e;
