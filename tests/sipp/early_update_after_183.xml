@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scenario name="Early SDP UPDATE after reliable 183, before INVITE 200">
+  <recv request="INVITE" timeout="5000"><action>
+    <ereg regexp="SIP/2.0/UDP ([^; ]+)" search_in="hdr" header="Via:" check_it="true" assign_to="_,pbx_addr"/>
+    <ereg regexp=".*" search_in="hdr" header="From:" check_it="true" assign_to="caller"/>
+    <ereg regexp=".*" search_in="hdr" header="To:" check_it="true" assign_to="callee"/>
+  </action></recv>
+  <nop><action>
+    <assignstr assign_to="via" value="[last_Via:]"/>
+    <assignstr assign_to="from" value="[last_From:]"/>
+    <assignstr assign_to="to" value="[last_To:]"/>
+    <assignstr assign_to="call_id" value="[last_Call-ID:]"/>
+    <assignstr assign_to="cseq" value="[last_CSeq:]"/>
+  </action></nop>
+  <send><![CDATA[
+SIP/2.0 183 Session Progress
+[$via]
+[$from]
+[$to];tag=sipp-early-update
+[$call_id]
+[$cseq]
+Require: 100rel
+RSeq: 1
+Contact: <sip:ims@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=ims 1 1 IN IP4 127.0.0.1
+s=early update
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18494 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]></send>
+  <recv request="PRACK" timeout="5000"><action>
+    <ereg regexp="1 1 INVITE" search_in="hdr" header="RAck:" check_it="true" assign_to="_"/>
+  </action></recv>
+  <send><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]></send>
+  <send retrans="500"><![CDATA[
+UPDATE sip:pbx@[$pbx_addr] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-early-update-[call_number]
+From: [$callee];tag=sipp-early-update
+To: [$caller]
+[$call_id]
+CSeq: 1 UPDATE
+Contact: <sip:ims@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=ims 1 2 IN IP4 127.0.0.1
+s=early update
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18532 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]></send>
+  <recv response="200" timeout="5000"><action>
+    <ereg regexp="1 UPDATE" search_in="hdr" header="CSeq:" check_it="true" assign_to="_"/>
+    <ereg regexp="application/sdp" search_in="hdr" header="Content-Type:" check_it="true" assign_to="_"/>
+    <ereg regexp="m=audio [1-9][0-9]* RTP/AVP 0" search_in="body" check_it="true" assign_to="_"/>
+    <log message="EARLY_UPDATE_ANSWERED_BEFORE_INVITE_200"/>
+  </action></recv>
+  <send retrans="500"><![CDATA[
+SIP/2.0 200 OK
+[$via]
+[$from]
+[$to];tag=sipp-early-update
+[$call_id]
+[$cseq]
+Contact: <sip:ims@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=ims 1 1 IN IP4 127.0.0.1
+s=early update
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18494 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]></send>
+  <recv request="ACK" timeout="5000"/>
+  <recv request="BYE" timeout="5000"/>
+  <send><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]></send>
+</scenario>

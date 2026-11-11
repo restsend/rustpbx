@@ -15401,3 +15401,226 @@ model = "test-model"
     server.reload_proxy_config(path.to_str().unwrap()).await.unwrap();
     assert!(server.realtime_presets.load().is_none());
 }
+
+#[tokio::test]
+async fn early_update_is_answered_while_invite_pending_and_preserves_new_media() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_test_writer().try_init();
+    }
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::{build_session_with_cmd_rx_on, setup_recording_test_media};
+    use rsipstack::sip::{Header, HeadersExt, Method, SipMessage, StatusCode};
+    use rsipstack::transport::udp::UdpConnection;
+
+    let (server, _) = create_test_server().await;
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = target.local_addr().unwrap();
+    let endpoint = server.endpoint.inner.clone();
+    for local in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&local);
+    }
+    endpoint.transport_layer.add_transport(UdpConnection::create_connection(
+        "127.0.0.1:0".parse().unwrap(), None, None,
+    ).await.unwrap().into());
+    let mut incoming = server.endpoint.incoming_transactions().unwrap();
+    let layer = server.dialog_layer.clone();
+    let dispatch = tokio::spawn(async move {
+        while let Some(mut tx) = incoming.recv().await {
+            let mut dialog = layer.match_dialog(&tx).expect("UPDATE must match early dialog");
+            dialog.handle(&mut tx).await.unwrap();
+        }
+    });
+    let serving_endpoint = endpoint.clone();
+    let serving = tokio::spawn(async move { serving_endpoint.serve().await.unwrap(); });
+    let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+    let mut plan = Dialplan::new("early-update".into(), request, DialDirection::Inbound)
+        .with_caller("sip:customer@example.test".parse().unwrap());
+    plan.media.proxy_mode = MediaProxyMode::All;
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server.clone(), plan).await;
+    // Keep the caller transaction alive so ringing/accept can enqueue their
+    // responses; the generic session fixture drops its transaction at return.
+    let caller_request = session.caller_dialog.as_ref().unwrap().initial_request();
+    let (caller_tx, _caller_endpoint) = crate::proxy::tests::common::create_transaction(caller_request).await;
+    let (caller_events, _caller_states) = mpsc::unbounded_channel();
+    let caller_dialog = server.dialog_layer.get_or_create_server_invite(&caller_tx, caller_events, None, None).unwrap();
+    session.legs.set_dialog(LegId::from("caller"), Dialog::Invite(caller_dialog.clone()));
+    session.caller_dialog = Some(caller_dialog);
+    let _cancel = session.cancel_token.clone().drop_guard();
+    setup_recording_test_media(&mut session).await;
+    let (state_tx, mut states) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(state_tx);
+    let layer = server.dialog_layer.clone();
+    let responder = async move {
+        let mut buffer = [0u8; 65536];
+        let (size, source) = target.recv_from(&mut buffer).await.unwrap();
+        let SipMessage::Request(invite) = SipMessage::try_from(&buffer[..size]).unwrap() else { panic!("expected INVITE"); };
+        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 18494 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let mut ringing = endpoint.make_response(&invite, StatusCode::Ringing, None);
+        ringing.headers.unique_push(Header::To(format!("<sip:target@{address}>;tag=ims").into()));
+        ringing.headers.unique_push(Header::Contact(format!("<sip:target@{address}>").into()));
+        ringing.headers.unique_push(Header::Require("100rel".into()));
+        ringing.headers.unique_push(Header::Other("RSeq".into(), "1".into()));
+        ringing.headers.unique_push(Header::ContentType("application/sdp".into()));
+        ringing.body = sdp.as_bytes().to_vec();
+        ringing.headers.unique_push(Header::ContentLength(ringing.body.len().to_string().into()));
+        target.send_to(ringing.to_string().as_bytes(), source).await.unwrap();
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(prack) = SipMessage::try_from(&buffer[..size]).unwrap() {
+                if prack.method == Method::PRack {
+                    let response = endpoint.make_response(&prack, StatusCode::OK, None);
+                    target.send_to(response.to_string().as_bytes(), source).await.unwrap();
+                    break;
+                }
+            }
+        }
+        let call_id = invite.call_id_header().unwrap().value().to_string();
+        let from = ringing.to_header().unwrap().value().to_string();
+        let to = invite.from_header().unwrap().value().to_string();
+        for (seq, body, expected) in [
+            (1, String::new(), StatusCode::OK),
+            (2, sdp.replace("18494", "18532").replace("o=- 1 1", "o=- 1 2"), StatusCode::OK),
+            (3, "invalid SDP".to_string(), StatusCode::NotAcceptableHere),
+        ] {
+            let update = format!("UPDATE sip:pbx@{source} SIP/2.0\r\nVia: SIP/2.0/UDP {address};branch=z9hG4bK-update-{seq}\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {seq} UPDATE\r\nContact: <sip:target@{address}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            target.send_to(update.as_bytes(), source).await.unwrap();
+            loop {
+                let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+                if let SipMessage::Response(response) = SipMessage::try_from(&buffer[..size]).unwrap() {
+                    if response.cseq_header().unwrap().method().unwrap() == Method::Update {
+                        assert_eq!(response.status_code, expected, "{response}");
+                        assert_eq!(!response.body.is_empty(), seq == 2);
+                        break;
+                    }
+                }
+            }
+            let dialogs = layer.get_client_dialog_by_call_id(&call_id);
+            assert_eq!(dialogs.len(), 1);
+            assert!(matches!(dialogs[0].state(), DialogState::Early(..)), "UPDATE must not answer INVITE");
+        }
+        let mut accepted = ringing;
+        accepted.status_code = StatusCode::OK;
+        accepted.headers.retain(|h| !matches!(h, Header::Require(_) | Header::Other(_, _)));
+        target.send_to(accepted.to_string().as_bytes(), source).await.unwrap();
+    };
+    let location = Location {
+        aor: format!("sip:target@{address}").parse().unwrap(),
+        headers: Some(vec![Header::Supported("100rel".into())]),
+        ..Default::default()
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            session.try_single_target(&location, &mut states, None, None, None, None),
+            responder,
+        )
+    }).await.expect("UPDATE must be answered before IMS sends INVITE 200");
+    serving.abort();
+    dispatch.abort();
+    result.0.expect("INVITE should complete after early UPDATE");
+    assert!(session.meta.connected_callee_dialog_id.is_some());
+    let peer = session.media_leg(&LegId::from("callee")).unwrap();
+    assert_eq!(peer.pc().remote_description().unwrap().media_sections[0].port, 18532,
+        "final INVITE answer must not restore the old media port");
+    session.cleanup().await;
+}
+
+/// Run with SIPP_BIN=/path/to/sipp cargo test --lib sipp_early_update_after_183 -- --ignored.
+#[tokio::test]
+#[ignore = "requires the external SIPp executable (SIPP_BIN or sipp on PATH)"]
+async fn sipp_early_update_after_183() {
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::{build_session_with_cmd_rx_on, setup_recording_test_media};
+    use rsipstack::sip::{Header, Method};
+    use rsipstack::transport::udp::UdpConnection;
+
+    let (server, _) = create_test_server().await;
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = target.local_addr().unwrap();
+    let endpoint = server.endpoint.inner.clone();
+    for local in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&local);
+    }
+    endpoint.transport_layer.add_transport(UdpConnection::create_connection(
+        "127.0.0.1:0".parse().unwrap(), None, None,
+    ).await.unwrap().into());
+    let mut incoming = server.endpoint.incoming_transactions().unwrap();
+    let layer = server.dialog_layer.clone();
+    let dispatch = tokio::spawn(async move {
+        while let Some(mut tx) = incoming.recv().await {
+            let mut dialog = layer.match_dialog(&tx).expect("UPDATE must match early dialog");
+            dialog.handle(&mut tx).await.unwrap();
+        }
+    });
+    let serving_endpoint = endpoint.clone();
+    let serving = tokio::spawn(async move { serving_endpoint.serve().await.unwrap(); });
+    let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+    let mut plan = Dialplan::new("early-update".into(), request, DialDirection::Inbound)
+        .with_caller("sip:customer@example.test".parse().unwrap());
+    plan.media.proxy_mode = MediaProxyMode::All;
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server.clone(), plan).await;
+    // Keep the caller transaction alive so ringing/accept can enqueue their
+    // responses; the generic session fixture drops its transaction at return.
+    let caller_request = session.caller_dialog.as_ref().unwrap().initial_request();
+    let (caller_tx, _caller_endpoint) = crate::proxy::tests::common::create_transaction(caller_request).await;
+    let (caller_events, _caller_states) = mpsc::unbounded_channel();
+    let caller_dialog = server.dialog_layer.get_or_create_server_invite(&caller_tx, caller_events, None, None).unwrap();
+    session.legs.set_dialog(LegId::from("caller"), Dialog::Invite(caller_dialog.clone()));
+    session.caller_dialog = Some(caller_dialog);
+    let _cancel = session.cancel_token.clone().drop_guard();
+    setup_recording_test_media(&mut session).await;
+    let (state_tx, mut states) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(state_tx);
+    drop(target);
+    let logs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sipp-early-update");
+    std::fs::create_dir_all(&logs).unwrap();
+    for name in ["messages.log", "errors.log", "actions.log"] {
+        std::fs::File::create(logs.join(name)).unwrap();
+    }
+    let mut sipp = tokio::process::Command::new(std::env::var("SIPP_BIN").unwrap_or_else(|_| "sipp".into()))
+        .current_dir(&logs)
+        .arg("-sf").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sipp/early_update_after_183.xml"))
+        .args(["-i", "127.0.0.1", "-p", &address.port().to_string(), "-t", "u1", "-m", "1",
+            "-timeout", "20s", "-timeout_error", "-nostdin",
+            "-trace_msg", "-message_file", "messages.log",
+            "-trace_err", "-error_file", "errors.log",
+            "-trace_logs", "-log_file", "actions.log"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(logs.join("stdout.log")).unwrap())
+        .stderr(std::fs::File::create(logs.join("stderr.log")).unwrap())
+        .kill_on_drop(true).spawn().expect("start SIPp");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(sipp.try_wait().unwrap().is_none(), "SIPp exited during startup; logs: {}", logs.display());
+            match std::net::UdpSocket::bind(address) {
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => break,
+                Err(error) => panic!("checking SIPp listener: {error}"),
+                Ok(socket) => drop(socket),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("SIPp must bind its listener");
+    let location = Location {
+        aor: format!("sip:ims@{address}").parse().unwrap(),
+        headers: Some(vec![Header::Supported("100rel".into())]),
+        ..Default::default()
+    };
+    let result = tokio::time::timeout(Duration::from_secs(15),
+        session.try_single_target(&location, &mut states, None, None, None, None),
+    ).await.expect("SIPp must receive UPDATE answer before sending INVITE 200");
+    result.expect("INVITE must complete after SIPp's early UPDATE");
+    let id = session.meta.connected_callee_dialog_id.clone().unwrap();
+    let peer = session.media_leg(&LegId::from("callee")).unwrap();
+    assert_eq!(peer.pc().remote_description().unwrap().media_sections[0].port, 18532,
+        "the final INVITE response must not revert the UPDATE's media port");
+    assert!(std::fs::read_to_string(logs.join("actions.log")).unwrap()
+        .contains("EARLY_UPDATE_ANSWERED_BEFORE_INVITE_200"));
+    let Some(Dialog::Invite(dialog)) = server.dialog_layer.get_dialog(&id) else { panic!("missing confirmed dialog"); };
+    tokio::time::timeout(Duration::from_secs(5), dialog.bye()).await.unwrap().unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(5), sipp.wait()).await.unwrap().unwrap();
+    assert!(status.success(), "SIPp failed: {status}; logs: {}", logs.display());
+    serving.abort();
+    dispatch.abort();
+    session.cleanup().await;
+}

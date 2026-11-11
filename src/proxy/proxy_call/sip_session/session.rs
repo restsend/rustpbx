@@ -4188,6 +4188,89 @@ impl SipSession {
         None
     }
 
+    /// Answer an UPDATE from the current dialing attempt without accepting the
+    /// INVITE or registering this candidate as the connected callee.
+    async fn handle_early_callee_update(
+        &mut self,
+        dialog_id: DialogId,
+        request: rsipstack::sip::Request,
+        tx_handle: TransactionHandle,
+    ) -> bool {
+        let mut headers = Vec::new();
+        let result = async {
+            if let Err(error) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers) {
+                warn!(session_id = %self.id, %dialog_id, %error, "Invalid early UPDATE session interval");
+                if let Some(timer) = self.session_timers.timers.get(&dialog_id) {
+                    headers.push(rsipstack::sip::Header::Other(HEADER_MIN_SE.into(), timer.min_se.as_secs().to_string()));
+                }
+                return Ok((StatusCode::SessionIntervalTooSmall, None));
+            }
+            headers.extend(self.successful_refresh_response_headers(&dialog_id).unwrap_or_default());
+            if request.body.is_empty() {
+                return Ok::<_, anyhow::Error>((StatusCode::OK, None));
+            }
+            // A replacement candidate must not renegotiate the still-connected
+            // callee's media while a blind transfer is ringing.
+            if self.meta.transfer_in_progress && self.meta.connected_callee_dialog_id.is_some() {
+                return Ok((StatusCode::NotAcceptableHere, None));
+            }
+            let offer = String::from_utf8(request.body.clone())?;
+            Self::parse_sdp(rustrtc::SdpType::Offer, &offer, "early UPDATE")?;
+            let offer = if self.custom_sdp_attrs_passthrough_enabled() {
+                offer
+            } else {
+                crate::media::sdp_attrs::strip_custom_attrs_sdp(&offer, rustrtc::SdpType::Offer)
+            };
+            if self.bypasses_local_media() {
+                return self.relay_signaling_only_offer(DialogSide::Callee, rsipstack::sip::Method::Update, &offer).await;
+            }
+            let leg_id = LegId::from("callee");
+            let peer = self.media_leg(&leg_id).ok_or_else(|| anyhow!("Missing early callee media"))?;
+            // A reliable provisional answer completes the SIP offer/answer
+            // exchange, although the INVITE itself is still pending. rustrtc
+            // keeps Pranswer in HaveLocalOffer, so complete that exchange before
+            // applying the new offer. Do not change the SIP dialog's state.
+            if peer.pc().signaling_state() == rustrtc::SignalingState::HaveLocalOffer {
+                let Some(mut answer) = peer.pc().remote_description()
+                    .filter(|sdp| sdp.sdp_type == rustrtc::SdpType::Pranswer)
+                else {
+                    return Ok((StatusCode::RequestPending, None));
+                };
+                answer.sdp_type = rustrtc::SdpType::Answer;
+                peer.apply_remote_sdp(&answer.to_sdp_string(), rustrtc::SdpType::Answer).await?;
+            }
+            let answer = self.build_local_dialog_answer(
+                DialogSide::Callee, &leg_id, rsipstack::sip::Method::Update, &offer,
+            ).await?;
+            self.media.callee_answer_sdp = Some(offer);
+            // Refresh media routing, but leave call/leg state and answer time
+            // untouched until the final INVITE response.
+            if self.media.early_media_sent {
+                self.activate_callee_media(true).await?;
+            }
+            Ok((StatusCode::OK, Some(answer)))
+        }.await;
+        let (status, body) = match result {
+            Ok((status, answer)) => {
+                if answer.is_some() {
+                    headers.extend(Self::sdp_headers());
+                }
+                (status, answer.map(String::into_bytes))
+            }
+            Err(error) => {
+                warn!(session_id = %self.id, %dialog_id, %error, "Failed to negotiate early UPDATE");
+                headers.clear();
+                (StatusCode::NotAcceptableHere, None)
+            }
+        };
+        let updated = status.kind() == rsipstack::sip::StatusCodeKind::Successful && body.is_some();
+        if let Err(error) = tx_handle.respond(status, Some(headers), body).await {
+            warn!(session_id = %self.id, %dialog_id, %error, "Failed to respond to early UPDATE");
+            return false;
+        }
+        updated
+    }
+
     async fn handle_updated_dialog(
         &mut self,
         side: DialogSide,
@@ -7536,6 +7619,7 @@ impl SipSession {
         // attempt so a transferor BYE cannot abort a successful replacement,
         // and cannot disappear when the replacement fails.
         let mut deferred_states = Vec::new();
+        let mut early_sdp_updated = false;
         let result = loop {
             tokio::select! {
                 _ = caller_end_check.tick() => {
@@ -7786,6 +7870,12 @@ impl SipSession {
                             self.emit_call_ringing(None, false, None);
                         }
                         self.update_snapshot_cache();
+                    } else if let Some(DialogState::Updated(id, request, handle)) = state {
+                        if id.call_id == callee_call_id && request.method == rsipstack::sip::Method::Update {
+                            early_sdp_updated |= self.handle_early_callee_update(id, request, handle).await;
+                        } else {
+                            deferred_states.push(DialogState::Updated(id, request, handle));
+                        }
                     } else if let Some(state) = state {
                         deferred_states.push(state);
                     }
@@ -7796,7 +7886,15 @@ impl SipSession {
             let _ = state_tx.send(state);
         }
 
-        let (dialog_id, response): (DialogId, Option<rsipstack::sip::Response>) = result?;
+        let (dialog_id, mut response): (DialogId, Option<rsipstack::sip::Response>) = result?;
+        if early_sdp_updated {
+            // The final INVITE repeats the initial answer. A subsequent UPDATE
+            // has already superseded it; replaying it would revert the media
+            // address and apply an Answer to a now-stable PeerConnection.
+            if let Some(response) = response.as_mut() {
+                response.body.clear();
+            }
+        }
         self.finalize_callee_connection(
             dialog_id,
             response,
