@@ -77,7 +77,7 @@ async fn voicemail_service_hangs_up_real_calls_and_finalizes_artifacts() -> Resu
         let server = Arc::new(test_helpers::register_standard_modules(builder).build().await?);
         let registry = server.get_inner().active_call_registry.clone();
         let server_task = tokio::spawn(async move { server.serve().await });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // build() binds the SIP socket; REGISTER below waits for the server response.
         let mut uas = Vec::new();
         for (name, password) in [("alice", "password123"), ("bob", "password456")] {
             let mut ua = TestUa::new(TestUaConfig { webrtc:false, username:name.into(), password:password.into(), realm:"127.0.0.1".into(),
@@ -180,9 +180,11 @@ async fn voicemail_service_hangs_up_real_calls_and_finalizes_artifacts() -> Resu
         std::fs::write(output.join("sipflow.json"), serde_json::to_vec_pretty(&signaling)?)?;
         let text = signaling.iter().map(|p| String::from_utf8_lossy(&p.payload)).collect::<Vec<_>>().join("\n");
         for method in ["INVITE ", "ACK ", "BYE ", "SIP/2.0 200"] { assert!(text.contains(method), "{case}: missing {method} in SIPFlow"); }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Observe the channel for duplicate terminal records while checking that
+        // the finalized recording remains unchanged; this is an absence assertion.
+        assert!(tokio::time::timeout(Duration::from_millis(300), records.recv()).await.is_err(),
+            "no second terminal CDR or premature channel closure after call cleanup");
         assert_eq!(std::fs::metadata(&record.recorder[0].path)?.len(), size, "recording stopped growing");
-        assert!(records.try_recv().is_err(), "exactly one terminal CDR");
         eprintln!("QUALITY_E2E_OK case={case} call_id={} duration_ms={} recording={} bytes={size} sipflow_items={} registry_handles={}", record.call_id,
             (record.end_time - record.answer_time.unwrap()).num_milliseconds(), record.recorder[0].path, signaling.len(), registry.handles_by_dialog_count());
         for ua in uas { ua.stop(); }
