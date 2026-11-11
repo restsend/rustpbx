@@ -773,7 +773,7 @@ GET /api/call-records/{id}/recording
 
 ### 8. 独立质检服务部署
 
-服务源码和发布流水线位于 [miuda.ai/realtime-quality](https://cnb.cool/miuda.ai/realtime-quality)，完整参数见该仓库 README。只支持英语（`en`）、印尼语（`id`）关键词匹配及可配置频率的 beep；可以分别启用，也可以组合。关键词来自配置，未配置关键词时不能启用 ASR。检测结果表示命中配置条件，不代表通用 AI 接听检测。
+服务源码和发布流水线位于 [miuda-ai/realtime-quality](https://github.com/miuda-ai/realtime-quality)，完整参数见该仓库 README。只支持英语（`en`）、印尼语（`id`）关键词匹配及可配置频率的 beep；可以分别启用，也可以组合。关键词来自配置，未配置关键词时不能启用 ASR。检测结果表示命中配置条件，不代表通用 AI 接听检测。
 
 发布目标为 Linux x86_64 和 macOS arm64。Linux 包以 Debian 12 / glibc 2.36 为基线；模型不随可执行文件打包。下载对应 tar.gz 和 `.sha256`，校验后解压到 `/opt/realtime-quality`。macOS 可以直接前台运行，Linux 推荐随包的 systemd 单元。
 
@@ -809,7 +809,7 @@ journalctl -u realtime-quality -f
 
 部署后先检查 `/health`，再发起测试通话，按前文在核心 CDR 的 `metadata.trace` 查 `quality.voicemail_detected`，并检查 End 事件的服务挂断来源；录音、SIPFlow、wholesale 计费仍走原流程。健康检查成功只表示服务启动，不能代替真实通话验证。
 
-版本 tag 触发双平台发布；两个包与校验文件齐全才发布 draft。macOS CI 需要组织自托管 runner（默认标签 `mac`、`arm64`），并非 CNB 托管 Mac。源码与发布包均不包含模型、录音或测试音频；不要把本机配置、凭据和评测输出提交到任一项目。
+`v*` 版本 tag 触发 GitHub Actions 双平台发布；两个构建成功且包与校验文件齐全后才发布 draft。使用 GitHub 托管 macOS 15 arm64 runner 和 Ubuntu 上的 Debian 12 构建容器，无需组织自托管 Mac。源码与发布包均不包含模型、录音或测试音频；不要把本机配置、凭据和评测输出提交到任一项目。
 
 ### 9. 从上一轮 wholesale 镜像升级：数据库 schema（2026-11-11）
 
