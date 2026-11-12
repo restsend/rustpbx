@@ -2665,7 +2665,7 @@ fn test_apply_trunk_config_pai_enabled_is_independent_of_credentials() {
                 ..Default::default()
             };
             let mut option = create_invite_option(
-                "sip:+8675789985013@36.141.49.5", "sip:10086@pbx.local",
+                "sip:+12025550123@198.51.100.5", "sip:10086@pbx.local",
                 None, Some("application/sdp"), None,
             );
             option.headers = Some(vec![
@@ -2677,8 +2677,8 @@ fn test_apply_trunk_config_pai_enabled_is_independent_of_credentials() {
             let pai: Vec<_> = headers.iter().filter(|h| h.name().eq_ignore_ascii_case("P-Asserted-Identity")).collect();
             assert_eq!(pai.len(), 2);
             assert_eq!(pai[0].value(), "<sip:explicit@old.test>");
-            assert_eq!(pai[1].value(), "<sip:+8675789985013@36.141.49.5>");
-            let expected_host = if rewrite { "ims.example.com" } else { "36.141.49.5" };
+            assert_eq!(pai[1].value(), "<sip:+12025550123@198.51.100.5>");
+            let expected_host = if rewrite { "ims.example.com" } else { "198.51.100.5" };
             assert_eq!(option.caller.host().to_string(), expected_host);
             assert!(headers.iter().any(|h| h.name() == "X-Test" && h.value() == "keep"));
         }

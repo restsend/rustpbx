@@ -6902,7 +6902,7 @@ async fn stereo_external_left_resolves_swap_per_call_shape() {
             cookie: TransactionCookie::default(),
             start_time: Instant::now(),
             original_caller: "sip:1001@rustpbx.com".to_string(),
-            original_callee: "sip:+862161952290@trunk.example".to_string(),
+            original_callee: "sip:+862155550100@trunk.example".to_string(),
             max_forwards: 70,
             created_at: chrono::Utc::now().to_rfc3339(),
             metadata: None,

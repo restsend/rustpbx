@@ -526,7 +526,7 @@ mod tests {
     }
 
     /// Production fault: a JsSIP WebSocket client's registration must record
-    /// the REAL flow address (`112.64.233.138:7318`), never the `.invalid`
+    /// the REAL flow address (`203.0.113.138:7318`), never the `.invalid`
     /// flow token from its Via sent-by nor a wildcard listener default —
     /// otherwise in-dialog requests (BYE) dial back to garbage and call-flow
     /// recordings show `dst_addr: 0.0.0.0:5060`.
@@ -546,7 +546,7 @@ mod tests {
             SipAddr {
                 r#type: Some(rsipstack::sip::Transport::Udp),
                 addr: rsipstack::sip::HostWithPort {
-                    host: rsipstack::sip::Host::IpAddr("112.64.233.138".parse().unwrap()),
+                    host: rsipstack::sip::Host::IpAddr("203.0.113.138".parse().unwrap()),
                     port: Some(7318.into()),
                 },
             },
@@ -567,7 +567,7 @@ mod tests {
         );
 
         apply_flow_destination(&mut destination, Some(&connection));
-        assert_eq!(destination.addr.host.to_string(), "112.64.233.138");
+        assert_eq!(destination.addr.host.to_string(), "203.0.113.138");
         assert_eq!(
             destination.addr.port.map(|p| p.0),
             Some(7318),
@@ -585,9 +585,9 @@ mod tests {
         // UDP has no per-registration flow to reuse: the classic
         // Via received/rport target stays authoritative.
         let mut destination =
-            via_derived_destination("SIP/2.0/UDP 58.246.19.74:6988;branch=z9hG4bKx;rport=6988");
+            via_derived_destination("SIP/2.0/UDP 198.51.100.74:6988;branch=z9hG4bKx;rport=6988");
         apply_flow_destination(&mut destination, None);
-        assert_eq!(destination.addr.host.to_string(), "58.246.19.74");
+        assert_eq!(destination.addr.host.to_string(), "198.51.100.74");
         assert_eq!(destination.addr.port.map(|p| p.0), Some(6988));
     }
 
@@ -617,12 +617,12 @@ mod tests {
         let connection = rsipstack::transport::SipConnection::Channel(conn);
 
         let mut destination = via_derived_destination(
-            "SIP/2.0/WSS 7i94k9e6mr86.invalid;branch=z9hG4bK2011401;received=112.64.233.138;rport=7318",
+            "SIP/2.0/WSS 7i94k9e6mr86.invalid;branch=z9hG4bK2011401;received=203.0.113.138;rport=7318",
         );
         apply_flow_destination(&mut destination, Some(&connection));
         assert_eq!(
             destination.addr.host.to_string(),
-            "112.64.233.138",
+            "203.0.113.138",
             "a wildcard flow address must not override a usable via-derived target"
         );
     }

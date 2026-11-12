@@ -1782,16 +1782,16 @@ mod apply_trunk_config_tests {
     fn separate_digest_identity_does_not_replace_invite_caller() {
         let trunk: TrunkConfig = toml::from_str(r#"
             dest = "sip:ims.test"
-            username = "+8675789985014"
-            auth_username = "8675789985014@ims.test"
+            username = "+12025550123"
+            auth_username = "12025550123@ims.test"
             password = "test-password"
         "#).unwrap();
         let mut option = option();
         apply_trunk_config(&mut option, &trunk).unwrap();
         assert_eq!(option.caller.user(), Some("alice"));
         let credential = option.credential.unwrap();
-        assert_eq!(credential.username, "+8675789985014");
-        assert_eq!(credential.digest_username(), "8675789985014@ims.test");
+        assert_eq!(credential.username, "+12025550123");
+        assert_eq!(credential.digest_username(), "12025550123@ims.test");
     }
 
     #[test]

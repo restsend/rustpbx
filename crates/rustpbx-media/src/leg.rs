@@ -2021,7 +2021,7 @@ mod relay_policy_tests {
     #[test]
     fn relay_only_maps_to_relay_ice_policy() {
         let turn = IceServer {
-            urls: vec!["turn:116.62.74.130:3478".to_string()],
+            urls: vec!["turn:192.0.2.130:3478".to_string()],
             username: Some("u".to_string()),
             credential: Some("c".to_string()),
             ..Default::default()

@@ -2588,9 +2588,9 @@ a=rtpmap:101 telephone-event/8000\r\n";
     #[test]
     fn test_bridge_codecs_ignores_unrecognized_rtpmap_entries() {
         let caller_sdp = "v=0\r\n\
-o=- 1777370486 1777370486 IN IP4 58.246.19.74\r\n\
+o=- 1777370486 1777370486 IN IP4 198.51.100.74\r\n\
 s=-\r\n\
-c=IN IP4 58.246.19.74\r\n\
+c=IN IP4 198.51.100.74\r\n\
 t=0 0\r\n\
 m=audio 16844 RTP/AVP 98 96 111 106 18 8 0 100\r\n\
 a=rtpmap:98 AMR-WB/16000/1\r\n\

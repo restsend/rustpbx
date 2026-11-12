@@ -768,7 +768,7 @@ impl RwiCommandProcessor {
     /// Normalize an RWI-supplied `caller_id` into a valid SIP URI string for the
     /// originate `From` header.
     ///
-    /// `caller_id` is commonly a bare phone number ("+16142159851") — caller ID
+    /// `caller_id` is commonly a bare phone number ("+12025550123") — caller ID
     /// *is* a number. A bare token parses into a user-less URI, and a trunk's
     /// `rewrite_hostport` then restamps the host, yielding an invalid `From` like
     /// `<carrier.example.com>` (no user) that carriers reject with

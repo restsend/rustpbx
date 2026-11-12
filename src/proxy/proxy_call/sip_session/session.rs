@@ -14387,14 +14387,14 @@ mod route_via_home_proxy_tests {
         // it is OUR registration (deliver locally), a peer's external home
         // is remote — regardless of any address this node happens to hold
         // connections to.
-        let own_contact = sip_addr("116.62.75.161:15060");
+        let own_contact = sip_addr("192.0.2.161:15060");
         assert!(!SipSession::route_via_home_proxy(
-            &target_with_home("116.62.75.161:15060"),
+            &target_with_home("192.0.2.161:15060"),
             true,
             Some(&own_contact)
         ));
         assert!(SipSession::route_via_home_proxy(
-            &target_with_home("116.62.250.247:15060"),
+            &target_with_home("192.0.2.247:15060"),
             true,
             Some(&own_contact)
         ));

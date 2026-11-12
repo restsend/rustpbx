@@ -2949,7 +2949,7 @@ mod contact_uri_tests {
         // This node is the first peer (Node B); its listener matches peer[0].
         let local_addrs = vec![
             "172.25.224.232:15060".to_string(),
-            "116.62.250.247:15060".to_string(),
+            "192.0.2.247:15060".to_string(),
         ];
 
         let result = resolve_cluster_self_addr(&peers, &local_addrs).unwrap();

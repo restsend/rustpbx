@@ -6484,8 +6484,8 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 
 #[test]
 fn test_trunk_host_port_sip_uri_with_port() {
-    let (host, port) = trunk_host_port("sip:58.246.19.74:6988").unwrap();
-    assert_eq!(host, "58.246.19.74");
+    let (host, port) = trunk_host_port("sip:198.51.100.74:6988").unwrap();
+    assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 
@@ -6505,8 +6505,8 @@ fn test_trunk_host_port_sip_uri_with_user_and_port() {
 
 #[test]
 fn test_trunk_host_port_bare_host_port() {
-    let (host, port) = trunk_host_port("58.246.19.74:6988").unwrap();
-    assert_eq!(host, "58.246.19.74");
+    let (host, port) = trunk_host_port("198.51.100.74:6988").unwrap();
+    assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 

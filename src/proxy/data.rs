@@ -2779,8 +2779,8 @@ file = "db://ivr/lf-step-ivr.generated.toml"
 
     #[test]
     fn dest_to_ipnet_ip_with_port() {
-        let net = ProxyDataContext::dest_to_ipnet("61.169.80.210:7731");
-        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+        let net = ProxyDataContext::dest_to_ipnet("198.51.100.210:7731");
+        assert_eq!(net, Some("198.51.100.210/32".parse().unwrap()));
     }
 
     #[test]
@@ -2797,14 +2797,14 @@ file = "db://ivr/lf-step-ivr.generated.toml"
 
     #[test]
     fn dest_to_ipnet_sip_with_port() {
-        let net = ProxyDataContext::dest_to_ipnet("sip:61.169.80.210:7731");
-        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+        let net = ProxyDataContext::dest_to_ipnet("sip:198.51.100.210:7731");
+        assert_eq!(net, Some("198.51.100.210/32".parse().unwrap()));
     }
 
     #[test]
     fn dest_to_ipnet_sips_with_port() {
-        let net = ProxyDataContext::dest_to_ipnet("sips:61.169.80.210:5061");
-        assert_eq!(net, Some("61.169.80.210/32".parse().unwrap()));
+        let net = ProxyDataContext::dest_to_ipnet("sips:198.51.100.210:5061");
+        assert_eq!(net, Some("198.51.100.210/32".parse().unwrap()));
     }
 
     #[test]

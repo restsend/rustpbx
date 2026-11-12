@@ -1199,15 +1199,15 @@ async fn default_resolve_wholesale_trunk_gets_marker_and_empty_targets() {
         None,
     );
     request.uri =
-        rsipstack::sip::Uri::try_from("sip:+862161952290@rustpbx.com;transport=UDP").unwrap();
+        rsipstack::sip::Uri::try_from("sip:+862155550100@rustpbx.com;transport=UDP").unwrap();
     replace_to_header(
         &mut request,
-        rsipstack::sip::Uri::try_from("sip:+862161952290@rustpbx.com").unwrap(),
+        rsipstack::sip::Uri::try_from("sip:+862155550100@rustpbx.com").unwrap(),
     );
 
     // Caller from trunk — realm matches server so callee_is_same_realm=true
     let caller = SipUser {
-        username: "+8617301791502".to_string(),
+        username: "+8613800138000".to_string(),
         realm: Some("rustpbx.com".to_string()),
         ..Default::default()
     };
