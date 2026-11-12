@@ -1264,13 +1264,14 @@ impl SipSession {
         };
         let session_extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
 
+        // Session app-context config: full-config snapshot with the LIVE
+        // [proxy] section overlaid (see SipServerInner::session_app_config).
+        // Rebuilding `Config::default()` here silently dropped non-proxy
+        // sections and broke `[[realtime]]` preset resolution (#302).
         let mut app_ctx = ApplicationContext::new(
             server.database.clone().unwrap_or_default(),
             call_info,
-            Arc::new(crate::config::Config {
-                proxy: (*server.proxy_config.load_full()).clone(),
-                ..Default::default()
-            }),
+            server.session_app_config(),
             server.http_client.clone(),
         );
         app_ctx.rwi_gateway = server.rwi_gateway.clone();

@@ -818,4 +818,109 @@ mod tests {
             }
         }
     }
+
+    /// Regression (issue #302): a `[[realtime]]` preset defined in the
+    /// `--conf` file must be resolvable by the `realtime` call app when the
+    /// dialplan starts it (`app = "realtime"`, `app_params.preset = ...`).
+    /// The session path used to synthesize the app context's `Config` from
+    /// `Config::default()` + `[proxy]` only, silently dropping every other
+    /// section — the preset lookup then failed at call time even though
+    /// `check-config` passed. Asserted through the REAL server construction
+    /// (AppStateBuilder → SipServerInner → session_app_config → factory),
+    /// not a hand-built context.
+    #[tokio::test]
+    async fn realtime_preset_from_config_file_resolves_in_session_app_context() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[proxy]
+addr = "0.0.0.0"
+
+[[realtime]]
+name = "inworld"
+url = "wss://api.example.test/realtime"
+protocol = "openai"
+api_key = "sk-config-only"
+model = "test-model"
+"#,
+        )
+        .expect("issue #302 reporter config shape must parse");
+
+        let app = crate::app::AppStateBuilder::new()
+            .with_config(config)
+            .with_skip_sip_bind()
+            .build()
+            .await
+            .expect("app state builds");
+        let server = &app.sip_server().inner;
+
+        // 1. The full config survived the builder → server wiring.
+        let seeded = server.app_config.load();
+        assert!(
+            seeded
+                .realtime
+                .as_ref()
+                .is_some_and(|p| p.iter().any(|preset| preset.name == "inworld")),
+            "SipServerInner.app_config must carry the [[realtime]] preset"
+        );
+        drop(seeded);
+
+        // 2. The live-proxy overlay: session config takes [proxy] from the
+        // live ArcSwap (hot-reload semantics), non-proxy sections from the
+        // file snapshot.
+        let mut live_proxy = crate::config::ProxyConfig::default();
+        live_proxy.addr = "1.2.3.4".into();
+        server.proxy_config.store(Arc::new(live_proxy));
+        let session_config = server.session_app_config();
+        assert_eq!(
+            session_config.proxy.addr, "1.2.3.4",
+            "session config must read [proxy] from the live swap"
+        );
+        assert!(
+            session_config
+                .realtime
+                .as_ref()
+                .is_some_and(|p| p.iter().any(|preset| preset.name == "inworld")),
+            "session config must keep non-proxy sections from the file snapshot"
+        );
+
+        // 3. End-to-end: the factory resolves the preset exactly the way the
+        // dialplan application path does.
+        let call_info = CallInfo {
+            session_id: "realtime-preset-regression".into(),
+            caller: "1001".into(),
+            callee: "ai".into(),
+            direction: "inbound".into(),
+            started_at: chrono::Utc::now(),
+            sip_headers: Default::default(),
+            route_name: Some("test-inworld".into()),
+        };
+        let ctx = ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            call_info,
+            session_config,
+            reqwest::Client::new(),
+        );
+        let created = BuiltinAppFactory::new(None, None)
+            .create_app(
+                "realtime",
+                Some(serde_json::json!({ "preset": "inworld" })),
+                &ctx,
+            )
+            .await
+            .expect("configured preset must start the realtime app");
+        assert!(created.is_some());
+
+        // 4. Guard: an unknown preset still fails (the error the reporter saw).
+        let err = BuiltinAppFactory::new(None, None)
+            .create_app(
+                "realtime",
+                Some(serde_json::json!({ "preset": "nope" })),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+
+        app.token().cancel();
+    }
 }

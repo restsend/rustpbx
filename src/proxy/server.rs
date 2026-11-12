@@ -73,6 +73,15 @@ pub struct SipServerInner {
     pub default_network_profile_id: ArcSwap<String>,
     pub media_proxy: ArcSwap<MediaProxyMode>,
     pub proxy_config: ArcSwap<ProxyConfig>,
+    /// Full process config snapshot (`--conf` file) — the live counterpart of
+    /// `proxy_config` for every NON-proxy section. The call path synthesizes
+    /// each session's `ApplicationContext.config` from this snapshot with the
+    /// `proxy` section overridden by the live `proxy_config` swap, so config
+    /// sections that only exist in the file (`[[realtime]]`, `[rwi]`, ...) stay
+    /// visible to call apps. Issue #302: the app context used to rebuild a
+    /// `Config::default()` here, silently dropping `[[realtime]]` presets.
+    /// Refreshed by `reload_proxy_config`.
+    pub app_config: ArcSwap<crate::config::Config>,
     pub data_context: Arc<ProxyDataContext>,
     /// Shared routing state (round-robin counters + policy guard) used by the
     /// inbound route path and by app/transfer/RWI-originated legs that opt into
@@ -244,6 +253,10 @@ pub struct SipServerBuilder {
     /// Media policy for deciding when to anchor media.
     /// Trunk health check states (shared map populated by background loop).
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
+    /// Full process config (all sections, not just `[proxy]`) — seeded into
+    /// [`SipServerInner::app_config`]. Call apps read non-proxy sections
+    /// (e.g. `[[realtime]]` presets) through it.
+    app_config: Option<Arc<crate::config::Config>>,
     /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
     session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
     /// Rolling handover runtime (None unless `[rolling] enabled`). When
@@ -296,9 +309,19 @@ impl SipServerBuilder {
             cluster_peers: Vec::new(),
             cluster_config: None,
             trunk_health: None,
+            app_config: None,
             session_hooks: Vec::new(),
             rolling: None,
         }
+    }
+
+    /// Seed the server with the FULL process config (all top-level sections).
+    /// Only the `[proxy]` section flows through `SipServerBuilder::new`; this
+    /// carries the rest (`[[realtime]]`, `[rwi]`, ...) for the call-app path.
+    /// `reload_proxy_config` refreshes the snapshot on config-file reloads.
+    pub fn with_app_config(mut self, config: Arc<crate::config::Config>) -> Self {
+        self.app_config = Some(config);
+        self
     }
 
     pub fn with_rolling(
@@ -1316,6 +1339,11 @@ impl SipServerBuilder {
             default_network_profile_id: ArcSwap::new(Arc::new(default_network_profile_id)),
             media_proxy: ArcSwap::new(Arc::new(self.config.media_proxy)),
             proxy_config: ArcSwap::from_pointee(self.config.as_ref().clone()),
+            app_config: ArcSwap::from(
+                self.app_config
+                    .take()
+                    .unwrap_or_else(|| Arc::new(crate::config::Config::default())),
+            ),
             cancel_token,
             data_context,
             routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
@@ -2074,6 +2102,18 @@ impl SipServerInner {
             .with_inband_dtmf(rtp.inband_dtmf)
     }
 
+    /// Full-config snapshot for a new session's [`crate::call::app::ApplicationContext`]:
+    /// the `app_config` snapshot (every file section) with the LIVE `[proxy]`
+    /// section overlaid from the `proxy_config` swap — proxy keeps its
+    /// hot-reload semantics while the rest stays visible to call apps
+    /// (`[[realtime]]` preset resolution reads `config.realtime` here; issue
+    /// #302 was exactly this snapshot dropping the section).
+    pub fn session_app_config(&self) -> Arc<crate::config::Config> {
+        let mut snapshot = (*self.app_config.load_full()).clone();
+        snapshot.proxy = (*self.proxy_config.load_full()).clone();
+        Arc::new(snapshot)
+    }
+
     /// Hot-reload the full `[proxy]` section plus related platform settings
     /// from the on-disk configuration. The live `ProxyConfig` snapshot is
     /// swapped atomically so all per-request / per-call reads (`rtp_timeout`,
@@ -2097,6 +2137,11 @@ impl SipServerInner {
 
         // Atomically swap the live proxy config.
         self.proxy_config.store(new_arc.clone());
+
+        // Keep the full-config snapshot in sync so non-proxy sections
+        // (`[[realtime]]` presets etc.) observe file reloads too — the
+        // call path derives each session's app config from this snapshot.
+        self.app_config.store(Arc::new(config.clone()));
 
         // Keep data_context in sync so trunk/route/ACL reloads reuse the
         // updated config (generated dirs, use_db_config, etc.).

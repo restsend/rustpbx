@@ -499,6 +499,7 @@ async fn test_guest_call_allowed_extension() {
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
         recording_policy: Arc::new(ArcSwap::new(Arc::new(None))),
         proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),
+        app_config: ArcSwap::from_pointee(crate::config::Config::default()),
         emergency_config: ArcSwap::from_pointee(config.emergency.clone()),
         rwi_webhook_config: ArcSwap::from_pointee(None),
         cancel_token: CancellationToken::new(),
