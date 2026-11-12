@@ -2056,7 +2056,7 @@ impl SipServerInner {
         let rtp = self.rtp_config.load();
         let media_proxy = **self.media_proxy.load();
         let proxy_config = self.proxy_config.load();
-        MediaConfig::new()
+        let mut media = MediaConfig::new()
             .with_proxy_mode(media_proxy)
             .with_external_ip(rtp.external_ip.clone())
             .with_bind_ip(rtp.bind_ip.clone())
@@ -2074,7 +2074,12 @@ impl SipServerInner {
             .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
             .with_quality_stats(rtp.quality_stats.clone())
             .with_volume_stats(rtp.volume_stats.clone())
-            .with_inband_dtmf(rtp.inband_dtmf)
+            .with_inband_dtmf(rtp.inband_dtmf);
+        if !self.network_profiles.load().is_empty() {
+            let profile = self.default_network_profile();
+            self.apply_network_profile_to_media(&profile, &mut media);
+        }
+        media
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

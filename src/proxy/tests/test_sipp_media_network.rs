@@ -20,10 +20,11 @@ async fn sipp_two_legs_media_network() {
     }
     let local = rustrtc::transports::get_local_ip().unwrap().to_string();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for (case, a_bind, a_ip, b_bind, b_ip) in [
-        ("localhost", "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1"),
-        ("lan_and_localhost", local.as_str(), local.as_str(), "127.0.0.1", "127.0.0.1"),
-        ("distinct_advertised", local.as_str(), "203.0.113.10", local.as_str(), "198.51.100.20"),
+    for (case, has_inbound_trunk, a_bind, a_ip, b_bind, b_ip) in [
+        ("localhost", true, "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1"),
+        ("lan_and_localhost", true, local.as_str(), local.as_str(), "127.0.0.1", "127.0.0.1"),
+        ("distinct_advertised", true, local.as_str(), "203.0.113.10", local.as_str(), "198.51.100.20"),
+        ("extension_to_trunk", false, local.as_str(), "203.0.113.10", local.as_str(), "198.51.100.20"),
     ] {
         let logs = root.join("target/sipp-media-network").join(case);
         std::fs::create_dir_all(&logs).unwrap();
@@ -47,18 +48,21 @@ async fn sipp_two_legs_media_network() {
             generated_dir: logs.join("generated").to_string_lossy().into_owned(),
             ..Default::default()
         };
-        config.trunks.insert("inbound".into(), TrunkConfig {
-            direction: Some(TrunkDirection::Inbound), inbound_hosts: vec!["127.0.0.1".into()],
-            profile: Some("wan".into()), media_mode: Some(MediaMode::ForceTranscode),
-            ..Default::default()
-        });
+        if has_inbound_trunk {
+            config.trunks.insert("inbound".into(), TrunkConfig {
+                direction: Some(TrunkDirection::Inbound), inbound_hosts: vec!["127.0.0.1".into()],
+                profile: Some("wan".into()), media_mode: Some(MediaMode::ForceTranscode),
+                ..Default::default()
+            });
+        }
         config.trunks.insert("outbound".into(), TrunkConfig {
             direction: Some(TrunkDirection::Outbound), dest: format!("sip:127.0.0.1:{uas_port}"),
             profile: Some("ims".into()), media_mode: Some(MediaMode::ForceTranscode),
             ..Default::default()
         });
         config.routes = Some(vec![RouteRule {
-            name: "sipp-two-legs".into(), source_trunks: vec!["inbound".into()],
+            name: "sipp-two-legs".into(),
+            source_trunks: if has_inbound_trunk { vec!["inbound".into()] } else { Vec::new() },
             action: RouteAction { dest: Some(DestConfig::Single("outbound".into())), ..Default::default() },
             ..Default::default()
         }]);

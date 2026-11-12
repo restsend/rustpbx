@@ -752,22 +752,26 @@ impl SipSession {
         codecs: Vec<crate::media::negotiate::CodecInfo>,
         video_codecs: Vec<rustrtc::config::VideoCapability>,
     ) -> crate::media::leg::LegConfig {
-        let network = if leg_id.as_str() == "caller" {
-            self.context.dialplan.caller_media_network.as_ref()
-        } else {
-            None
-        };
         let media = &self.context.dialplan.media;
+        let (external_ip, bind_ip, rtp_ports) = if leg_id.as_str() == "caller" {
+            let n = &self.context.dialplan.caller_media_network;
+            (
+                n.external_ip.as_deref(),
+                n.bind_ip.as_deref(),
+                n.rtp_start_port.zip(n.rtp_end_port),
+            )
+        } else {
+            (
+                media.external_ip.as_deref(),
+                media.bind_ip.as_deref(),
+                media.rtp_start_port.zip(media.rtp_end_port),
+            )
+        };
         let is_webrtc = transport == crate::media::TransportMode::WebRtc;
         let rtp_port_range = if is_webrtc {
-            self.context
-                .dialplan
-                .media
-                .webrtc_port_start
-                .zip(self.context.dialplan.media.webrtc_port_end)
+            media.webrtc_port_start.zip(media.webrtc_port_end)
         } else {
-            network.and_then(|n| n.rtp_start_port).or(media.rtp_start_port)
-                .zip(network.and_then(|n| n.rtp_end_port).or(media.rtp_end_port))
+            rtp_ports
         };
         crate::media::leg::LegConfig {
             quality_stats: self.context.dialplan.media.quality_stats.clone(),
@@ -786,13 +790,13 @@ impl SipSession {
             codecs,
             video_codecs,
             rtp_port_range,
-            external_ips: parse_ips(network.and_then(|n| n.external_ip.as_deref()).or(media.external_ip.as_deref())),
+            external_ips: parse_ips(external_ip),
             // WebRTC must gather host candidates across interfaces. A fixed
             // SIP/RTP bind address is only appropriate for RTP/SDES legs.
             bind_ips: if is_webrtc {
                 Vec::new()
             } else {
-                parse_ips(network.and_then(|n| n.bind_ip.as_deref()).or(media.bind_ip.as_deref()))
+                parse_ips(bind_ip)
             },
             prefer_ipv6: false,
             cname: Some(self.server.rtc_cname.clone()),

@@ -217,6 +217,13 @@ async fn match_invite_impl(
         source_trunk.and_then(|source| trunks.and_then(|trunks| trunks.get(&source.name)))
     {
         merge_trunk_media_hints(&mut source_hints, trunk);
+        if let Some(hints) = source_hints.as_mut() {
+            // Source-trunk media network settings belong to the caller leg
+            // (`Dialplan::caller_media_network`), not the callee leg.
+            hints.network_profile_id = None;
+            hints.external_ip = None;
+            hints.bind_ip = None;
+        }
     }
 
     let routes = match routes {

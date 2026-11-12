@@ -62,16 +62,18 @@ bind_ip = "100.64.10.2"
 codec = ["opus", "pcmu"]
 ```
 
-For anchored media, an inbound trunk's explicit `profile`, `external_ip`, and
-`bind_ip` select the original caller's (A-leg) media network. The outbound
-trunk selects B-leg's network. Direct trunk addresses override its profile;
-profile RTP port ranges also apply to that leg. For example, an inbound `wan`
-profile can advertise the public IP while an outbound `ims` profile advertises
-an IMS interface address. These media overrides do not change SIP Contact/Via
-selection. Without explicit inbound network settings, both legs retain the
-legacy shared media settings, including outbound trunk overrides. Unspecified
-fields fall back to the shared settings. An established caller transport stays
-unchanged when an outbound attempt is retried on another trunk.
+For anchored media, each leg resolves its media network independently from the
+global RTP / `default_network_profile` baseline: an inbound trunk's explicit
+`profile`, `external_ip`, and `bind_ip` override only the original caller's
+(A-leg) media network, and an outbound trunk's settings override only B-leg's
+network. Extension legs (or trunks without explicit network overrides) stay on
+the global / default-profile media network rather than inheriting the other
+leg's trunk settings. Direct trunk addresses override its profile; profile RTP
+port ranges also apply to that leg. For example, a LAN extension or inbound
+`wan` profile can advertise its own interface/public IP on A-leg while an
+outbound `ims` profile advertises an IMS interface address on B-leg. These media
+overrides do not change SIP Contact/Via selection. An established caller
+transport stays unchanged when an outbound attempt is retried on another trunk.
 
 ### Testing per-leg networks with SIPp
 
@@ -84,13 +86,14 @@ SIPP_BIN=/opt/homebrew/bin/sipp cargo test --lib sipp_two_legs_media_network -- 
 Omit `SIPP_BIN` when `sipp` is on PATH. The test uses dynamic loopback SIP ports
 and does not need a second physical network card or interface aliases.
 
-The test runs three calls:
+The test runs four calls:
 
 | Case | A-leg bind / advertised IP | B-leg bind / advertised IP |
 | --- | --- | --- |
 | `localhost` | `127.0.0.1` / `127.0.0.1` | `127.0.0.1` / `127.0.0.1` |
 | `lan_and_localhost` | detected local IPv4 / same IP | `127.0.0.1` / `127.0.0.1` |
 | `distinct_advertised` | detected local IPv4 / `203.0.113.10` | detected local IPv4 / `198.51.100.20` |
+| `extension_to_trunk` (no inbound trunk) | detected local IPv4 / `203.0.113.10` (default profile) | detected local IPv4 / `198.51.100.20` |
 
 A uses RTP ports 20000–24998; B uses 25000–29998. SIPp validates A's 183 and
 200 SDP and B's INVITE SDP, then completes ACK/BYE. The harness also checks
