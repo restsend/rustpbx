@@ -15624,3 +15624,112 @@ async fn sipp_early_update_after_183() {
     dispatch.abort();
     session.cleanup().await;
 }
+
+
+#[tokio::test]
+async fn inbound_media_network_survives_outbound_profiles_and_retry() {
+    use crate::call::{SipUser, TransactionCookie, TrunkContext};
+    use crate::config::{NetworkProfile, ProxyConfig};
+    use crate::proxy::call::CallModule;
+    use crate::proxy::routing::{DestConfig, RouteAction, RouteRule, TrunkConfig, TrunkDirection};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config, create_transaction};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    // Explicit loopback binds intentionally bypass external-IP advertisement in rustrtc.
+    let local_ip = rustrtc::transports::get_local_ip().unwrap();
+    for case in ["profiles", "trunk_override", "direct_override", "legacy", "same_profile"] {
+        let mut proxy = ProxyConfig::default();
+        proxy.generated_dir = format!("target/test-generated/media-network-{case}-{}", std::process::id());
+        proxy.trunks.insert("inbound".into(), TrunkConfig {
+            profile: match case {
+                "legacy" | "direct_override" => None,
+                "same_profile" => Some("ims".into()),
+                _ => Some("wan".into()),
+            },
+            external_ip: matches!(case, "trunk_override" | "direct_override").then(|| "192.0.2.3".into()),
+            bind_ip: (case == "direct_override").then(|| "0.0.0.0".into()),
+            direction: Some(TrunkDirection::Inbound),
+            ..Default::default()
+        });
+        proxy.trunks.insert("outbound".into(), TrunkConfig {
+            dest: "sip:192.0.2.20:5060".into(),
+            profile: Some("ims".into()),
+            // Match deployments that explicitly override both trunks: the
+            // destination's existing shared-network precedence stays intact.
+            external_ip: matches!(case, "trunk_override" | "direct_override").then(|| "192.0.2.2".into()),
+            bind_ip: matches!(case, "trunk_override" | "direct_override").then(|| local_ip.to_string()),
+            direction: Some(TrunkDirection::Outbound),
+            media_mode: Some(crate::proxy::routing::MediaMode::ForceTranscode),
+            ..Default::default()
+        });
+        proxy.routes = Some(vec![RouteRule {
+            name: "two-networks".into(),
+            source_trunks: vec!["inbound".into()],
+            action: RouteAction {
+                dest: Some(DestConfig::Single("outbound".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let (server, config) = create_test_server_with_config(proxy).await;
+        let profiles: Vec<NetworkProfile> = serde_json::from_value(serde_json::json!([
+            { "id": "wan", "external_ip": "192.0.2.1", "bind_ip": "0.0.0.0",
+              "rtp_start_port": 20000, "rtp_end_port": 24998 },
+            { "id": "ims", "external_ip": "192.0.2.2", "bind_ip": local_ip.to_string(),
+              "rtp_start_port": 25000, "rtp_end_port": 29998 }
+        ])).unwrap();
+        server.network_profiles.store(Arc::new(profiles));
+        let module = CallModule::new(config, server.clone());
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext { id: None, name: "inbound".into(), did_numbers: vec![] });
+        let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+        let (mut tx, _endpoint) = create_transaction(request).await;
+        let caller = SipUser::try_from(&tx).unwrap();
+        let plan = module.build_dialplan(&mut tx, cookie, &caller).await.unwrap();
+        assert_eq!(plan.caller_media_network.is_none(), case == "legacy");
+        assert_eq!(plan.media.external_ip.as_deref(), Some("192.0.2.2"));
+        let base = plan.fork_for_target();
+        let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.media.caller_offer = Some(concat!(
+            "v=0\r\no=- 1 1 IN IP4 198.51.100.10\r\ns=-\r\nc=IN IP4 198.51.100.10\r\nt=0 0\r\n",
+            "m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+        ).into());
+        let expected_a = match case {
+            "profiles" => "192.0.2.1",
+            "trunk_override" | "direct_override" => "192.0.2.3",
+            _ => "192.0.2.2",
+        };
+        // Generate actual SDP without receiving any RTP from the caller.
+        session.ensure_caller_leg().await.unwrap();
+        let early_answer = session.media.answer.clone().unwrap();
+        assert!(early_answer.contains(&format!("c=IN IP4 {expected_a}")), "{case}: {early_answer}");
+        let caller_cfg = session.build_leg_config(&LegId::from("caller"), crate::media::TransportMode::Rtp, vec![], vec![]);
+        assert_eq!(caller_cfg.rtp_port_range, Some(if matches!(case, "profiles" | "trunk_override") {
+            (20000, 24998)
+        } else { (25000, 29998) }));
+        let expected_bind = if matches!(case, "legacy" | "same_profile") {
+            local_ip
+        } else { "0.0.0.0".parse().unwrap() };
+        assert_eq!(caller_cfg.bind_ips, vec![expected_bind]);
+        let callee_cfg = session.build_leg_config(&LegId::from("callee"), crate::media::TransportMode::Rtp, vec![], vec![]);
+        assert_eq!(callee_cfg.bind_ips, vec![local_ip]);
+        assert_eq!(callee_cfg.rtp_port_range, Some((25000, 29998)));
+        let (peer, offer) = session.create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp).await.unwrap();
+        assert!(offer.contains("c=IN IP4 192.0.2.2"), "{case}: {offer}");
+        drop(peer);
+
+        // A later destination may change B's network, but the established
+        // caller transport and its early/final answer must remain stable.
+        let attempt = dial_attempt(Default::default(), Some(crate::config::DialplanHints {
+            external_ip: Some("192.0.2.4".into()),
+            ..Default::default()
+        }), None);
+        let retry_plan = SipSession::plan_for_attempt(&server, &base, &attempt);
+        session.activate_attempt(&attempt, retry_plan).await;
+        session.ensure_caller_leg().await.unwrap();
+        assert_eq!(session.media.answer.as_deref(), Some(early_answer.as_str()));
+        let (peer, offer) = session.create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp).await.unwrap();
+        assert!(offer.contains("c=IN IP4 192.0.2.4"), "{case}: {offer}");
+        drop(peer);
+    }
+}

@@ -747,10 +747,17 @@ impl SipSession {
 
     pub(crate) fn build_leg_config(
         &self,
+        leg_id: &LegId,
         transport: crate::media::TransportMode,
         codecs: Vec<crate::media::negotiate::CodecInfo>,
         video_codecs: Vec<rustrtc::config::VideoCapability>,
     ) -> crate::media::leg::LegConfig {
+        let network = if leg_id.as_str() == "caller" {
+            self.context.dialplan.caller_media_network.as_ref()
+        } else {
+            None
+        };
+        let media = &self.context.dialplan.media;
         let is_webrtc = transport == crate::media::TransportMode::WebRtc;
         let rtp_port_range = if is_webrtc {
             self.context
@@ -759,11 +766,8 @@ impl SipSession {
                 .webrtc_port_start
                 .zip(self.context.dialplan.media.webrtc_port_end)
         } else {
-            self.context
-                .dialplan
-                .media
-                .rtp_start_port
-                .zip(self.context.dialplan.media.rtp_end_port)
+            network.and_then(|n| n.rtp_start_port).or(media.rtp_start_port)
+                .zip(network.and_then(|n| n.rtp_end_port).or(media.rtp_end_port))
         };
         crate::media::leg::LegConfig {
             quality_stats: self.context.dialplan.media.quality_stats.clone(),
@@ -782,13 +786,13 @@ impl SipSession {
             codecs,
             video_codecs,
             rtp_port_range,
-            external_ips: parse_ips(self.context.dialplan.media.external_ip.as_deref()),
+            external_ips: parse_ips(network.and_then(|n| n.external_ip.as_deref()).or(media.external_ip.as_deref())),
             // WebRTC must gather host candidates across interfaces. A fixed
             // SIP/RTP bind address is only appropriate for RTP/SDES legs.
             bind_ips: if is_webrtc {
                 Vec::new()
             } else {
-                parse_ips(self.context.dialplan.media.bind_ip.as_deref())
+                parse_ips(network.and_then(|n| n.bind_ip.as_deref()).or(media.bind_ip.as_deref()))
             },
             prefer_ipv6: false,
             cname: Some(self.server.rtc_cname.clone()),
@@ -2726,7 +2730,7 @@ impl SipSession {
             return Err(anyhow!("Originate caller MediaBridge A leg already exists"));
         }
 
-        let cfg = self.build_leg_config(crate::media::TransportMode::Rtp, codecs, Vec::new());
+        let cfg = self.build_leg_config(&LegId::from("caller"), crate::media::TransportMode::Rtp, codecs, Vec::new());
         let recorder_sender = self.setup_recording_capture()?;
         let leg_label = "caller";
         let leg = crate::media::create_leg(leg_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
@@ -4391,7 +4395,7 @@ impl SipSession {
                         } else {
                             Vec::new()
                         };
-                        let config = self.build_leg_config(mode.clone(), codecs, video);
+                        let config = self.build_leg_config(&leg_id, mode.clone(), codecs, video);
                         let peer =
                             crate::media::create_leg(leg_id.as_str(), &config, None, crate::media::CaptureRoute::Classic)?;
                         self.attach_media_leg(&leg_id, peer.clone());
@@ -7303,7 +7307,7 @@ impl SipSession {
         // strips video, the video m-line is forced inactive in the answer below.
         let video_codecs = self.video_caps_from_sdp(&caller_offer);
 
-        let cfg = self.build_leg_config(transport.clone(), codecs, video_codecs);
+        let cfg = self.build_leg_config(&LegId::from("caller"), transport.clone(), codecs, video_codecs);
         let caller_label = "caller";
 
         let recorder_sender = self.setup_recording_capture()?;
@@ -7967,7 +7971,7 @@ impl SipSession {
                     } else {
                         Vec::new()
                     };
-                    let cfg = self.build_leg_config(callee_mode, codecs, video_codecs);
+                    let cfg = self.build_leg_config(&LegId::from("callee"), callee_mode, codecs, video_codecs);
                     // The callee leg feeds the same recording task so its
                     // ingress (the agent mic) can become the recorder's B
                     // channel while the call is held; its tap starts fully
@@ -12946,7 +12950,7 @@ impl SipSession {
                 codecs.iter().map(|codec| codec.payload_type),
             )?;
         }
-        let cfg = self.build_leg_config(mode, codecs, video);
+        let cfg = self.build_leg_config(leg_id, mode, codecs, video);
         // Any dynamic leg can become the selected B side after queue dispatch
         // or transfer. Capture stays off until hold selects that exact peer,
         // so an unselected consultation cannot leak into the recording.

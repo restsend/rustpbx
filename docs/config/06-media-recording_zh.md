@@ -62,6 +62,29 @@ bind_ip = "100.64.10.2"
 codec = ["opus", "pcmu"]
 ```
 
+媒体由 PBX 锚定时，入局中继显式配置的 `profile`、`external_ip` 和 `bind_ip`
+用于原始主叫（A-leg）的媒体网络；出局中继配置用于 B-leg。中继直接配置的地址
+优先于 profile，profile 的 RTP 端口范围也按腿生效。例如，入局使用 `wan`
+公布公网地址，出局使用 `ims` 公布 IMS 网卡地址。这些媒体覆盖项不改变 SIP
+Contact/Via 的选择。入局未显式配置网络时，两条腿保留原有共享媒体配置行为，
+包括出局中继的覆盖项；未指定字段回退到共享配置。出局重试切换中继时，已建立的
+主叫媒体传输保持不变。
+
+### 使用两个 SIPp 验证媒体网络
+
+```sh
+SIPP_BIN=/opt/homebrew/bin/sipp cargo test --lib sipp_two_legs_media_network -- --ignored --nocapture
+```
+
+SIPp 已在 PATH 中时可省略 `SIPP_BIN`。测试无需第二张物理网卡，覆盖两侧均使用
+localhost、A 使用本机 IPv4 而 B 使用 localhost、两侧绑定同一本机 IPv4 但公布
+不同地址三种情况。检查 A-leg 的 183/200 SDP 地址和端口一致性、B-leg 的 INVITE
+SDP，以及 ACK/BYE 流程；主叫不发送 RTP。日志位于 `target/sipp-media-network/`。
+
+显式绑定 loopback 时，rustrtc 会保留 loopback 公布地址，不映射 `external_ip`。
+测试不同公布地址应使用实际本机接口或通配绑定。第三种情况使用文档专用地址，
+只验证 SDP，不验证公网 NAT 可达性或音频传输。
+
 ### Latching（源地址学习）
 
 `enable_latching = true`（默认）时，即使被叫 SDP 公布的是局域网私有 IP，PBX 也会从第一个收到的数据包学习被叫实际 RTP 地址。这使 `media_proxy = "auto"` 或 `"force_transcode"` 能正确处理 NAT 后的端点，无需显式改写 SDP。

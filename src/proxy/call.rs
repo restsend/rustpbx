@@ -1208,6 +1208,33 @@ impl CallModule {
             .with_diversion_chain_from_request(original)
             .with_passthrough_failure(self.inner.server.proxy_config.load().passthrough_failure);
 
+        // Preserve the inbound network before destination hints replace the
+        // shared media settings. No explicit source settings means legacy
+        // shared-network behavior (including outbound-trunk overrides).
+        if let Some(trunk) = cookie.get_extension::<TrunkContext>()
+            .and_then(|ctx| self.inner.server.data_context.get_trunk(&ctx.name))
+            && (trunk.profile.is_some() || trunk.external_ip.is_some() || trunk.bind_ip.is_some())
+        {
+            let mut network = crate::call::MediaNetworkConfig::default();
+            if let Some(id) = trunk.profile.as_deref() {
+                let profile = self.inner.server.network_profile(id)
+                    .unwrap_or_else(|| self.inner.server.default_network_profile());
+                let mut media = dialplan.media.clone();
+                self.inner.server.apply_network_profile_to_media(&profile, &mut media);
+                network.external_ip = media.external_ip;
+                network.bind_ip = media.bind_ip;
+                network.rtp_start_port = media.rtp_start_port;
+                network.rtp_end_port = media.rtp_end_port;
+            }
+            if let Some(ip) = trunk.external_ip {
+                network.external_ip = Some(ip);
+            }
+            if let Some(ip) = trunk.bind_ip {
+                network.bind_ip = Some(ip);
+            }
+            dialplan.caller_media_network = Some(network);
+        }
+
         // Resolve the original-header passthrough rule for the (direct) callee
         // target(s) before moving `targets` into the dialplan. Internal
         // destinations (same realm / registered / home proxy) always

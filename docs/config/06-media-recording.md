@@ -62,6 +62,51 @@ bind_ip = "100.64.10.2"
 codec = ["opus", "pcmu"]
 ```
 
+For anchored media, an inbound trunk's explicit `profile`, `external_ip`, and
+`bind_ip` select the original caller's (A-leg) media network. The outbound
+trunk selects B-leg's network. Direct trunk addresses override its profile;
+profile RTP port ranges also apply to that leg. For example, an inbound `wan`
+profile can advertise the public IP while an outbound `ims` profile advertises
+an IMS interface address. These media overrides do not change SIP Contact/Via
+selection. Without explicit inbound network settings, both legs retain the
+legacy shared media settings, including outbound trunk overrides. Unspecified
+fields fall back to the shared settings. An established caller transport stays
+unchanged when an outbound attempt is retried on another trunk.
+
+### Testing per-leg networks with SIPp
+
+Run two real SIPp processes through the PBX's ACL, routing, and call modules:
+
+```sh
+SIPP_BIN=/opt/homebrew/bin/sipp cargo test --lib sipp_two_legs_media_network -- --ignored --nocapture
+```
+
+Omit `SIPP_BIN` when `sipp` is on PATH. The test uses dynamic loopback SIP ports
+and does not need a second physical network card or interface aliases.
+
+The test runs three calls:
+
+| Case | A-leg bind / advertised IP | B-leg bind / advertised IP |
+| --- | --- | --- |
+| `localhost` | `127.0.0.1` / `127.0.0.1` | `127.0.0.1` / `127.0.0.1` |
+| `lan_and_localhost` | detected local IPv4 / same IP | `127.0.0.1` / `127.0.0.1` |
+| `distinct_advertised` | detected local IPv4 / `203.0.113.10` | detected local IPv4 / `198.51.100.20` |
+
+A uses RTP ports 20000–24998; B uses 25000–29998. SIPp validates A's 183 and
+200 SDP and B's INVITE SDP, then completes ACK/BYE. The harness also checks
+that A's early and final SDP use the same RTP port. No caller RTP is sent,
+matching a caller without microphone input.
+
+Logs, effective profiles, and substituted scenarios are saved under
+`target/sipp-media-network/<case>/`. The two XML files are templates; the
+harness substitutes their expected addresses before starting SIPp.
+
+Explicit loopback RTP binds work for localhost calls, but rustrtc deliberately
+keeps their advertised address on loopback, even if `external_ip` is different.
+Use a real local interface or wildcard binding to test external-IP mapping.
+The documentation-range addresses in the third case test SDP advertisement
+only; this test does not verify public NAT reachability or audio delivery.
+
 ### Latching
 
 When `enable_latching = true` (default), the PBX learns a callee's actual RTP

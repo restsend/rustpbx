@@ -925,6 +925,16 @@ impl Default for FailureAction {
     }
 }
 
+/// Optional per-leg media network overrides. Unset fields retain the shared
+/// media configuration; SIP Contact/Via policy is deliberately separate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MediaNetworkConfig {
+    pub external_ip: Option<String>,
+    pub bind_ip: Option<String>,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
+}
+
 /// Media configuration for call control
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
@@ -1185,6 +1195,9 @@ pub struct Dialplan {
     pub recording_policy: Option<RecordingPolicy>,
     /// Media configuration
     pub media: MediaConfig,
+    /// Explicit inbound-trunk network settings for the original caller.
+    /// None preserves the legacy shared media network on both legs.
+    pub caller_media_network: Option<MediaNetworkConfig>,
     /// Maximum call duration
     pub max_call_duration: Option<Duration>,
     /// RTP timeout per direction (None = use proxy default)
@@ -1269,6 +1282,7 @@ impl std::fmt::Debug for Dialplan {
             .field("max_ring_time", &self.max_ring_time)
             .field("recording", &self.recording)
             .field("media", &self.media)
+            .field("caller_media_network", &self.caller_media_network)
             .field("max_call_duration", &self.max_call_duration)
             .field("rtp_timeout", &self.rtp_timeout)
             .field("enable_sipflow", &self.enable_sipflow)
@@ -1296,6 +1310,7 @@ impl Dialplan {
             recording: self.recording.clone(),
             recording_policy: self.recording_policy.clone(),
             media: self.media.clone(),
+            caller_media_network: self.caller_media_network.clone(),
             max_call_duration: self.max_call_duration,
             rtp_timeout: self.rtp_timeout,
             failure_action: self.failure_action.clone(),
@@ -1418,6 +1433,9 @@ impl Dialplan {
                 ),
             );
         }
+        if let Some(network) = self.caller_media_network.as_ref() {
+            obj.insert("caller_media_network".to_string(), serde_json::json!(network));
+        }
         // Media optional fields.
         if let Some(media_obj) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
             if let Some(ip) = media.external_ip.as_ref() {
@@ -1498,6 +1516,7 @@ impl Dialplan {
             recording: CallRecordingConfig::default(),
             recording_policy: None,
             media: MediaConfig::default(),
+            caller_media_network: None,
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
             rtp_timeout: None,
             failure_action: FailureAction::default(),
