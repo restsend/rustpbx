@@ -1,7 +1,97 @@
 use super::prelude::*;
 use super::session::SipSession;
+use super::util::{CalleeError, into_callee_err};
+use crate::media::MediaNegotiationError;
 use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::sip_session::util::trunk_host_port;
+
+#[derive(Debug)]
+struct DownstreamMediaError(anyhow::Error);
+
+impl std::fmt::Display for DownstreamMediaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for DownstreamMediaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+fn is_local_media_resource_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| match cause.downcast_ref::<rustrtc::RtcError>() {
+        Some(
+            rustrtc::RtcError::AddrInUse
+            | rustrtc::RtcError::Transport(_)
+            | rustrtc::RtcError::Timeout(_),
+        ) => true,
+        Some(rustrtc::RtcError::InvalidState(msg)) => msg.contains("ICE gathering failed"),
+        Some(rustrtc::RtcError::Internal(msg)) => {
+            msg.contains("No available even RTP ports")
+                || msg.contains("RTP socket bind failed")
+                || msg.contains("RTP direct error")
+                || msg.contains("ICE error")
+                || msg.contains("ICE restart failed")
+        }
+        _ => false,
+    })
+}
+
+fn is_media_negotiation_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if cause.is::<MediaNegotiationError>() || cause.is::<rustrtc::SdpError>() {
+            return true;
+        }
+        match cause.downcast_ref::<rustrtc::RtcError>() {
+            Some(
+                rustrtc::RtcError::InvalidConfiguration(_)
+                | rustrtc::RtcError::Protocol(_)
+                | rustrtc::RtcError::NotImplemented(_),
+            ) => true,
+            Some(rustrtc::RtcError::Internal(msg)) => {
+                let lower = msg.to_ascii_lowercase();
+                lower.contains("crypto suite")
+                    || lower.contains("key params")
+                    || lower.contains("invalid base64 key")
+                    || lower.contains("invalid key length")
+                    || lower.contains("mki")
+                    || lower.contains("srtp error")
+                    || lower.contains("dtls")
+                    || lower.contains("no transceiver found for mid")
+            }
+            _ => false,
+        }
+    })
+}
+
+pub(crate) fn classify_media_setup_error(err: &anyhow::Error) -> CalleeError {
+    if is_local_media_resource_error(err) {
+        return into_callee_err(
+            &StatusCode::ServerInternalError,
+            Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string()),
+        );
+    }
+
+    if is_media_negotiation_error(err) {
+        if err.chain().any(|cause| cause.is::<DownstreamMediaError>()) {
+            return into_callee_err(
+                &StatusCode::BadGateway,
+                Some(r#"SIP;cause=502;text="Downstream media negotiation failed""#.to_string()),
+            );
+        }
+        return into_callee_err(
+            &StatusCode::NotAcceptableHere,
+            Some(r#"SIP;cause=488;text="Media negotiation failed""#.to_string()),
+        );
+    }
+
+    into_callee_err(
+        &StatusCode::ServerInternalError,
+        Some(r#"SIP;cause=500;text="Media session setup failed""#.to_string()),
+    )
+}
 
 // ===================================================================
 // Media negotiation & SDP handling for SipSession
@@ -97,7 +187,7 @@ impl SipSession {
             return Ok(());
         }
         let recorder_sender = match side {
-            LegSide::A => self.setup_recording_capture()?,
+            LegSide::A => self.setup_recording_capture(),
             LegSide::B => {
                 // The callee leg feeds the SAME recording task so its ingress
                 // (the agent mic) can become the recorder's B channel while
@@ -705,7 +795,10 @@ impl SipSession {
                 } else {
                     caller_answer
                 };
-                callee.apply_remote_sdp(callee_sdp_value, callee_sdp_type).await?;
+                callee
+                    .apply_remote_sdp(callee_sdp_value, callee_sdp_type)
+                    .await
+                    .map_err(DownstreamMediaError)?;
 
                 self.media.answer = caller_answer.clone();
 
@@ -769,7 +862,9 @@ impl SipSession {
 
         let caller_answer = if self.media_profile.path == MediaPathMode::Anchored {
             if let Some(peer) = self.media_leg(&LegId::from("callee")) {
-                peer.apply_remote_sdp(&callee_sdp_value, callee_sdp_type).await?;
+                peer.apply_remote_sdp(&callee_sdp_value, callee_sdp_type)
+                    .await
+                    .map_err(DownstreamMediaError)?;
             }
             self.ensure_caller_leg().await?;
             self.media.answer.clone()

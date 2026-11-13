@@ -124,12 +124,29 @@ impl SipSession {
     /// packets, so the idle cost is a single lightweight task per session.
     pub(crate) fn setup_recording_capture(
         &mut self,
-    ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
+    ) -> Option<crate::media::media_recorder::RecorderSender> {
+        if let Some(sender) = self.media.recording.capture_sender() {
+            return Some(sender);
+        }
         let _media_runtime_guard = crate::utils::media_enter();
         // Match the recorder's target so enabling its logs also enables call context.
-        let sender = tracing::info_span!(target: "rustpbx_media::recorder", "recording", session_id = %self.id)
-            .in_scope(|| self.media.recording.setup_recorder_task())?;
-        Ok(Some(sender))
+        match tracing::info_span!(
+            target: "rustpbx_media::recorder",
+            "recording",
+            session_id = %self.id
+        )
+        .in_scope(|| self.media.recording.setup_recorder_task())
+        {
+            Ok(sender) => Some(sender),
+            Err(error) => {
+                warn!(
+                    session_id = %self.id,
+                    %error,
+                    "Failed to setup recording capture task; continuing call without recording"
+                );
+                None
+            }
+        }
     }
 
     pub(super) fn caller_recording_profile(&self) -> Result<crate::media::negotiate::NegotiatedLegProfile> {

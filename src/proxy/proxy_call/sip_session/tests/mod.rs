@@ -16008,3 +16008,167 @@ async fn inbound_media_network_survives_outbound_profiles_and_retry() {
         drop(peer);
     }
 }
+
+#[tokio::test]
+async fn media_setup_separates_resource_negotiation_and_recording_errors() {
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::config::MediaProxyMode;
+    use crate::proxy::proxy_call::sip_session::session::MediaPathMode;
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let (server, _) = create_test_server().await;
+    let target = Location {
+        aor: "sip:2001@rustpbx.com".try_into().unwrap(),
+        ..Default::default()
+    };
+
+    let new_anchored_session = |session_id: &str| {
+        let server = server.clone();
+        let sid = session_id.to_string();
+        async move {
+            let request = create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            );
+            let mut plan = Dialplan::new(sid, request, DialDirection::Inbound)
+                .with_caller("sip:alice@rustpbx.com".parse().unwrap());
+            plan.media.proxy_mode = MediaProxyMode::All;
+            let (mut session, _handle, _rx) = build_session_with_cmd_rx_on(server, plan).await;
+            session.media_profile.path = MediaPathMode::Anchored;
+            session
+        }
+    };
+
+    let valid_offer = concat!(
+        "v=0\r\n",
+        "o=- 1 1 IN IP4 127.0.0.1\r\n",
+        "s=-\r\n",
+        "c=IN IP4 127.0.0.1\r\n",
+        "t=0 0\r\n",
+        "m=audio 4000 RTP/AVP 0\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+        "a=sendrecv\r\n",
+    );
+
+    // 1. Pre-started / failed recording setup does not abort call establishment
+    {
+        let mut session = new_anchored_session("recording-non-fatal").await;
+        let _ = session.media.recording.setup_recorder_task().unwrap();
+        session.media.caller_offer = Some(valid_offer.to_string());
+        session
+            .build_target_invite_option(&target, None, None)
+            .await
+            .ok()
+            .expect("recording setup state must not fail call setup");
+    }
+
+    // 2. Negotiation / SDP / codec failure -> 488 "Media negotiation failed"
+    for bad_offer in [
+        None,
+        Some("not valid sdp\r\n".to_string()),
+        Some(
+            concat!(
+                "v=0\r\n",
+                "o=- 1 1 IN IP4 127.0.0.1\r\n",
+                "s=-\r\n",
+                "c=IN IP4 127.0.0.1\r\n",
+                "t=0 0\r\n",
+                "m=audio 4000 RTP/AVP 97\r\n",
+                "a=rtpmap:97 FOOCODEC/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        ),
+    ] {
+        let mut session = new_anchored_session("negotiation-err").await;
+        session.media.caller_offer = bad_offer;
+        let (code, _phrase, reason) = session
+            .build_target_invite_option(&target, None, None)
+            .await
+            .err()
+            .expect("negotiation error must fail");
+        assert_eq!(code, 488);
+        assert_eq!(
+            reason.as_deref(),
+            Some(r#"SIP;cause=488;text="Media negotiation failed""#)
+        );
+    }
+
+    // 3. Downstream callee 200 OK SDP failure -> 502 "Downstream media negotiation failed"
+    {
+        let mut session = new_anchored_session("downstream-sdp-err").await;
+        session.media.caller_offer = Some(valid_offer.to_string());
+        let _ = session
+            .build_target_invite_option(&target, None, None)
+            .await
+            .ok()
+            .expect("callee INVITE offer setup must succeed");
+        let err = session
+            .prepare_caller_answer_from_callee_sdp(
+                Some("corrupted callee 200 ok sdp".to_string()),
+                false,
+                rustrtc::SdpType::Answer,
+            )
+            .await
+            .expect_err("corrupted downstream SDP answer must fail");
+        let (code, _phrase, reason) =
+            crate::proxy::proxy_call::sip_session::session_media::classify_media_setup_error(&err);
+        assert_eq!(code, 502);
+        assert_eq!(
+            reason.as_deref(),
+            Some(r#"SIP;cause=502;text="Downstream media negotiation failed""#)
+        );
+    }
+
+    // 4. True RTP port exhaustion -> 500 "Media resource allocation failed" (sanitized)
+    {
+        let occupied = loop {
+            let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            if sock.local_addr().unwrap().port() % 2 == 0 {
+                break sock;
+            }
+        };
+        let port = occupied.local_addr().unwrap().port();
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let mut plan = Dialplan::new(
+            "rtp-exhausted".to_string(),
+            request,
+            DialDirection::Inbound,
+        )
+        .with_caller("sip:alice@rustpbx.com".parse().unwrap());
+        plan.media.proxy_mode = MediaProxyMode::All;
+        plan.media.bind_ip = Some("127.0.0.1".to_string());
+        plan.media.rtp_start_port = Some(port);
+        plan.media.rtp_end_port = Some(port);
+        plan.caller_media_network = crate::call::MediaNetworkConfig::from(&plan.media);
+        let (mut session, _handle, _rx) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.media_profile.path = MediaPathMode::Anchored;
+        session.media.caller_offer = Some(valid_offer.to_string());
+        let (code, _phrase, reason) = session
+            .build_target_invite_option(&target, None, None)
+            .await
+            .err()
+            .expect("exhausted RTP port range must fail");
+        assert_eq!(code, 500);
+        assert_eq!(
+            reason.as_deref(),
+            Some(r#"SIP;cause=500;text="Media resource allocation failed""#)
+        );
+        assert!(
+            !reason.unwrap().contains(&port.to_string()),
+            "internal port details must not leak into SIP Reason header"
+        );
+        drop(occupied);
+    }
+}

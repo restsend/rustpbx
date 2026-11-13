@@ -2735,7 +2735,7 @@ impl SipSession {
         }
 
         let cfg = self.build_leg_config(&LegId::from("caller"), crate::media::TransportMode::Rtp, codecs, Vec::new());
-        let recorder_sender = self.setup_recording_capture()?;
+        let recorder_sender = self.setup_recording_capture();
         let leg_label = "caller";
         let leg = crate::media::create_leg(leg_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
         let offer = leg.create_offer().await?;
@@ -4024,12 +4024,7 @@ impl SipSession {
                         error = %e,
                         "Failed to create per-fork media offer"
                     );
-                    into_callee_err(
-                        &StatusCode::ServerInternalError,
-                        Some(
-                            r#"SIP;cause=500;text="Media resource allocation failed""#.to_string(),
-                        ),
-                    )
+                    super::session_media::classify_media_setup_error(&e)
                 })?
         } else {
             self.prepare_callee_media_offer(target).await.map_err(|e| {
@@ -4038,10 +4033,7 @@ impl SipSession {
                     error = %e,
                     "Failed to prepare callee media offer"
                 );
-                into_callee_err(
-                    &StatusCode::ServerInternalError,
-                    Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string()),
-                )
+                super::session_media::classify_media_setup_error(&e)
             })?
         };
         let content_type = offer.as_ref().map(|_| "application/sdp".to_string());
@@ -7292,7 +7284,7 @@ impl SipSession {
             .media
             .caller_offer
             .clone()
-            .ok_or_else(|| anyhow!("No caller offer available"))?;
+            .ok_or(crate::media::MediaNegotiationError::MissingOffer)?;
         // Classify from the offer itself (ICE+DTLS → WebRtc, RTP/SAVP or
         // a=crypto → Srtp, otherwise plain Rtp) so an SDES-SRTP offer gets an
         // Srtp caller leg and an `RTP/SAVP`+`a=crypto` answer — answering a
@@ -7314,7 +7306,7 @@ impl SipSession {
         let cfg = self.build_leg_config(&LegId::from("caller"), transport.clone(), codecs, video_codecs);
         let caller_label = "caller";
 
-        let recorder_sender = self.setup_recording_capture()?;
+        let recorder_sender = self.setup_recording_capture();
         let prepared = async {
             let leg = crate::media::create_leg(caller_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
             leg.apply_remote_sdp(&caller_offer, rustrtc::SdpType::Offer).await?;
@@ -8023,10 +8015,7 @@ impl SipSession {
                     error = %e,
                     "Failed to prepare caller answer"
                 );
-                into_callee_err(
-                    &StatusCode::ServerInternalError,
-                    Some(r#"SIP;cause=500;text="Media resource allocation failed""#.to_string()),
-                )
+                super::session_media::classify_media_setup_error(&e)
             })?;
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
@@ -8043,7 +8032,14 @@ impl SipSession {
             .unwrap_or_default();
         self.accept_call_with_headers(Some(callee_uri.to_string()), caller_answer, relayed_headers)
             .await
-            .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
+            .map_err(|e| {
+                warn!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to accept caller dialog"
+                );
+                super::session_media::classify_media_setup_error(&e)
+            })?;
 
         // Register callee dialog in unified map
         if let Some(dlg) = self.server.dialog_layer.get_dialog(&dialog_id) {

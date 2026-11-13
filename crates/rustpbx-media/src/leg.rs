@@ -389,7 +389,9 @@ impl LegInner {
         relay_ready_timeout: Option<std::time::Duration>,
         recorder_sender: Option<RecorderSender>,
     ) -> Result<Leg> {
-        let first_codec = codecs.first().ok_or_else(|| anyhow!("no codecs"))?;
+        let first_codec = codecs
+            .first()
+            .ok_or(negotiate::MediaNegotiationError::NoCompatibleCodecs)?;
 
         // Stamp the correlation label (e.g. rustpbx's `{session_id}-{leg}`) on
         // the RtcConfiguration so rustrtc's per-PC tracing span carries it —
@@ -824,8 +826,7 @@ impl LegInner {
                 caps,
             )?;
         }
-        let offer = SessionDescription::parse(SdpType::Offer, &sdp)
-            .map_err(|e| anyhow!("failed to reparse rewritten offer: {e:?}"))?;
+        let offer = SessionDescription::parse(SdpType::Offer, &sdp)?;
         let sdp = set_local(&self.pc, offer)?;
         if let Some(desc) = self.pc.local_description()
             && let Some(addr) = advertised_audio_addr(&desc)
@@ -865,15 +866,12 @@ impl LegInner {
             video_mline = ?video_mline,
             "leg SDP applied",
         );
-        let desc = SessionDescription::parse(sdp_type, remote)
-            .map_err(|e| anyhow!("failed to parse remote sdp: {:?}", e))?;
+        let desc = SessionDescription::parse(sdp_type, remote)?;
         if let Some(addr) = advertised_audio_addr(&desc) {
             *self.peer_advertised_addr.lock() = Some(addr);
         }
         // Keep rustrtc's large negotiation future off the nested SIP call stack.
-        Box::pin(self.pc.set_remote_description(desc))
-            .await
-            .map_err(|e| anyhow!("set_remote_description failed: {}", e))?;
+        Box::pin(self.pc.set_remote_description(desc)).await?;
         // Direct RTP has a transport now; WebRTC may still be waiting for ICE.
         // Attach immediately when the transport object becomes available.
         self.ensure_observer();
