@@ -92,7 +92,13 @@ async fn test_cluster_consult_state_marker_relays_across_home_proxy_e2e() -> Res
     let server_a = start_server(&db_url, port_a, port_b).await?;
     let server_b = start_server(&db_url, port_b, port_a).await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Both listeners must be bound before any UA can register.
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        !server_a.inner.local_listen_addrs.is_empty()
+            && !server_b.inner.local_listen_addrs.is_empty()
+    })
+    .await
+    .expect("cluster servers must bind their listeners");
 
     let proxy_a: SocketAddr = format!("127.0.0.1:{}", port_a).parse()?;
     let proxy_b: SocketAddr = format!("127.0.0.1:{}", port_b).parse()?;
@@ -106,7 +112,29 @@ async fn test_cluster_consult_state_marker_relays_across_home_proxy_e2e() -> Res
     let ap = Arc::new(create_ua("ap", proxy_a, ap_port).await?);
     let lp = create_ua("lp", proxy_b, lp_port).await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Both registrations must be visible on BOTH nodes' shared locator —
+    // the home-proxy routing this regression guards reads the peer's
+    // locator, so local-only visibility is not enough.
+    let ap_aor: rsipstack::sip::Uri = "sip:ap@127.0.0.1".parse()?;
+    let lp_aor: rsipstack::sip::Uri = "sip:lp@127.0.0.1".parse()?;
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        !server_a
+            .inner
+            .locator
+            .lookup(&ap_aor)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+            && !server_b
+                .inner
+                .locator
+                .lookup(&lp_aor)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+    })
+    .await
+    .expect("registrations must be visible on both cluster nodes");
 
     let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
 
@@ -151,7 +179,7 @@ async fn test_cluster_consult_state_marker_relays_across_home_proxy_e2e() -> Res
         if lp_dialog_id.is_some() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(lp_dialog_id.is_some(), "call must ring lp across the cluster");
 
@@ -219,7 +247,14 @@ async fn test_cluster_consult_state_marker_relays_across_home_proxy_e2e() -> Res
     assert!(talk_seen, "consult-state=talk must relay across the cluster too");
 
     ap.hangup(&ap_dialog_id).await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Sessions must tear down on both nodes before the servers stop — the
+    // registry clearing is the teardown observable (BYE fully processed).
+    crate::common::wait::wait_until(Duration::from_secs(5), || async {
+        server_a.inner.active_call_registry.is_empty()
+            && server_b.inner.active_call_registry.is_empty()
+    })
+    .await
+    .expect("call sessions must tear down on both nodes after hangup");
     ap.stop();
     lp.stop();
     server_a.stop();

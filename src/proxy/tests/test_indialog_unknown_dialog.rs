@@ -247,7 +247,28 @@ async fn zombie_update_on_terminated_call_gets_481() {
 
     caller.register().await.unwrap();
     agent.register().await.unwrap();
-    sleep(Duration::from_millis(100)).await;
+    // Registrations must be visible to the proxy's locator before dialing —
+    // register() already awaited the 200 OK, so this is pure persistence sync.
+    super::wait::wait_until(Duration::from_secs(2), || async {
+        let alice: rsipstack::sip::Uri = "sip:alice@127.0.0.1".parse().unwrap();
+        let bob: rsipstack::sip::Uri = "sip:bob@127.0.0.1".parse().unwrap();
+        !proxy
+            .server_ref
+            .locator
+            .lookup(&alice)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+            && !proxy
+                .server_ref
+                .locator
+                .lookup(&bob)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+    })
+    .await
+    .expect("registrations must land in the locator");
 
     let caller_handle = crate::utils::spawn({
         let caller = caller.clone();
@@ -271,16 +292,21 @@ async fn zombie_update_on_terminated_call_gets_481() {
         )
         .await
         .ok();
-    sleep(Duration::from_millis(200)).await;
+    // make_call's join handle resolves only on full establishment — that is
+    // the establishment synchronization; no settle sleep needed.
 
     let dialog_id = caller_handle
         .await
         .expect("make_call join")
         .expect("make_call ok");
 
-    // Tear the call down: the proxy's dialog entry is removed.
+    // Tear the call down: the dialog entry is removed from the proxy's table.
     caller.hangup(&dialog_id).await.ok();
-    sleep(Duration::from_millis(300)).await;
+    super::wait::wait_until(Duration::from_secs(3), || async {
+        proxy.registry.is_empty()
+    })
+    .await
+    .expect("dialog entry must be removed from the proxy after hangup");
 
     // The zombie sends a session-refresh UPDATE on the terminated dialog.
     let msg = build_indialog_request(
