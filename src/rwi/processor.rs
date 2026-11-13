@@ -768,7 +768,7 @@ impl RwiCommandProcessor {
     /// Normalize an RWI-supplied `caller_id` into a valid SIP URI string for the
     /// originate `From` header.
     ///
-    /// `caller_id` is commonly a bare phone number ("+16142159851") — caller ID
+    /// `caller_id` is commonly a bare phone number ("+12025550123") — caller ID
     /// *is* a number. A bare token parses into a user-less URI, and a trunk's
     /// `rewrite_hostport` then restamps the host, yielding an invalid `From` like
     /// `<carrier.example.com>` (no user) that carriers reject with
@@ -846,8 +846,8 @@ impl RwiCommandProcessor {
     /// Apply an explicit carrier-trunk override to an originate's InviteOption.
     ///
     /// When `trunk_name` names a configured (and enabled) trunk, stamp that trunk's
-    /// destination next-hop, transport, digest credential, host rewrite, and
-    /// P-Asserted-Identity header onto `option` (the same pure mutator the inbound
+    /// destination next-hop, transport, digest credential, and host rewrite
+    /// onto `option` (the same pure mutator the inbound
     /// proxy path uses), so the resulting INVITE goes straight to the carrier. When
     /// `trunk_name` is None/blank the option is left untouched and the legacy
     /// direct-to-callee behavior is preserved.
@@ -981,7 +981,7 @@ impl RwiCommandProcessor {
         };
 
         // Direct-to-trunk routing: when the caller names a `trunk`, stamp its
-        // next-hop + credential + P-Asserted-Identity onto the option so
+        // next-hop + credential onto the option so
         // rsipstack sends ONE INVITE straight to the carrier (auto-answering
         // its 401/407). Without `trunk` the option is untouched (legacy
         // direct-to-callee). The route table is deliberately NOT consulted

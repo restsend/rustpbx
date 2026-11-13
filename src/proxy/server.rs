@@ -73,15 +73,6 @@ pub struct SipServerInner {
     pub default_network_profile_id: ArcSwap<String>,
     pub media_proxy: ArcSwap<MediaProxyMode>,
     pub proxy_config: ArcSwap<ProxyConfig>,
-    /// Full process config snapshot (`--conf` file) — the live counterpart of
-    /// `proxy_config` for every NON-proxy section. The call path synthesizes
-    /// each session's `ApplicationContext.config` from this snapshot with the
-    /// `proxy` section overridden by the live `proxy_config` swap, so config
-    /// sections that only exist in the file (`[[realtime]]`, `[rwi]`, ...) stay
-    /// visible to call apps. Issue #302: the app context used to rebuild a
-    /// `Config::default()` here, silently dropping `[[realtime]]` presets.
-    /// Refreshed by `reload_proxy_config`.
-    pub app_config: ArcSwap<crate::config::Config>,
     pub data_context: Arc<ProxyDataContext>,
     /// Shared routing state (round-robin counters + policy guard) used by the
     /// inbound route path and by app/transfer/RWI-originated legs that opt into
@@ -114,6 +105,8 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub locator_event_lock: LocatorEventLock,
+    /// Top-level realtime presets, snapshotted when each call session is created.
+    pub realtime_presets: ArcSwap<Option<Vec<crate::config::RealtimePreset>>>,
     pub sipflow_config: Arc<arc_swap::ArcSwap<Option<SipFlowConfig>>>,
     pub recording_policy: Arc<arc_swap::ArcSwap<Option<RecordingPolicy>>>,
     pub sip_flow: Option<SipFlow>,
@@ -223,6 +216,7 @@ pub struct SipServerBuilder {
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
+    realtime_presets: Option<Vec<crate::config::RealtimePreset>>,
     sipflow_config: Option<SipFlowConfig>,
     /// Shared sipflow config slot (takes precedence over `sipflow_config`);
     /// lets the app share one live config handle between the server, the
@@ -253,10 +247,6 @@ pub struct SipServerBuilder {
     /// Media policy for deciding when to anchor media.
     /// Trunk health check states (shared map populated by background loop).
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
-    /// Full process config (all sections, not just `[proxy]`) — seeded into
-    /// [`SipServerInner::app_config`]. Call apps read non-proxy sections
-    /// (e.g. `[[realtime]]` presets) through it.
-    app_config: Option<Arc<crate::config::Config>>,
     /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
     session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
     /// Rolling handover runtime (None unless `[rolling] enabled`). When
@@ -293,6 +283,7 @@ impl SipServerBuilder {
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
             storage: None,
+            realtime_presets: None,
             sipflow_config: None,
             sipflow_config_slot: None,
             recording_policy_slot: None,
@@ -309,19 +300,9 @@ impl SipServerBuilder {
             cluster_peers: Vec::new(),
             cluster_config: None,
             trunk_health: None,
-            app_config: None,
             session_hooks: Vec::new(),
             rolling: None,
         }
-    }
-
-    /// Seed the server with the FULL process config (all top-level sections).
-    /// Only the `[proxy]` section flows through `SipServerBuilder::new`; this
-    /// carries the rest (`[[realtime]]`, `[rwi]`, ...) for the call-app path.
-    /// `reload_proxy_config` refreshes the snapshot on config-file reloads.
-    pub fn with_app_config(mut self, config: Arc<crate::config::Config>) -> Self {
-        self.app_config = Some(config);
-        self
     }
 
     pub fn with_rolling(
@@ -339,6 +320,11 @@ impl SipServerBuilder {
 
     pub fn with_cluster_config(mut self, config: Option<ClusterConfig>) -> Self {
         self.cluster_config = config;
+        self
+    }
+
+    pub fn with_realtime_presets(mut self, presets: Option<Vec<crate::config::RealtimePreset>>) -> Self {
+        self.realtime_presets = presets;
         self
     }
 
@@ -1339,11 +1325,6 @@ impl SipServerBuilder {
             default_network_profile_id: ArcSwap::new(Arc::new(default_network_profile_id)),
             media_proxy: ArcSwap::new(Arc::new(self.config.media_proxy)),
             proxy_config: ArcSwap::from_pointee(self.config.as_ref().clone()),
-            app_config: ArcSwap::from(
-                self.app_config
-                    .take()
-                    .unwrap_or_else(|| Arc::new(crate::config::Config::default())),
-            ),
             cancel_token,
             data_context,
             routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(
@@ -1367,6 +1348,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             locator_event_lock,
+            realtime_presets: ArcSwap::from_pointee(self.realtime_presets),
             sipflow_config: self.sipflow_config_slot.unwrap_or_else(|| {
                 Arc::new(ArcSwap::new(Arc::new(self.sipflow_config.clone())))
             }),
@@ -2081,7 +2063,7 @@ impl SipServerInner {
         let rtp = self.rtp_config.load();
         let media_proxy = **self.media_proxy.load();
         let proxy_config = self.proxy_config.load();
-        MediaConfig::new()
+        let mut media = MediaConfig::new()
             .with_proxy_mode(media_proxy)
             .with_external_ip(rtp.external_ip.clone())
             .with_bind_ip(rtp.bind_ip.clone())
@@ -2099,19 +2081,12 @@ impl SipServerInner {
             .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
             .with_quality_stats(rtp.quality_stats.clone())
             .with_volume_stats(rtp.volume_stats.clone())
-            .with_inband_dtmf(rtp.inband_dtmf)
-    }
-
-    /// Full-config snapshot for a new session's [`crate::call::app::ApplicationContext`]:
-    /// the `app_config` snapshot (every file section) with the LIVE `[proxy]`
-    /// section overlaid from the `proxy_config` swap — proxy keeps its
-    /// hot-reload semantics while the rest stays visible to call apps
-    /// (`[[realtime]]` preset resolution reads `config.realtime` here; issue
-    /// #302 was exactly this snapshot dropping the section).
-    pub fn session_app_config(&self) -> Arc<crate::config::Config> {
-        let mut snapshot = (*self.app_config.load_full()).clone();
-        snapshot.proxy = (*self.proxy_config.load_full()).clone();
-        Arc::new(snapshot)
+            .with_inband_dtmf(rtp.inband_dtmf);
+        if !self.network_profiles.load().is_empty() {
+            let profile = self.default_network_profile();
+            self.apply_network_profile_to_media(&profile, &mut media);
+        }
+        media
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings
@@ -2137,11 +2112,6 @@ impl SipServerInner {
 
         // Atomically swap the live proxy config.
         self.proxy_config.store(new_arc.clone());
-
-        // Keep the full-config snapshot in sync so non-proxy sections
-        // (`[[realtime]]` presets etc.) observe file reloads too — the
-        // call path derives each session's app config from this snapshot.
-        self.app_config.store(Arc::new(config.clone()));
 
         // Keep data_context in sync so trunk/route/ACL reloads reuse the
         // updated config (generated dirs, use_db_config, etc.).
@@ -2196,6 +2166,10 @@ impl SipServerInner {
         }
 
         let mut parts: Vec<String> = Vec::new();
+        if self.realtime_presets.load().as_ref() != &config.realtime {
+            self.realtime_presets.store(Arc::new(config.realtime.clone()));
+            parts.push("realtime".to_string());
+        }
         let old = &old_proxy;
         if old.rtp_timeout != new_proxy.rtp_timeout {
             parts.push("rtp_timeout".to_string());
@@ -2267,6 +2241,9 @@ impl SipServerInner {
         }
         if old.max_ring_time != new_proxy.max_ring_time {
             parts.push("max_ring_time".to_string());
+        }
+        if old.quality != new_proxy.quality {
+            parts.push("quality".to_string());
         }
         if format!("{:?}", old.locator_webhook) != format!("{:?}", new_proxy.locator_webhook) {
             parts.push("locator_webhook".to_string());
@@ -2984,7 +2961,7 @@ mod contact_uri_tests {
         // This node is the first peer (Node B); its listener matches peer[0].
         let local_addrs = vec![
             "172.25.224.232:15060".to_string(),
-            "116.62.250.247:15060".to_string(),
+            "192.0.2.247:15060".to_string(),
         ];
 
         let result = resolve_cluster_self_addr(&peers, &local_addrs).unwrap();

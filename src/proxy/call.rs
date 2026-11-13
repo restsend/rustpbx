@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
-    Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    Location, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::recorder::RecorderOption;
@@ -647,35 +647,11 @@ impl CallModule {
             })?
             .value();
 
-        let media_config = {
-            let rtp = self.inner.server.rtp_config.load();
-            let proxy_mode = **self.inner.server.media_proxy.load();
-            MediaConfig::new()
-                .with_proxy_mode(proxy_mode)
-                .with_external_ip(rtp.external_ip.clone())
-                .with_bind_ip(rtp.bind_ip.clone())
-                .with_rtp_start_port(rtp.start_port)
-                .with_rtp_end_port(rtp.end_port)
-                .with_webrtc_start_port(rtp.webrtc_start_port)
-                .with_webrtc_end_port(rtp.webrtc_end_port)
-                .with_ice_servers(rtp.ice_servers.clone())
-                .with_enable_latching(self.inner.server.proxy_config.load().enable_latching)
-                .with_probation_max_packets(
-                    self.inner
-                        .server
-                        .proxy_config
-                        .load()
-                        .latching_probation_max_packets,
-                )
-                .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
-                .with_ice_lite(rtp.ice_lite || caller.ice_lite)
-                .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
-                .with_stall_detect_secs(rtp.stall_detect_secs)
-                .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
-                .with_quality_stats(rtp.quality_stats.clone())
-                .with_volume_stats(rtp.volume_stats.clone())
-                .with_inband_dtmf(rtp.inband_dtmf)
-        };
+        let media_config = self
+            .inner
+            .server
+            .default_media_config()
+            .with_ice_lite(self.inner.server.rtp_config.load().ice_lite || caller.ice_lite);
 
         let caller_is_same_realm = self
             .inner
@@ -686,7 +662,10 @@ impl CallModule {
 
         let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();
 
-        let direction = if caller_is_same_realm && callee_is_same_realm && !is_from_trunk {
+        let direction = if is_from_trunk {
+            // Recognized trunk ingress is inbound regardless of URI realms.
+            DialDirection::Inbound
+        } else if caller_is_same_realm && callee_is_same_realm {
             match self
                 .inner
                 .server
@@ -717,25 +696,17 @@ impl CallModule {
                     DialDirection::Internal
                 }
             }
-        } else if caller_is_same_realm && callee_is_same_realm {
-            DialDirection::Outbound
         } else if caller_is_same_realm && !callee_is_same_realm {
             DialDirection::Outbound
         } else if !caller_is_same_realm && callee_is_same_realm {
             DialDirection::Inbound
         } else {
-            if is_from_trunk {
-                // If the call comes from a trunk, we can allow it to reach an internal destination even if the callee realm doesn't match, as long as the caller realm also doesn't match (to prevent external-to-external calls).
-                // This allows for more flexible routing from trusted trunks.
-                DialDirection::Inbound
-            } else {
-                warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
-                return Err(RouteError::from((
-                    anyhow::anyhow!("Both caller and callee are external realm"),
-                    Some(rsipstack::sip::StatusCode::Forbidden),
-                ))
-                .with_code(&crate::proxy::error_catalog::EXTERNAL_REALM_BOTH));
-            }
+            warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+            return Err(RouteError::from((
+                anyhow::anyhow!("Both caller and callee are external realm"),
+                Some(rsipstack::sip::StatusCode::Forbidden),
+            ))
+            .with_code(&crate::proxy::error_catalog::EXTERNAL_REALM_BOTH));
         };
 
         let mut locs = vec![Location {
@@ -1213,6 +1184,34 @@ impl CallModule {
             .with_diversion_chain_from_request(original)
             .with_passthrough_failure(self.inner.server.proxy_config.load().passthrough_failure);
 
+        // `with_media` already seeded `caller_media_network` from the global /
+        // default-profile baseline; apply explicit inbound-trunk overrides on top
+        // before destination hints modify `dialplan.media` for the callee leg.
+        if let Some(trunk) = cookie
+            .get_extension::<TrunkContext>()
+            .and_then(|ctx| self.inner.server.data_context.get_trunk(&ctx.name))
+            && (trunk.profile.is_some() || trunk.external_ip.is_some() || trunk.bind_ip.is_some())
+        {
+            let mut caller_media = dialplan.media.clone();
+            if let Some(id) = trunk.profile.as_deref() {
+                let profile = self
+                    .inner
+                    .server
+                    .network_profile(id)
+                    .unwrap_or_else(|| self.inner.server.default_network_profile());
+                self.inner
+                    .server
+                    .apply_network_profile_to_media(&profile, &mut caller_media);
+            }
+            if let Some(ip) = trunk.external_ip {
+                caller_media.external_ip = Some(ip);
+            }
+            if let Some(ip) = trunk.bind_ip {
+                caller_media.bind_ip = Some(ip);
+            }
+            dialplan.caller_media_network = crate::call::MediaNetworkConfig::from(&caller_media);
+        }
+
         // Resolve the original-header passthrough rule for the (direct) callee
         // target(s) before moving `targets` into the dialplan. Internal
         // destinations (same realm / registered / home proxy) always
@@ -1368,7 +1367,6 @@ impl CallModule {
                 dialplan.busy_wait = Some(busy_wait.to_plan());
             }
             dialplan.diversion_policy = hints.diversion_policy;
-            dialplan.amd = hints.amd.take();
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);
             dialplan.concurrent_call_lease = hints.concurrent_call_lease;

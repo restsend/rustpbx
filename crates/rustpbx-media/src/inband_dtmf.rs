@@ -150,7 +150,7 @@ const NEIGHBOR_LOW_MARGIN_MAX: f64 = 0.8;
 /// Energy is refreshed on EVERY sample as `power / totalPower / filterLength`
 /// so the value after the last sample is the block's normalized energy.
 #[derive(Debug)]
-pub(crate) struct Goertzel {
+struct Goertzel {
     coefficient: f64,
     f1: f64,
     f2: f64,
@@ -163,7 +163,7 @@ pub(crate) struct Goertzel {
 }
 
 impl Goertzel {
-    pub(crate) fn new(frequency: f64, sample_rate: f64) -> Self {
+    fn new(frequency: f64, sample_rate: f64) -> Self {
         let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
         Self {
             coefficient: 2.0 * omega.cos(),
@@ -177,7 +177,7 @@ impl Goertzel {
     }
 
     #[inline]
-    pub(crate) fn process_sample(&mut self, sample: f64) {
+    fn process_sample(&mut self, sample: f64) {
         let f1 = self.f1;
         let sine = sample + self.coefficient * f1 - self.f2;
         self.f2 = f1;
@@ -190,12 +190,7 @@ impl Goertzel {
         self.energy = self.power / total / self.filter_length as f64;
     }
 
-    /// Normalized energy of the block so far (0..1 relative fraction).
-    pub(crate) fn energy(&self) -> f64 {
-        self.energy
-    }
-
-    pub(crate) fn refresh(&mut self) {
+    fn refresh(&mut self) {
         self.f1 = 0.0;
         self.f2 = 0.0;
         self.total_power = 0.0;
@@ -1143,77 +1138,4 @@ mod tests {
         assert!(!leg.inband_dtmf_active());
     }
 
-    // ── 10. shared analysis tap × AMD (crate::amd sinks on the same tap) ──
-
-    /// Arming AMD on a leg whose DTMF sink already runs adds the AMD sink to
-    /// the SAME tap in place — the DTMF detector must not be rebuilt.
-    #[tokio::test]
-    async fn amd_arm_adds_sink_in_place_without_disturbing_dtmf() {
-        let leg = crate::leg::LegInner::new("amd-shared", &crate::leg::LegConfig::rtp_pcmu(), None)
-            .expect("leg");
-        leg.apply_profile_from_sdp(SDP_PCMU_NO_DTMF).await.unwrap();
-        assert!(leg.inband_dtmf_active(), "precondition: DTMF sink running");
-        let dtmf_generation = leg.inband_dtmf_generation();
-
-        let (outcome_tx, _outcome_rx) = tokio::sync::mpsc::channel(2);
-        leg.arm_amd(crate::amd::AmdArmament {
-            detector: crate::amd::create_amd_detector(&crate::amd::AmdConfig::default())
-                .expect("heuristic detector"),
-            local_speech: Default::default(),
-            outcome_tx,
-        });
-        assert!(leg.amd_armed());
-        assert!(leg.inband_dtmf_active(), "DTMF sink must survive the AMD arm");
-        assert_eq!(
-            leg.inband_dtmf_generation(),
-            dtmf_generation,
-            "AMD arm must add its sink in place, not rebuild the tap"
-        );
-
-        // Disarm: the AMD sink goes away, DTMF keeps running untouched.
-        leg.disarm_amd();
-        assert!(!leg.amd_armed());
-        assert!(leg.inband_dtmf_active());
-        assert_eq!(
-            leg.inband_dtmf_generation(),
-            dtmf_generation,
-            "AMD disarm must not disturb the DTMF sink"
-        );
-        leg.stop();
-    }
-
-    /// On a leg that negotiated telephone-event (no DTMF sink) the armed AMD
-    /// sink keeps the shared tap alive on its own; disarming it tears the tap
-    /// down entirely (no sinks → no observer, no decode task).
-    #[tokio::test]
-    async fn amd_only_leg_runs_and_teardowns_the_tap() {
-        let leg = crate::leg::LegInner::new("amd-only", &crate::leg::LegConfig::rtp_pcmu(), None)
-            .expect("leg");
-        leg.apply_profile_from_sdp(SDP_PCMU_WITH_DTMF).await.unwrap();
-        assert!(!leg.inband_dtmf_active(), "precondition: RFC 2833 owns DTMF");
-
-        let (outcome_tx, _outcome_rx) = tokio::sync::mpsc::channel(2);
-        leg.arm_amd(crate::amd::AmdArmament {
-            detector: crate::amd::create_amd_detector(&crate::amd::AmdConfig::default())
-                .expect("heuristic detector"),
-            local_speech: Default::default(),
-            outcome_tx,
-        });
-        assert!(leg.amd_armed());
-        assert_eq!(
-            leg.amd_generation(),
-            1,
-            "the AMD sink must have been created on its own tap"
-        );
-
-        // Re-applying the same profile must be a no-op (stable generation).
-        leg.apply_profile_from_sdp(SDP_PCMU_WITH_DTMF).await.unwrap();
-        assert_eq!(leg.amd_generation(), 1, "same profile must not rebuild");
-
-        leg.disarm_amd();
-        assert!(!leg.amd_armed());
-        assert!(!leg.inband_dtmf_active());
-        leg.stop();
-    }
 }
-

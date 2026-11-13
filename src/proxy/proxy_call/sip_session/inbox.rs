@@ -7,17 +7,14 @@
 //! closed-channel semantics; the run loop selects on `inbox.recv()` plus the
 //! arms that are futures rather than streams (hangup drains, cancellation,
 //! shutdown-drain timeout, session-timer DelayQueue, max-duration sleep,
-//! heartbeat tick) and the two **media-plane** arms.
+//! heartbeat tick) and the **media-plane** completion arm.
 //!
 //! # Media-plane separation rule
 //!
-//! Media events (DTMF / AMD / recording / transcription) do NOT enter this
+//! Media events (DTMF / recording / transcription) do NOT enter this
 //! inbox. Each has its own pipeline with its own latency, lifecycle, and
 //! ownership semantics: DTMF is injected straight into the running app
-//! (latency-critical pending buffer); AMD keeps a dedicated arm with a fresh
-//! channel per armament (dropping stale verdicts on teardown is the correct
-//! semantics — a session-owned shared channel would deliver stale verdicts
-//! into the next attempt's attribution); recording completion is read from
+//! (latency-critical pending buffer); recording completion is read from
 //! the media crate-owned `RecordingSession`. New media event sources get
 //! their own pipeline + dedicated arm; do not fold them in here for the sake
 //! of uniformity.

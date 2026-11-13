@@ -571,39 +571,24 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # # connect_timeout_ms = 3000
 # # request_timeout_ms = 10000
 
-# ── Live transcription (streaming ASR) ───────────────────────────────────────
-# Real-time call transcription over a streaming ASR WebSocket. When configured,
-# `GET /cc/calls/{call_id}/transcript` (SSE) lazily starts transcription on
-# first subscribe and streams text segments; cc-phone shows a live transcript
-# panel. Without this section the feature reports unavailable (503) and the
-# cc-phone transcript button is grayed out.
+# ── Realtime quality inspection ────────────────────────────────────────────
+# External service receives PCM and returns text, calltrace or hangup actions.
+# Audio must pass through RustPBX: use [proxy] media_proxy = "all" for global
+# inspection. Wholesale enables proxied media on selected inspection routes.
+# ASR credentials/models/languages belong in that service, not in RustPBX.
+# [proxy.quality]
+# url = "ws://127.0.0.1:8095/v1/quality"
+# headers = [["Authorization", "Bearer your-token"]]
+# enabled = false # true starts inspection automatically after answer
+# sides = "both" # caller | callee | both; choose callee for outbound beep inspection
+# [proxy.quality.parameters]
+# frequencies_hz = [1309, 660]
+# max_gap_ms = 40
+# hangup_on_beep = true # service decision; returned hangup actions are executed
 #
-# The wire protocol is Deepgram-compatible raw PCM streaming
-# (`/v1/listen?encoding=linear16&sample_rate=16000`); any endpoint speaking
-# the same envelope works.
-#
-# [proxy.transcript.remote]
-# # API key (falls back to the DEEPGRAM_API_KEY env var)
-# # api_key = "your-key"
-# # Override endpoint (default wss://api.deepgram.com)
-# # url = "wss://api.deepgram.com"
-# # model = "nova-2"
-# # language = "multi"        # BCP-47 tag, or "multi"
-# # interim_results = true    # stream partial hypotheses
-# # punctuate = true
-# # Provider factory name — the built-in "deepgram" implements the
-# # Deepgram-compatible protocol above; custom protocols register a
-# # TranscriptionProviderFactory via
-# # rustpbx::call::transcription::register_transcription_provider().
-# # provider = "deepgram"
-# # Auto-start transcription when the call is answered (otherwise start via
-# # the SSE endpoint or the REST start_transcription command).
-# # auto_start = false
-#
-# To receive every finalized utterance as a webhook ("one POST per spoken
-# sentence"), subscribe the [rwi_webhook] pipeline to the transcript_final
-# event (retry/dedup/headers are handled there):
-#
+# CC retains GET /cc/calls/{call_id}/transcript (SSE). Manual control uses
+# start_quality_check / stop_quality_check for explicit administration.
+# CC subtitle subscriptions never start or stop inspection.
 # [rwi_webhook]
 # url = "https://your-service.example.com/hook"
 # events = ["transcript_final"]
@@ -726,6 +711,10 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # ]
 
 # [proxy.trunks.wuhoo]
+# send_p_asserted_identity = false       # Per-trunk automatic PAI; defaults to false.
+#                                       # Uses the original caller URI, regardless of credentials.
+#                                       # Existing explicit PAI headers are preserved.
+#                                       # Console/API: metadata.sbc.send_p_asserted_identity.
 # dest = "sip:123.456.789.00:1234"
 # username = "+12025550123"           # REGISTER From/To user
 # auth_username = "12025550123@ims.example.com" # Optional separate Digest identity
@@ -910,9 +899,9 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # url = "wss://api.openai.com/v1/realtime"
 # protocol = "openai"                  # "openai" (default) or "pcm" (raw PCM16 + DTMF JSON, same wire format as voip_bridge:)
 # api_key = "sk-..."
-# model = "gpt-4o-realtime-preview"
+# model = "gpt-realtime-2.1"
 # voice = "alloy"
-# instructions = "You are a phone support agent. Keep replies short."
+# instructions = "You are a phone support agent. Keep replies short. Start by greeting the caller."
 # sample_rate = 24000                  # openai default 24000, pcm default 8000
 # timeout_ms = 5000                    # WS connect timeout
 # hangup_on_disconnect = true          # endpoint close hangs the call up

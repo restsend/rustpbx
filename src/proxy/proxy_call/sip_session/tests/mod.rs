@@ -2627,6 +2627,7 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
     );
     dialplan.media.rtp_start_port = Some(39000);
     dialplan.media.rtp_end_port = Some(39010);
+    dialplan.caller_media_network = crate::call::MediaNetworkConfig::from(&dialplan.media);
     let context = CallContext {
         session_id: "rwi-prepared-caller-leg".to_string(),
         dialplan: Arc::new(dialplan),
@@ -6237,6 +6238,7 @@ async fn ensure_caller_leg_recovers_after_busy_rtp_port() {
     dialplan.media.bind_ip = Some("127.0.0.1".to_string());
     dialplan.media.rtp_start_port = Some(port);
     dialplan.media.rtp_end_port = Some(port);
+    dialplan.caller_media_network = crate::call::MediaNetworkConfig::from(&dialplan.media);
     let (mut session, _handle, _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
     session.media.caller_offer = Some(
         concat!(
@@ -6484,8 +6486,8 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 
 #[test]
 fn test_trunk_host_port_sip_uri_with_port() {
-    let (host, port) = trunk_host_port("sip:58.246.19.74:6988").unwrap();
-    assert_eq!(host, "58.246.19.74");
+    let (host, port) = trunk_host_port("sip:198.51.100.74:6988").unwrap();
+    assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 
@@ -6505,8 +6507,8 @@ fn test_trunk_host_port_sip_uri_with_user_and_port() {
 
 #[test]
 fn test_trunk_host_port_bare_host_port() {
-    let (host, port) = trunk_host_port("58.246.19.74:6988").unwrap();
-    assert_eq!(host, "58.246.19.74");
+    let (host, port) = trunk_host_port("198.51.100.74:6988").unwrap();
+    assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 
@@ -9354,6 +9356,12 @@ async fn consult_media_preserves_peers_body() {
     use crate::proxy::tests::common::create_test_request;
     use crate::proxy::tests::common::create_test_server_with_config;
 
+    // Silent endpoints must emit digital silence: comfort noise exceeds the
+    // audibility threshold used to verify mixer self-exclusion below.
+    let endpoint_config = LegConfig {
+        comfort_noise: false,
+        ..LegConfig::rtp_pcmu()
+    };
     for scenario in [
         "reject",
         "timeout",
@@ -9405,7 +9413,7 @@ async fn consult_media_preserves_peers_body() {
         for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
             let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
             let remote =
-                LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+                LegInner::new(format!("remote-{name}"), &endpoint_config, None).unwrap();
             let offer = local.create_offer().await.unwrap();
             if side == LegSide::A {
                 session.media.answer = Some(offer.clone());
@@ -9448,7 +9456,7 @@ async fn consult_media_preserves_peers_body() {
             .await
             .unwrap();
         session.legs.set_media_leg(&consult, peer.clone());
-        let remote = LegInner::new("remote-consult", &LegConfig::rtp_pcmu(), None).unwrap();
+        let remote = LegInner::new("remote-consult", &endpoint_config, None).unwrap();
         let answer = remote
             .answer(&offer)
             .await
@@ -15336,5 +15344,667 @@ async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
             "{identity}: target identity must be canonical before events"
         );
         serving.abort();
+    }
+}
+
+#[tokio::test]
+async fn realtime_preset_survives_session_configuration_and_reload() {
+    use crate::call::runtime::AppFactory;
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+    let config: crate::config::Config = toml::from_str(r#"
+[proxy]
+addr = "0.0.0.0"
+[[realtime]]
+name = "inworld"
+url = "wss://example.com/realtime"
+protocol = "openai"
+api_key = "test-preset-key"
+model = "test-model"
+"#).unwrap();
+    let (server, _) = create_test_server().await;
+    server.realtime_presets.store(Arc::new(config.realtime.clone()));
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let (tx, _caller_endpoint) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+    let context = CallContext {
+        session_id: "realtime-preset".into(),
+        dialplan: Arc::new(Dialplan::new("realtime-preset".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (session, _handle, _commands) = SipSession::new(
+        server.clone(), CancellationToken::new(), None, context, dialog, false,
+    );
+    let app_ctx = session.app_runtime.app_context().unwrap();
+    assert_eq!(app_ctx.config.realtime, config.realtime);
+    let factory = BuiltinAppFactory::new(None, None);
+    assert!(factory.create_app("realtime", Some(serde_json::json!({"preset": "inworld"})), app_ctx).await.unwrap().is_some());
+    assert!(factory.create_app("realtime", Some(serde_json::json!({"preset": "missing"})), app_ctx).await.is_err());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut updated = config.clone();
+    updated.realtime.as_mut().unwrap()[0].model = Some("updated-model".into());
+    std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+    let result = server.reload_proxy_config(path.to_str().unwrap()).await.unwrap();
+    assert!(result.contains("realtime"));
+    assert_eq!(server.realtime_presets.load().as_ref(), &updated.realtime);
+    // Existing calls retain their snapshot; subsequent calls use the reloaded presets.
+    assert_eq!(app_ctx.config.realtime, config.realtime);
+    updated.realtime = None;
+    std::fs::write(&path, toml::to_string(&updated).unwrap()).unwrap();
+    server.reload_proxy_config(path.to_str().unwrap()).await.unwrap();
+    assert!(server.realtime_presets.load().is_none());
+}
+
+#[tokio::test]
+async fn early_update_is_answered_while_invite_pending_and_preserves_new_media() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_test_writer().try_init();
+    }
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::{build_session_with_cmd_rx_on, setup_recording_test_media};
+    use rsipstack::sip::{Header, HeadersExt, Method, SipMessage, StatusCode};
+    use rsipstack::transport::udp::UdpConnection;
+
+    let (server, _) = create_test_server().await;
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = target.local_addr().unwrap();
+    let endpoint = server.endpoint.inner.clone();
+    for local in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&local);
+    }
+    endpoint.transport_layer.add_transport(UdpConnection::create_connection(
+        "127.0.0.1:0".parse().unwrap(), None, None,
+    ).await.unwrap().into());
+    let mut incoming = server.endpoint.incoming_transactions().unwrap();
+    let layer = server.dialog_layer.clone();
+    let dispatch = tokio::spawn(async move {
+        while let Some(mut tx) = incoming.recv().await {
+            let mut dialog = layer.match_dialog(&tx).expect("UPDATE must match early dialog");
+            dialog.handle(&mut tx).await.unwrap();
+        }
+    });
+    let serving_endpoint = endpoint.clone();
+    let serving = tokio::spawn(async move { serving_endpoint.serve().await.unwrap(); });
+    let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+    let mut plan = Dialplan::new("early-update".into(), request, DialDirection::Inbound)
+        .with_caller("sip:customer@example.test".parse().unwrap());
+    plan.media.proxy_mode = MediaProxyMode::All;
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server.clone(), plan).await;
+    // Keep the caller transaction alive so ringing/accept can enqueue their
+    // responses; the generic session fixture drops its transaction at return.
+    let caller_request = session.caller_dialog.as_ref().unwrap().initial_request();
+    let (caller_tx, _caller_endpoint) = crate::proxy::tests::common::create_transaction(caller_request).await;
+    let (caller_events, _caller_states) = mpsc::unbounded_channel();
+    let caller_dialog = server.dialog_layer.get_or_create_server_invite(&caller_tx, caller_events, None, None).unwrap();
+    session.legs.set_dialog(LegId::from("caller"), Dialog::Invite(caller_dialog.clone()));
+    session.caller_dialog = Some(caller_dialog);
+    let _cancel = session.cancel_token.clone().drop_guard();
+    setup_recording_test_media(&mut session).await;
+    let (state_tx, mut states) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(state_tx);
+    let layer = server.dialog_layer.clone();
+    let responder = async move {
+        let mut buffer = [0u8; 65536];
+        let (size, source) = target.recv_from(&mut buffer).await.unwrap();
+        let SipMessage::Request(invite) = SipMessage::try_from(&buffer[..size]).unwrap() else { panic!("expected INVITE"); };
+        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 18494 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+        let mut ringing = endpoint.make_response(&invite, StatusCode::Ringing, None);
+        ringing.headers.unique_push(Header::To(format!("<sip:target@{address}>;tag=ims").into()));
+        ringing.headers.unique_push(Header::Contact(format!("<sip:target@{address}>").into()));
+        ringing.headers.unique_push(Header::Require("100rel".into()));
+        ringing.headers.unique_push(Header::Other("RSeq".into(), "1".into()));
+        ringing.headers.unique_push(Header::ContentType("application/sdp".into()));
+        ringing.body = sdp.as_bytes().to_vec();
+        ringing.headers.unique_push(Header::ContentLength(ringing.body.len().to_string().into()));
+        target.send_to(ringing.to_string().as_bytes(), source).await.unwrap();
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(prack) = SipMessage::try_from(&buffer[..size]).unwrap() {
+                if prack.method == Method::PRack {
+                    let response = endpoint.make_response(&prack, StatusCode::OK, None);
+                    target.send_to(response.to_string().as_bytes(), source).await.unwrap();
+                    break;
+                }
+            }
+        }
+        let call_id = invite.call_id_header().unwrap().value().to_string();
+        let from = ringing.to_header().unwrap().value().to_string();
+        let to = invite.from_header().unwrap().value().to_string();
+        for (seq, body, expected) in [
+            (1, String::new(), StatusCode::OK),
+            (2, sdp.replace("18494", "18532").replace("o=- 1 1", "o=- 1 2"), StatusCode::OK),
+            (3, "invalid SDP".to_string(), StatusCode::NotAcceptableHere),
+        ] {
+            let update = format!("UPDATE sip:pbx@{source} SIP/2.0\r\nVia: SIP/2.0/UDP {address};branch=z9hG4bK-update-{seq}\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {seq} UPDATE\r\nContact: <sip:target@{address}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            target.send_to(update.as_bytes(), source).await.unwrap();
+            loop {
+                let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+                if let SipMessage::Response(response) = SipMessage::try_from(&buffer[..size]).unwrap() {
+                    if response.cseq_header().unwrap().method().unwrap() == Method::Update {
+                        assert_eq!(response.status_code, expected, "{response}");
+                        assert_eq!(!response.body.is_empty(), seq == 2);
+                        break;
+                    }
+                }
+            }
+            let dialogs = layer.get_client_dialog_by_call_id(&call_id);
+            assert_eq!(dialogs.len(), 1);
+            assert!(matches!(dialogs[0].state(), DialogState::Early(..)), "UPDATE must not answer INVITE");
+        }
+        let mut accepted = ringing;
+        accepted.status_code = StatusCode::OK;
+        accepted.headers.retain(|h| !matches!(h, Header::Require(_) | Header::Other(_, _)));
+        target.send_to(accepted.to_string().as_bytes(), source).await.unwrap();
+    };
+    let location = Location {
+        aor: format!("sip:target@{address}").parse().unwrap(),
+        headers: Some(vec![Header::Supported("100rel".into())]),
+        ..Default::default()
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            session.try_single_target(&location, &mut states, None, None, None, None),
+            responder,
+        )
+    }).await.expect("UPDATE must be answered before IMS sends INVITE 200");
+    serving.abort();
+    dispatch.abort();
+    result.0.expect("INVITE should complete after early UPDATE");
+    assert!(session.meta.connected_callee_dialog_id.is_some());
+    let peer = session.media_leg(&LegId::from("callee")).unwrap();
+    assert_eq!(peer.pc().remote_description().unwrap().media_sections[0].port, 18532,
+        "final INVITE answer must not restore the old media port");
+    session.cleanup().await;
+}
+
+/// Run with SIPP_BIN=/path/to/sipp cargo test --lib sipp_early_update_after_183 -- --ignored.
+#[tokio::test]
+#[ignore = "requires the external SIPp executable (SIPP_BIN or sipp on PATH)"]
+async fn sipp_early_update_after_183() {
+    use crate::call::{DialDirection, Dialplan, Location};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::{build_session_with_cmd_rx_on, setup_recording_test_media};
+    use rsipstack::sip::{Header, Method};
+    use rsipstack::transport::udp::UdpConnection;
+
+    let (server, _) = create_test_server().await;
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = target.local_addr().unwrap();
+    let endpoint = server.endpoint.inner.clone();
+    for local in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&local);
+    }
+    endpoint.transport_layer.add_transport(UdpConnection::create_connection(
+        "127.0.0.1:0".parse().unwrap(), None, None,
+    ).await.unwrap().into());
+    let mut incoming = server.endpoint.incoming_transactions().unwrap();
+    let layer = server.dialog_layer.clone();
+    let dispatch = tokio::spawn(async move {
+        while let Some(mut tx) = incoming.recv().await {
+            let mut dialog = layer.match_dialog(&tx).expect("UPDATE must match early dialog");
+            dialog.handle(&mut tx).await.unwrap();
+        }
+    });
+    let serving_endpoint = endpoint.clone();
+    let serving = tokio::spawn(async move { serving_endpoint.serve().await.unwrap(); });
+    let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+    let mut plan = Dialplan::new("early-update".into(), request, DialDirection::Inbound)
+        .with_caller("sip:customer@example.test".parse().unwrap());
+    plan.media.proxy_mode = MediaProxyMode::All;
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server.clone(), plan).await;
+    // Keep the caller transaction alive so ringing/accept can enqueue their
+    // responses; the generic session fixture drops its transaction at return.
+    let caller_request = session.caller_dialog.as_ref().unwrap().initial_request();
+    let (caller_tx, _caller_endpoint) = crate::proxy::tests::common::create_transaction(caller_request).await;
+    let (caller_events, _caller_states) = mpsc::unbounded_channel();
+    let caller_dialog = server.dialog_layer.get_or_create_server_invite(&caller_tx, caller_events, None, None).unwrap();
+    session.legs.set_dialog(LegId::from("caller"), Dialog::Invite(caller_dialog.clone()));
+    session.caller_dialog = Some(caller_dialog);
+    let _cancel = session.cancel_token.clone().drop_guard();
+    setup_recording_test_media(&mut session).await;
+    let (state_tx, mut states) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(state_tx);
+    drop(target);
+    let logs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sipp-early-update");
+    std::fs::create_dir_all(&logs).unwrap();
+    for name in ["messages.log", "errors.log", "actions.log"] {
+        std::fs::File::create(logs.join(name)).unwrap();
+    }
+    let mut sipp = tokio::process::Command::new(std::env::var("SIPP_BIN").unwrap_or_else(|_| "sipp".into()))
+        .current_dir(&logs)
+        .arg("-sf").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sipp/early_update_after_183.xml"))
+        .args(["-i", "127.0.0.1", "-p", &address.port().to_string(), "-t", "u1", "-m", "1",
+            "-timeout", "20s", "-timeout_error", "-nostdin",
+            "-trace_msg", "-message_file", "messages.log",
+            "-trace_err", "-error_file", "errors.log",
+            "-trace_logs", "-log_file", "actions.log"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(logs.join("stdout.log")).unwrap())
+        .stderr(std::fs::File::create(logs.join("stderr.log")).unwrap())
+        .kill_on_drop(true).spawn().expect("start SIPp");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(sipp.try_wait().unwrap().is_none(), "SIPp exited during startup; logs: {}", logs.display());
+            match std::net::UdpSocket::bind(address) {
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => break,
+                Err(error) => panic!("checking SIPp listener: {error}"),
+                Ok(socket) => drop(socket),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("SIPp must bind its listener");
+    let location = Location {
+        aor: format!("sip:ims@{address}").parse().unwrap(),
+        headers: Some(vec![Header::Supported("100rel".into())]),
+        ..Default::default()
+    };
+    let result = tokio::time::timeout(Duration::from_secs(15),
+        session.try_single_target(&location, &mut states, None, None, None, None),
+    ).await.expect("SIPp must receive UPDATE answer before sending INVITE 200");
+    result.expect("INVITE must complete after SIPp's early UPDATE");
+    let id = session.meta.connected_callee_dialog_id.clone().unwrap();
+    let peer = session.media_leg(&LegId::from("callee")).unwrap();
+    assert_eq!(peer.pc().remote_description().unwrap().media_sections[0].port, 18532,
+        "the final INVITE response must not revert the UPDATE's media port");
+    assert!(std::fs::read_to_string(logs.join("actions.log")).unwrap()
+        .contains("EARLY_UPDATE_ANSWERED_BEFORE_INVITE_200"));
+    let Some(Dialog::Invite(dialog)) = server.dialog_layer.get_dialog(&id) else { panic!("missing confirmed dialog"); };
+    tokio::time::timeout(Duration::from_secs(5), dialog.bye()).await.unwrap().unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(5), sipp.wait()).await.unwrap().unwrap();
+    assert!(status.success(), "SIPp failed: {status}; logs: {}", logs.display());
+    serving.abort();
+    dispatch.abort();
+    session.cleanup().await;
+}
+
+
+#[tokio::test]
+async fn inbound_media_network_survives_outbound_profiles_and_retry() {
+    use crate::call::{SipUser, TransactionCookie, TrunkContext};
+    use crate::config::{NetworkProfile, ProxyConfig, RtpConfig};
+    use crate::proxy::call::CallModule;
+    use crate::proxy::routing::{DestConfig, RouteAction, RouteRule, TrunkConfig, TrunkDirection};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config, create_transaction};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    // Explicit loopback binds intentionally bypass external-IP advertisement in rustrtc.
+    let local_ip = rustrtc::transports::get_local_ip().unwrap();
+    for case in ["profiles", "trunk_override", "direct_override", "default_profile", "same_profile"] {
+        let mut proxy = ProxyConfig::default();
+        proxy.generated_dir = format!("target/test-generated/media-network-{case}-{}", std::process::id());
+        proxy.trunks.insert("inbound".into(), TrunkConfig {
+            profile: match case {
+                "default_profile" | "direct_override" => None,
+                "same_profile" => Some("ims".into()),
+                _ => Some("wan".into()),
+            },
+            external_ip: matches!(case, "trunk_override" | "direct_override").then(|| "192.0.2.3".into()),
+            bind_ip: (case == "direct_override").then(|| "0.0.0.0".into()),
+            direction: Some(TrunkDirection::Inbound),
+            ..Default::default()
+        });
+        proxy.trunks.insert("outbound".into(), TrunkConfig {
+            dest: "sip:192.0.2.20:5060".into(),
+            profile: Some("ims".into()),
+            // Match deployments that explicitly override both trunks: the
+            // destination's existing shared-network precedence stays intact.
+            external_ip: matches!(case, "trunk_override" | "direct_override").then(|| "192.0.2.2".into()),
+            bind_ip: matches!(case, "trunk_override" | "direct_override").then(|| local_ip.to_string()),
+            direction: Some(TrunkDirection::Outbound),
+            media_mode: Some(crate::proxy::routing::MediaMode::ForceTranscode),
+            ..Default::default()
+        });
+        proxy.routes = Some(vec![RouteRule {
+            name: "two-networks".into(),
+            source_trunks: vec!["inbound".into()],
+            action: RouteAction {
+                dest: Some(DestConfig::Single("outbound".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let (server, config) = create_test_server_with_config(proxy).await;
+        let profiles: Vec<NetworkProfile> = serde_json::from_value(serde_json::json!([
+            { "id": "wan", "external_ip": "192.0.2.1", "bind_ip": "0.0.0.0",
+              "rtp_start_port": 20000, "rtp_end_port": 24998 },
+            { "id": "ims", "external_ip": "192.0.2.2", "bind_ip": local_ip.to_string(),
+              "rtp_start_port": 25000, "rtp_end_port": 29998 }
+        ]))
+        .unwrap();
+        server.network_profiles.store(Arc::new(profiles));
+        let module = CallModule::new(config, server.clone());
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: None,
+            name: "inbound".into(),
+            did_numbers: vec![],
+        });
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (mut tx, _endpoint) = create_transaction(request).await;
+        let caller = SipUser::try_from(&tx).unwrap();
+        let plan = module
+            .build_dialplan(&mut tx, cookie, &caller)
+            .await
+            .unwrap();
+        assert_eq!(plan.media.external_ip.as_deref(), Some("192.0.2.2"));
+        let base = plan.fork_for_target();
+        let (mut session, _handle, _commands) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\no=- 1 1 IN IP4 198.51.100.10\r\ns=-\r\nc=IN IP4 198.51.100.10\r\nt=0 0\r\n",
+                "m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+            )
+            .into(),
+        );
+        let expected_a = match case {
+            "trunk_override" | "direct_override" => "192.0.2.3",
+            "same_profile" => "192.0.2.2",
+            _ => "192.0.2.1",
+        };
+        // Generate actual SDP without receiving any RTP from the caller.
+        session.ensure_caller_leg().await.unwrap();
+        let early_answer = session.media.answer.clone().unwrap();
+        assert!(
+            early_answer.contains(&format!("c=IN IP4 {expected_a}")),
+            "{case}: {early_answer}"
+        );
+        let caller_cfg = session.build_leg_config(
+            &LegId::from("caller"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            caller_cfg.rtp_port_range,
+            Some(if case == "same_profile" {
+                (25000, 29998)
+            } else {
+                (20000, 24998)
+            })
+        );
+        let expected_bind = if case == "same_profile" {
+            local_ip
+        } else {
+            "0.0.0.0".parse().unwrap()
+        };
+        assert_eq!(caller_cfg.bind_ips, vec![expected_bind]);
+        let callee_cfg = session.build_leg_config(
+            &LegId::from("callee"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(callee_cfg.bind_ips, vec![local_ip]);
+        assert_eq!(callee_cfg.rtp_port_range, Some((25000, 29998)));
+        let (peer, offer) = session
+            .create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp)
+            .await
+            .unwrap();
+        assert!(offer.contains("c=IN IP4 192.0.2.2"), "{case}: {offer}");
+        drop(peer);
+
+        // A later destination may change B's network, but the established
+        // caller transport and its early/final answer must remain stable.
+        let attempt = dial_attempt(
+            Default::default(),
+            Some(crate::config::DialplanHints {
+                external_ip: Some("192.0.2.4".into()),
+                ..Default::default()
+            }),
+            None,
+        );
+        let retry_plan = SipSession::plan_for_attempt(&server, &base, &attempt);
+        session.activate_attempt(&attempt, retry_plan).await;
+        session.ensure_caller_leg().await.unwrap();
+        assert_eq!(session.media.answer.as_deref(), Some(early_answer.as_str()));
+        let (peer, offer) = session
+            .create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp)
+            .await
+            .unwrap();
+        assert!(offer.contains("c=IN IP4 192.0.2.4"), "{case}: {offer}");
+        drop(peer);
+    }
+
+    // Issue #301: an extension caller (no inbound TrunkContext) must keep the
+    // global / default-profile media network when routed out via a trunk with
+    // its own profile or external_ip/bind_ip, including when the LAN baseline
+    // has no external_ip (advertising its bound local interface IP instead).
+    for use_profile in [true, false] {
+        let mut proxy = ProxyConfig::default();
+        proxy.generated_dir = format!(
+            "target/test-generated/media-network-ext-out-{use_profile}-{}",
+            std::process::id()
+        );
+        proxy.trunks.insert(
+            "itsp".into(),
+            TrunkConfig {
+                dest: "sip:192.0.2.20:5060".into(),
+                external_ip: Some("198.51.100.44".into()),
+                bind_ip: Some("0.0.0.0".into()),
+                direction: Some(TrunkDirection::Outbound),
+                media_mode: Some(crate::proxy::routing::MediaMode::ForceTranscode),
+                ..Default::default()
+            },
+        );
+        proxy.routes = Some(vec![RouteRule {
+            name: "lan-to-itsp".into(),
+            action: RouteAction {
+                dest: Some(DestConfig::Single("itsp".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let (server, config) = create_test_server_with_config(proxy).await;
+        let expected_a = if use_profile {
+            let profiles: Vec<NetworkProfile> = serde_json::from_value(serde_json::json!([
+                { "id": "lan", "external_ip": "192.0.2.10", "bind_ip": local_ip.to_string(),
+                  "rtp_start_port": 12000, "rtp_end_port": 19998 }
+            ]))
+            .unwrap();
+            server.network_profiles.store(Arc::new(profiles));
+            "192.0.2.10".to_string()
+        } else {
+            // Pure global RtpConfig with no external_ip: caller leg must not
+            // fall back to the outbound trunk's external_ip.
+            server.rtp_config.store(Arc::new(RtpConfig {
+                external_ip: None,
+                bind_ip: Some(local_ip.to_string()),
+                start_port: Some(12000),
+                end_port: Some(19998),
+                ..Default::default()
+            }));
+            local_ip.to_string()
+        };
+
+        let module = CallModule::new(config, server.clone());
+        let cookie = TransactionCookie::default();
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "01012345",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (mut tx, _endpoint) = create_transaction(request).await;
+        let caller = SipUser::try_from(&tx).unwrap();
+        let plan = module
+            .build_dialplan(&mut tx, cookie, &caller)
+            .await
+            .unwrap();
+
+        let (mut session, _handle, _commands) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\no=- 1 1 IN IP4 192.168.174.1\r\ns=-\r\nc=IN IP4 192.168.174.1\r\nt=0 0\r\n",
+                "m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+            )
+            .into(),
+        );
+        session.ensure_caller_leg().await.unwrap();
+        let answer = session.media.answer.as_deref().unwrap();
+        assert!(
+            answer.contains(&format!("c=IN IP4 {expected_a}")),
+            "use_profile={use_profile}: {answer}"
+        );
+        let caller_cfg = session.build_leg_config(
+            &LegId::from("caller"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(caller_cfg.bind_ips, vec![local_ip]);
+        assert_eq!(caller_cfg.rtp_port_range, Some((12000, 19998)));
+
+        let callee_cfg = session.build_leg_config(
+            &LegId::from("callee"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            callee_cfg.bind_ips,
+            vec!["0.0.0.0".parse::<std::net::IpAddr>().unwrap()]
+        );
+        let (peer, offer) = session
+            .create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp)
+            .await
+            .unwrap();
+        assert!(
+            offer.contains("c=IN IP4 198.51.100.44"),
+            "use_profile={use_profile}: {offer}"
+        );
+        drop(peer);
+    }
+
+    // Reverse direction: an inbound WAN trunk routed to a LAN extension must
+    // keep the WAN trunk network on A-leg and the default LAN profile on B-leg.
+    {
+        let mut proxy = ProxyConfig::default();
+        proxy.generated_dir = format!(
+            "target/test-generated/media-network-trunk-to-ext-{}",
+            std::process::id()
+        );
+        proxy.trunks.insert(
+            "itsp-in".into(),
+            TrunkConfig {
+                profile: Some("wan".into()),
+                external_ip: Some("198.51.100.44".into()),
+                bind_ip: Some("0.0.0.0".into()),
+                direction: Some(TrunkDirection::Inbound),
+                media_mode: Some(crate::proxy::routing::MediaMode::ForceTranscode),
+                ..Default::default()
+            },
+        );
+        proxy.routes = Some(vec![RouteRule {
+            name: "itsp-to-lan-ext".into(),
+            source_trunks: vec!["itsp-in".into()],
+            action: RouteAction {
+                dest: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let (server, config) = create_test_server_with_config(proxy).await;
+        server
+            .locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                crate::call::Location {
+                    aor: "sip:alice@rustpbx.com".try_into().unwrap(),
+                    destination: Some(rsipstack::transport::SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Udp),
+                        addr: "192.168.174.1:5060".try_into().unwrap(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let profiles: Vec<NetworkProfile> = serde_json::from_value(serde_json::json!([
+            { "id": "lan", "external_ip": "192.0.2.10", "bind_ip": local_ip.to_string(),
+              "rtp_start_port": 12000, "rtp_end_port": 19998 },
+            { "id": "wan", "external_ip": "198.51.100.1", "bind_ip": "0.0.0.0",
+              "rtp_start_port": 20000, "rtp_end_port": 24998 }
+        ]))
+        .unwrap();
+        server.network_profiles.store(Arc::new(profiles));
+        server
+            .default_network_profile_id
+            .store(Arc::new("lan".into()));
+
+        let module = CallModule::new(config, server.clone());
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: None,
+            name: "itsp-in".into(),
+            did_numbers: vec![],
+        });
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (mut tx, _endpoint) = create_transaction(request).await;
+        let caller = SipUser::try_from(&tx).unwrap();
+        let plan = module
+            .build_dialplan(&mut tx, cookie, &caller)
+            .await
+            .unwrap();
+
+        let (mut session, _handle, _commands) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        session.media.caller_offer = Some(
+            concat!(
+                "v=0\r\no=- 1 1 IN IP4 198.51.100.8\r\ns=-\r\nc=IN IP4 198.51.100.8\r\nt=0 0\r\n",
+                "m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+            )
+            .into(),
+        );
+        session.ensure_caller_leg().await.unwrap();
+        let answer = session.media.answer.as_deref().unwrap();
+        assert!(answer.contains("c=IN IP4 198.51.100.44"), "{answer}");
+        let caller_cfg = session.build_leg_config(
+            &LegId::from("caller"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(caller_cfg.rtp_port_range, Some((20000, 24998)));
+
+        let callee_cfg = session.build_leg_config(
+            &LegId::from("callee"),
+            crate::media::TransportMode::Rtp,
+            vec![],
+            vec![],
+        );
+        assert_eq!(callee_cfg.bind_ips, vec![local_ip]);
+        assert_eq!(callee_cfg.rtp_port_range, Some((12000, 19998)));
+        let (peer, offer) = session
+            .create_leg_peer(&LegId::from("callee"), crate::media::TransportMode::Rtp)
+            .await
+            .unwrap();
+        assert!(offer.contains("c=IN IP4 192.0.2.10"), "{offer}");
+        drop(peer);
     }
 }

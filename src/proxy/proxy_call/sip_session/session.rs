@@ -7,7 +7,7 @@ use super::util::{
     normalize_call_hangup_by, parse_dial_target, parse_dtmf_digit,
     parse_sipfrag_status, route_outbound_leg, sip_status_to_hangup_reason,
 };
-use super::{live_transcription, transfer};
+use super::{live_quality, transfer};
 use crate::call::app::queue::QueueSignal;
 use crate::call::{DialDirection, OutboundTrunkContext, TrunkContext};
 use rsipstack::sip::{HeadersExt, ToTypedHeader};
@@ -175,15 +175,6 @@ struct EventProgress {
     child_role_hangup_reported: std::sync::atomic::AtomicBool,
 }
 
-/// AMD (answering-machine / AI-assistant) detection state for one session.
-/// Exists only while the `amd` config resolved at least once; the channel is
-/// replaced on each re-arm, `armed_leg` is `None` between verdicts (the
-/// disarm releases the shared analysis tap slot).
-struct AmdState {
-    outcome_rx: tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>,
-    armed_leg: Option<LegId>,
-}
-
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -247,17 +238,6 @@ pub struct SipSession {
 
     pub reporter: Option<CallReporter>,
     event_progress: EventProgress,
-    /// AMD (answering machine / AI assistant) detection: armed at answer when
-    /// the resolved `amd` config is enabled. The verdict channel is polled in
-    /// the main loop; the latest verdict lands in `amd_verdict` for the RWI
-    /// `call_amd_detected` event and CDR.
-    amd: Option<AmdState>,
-
-    /// Latest AMD verdict for this call (per callee-leg attempt: each new
-    /// answer re-arms, the last verdict wins into CDR). `None` when AMD never
-    /// armed or produced no decision.
-    pub(crate) amd_verdict: Option<crate::media::amd::AmdVerdict>,
-
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
@@ -324,8 +304,8 @@ pub struct SipSession {
     /// duration + interruption. `record_play_end` is idempotent via `remove`.
     pub(crate) active_plays: std::collections::HashMap<String, crate::proxy::proxy_call::state::ActivePlay>,
 
-    /// Live transcription state; `None` while nobody subscribes.
-    pub(crate) live_transcription: Option<live_transcription::LiveTranscription>,
+    /// Inspection state, owned by call policy or explicit administrative commands.
+    pub(crate) live_quality: Option<live_quality::LiveQuality>,
 
     /// Mid-call / auto recording state: the active recording (if any) plus
     /// completed segment history feeding CDR / `recording_segments` metadata.
@@ -767,23 +747,31 @@ impl SipSession {
 
     pub(crate) fn build_leg_config(
         &self,
+        leg_id: &LegId,
         transport: crate::media::TransportMode,
         codecs: Vec<crate::media::negotiate::CodecInfo>,
         video_codecs: Vec<rustrtc::config::VideoCapability>,
     ) -> crate::media::leg::LegConfig {
+        let media = &self.context.dialplan.media;
+        let (external_ip, bind_ip, rtp_ports) = if leg_id.as_str() == "caller" {
+            let n = &self.context.dialplan.caller_media_network;
+            (
+                n.external_ip.as_deref(),
+                n.bind_ip.as_deref(),
+                n.rtp_start_port.zip(n.rtp_end_port),
+            )
+        } else {
+            (
+                media.external_ip.as_deref(),
+                media.bind_ip.as_deref(),
+                media.rtp_start_port.zip(media.rtp_end_port),
+            )
+        };
         let is_webrtc = transport == crate::media::TransportMode::WebRtc;
         let rtp_port_range = if is_webrtc {
-            self.context
-                .dialplan
-                .media
-                .webrtc_port_start
-                .zip(self.context.dialplan.media.webrtc_port_end)
+            media.webrtc_port_start.zip(media.webrtc_port_end)
         } else {
-            self.context
-                .dialplan
-                .media
-                .rtp_start_port
-                .zip(self.context.dialplan.media.rtp_end_port)
+            rtp_ports
         };
         crate::media::leg::LegConfig {
             quality_stats: self.context.dialplan.media.quality_stats.clone(),
@@ -802,13 +790,13 @@ impl SipSession {
             codecs,
             video_codecs,
             rtp_port_range,
-            external_ips: parse_ips(self.context.dialplan.media.external_ip.as_deref()),
+            external_ips: parse_ips(external_ip),
             // WebRTC must gather host candidates across interfaces. A fixed
             // SIP/RTP bind address is only appropriate for RTP/SDES legs.
             bind_ips: if is_webrtc {
                 Vec::new()
             } else {
-                parse_ips(self.context.dialplan.media.bind_ip.as_deref())
+                parse_ips(bind_ip)
             },
             prefer_ipv6: false,
             cname: Some(self.server.rtc_cname.clone()),
@@ -846,107 +834,6 @@ impl SipSession {
     }
 
 
-    /// Resolve the effective AMD config for this call: global `[proxy] amd`
-    /// overlaid by the dialplan's route/trunk config (`dialplan.amd`, stamped
-    /// at routing), overlaid by an `app_params.amd` object on application
-    /// flows. `None` when detection is disabled anywhere in the chain.
-    pub(crate) fn resolve_amd_config(&self) -> Option<crate::media::amd::AmdConfig> {
-        let mut config = self
-            .server
-            .proxy_config
-            .load()
-            .amd
-            .clone()
-            .unwrap_or_default();
-        if let Some(dialplan_amd) = self.context.dialplan.amd.as_ref() {
-            config.overlay(dialplan_amd.clone());
-        }
-        if let crate::call::DialplanFlow::Application {
-            app_params: Some(params),
-            ..
-        } = &self.context.dialplan.flow
-        {
-            if let Some(value) = params.get("amd") {
-                match serde_json::from_value::<crate::media::amd::AmdConfig>(value.clone()) {
-                    Ok(app_amd) => config.overlay(app_amd),
-                    Err(error) => tracing::warn!(
-                        session_id = %self.id, %error,
-                        "amd: invalid app_params.amd object, ignoring"
-                    ),
-                }
-            }
-        }
-        (config.enabled.unwrap_or(false)).then_some(config)
-    }
-
-    /// Arm AMD detection on an outbound callee leg that just answered (see
-    /// `update_leg_state`). Best-effort: failures log and the call continues
-    /// normally — detection never blocks or breaks the media path.
-    fn arm_amd_for_leg(&mut self, leg_id: &LegId) {
-        let Some(config) = self.resolve_amd_config() else {
-            return;
-        };
-        let Some(media_leg) = self.media_leg(leg_id) else {
-            return;
-        };
-        let detector = match crate::media::amd::create_amd_detector(&config) {
-            Ok(detector) => detector,
-            Err(error) => {
-                tracing::warn!(session_id = %self.id, %error, "amd: detector creation failed");
-                return;
-            }
-        };
-        let (outcome_tx, outcome_rx) = tokio::sync::mpsc::channel(2);
-        media_leg.disarm_amd(); // fresh attempt → fresh verdict
-        media_leg.arm_amd(crate::media::amd::AmdArmament {
-            detector,
-            local_speech: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            outcome_tx,
-        });
-        self.amd = Some(match self.amd.take() {
-            Some(mut state) => {
-                state.outcome_rx = outcome_rx;
-                state.armed_leg = Some(leg_id.clone());
-                state
-            }
-            None => AmdState {
-                outcome_rx,
-                armed_leg: Some(leg_id.clone()),
-            },
-        });
-        debug!(
-            session_id = %self.id,
-            leg_id = %leg_id,
-            engine = config.engine.as_deref().unwrap_or("heuristic"),
-            "amd armed on answered callee leg"
-        );
-    }
-
-    /// Consume an AMD verdict: store (last attempt wins) and emit the RWI
-    /// `call_amd_detected` event. The leg's detector slot is released — the
-    /// verdict is final for this attempt.
-    fn handle_amd_verdict(&mut self, verdict: crate::media::amd::AmdVerdict) {
-        debug!(
-            session_id = %self.id,
-            result = %verdict.result,
-            confidence = verdict.confidence,
-            decision_time_ms = verdict.decision_time_ms,
-            "amd verdict"
-        );
-        self.amd_verdict = Some(verdict.clone());
-        // Disarm: release the shared analysis tap slot on the armed leg.
-        if let Some(leg_id) = self.amd.as_mut().and_then(|state| state.armed_leg.take()) {
-            if let Some(media_leg) = self.media_leg(&leg_id) {
-                media_leg.disarm_amd();
-            }
-        }
-        self.emit_typed_rwi_event(&crate::rwi::CallAmdDetected::from_verdict(
-            self.context.session_id.clone(),
-            &verdict,
-        ));
-    }
-
-
     pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::Receiver<CallCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
@@ -962,44 +849,21 @@ impl SipSession {
         (handle, cmd_rx)
     }
 
-    /// Auto-start live transcription when `[proxy.transcript.remote]
-    /// auto_start = true` **or** the dialplan carries a per-call
-    /// [`TranscriptionPlan`]. Best-effort: failures are logged, never fatal.
-    /// No-op while a transcription is already running — unlike the
-    /// `StartTranscription` command executor, a direct re-run here would
-    /// silently REPLACE the provider and reset its reference count.
-    async fn maybe_autostart_live_transcription(&mut self, at: &'static str) {
-        if self.live_transcription.is_some() {
-            return;
+    /// Effective enable policy owns inspection; subtitle subscriptions are passive.
+    async fn maybe_autostart_live_quality(&mut self, at: &'static str) {
+        if self.live_quality.is_some() { return; }
+        let mut config = self.server.proxy_config.load().quality.clone().unwrap_or_default();
+        if let Some(plan) = self.context.dialplan.extensions.get::<crate::call::quality::QualityPlan>() {
+            config.apply(plan);
         }
-        let globally_enabled = self
-            .server
-            .proxy_config
-            .load()
-            .transcript
-            .as_ref()
-            .and_then(|t| t.remote.as_ref())
-            .and_then(|r| r.auto_start)
-            .unwrap_or(false);
-        let per_call_plan = self
-            .context
-            .dialplan
-            .extensions
-            .get::<crate::call::transcription::TranscriptionPlan>()
-            .is_some();
-        if !globally_enabled && !per_call_plan {
-            return;
-        }
-        if let Err(error) = self.start_live_transcription(None).await {
-            warn!(
-                session_id = %self.id,
-                at,
-                %error,
-                "Auto start live transcription failed"
-            );
+        if !config.enabled { return; }
+        if let Err(error) = self.start_live_quality().await {
+            warn!(session_id = %self.id, at, %error, "Auto start quality inspection failed");
+            self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
+                call_id: self.context.session_id.clone(), side: None, error: error.to_string(),
+            });
         }
     }
-
 
     /// Resolve the stereo channel assignment for this call into
     /// `option.stereo_swap`, the value every recorder backend consumes.
@@ -1264,14 +1128,14 @@ impl SipSession {
         };
         let session_extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
 
-        // Session app-context config: full-config snapshot with the LIVE
-        // [proxy] section overlaid (see SipServerInner::session_app_config).
-        // Rebuilding `Config::default()` here silently dropped non-proxy
-        // sections and broke `[[realtime]]` preset resolution (#302).
         let mut app_ctx = ApplicationContext::new(
             server.database.clone().unwrap_or_default(),
             call_info,
-            server.session_app_config(),
+            Arc::new(crate::config::Config {
+                proxy: (*server.proxy_config.load_full()).clone(),
+                realtime: server.realtime_presets.load().as_ref().clone(),
+                ..Default::default()
+            }),
             server.http_client.clone(),
         );
         app_ctx.rwi_gateway = server.rwi_gateway.clone();
@@ -1448,8 +1312,6 @@ impl SipSession {
             pending_dynamic_dialogs: Arc::new(DashMap::new()),
             callee_guards: Vec::new(),
             reporter: None,
-            amd: None,
-            amd_verdict: None,
             event_progress: EventProgress {
                 cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 answered_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1469,7 +1331,7 @@ impl SipSession {
             session_registry_guard: None,
             dialog_registry_guards: HashMap::new(),
             active_plays: std::collections::HashMap::new(),
-            live_transcription: None,
+            live_quality: None,
             recording: RecordingState::default(),
             primary_leg_uac,
         };
@@ -2031,8 +1893,6 @@ impl SipSession {
         mb.force_transcode().await
     }
 
-    /// Poll the AMD verdict channel; pends forever when AMD never armed so
-    /// the select arm stays dormant.
     /// Human-readable label for the leg that stopped sending RTP: the session
     /// leg's display name + endpoint when available, falling back to the
     /// routing metadata (routed / connected URI), and finally to the running
@@ -2074,18 +1934,6 @@ impl SipSession {
                 .clone()
                 .map(|a| format!("app:{}", a))
                 .unwrap_or_else(|| "unknown".to_string()),
-        }
-    }
-    async fn recv_amd_verdict(
-        rx: Option<&mut tokio::sync::mpsc::Receiver<crate::media::amd::AmdVerdict>>,
-    ) -> crate::media::amd::AmdVerdict {
-        match rx {
-            Some(r) => match r.recv().await {
-                Some(verdict) => verdict,
-                // Sender dropped (leg torn down): park the arm permanently.
-                None => std::future::pending().await,
-            },
-            None => std::future::pending().await,
         }
     }
 
@@ -2245,12 +2093,6 @@ impl SipSession {
                             }
                         }
                     }
-                }
-
-                verdict = Self::recv_amd_verdict(
-                    self.amd.as_mut().map(|state| &mut state.outcome_rx),
-                ) => {
-                    self.handle_amd_verdict(verdict);
                 }
 
                 Some(result) = Self::recv_recorder_finished(&mut self.media.recording) => {
@@ -2892,7 +2734,7 @@ impl SipSession {
             return Err(anyhow!("Originate caller MediaBridge A leg already exists"));
         }
 
-        let cfg = self.build_leg_config(crate::media::TransportMode::Rtp, codecs, Vec::new());
+        let cfg = self.build_leg_config(&LegId::from("caller"), crate::media::TransportMode::Rtp, codecs, Vec::new());
         let recorder_sender = self.setup_recording_capture()?;
         let leg_label = "caller";
         let leg = crate::media::create_leg(leg_label, &cfg, recorder_sender, crate::media::CaptureRoute::Classic)?;
@@ -2945,7 +2787,7 @@ impl SipSession {
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
         self.set_auto_recorder_traced(None).await;
-        self.maybe_autostart_live_transcription("originate_answer")
+        self.maybe_autostart_live_quality("originate_answer")
             .await;
         // The caller dialog is already answered when it is attached. Its
         // Confirmed state may have been consumed by the originate setup loop
@@ -4354,6 +4196,89 @@ impl SipSession {
         None
     }
 
+    /// Answer an UPDATE from the current dialing attempt without accepting the
+    /// INVITE or registering this candidate as the connected callee.
+    async fn handle_early_callee_update(
+        &mut self,
+        dialog_id: DialogId,
+        request: rsipstack::sip::Request,
+        tx_handle: TransactionHandle,
+    ) -> bool {
+        let mut headers = Vec::new();
+        let result = async {
+            if let Err(error) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers) {
+                warn!(session_id = %self.id, %dialog_id, %error, "Invalid early UPDATE session interval");
+                if let Some(timer) = self.session_timers.timers.get(&dialog_id) {
+                    headers.push(rsipstack::sip::Header::Other(HEADER_MIN_SE.into(), timer.min_se.as_secs().to_string()));
+                }
+                return Ok((StatusCode::SessionIntervalTooSmall, None));
+            }
+            headers.extend(self.successful_refresh_response_headers(&dialog_id).unwrap_or_default());
+            if request.body.is_empty() {
+                return Ok::<_, anyhow::Error>((StatusCode::OK, None));
+            }
+            // A replacement candidate must not renegotiate the still-connected
+            // callee's media while a blind transfer is ringing.
+            if self.meta.transfer_in_progress && self.meta.connected_callee_dialog_id.is_some() {
+                return Ok((StatusCode::NotAcceptableHere, None));
+            }
+            let offer = String::from_utf8(request.body.clone())?;
+            Self::parse_sdp(rustrtc::SdpType::Offer, &offer, "early UPDATE")?;
+            let offer = if self.custom_sdp_attrs_passthrough_enabled() {
+                offer
+            } else {
+                crate::media::sdp_attrs::strip_custom_attrs_sdp(&offer, rustrtc::SdpType::Offer)
+            };
+            if self.bypasses_local_media() {
+                return self.relay_signaling_only_offer(DialogSide::Callee, rsipstack::sip::Method::Update, &offer).await;
+            }
+            let leg_id = LegId::from("callee");
+            let peer = self.media_leg(&leg_id).ok_or_else(|| anyhow!("Missing early callee media"))?;
+            // A reliable provisional answer completes the SIP offer/answer
+            // exchange, although the INVITE itself is still pending. rustrtc
+            // keeps Pranswer in HaveLocalOffer, so complete that exchange before
+            // applying the new offer. Do not change the SIP dialog's state.
+            if peer.pc().signaling_state() == rustrtc::SignalingState::HaveLocalOffer {
+                let Some(mut answer) = peer.pc().remote_description()
+                    .filter(|sdp| sdp.sdp_type == rustrtc::SdpType::Pranswer)
+                else {
+                    return Ok((StatusCode::RequestPending, None));
+                };
+                answer.sdp_type = rustrtc::SdpType::Answer;
+                peer.apply_remote_sdp(&answer.to_sdp_string(), rustrtc::SdpType::Answer).await?;
+            }
+            let answer = self.build_local_dialog_answer(
+                DialogSide::Callee, &leg_id, rsipstack::sip::Method::Update, &offer,
+            ).await?;
+            self.media.callee_answer_sdp = Some(offer);
+            // Refresh media routing, but leave call/leg state and answer time
+            // untouched until the final INVITE response.
+            if self.media.early_media_sent {
+                self.activate_callee_media(true).await?;
+            }
+            Ok((StatusCode::OK, Some(answer)))
+        }.await;
+        let (status, body) = match result {
+            Ok((status, answer)) => {
+                if answer.is_some() {
+                    headers.extend(Self::sdp_headers());
+                }
+                (status, answer.map(String::into_bytes))
+            }
+            Err(error) => {
+                warn!(session_id = %self.id, %dialog_id, %error, "Failed to negotiate early UPDATE");
+                headers.clear();
+                (StatusCode::NotAcceptableHere, None)
+            }
+        };
+        let updated = status.kind() == rsipstack::sip::StatusCodeKind::Successful && body.is_some();
+        if let Err(error) = tx_handle.respond(status, Some(headers), body).await {
+            warn!(session_id = %self.id, %dialog_id, %error, "Failed to respond to early UPDATE");
+            return false;
+        }
+        updated
+    }
+
     async fn handle_updated_dialog(
         &mut self,
         side: DialogSide,
@@ -4474,7 +4399,7 @@ impl SipSession {
                         } else {
                             Vec::new()
                         };
-                        let config = self.build_leg_config(mode.clone(), codecs, video);
+                        let config = self.build_leg_config(&leg_id, mode.clone(), codecs, video);
                         let peer =
                             crate::media::create_leg(leg_id.as_str(), &config, None, crate::media::CaptureRoute::Classic)?;
                         self.attach_media_leg(&leg_id, peer.clone());
@@ -7386,7 +7311,7 @@ impl SipSession {
         // strips video, the video m-line is forced inactive in the answer below.
         let video_codecs = self.video_caps_from_sdp(&caller_offer);
 
-        let cfg = self.build_leg_config(transport.clone(), codecs, video_codecs);
+        let cfg = self.build_leg_config(&LegId::from("caller"), transport.clone(), codecs, video_codecs);
         let caller_label = "caller";
 
         let recorder_sender = self.setup_recording_capture()?;
@@ -7702,6 +7627,7 @@ impl SipSession {
         // attempt so a transferor BYE cannot abort a successful replacement,
         // and cannot disappear when the replacement fails.
         let mut deferred_states = Vec::new();
+        let mut early_sdp_updated = false;
         let result = loop {
             tokio::select! {
                 _ = caller_end_check.tick() => {
@@ -7952,6 +7878,12 @@ impl SipSession {
                             self.emit_call_ringing(None, false, None);
                         }
                         self.update_snapshot_cache();
+                    } else if let Some(DialogState::Updated(id, request, handle)) = state {
+                        if id.call_id == callee_call_id && request.method == rsipstack::sip::Method::Update {
+                            early_sdp_updated |= self.handle_early_callee_update(id, request, handle).await;
+                        } else {
+                            deferred_states.push(DialogState::Updated(id, request, handle));
+                        }
                     } else if let Some(state) = state {
                         deferred_states.push(state);
                     }
@@ -7962,7 +7894,15 @@ impl SipSession {
             let _ = state_tx.send(state);
         }
 
-        let (dialog_id, response): (DialogId, Option<rsipstack::sip::Response>) = result?;
+        let (dialog_id, mut response): (DialogId, Option<rsipstack::sip::Response>) = result?;
+        if early_sdp_updated {
+            // The final INVITE repeats the initial answer. A subsequent UPDATE
+            // has already superseded it; replaying it would revert the media
+            // address and apply an Answer to a now-stable PeerConnection.
+            if let Some(response) = response.as_mut() {
+                response.body.clear();
+            }
+        }
         self.finalize_callee_connection(
             dialog_id,
             response,
@@ -8035,7 +7975,7 @@ impl SipSession {
                     } else {
                         Vec::new()
                     };
-                    let cfg = self.build_leg_config(callee_mode, codecs, video_codecs);
+                    let cfg = self.build_leg_config(&LegId::from("callee"), callee_mode, codecs, video_codecs);
                     // The callee leg feeds the same recording task so its
                     // ingress (the agent mic) can become the recorder's B
                     // channel while the call is held; its tap starts fully
@@ -8347,7 +8287,6 @@ impl SipSession {
         // The answer timing installs its recorder immediately before 200 OK.
         self.set_auto_recorder_traced(Some(crate::config::RecordingAutoStartAt::Answer))
             .await;
-        self.maybe_autostart_live_transcription("call_answer").await;
 
         if let Some(mut answer_sdp) = answer_sdp {
             if let Some(peer) = self.media_leg(&LegId::from("caller"))
@@ -8389,6 +8328,9 @@ impl SipSession {
         if let Some(peer) = self.media_leg(&LegId::from("caller")) {
             peer.accept();
         }
+
+        // PCM taps need the committed caller profile, not the provisional offer.
+        self.maybe_autostart_live_quality("call_answer").await;
 
         // A call has been answered (real callee or app) — any in-progress
         // blind transfer is over. Reconcile the watchdog: it is suppressed
@@ -8823,8 +8765,8 @@ impl SipSession {
         // and Drop.
         self.cancel_token.cancel();
 
-        // Stop live transcription (closes ASR streams, emits transcript_ended).
-        self.stop_live_transcription("call_ended").await;
+        // Stop inspection connections and emit transcript_ended.
+        self.stop_live_quality("call_ended").await;
 
         // Flush any in-flight media plays that finished naturally (without an
         // explicit stop) so the trace shows their full duration + completion.
@@ -10683,13 +10625,9 @@ impl SipSession {
                 Self::ok_or_failure(self.media.recording.resume_recording())
             }
 
-            CallCommand::StartTranscription { language } => {
-                // Reference-counted: bump the count when already running.
-                if let Some(lt) = self.live_transcription.as_mut() {
-                    lt.refs += 1;
-                    return CommandResult::success();
-                }
-                match self.start_live_transcription(language).await {
+            CallCommand::StartQualityCheck => {
+                if self.live_quality.is_some() { return CommandResult::success(); }
+                match self.start_live_quality().await {
                     Ok(_) => CommandResult::success(),
                     Err(e) => {
                         // Surface the failure to subscribers (SSE / webhook).
@@ -10703,16 +10641,10 @@ impl SipSession {
                 }
             }
 
-            CallCommand::StopTranscription => match self.live_transcription.as_mut() {
-                None => CommandResult::success(),
-                Some(lt) => {
-                    lt.refs = lt.refs.saturating_sub(1);
-                    if lt.refs == 0 {
-                        self.stop_live_transcription("stopped").await;
-                    }
-                    CommandResult::success()
-                }
-            },
+            CallCommand::StopQualityCheck => {
+                self.stop_live_quality("stopped").await;
+                CommandResult::success()
+            }
 
             CallCommand::Transfer {
                 leg_id,
@@ -11907,6 +11839,7 @@ impl SipSession {
     }
 
     pub(super) async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
+        let first_hangup = self.meta.hangup_time.is_none() && !self.cancel_token.is_cancelled();
         self.meta.pending_transfer_outcome = None;
         // Kill any external (voip/realtime) bridge — media tasks must not
         // outlive the call.
@@ -12013,6 +11946,9 @@ impl SipSession {
             .is_some_and(|leg| leg.state != LegState::Ended)
         {
             return CommandResult::success();
+        }
+        if first_hangup && self.meta.hangup_trace_detail.is_none() {
+            self.meta.hangup_trace_detail = cmd.trace_detail.clone();
         }
         self.bridge.clear();
 
@@ -12205,12 +12141,6 @@ impl SipSession {
                         );
                     }
                     LegTransitionAction::CallAnswered => {
-                        // AMD: arm on outbound callee legs (never the caller
-                        // slot) when the resolved config enables detection —
-                        // the detector rides the leg's shared analysis tap.
-                        if leg_id.as_str() != "caller" {
-                            self.arm_amd_for_leg(leg_id);
-                        }
                         self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                             leg_id: Some(leg_id.to_string()),
                             // Child-leg session (cluster-dispatched queue
@@ -13024,7 +12954,7 @@ impl SipSession {
                 codecs.iter().map(|codec| codec.payload_type),
             )?;
         }
-        let cfg = self.build_leg_config(mode, codecs, video);
+        let cfg = self.build_leg_config(leg_id, mode, codecs, video);
         // Any dynamic leg can become the selected B side after queue dispatch
         // or transfer. Capture stays off until hold selects that exact peer,
         // so an unselected consultation cannot leak into the recording.
@@ -14461,14 +14391,14 @@ mod route_via_home_proxy_tests {
         // it is OUR registration (deliver locally), a peer's external home
         // is remote — regardless of any address this node happens to hold
         // connections to.
-        let own_contact = sip_addr("116.62.75.161:15060");
+        let own_contact = sip_addr("192.0.2.161:15060");
         assert!(!SipSession::route_via_home_proxy(
-            &target_with_home("116.62.75.161:15060"),
+            &target_with_home("192.0.2.161:15060"),
             true,
             Some(&own_contact)
         ));
         assert!(SipSession::route_via_home_proxy(
-            &target_with_home("116.62.250.247:15060"),
+            &target_with_home("192.0.2.247:15060"),
             true,
             Some(&own_contact)
         ));

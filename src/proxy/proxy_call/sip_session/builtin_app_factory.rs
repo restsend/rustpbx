@@ -826,8 +826,8 @@ mod tests {
     /// `Config::default()` + `[proxy]` only, silently dropping every other
     /// section — the preset lookup then failed at call time even though
     /// `check-config` passed. Asserted through the REAL server construction
-    /// (AppStateBuilder → SipServerInner → session_app_config → factory),
-    /// not a hand-built context.
+    /// (AppStateBuilder → SipServerInner.realtime_presets → factory), not a
+    /// hand-built context.
     #[tokio::test]
     async fn realtime_preset_from_config_file_resolves_in_session_app_context() {
         let config: crate::config::Config = toml::from_str(
@@ -853,38 +853,28 @@ model = "test-model"
             .expect("app state builds");
         let server = &app.sip_server().inner;
 
-        // 1. The full config survived the builder → server wiring.
-        let seeded = server.app_config.load();
+        // 1. The presets survived the builder → server wiring.
+        let seeded = server.realtime_presets.load();
         assert!(
             seeded
-                .realtime
-                .as_ref()
-                .is_some_and(|p| p.iter().any(|preset| preset.name == "inworld")),
-            "SipServerInner.app_config must carry the [[realtime]] preset"
+                .iter()
+                .flatten()
+                .any(|preset| preset.name == "inworld"),
+            "SipServerInner.realtime_presets must carry the [[realtime]] preset"
         );
-        drop(seeded);
 
-        // 2. The live-proxy overlay: session config takes [proxy] from the
-        // live ArcSwap (hot-reload semantics), non-proxy sections from the
-        // file snapshot.
-        let mut live_proxy = crate::config::ProxyConfig::default();
-        live_proxy.addr = "1.2.3.4".into();
-        server.proxy_config.store(Arc::new(live_proxy));
-        let session_config = server.session_app_config();
+        // 2. End-to-end: build the session's app-context config exactly the
+        // way SipSession::new does (live [proxy] + snapshotted presets) and
+        // let the factory resolve the preset the way the dialplan path does.
+        let session_config = crate::config::Config {
+            proxy: (*server.proxy_config.load_full()).clone(),
+            realtime: server.realtime_presets.load().as_ref().clone(),
+            ..Default::default()
+        };
         assert_eq!(
-            session_config.proxy.addr, "1.2.3.4",
+            session_config.proxy.addr, "0.0.0.0",
             "session config must read [proxy] from the live swap"
         );
-        assert!(
-            session_config
-                .realtime
-                .as_ref()
-                .is_some_and(|p| p.iter().any(|preset| preset.name == "inworld")),
-            "session config must keep non-proxy sections from the file snapshot"
-        );
-
-        // 3. End-to-end: the factory resolves the preset exactly the way the
-        // dialplan application path does.
         let call_info = CallInfo {
             session_id: "realtime-preset-regression".into(),
             caller: "1001".into(),
@@ -897,7 +887,7 @@ model = "test-model"
         let ctx = ApplicationContext::new(
             sea_orm::DatabaseConnection::default(),
             call_info,
-            session_config,
+            Arc::new(session_config),
             reqwest::Client::new(),
         );
         let created = BuiltinAppFactory::new(None, None)

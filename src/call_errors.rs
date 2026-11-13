@@ -200,6 +200,8 @@ pub fn registry() -> &'static CallErrRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceKind {
+    /// An observation reported by a call quality service, not a routing transition.
+    Quality,
     /// An INVITE was sent to a target / ringing started.
     Ring,
     /// The callee answered and the call was established.
@@ -255,8 +257,12 @@ pub enum TraceKind {
 #[serde(rename_all = "snake_case")]
 pub struct TraceEvent {
     /// Milliseconds offset from the start of the session.
+    #[serde(default)]
     pub ts: i64,
     pub kind: TraceKind,
+    /// Audio leg identity, supplied by PBX for external quality observations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
     /// Severity (error/warn/info). `None` for neutral transitions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<ErrSeverity>,
@@ -281,6 +287,7 @@ impl TraceEvent {
         Self {
             ts: 0,
             kind,
+            side: None,
             severity: None,
             code: None,
             message: message.into(),

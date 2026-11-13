@@ -97,16 +97,10 @@ pub enum CallCommandPayload {
     StopRecording,
     PauseRecording,
     ResumeRecording,
-    /// Start live transcription on this call (reference-counted: safe to call
-    /// alongside SSE subscribers / auto_start). Requires
-    /// `[proxy.transcript.remote]` and a MediaBridge (not bypass mode).
-    StartTranscription {
-        #[serde(default)]
-        language: Option<String>,
-    },
-    /// Release one live-transcription reference (started via REST, SSE
-    /// subscribe, or auto_start).
-    StopTranscription,
+    /// Explicitly start enabled inspection; idempotent when already running.
+    StartQualityCheck,
+    /// Explicitly stop inspection; independent of subtitle subscriptions.
+    StopQualityCheck,
 }
 
 impl CallCommandPayload {
@@ -126,8 +120,8 @@ impl CallCommandPayload {
             Self::StopRecording => "stop_recording",
             Self::PauseRecording => "pause_recording",
             Self::ResumeRecording => "resume_recording",
-            Self::StartTranscription { .. } => "start_transcription",
-            Self::StopTranscription => "stop_transcription",
+            Self::StartQualityCheck => "start_quality_check",
+            Self::StopQualityCheck => "stop_quality_check",
         }
     }
 }

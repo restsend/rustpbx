@@ -274,15 +274,6 @@ pub enum RecordingAutoStartAt {
     Answer,
 }
 
-/// `[proxy.transcript]` section. Only the `remote` sub-table is typed; the
-/// offline sensevoice fields (`command`, `models_path`, ...) live in the raw
-/// TOML and are parsed ad-hoc by the transcript addon.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TranscriptSection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<crate::call::transcription::remote::RemoteTranscriptConfig>,
-}
-
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default, rename_all = "snake_case")]
@@ -755,10 +746,8 @@ pub struct Config {
     #[serde(default)]
     pub graceful_shutdown: Option<GracefulShutdownConfig>,
     /// Rolling process handover (container rolling release) — see
-    /// [`RollingConfig`]. **Enabled by default**: a config without a
-    /// `[rolling]` section behaves as `enabled = true`; a lone instance
-    /// self-detects and SIGTERM degrades to the plain drain. Opt out with
-    /// `[rolling] enabled = false`.
+    /// [`RollingConfig`]. Disabled by default, including when the
+    /// `[rolling]` section is absent. Opt in with `[rolling] enabled = true`.
     #[serde(default = "default_rolling_config")]
     pub rolling: Option<RollingConfig>,
     /// Maximum size (in bytes) for audio files downloaded over HTTP from the
@@ -1876,12 +1865,6 @@ pub struct ProxyConfig {
     /// declared but empty table disables the built-in failure audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
-    /// Global AMD (answering machine / AI assistant) detection defaults
-    /// (`[proxy] amd`). Route hints and trunk `[trunks.<name>] amd` sections
-    /// overlay it per-field; `app_params` overlay last at answer time.
-    /// Disabled unless `enabled = true` somewhere in the chain.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amd: Option<crate::media::amd::AmdConfig>,
     pub audio_codecs: Option<Vec<String>>,
     #[serde(default)]
     pub frequency_limiter: Option<String>,
@@ -1951,11 +1934,9 @@ pub struct ProxyConfig {
     pub ivr_fallback: Option<IvrFallbackConfig>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
-    /// Transcription settings (`[proxy.transcript]`). Only the `remote`
-    /// sub-table is typed here (live streaming ASR); the offline sensevoice
-    /// fields are read ad-hoc from the raw TOML by the transcript addon.
+    /// External realtime inspection service; offline transcript addon is independent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<TranscriptSection>,
+    pub quality: Option<crate::call::quality::QualityConfig>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     #[serde(default)]
@@ -2280,10 +2261,6 @@ pub struct DialplanHints {
     /// stamped during routing. `None` when no trunk/route policy applies —
     /// the session then falls back to the global proxy config.
     pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
-    /// AMD (answering machine / AI assistant) detection config: route-level
-    /// setting over the trunk's `[trunks.<name>] amd` section. `None` → the
-    /// session falls back to the global `[proxy] amd`.
-    pub amd: Option<crate::media::amd::AmdConfig>,
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
@@ -2313,7 +2290,6 @@ impl std::fmt::Debug for DialplanHints {
             )
             .field("busy_wait", &self.busy_wait)
             .field("diversion_policy", &self.diversion_policy)
-            .field("amd", &self.amd)
             .finish()
     }
 }
@@ -2438,16 +2414,12 @@ pub struct RollingConfig {
     pub hello_interval_secs: u64,
 }
 
-/// Rolling handover is ENABLED by default: a lone instance self-detects (its
-/// own hello comes back with its own pid) and SIGTERM degrades to the plain
-/// drain — identical behavior to a non-rolling deployment. A rolling pair
-/// (successor started first, then `docker stop` on the predecessor) gets
-/// the zero-restart handover. Opt out with `[rolling] enabled = false`.
+/// Rolling handover is disabled by default. Opt in with `[rolling] enabled = true`.
 fn default_rolling_enabled() -> bool {
-    true
+    false
 }
 
-/// Absent `[rolling]` section = enabled (see [`default_rolling_enabled`]).
+/// Absent `[rolling]` section uses the disabled default.
 fn default_rolling_config() -> Option<RollingConfig> {
     Some(RollingConfig::default())
 }
@@ -2537,7 +2509,7 @@ fn default_outbound_webhook_timeout() -> u64 {
 /// without ever carrying the credential: the `api_key` lives here (or in
 /// the `OPENAI_API_KEY` / `REALTIME_API_KEY` env fallback) and travels only
 /// in the WebSocket upgrade headers, never in URLs, logs or CDRs.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RealtimePreset {
     /// Preset name referenced by app params (`{"preset": "support-bot"}`).
     pub name: String,
@@ -2755,7 +2727,6 @@ impl ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            amd: None,
             presence_sweep_secs: None,
             locator_sweep_secs: None,
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
@@ -2825,7 +2796,7 @@ impl Default for ProxyConfig {
             ivr_endpoints: HashMap::new(),
             ivr_fallback: None,
             recording: None,
-            transcript: None,
+            quality: None,
             generated_dir: default_generated_config_dir(),
             generated_db: false,
             nat_fix: true,
@@ -4014,12 +3985,12 @@ bucket = "default-recordings"
     #[test]
     fn test_rtp_config_uses_proxy_addr_for_bind_ip() {
         let mut config = Config::default();
-        config.proxy.addr = "120.228.209.243".to_string();
+        config.proxy.addr = "198.51.100.10".to_string();
         config.external_ip = Some("203.0.113.10".to_string());
 
         let rtp_config = config.rtp_config();
 
-        assert_eq!(rtp_config.bind_ip.as_deref(), Some("120.228.209.243"));
+        assert_eq!(rtp_config.bind_ip.as_deref(), Some("198.51.100.10"));
         assert_eq!(rtp_config.external_ip.as_deref(), Some("203.0.113.10"));
     }
 

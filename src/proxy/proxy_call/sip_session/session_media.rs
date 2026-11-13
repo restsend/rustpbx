@@ -88,11 +88,11 @@ impl SipSession {
         // remote section), so the caps are always derived from `sdp`. The video
         // policy (strip) is enforced when the answer SDP is assembled.
         let video_codecs = self.video_caps_from_sdp(sdp);
-        let cfg = self.build_leg_config(transport, codecs, video_codecs);
         let leg_name = match side {
             LegSide::A => "caller",
             LegSide::B => "callee",
         };
+        let cfg = self.build_leg_config(&LegId::from(leg_name), transport, codecs, video_codecs);
         if self.media_leg(&LegId::from(leg_name)).is_some() {
             return Ok(());
         }

@@ -84,6 +84,7 @@ flate2 = "1"
 async-trait = "0.1.88"
 axum = { version = "0.8.9", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
+bytemuck = "1"
 futures = "0.3.31"
 rustls = { version = "0.23.41", default-features = false, features = [
     "ring",

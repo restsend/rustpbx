@@ -679,7 +679,6 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         dest,
         outbound_proxy: backup_dest.clone(),
         backup_dest,
-        amd: None,
         username: model.register_username.clone().filter(|user| !user.trim().is_empty())
             .or_else(|| model.auth_username.clone()),
         auth_username: model.auth_username.clone(),
@@ -712,6 +711,10 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
         rewrite_hostport: model.rewrite_hostport,
+        send_p_asserted_identity: model.metadata.as_ref()
+            .and_then(|meta| meta.get("sbc"))
+            .and_then(|sbc| sbc.get("send_p_asserted_identity"))
+            .and_then(|value| value.as_bool()),
         call_id_mode: None,
         health_check_enabled: None,
         health_check_per_ip: None,

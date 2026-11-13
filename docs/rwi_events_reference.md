@@ -777,7 +777,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
     "download_url": "https://storage.example.com/rec.mp3",
     "caller_name": "330909",
     "callee_name": "9242000001",
-    "called_phone": "018659727661",
+    "called_phone": "013800138000",
     "call_type": "outbound",
     "agent_id": "451447",
     "agent_name": "luoxiaofeng90_v",
@@ -910,7 +910,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 
 分发：call_owner
 
-> 触发方式：懒启动——首个 SSE 订阅者连接 `GET /cc/calls/{call_id}/transcript`（或发送 `StartTranscription` 命令）时自动开始；最后一个订阅者断开或通话挂断时停止。参见 [Live Transcript SSE API](live_transcript_api.md)。
+> 触发方式：有效质检策略 `enabled = true` 在接听后自动启动，通话结束时停止。`GET /cc/calls/{call_id}/transcript` 只订阅文字事件，连接和断开均不启停质检。管理命令 `StartQualityCheck` / `StopQualityCheck` 可显式控制，启动命令仍要求有效策略已启用。
 
 **transcript_started**
 
@@ -927,7 +927,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 | `call_id` | String | 呼叫标识 |
 | `side` | String | `"caller"` / `"callee"` |
 | `text` | String | 识别文本 |
-| `partial` | bool | `true` = 中间假设（会被同侧后续 segment 替换），`false` = 最终结果 |
+| `partial` | bool | 质检中间结果为 `true`；最终结果只通过 `transcript_final` 发布 |
 | `start_ms` | u64 | 相对转录起点偏移（毫秒） |
 | `end_ms` | u64 | 相对转录起点偏移（毫秒） |
 | `lang` | Option\<String\> | 语言 |
@@ -949,7 +949,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 
 **transcript_final**
 
-> 每一句**最终识别结果**的独立事件：在对应 `transcript_segment`（`partial=false`）之外额外发布，字段一致并增加 `provider`。`[rwi_webhook]` 配置 `events = ["transcript_final"]` 即可只订阅每句终稿、不收中间假设（"说完一句发一个 webhook"）。注意与 `realtime_event`（AI 语音桥）内部的 `transcript_final` kind 无关——那是 realtime 桥的透传负载。
+> 每一句**最终识别结果**的独立事件：每次终稿只发布一次，不再重复发布 `transcript_segment`。消费完整字幕时应同时订阅中间结果和终稿事件。`[rwi_webhook]` 配置 `events = ["transcript_final"]` 即可只订阅每句终稿、不收中间假设（"说完一句发一个 webhook"）。注意与 `realtime_event`（AI 语音桥）内部的 `transcript_final` kind 无关——那是 realtime 桥的透传负载。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|

@@ -5,7 +5,6 @@
 
 pub mod app_ingress;
 pub mod audio_source;
-pub mod amd;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
