@@ -82,6 +82,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
         .route(
+            "/cluster/query_transfer_target_dialog",
+            post(cluster_query_transfer_target_dialog_handler),
+        )
+        .route(
             "/cluster/show_session/{session_id}",
             get(cluster_show_session_handler),
         )
@@ -2234,6 +2238,68 @@ async fn cluster_forward_sip_handler(
         )
             .into_response(),
     }
+}
+
+/// Cross-node REFER-Replaces takeover (terminal): scan THIS node's sessions
+/// for the transfer target's REAL dialog — the one the target UA holds with
+/// this node (never a cluster hop leg). Body:
+/// `{"root_session_id": "...", "target_user": "1004"}`.
+/// Answers 200 `{dialog: TransferTargetDialog}` or 404.
+async fn cluster_query_transfer_target_dialog_handler(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    let root_session_id = req
+        .get("root_session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(target_user) = req.get("target_user").and_then(|v| v.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": "Missing target_user" })),
+        )
+            .into_response();
+    };
+    let registry = state.sip_server().inner.active_call_registry.clone();
+    for handle in registry.handles_snapshot() {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if handle
+            .send_command(crate::call::domain::CallCommand::QueryTransferTargetDialog {
+                target_user: target_user.to_string(),
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(Some(info)) = reply_rx.await else {
+            continue;
+        };
+        // Only the REAL target-facing dialog qualifies (shared rule with
+        // the asking side).
+        if !crate::proxy::cluster_forward::accepts_peer_transfer_target_dialog(
+            &info,
+            &root_session_id,
+        ) {
+            info!(
+                session_id = %handle.session_id(),
+                dialog = %info.call_id,
+                endpoint_matched = info.endpoint_matched,
+                remote_registered = info.remote_registered,
+                answer_root = %info.root_session_id,
+                query_root = %root_session_id,
+                "Transfer target dialog answer rejected by the peer acceptance rule"
+            );
+            continue;
+        }
+        return Json(serde_json::json!({ "dialog": info })).into_response();
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "message": "No local dialog toward the transfer target" })),
+    )
+        .into_response()
 }
 
 #[cfg(feature = "commerce")]

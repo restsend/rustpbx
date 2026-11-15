@@ -276,16 +276,16 @@ async fn dtmf_bus_fans_out_digit() {
 /// detect_transport correctly classifies SDP bodies.
 #[test]
 fn detect_transport_classification() {
-    use rustrtc::TransportMode;
+    use rustpbx_media::negotiate::MediaTransport;
     assert_eq!(
         negotiate::detect_transport("m=audio 1234 RTP/AVP 0\r\n"),
-        TransportMode::Rtp
+        MediaTransport::Rtp
     );
     assert_eq!(
         negotiate::detect_transport(
             "a=fingerprint:sha-256 XX\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
         ),
-        TransportMode::WebRtc
+        MediaTransport::WebRtc
     );
 }
 
@@ -804,16 +804,17 @@ async fn rtp_timeout_fires_on_inactive_b_leg() {
 /// out the same way as an RTP leg.
 #[tokio::test]
 async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
-    use rustrtc::TransportMode;
+    use rustpbx_media::negotiate::MediaTransport;
 
     let cfg = LegConfig {
         volume_stats: Default::default(),
         quality_stats: Default::default(),
         call_id: None,
+        root_session_id: None,
         ice_servers: Vec::new(),
         relay_only: false,
         enable_ice_lite: false,
-        transport: TransportMode::WebRtc,
+        transport: MediaTransport::WebRtc,
         codecs: vec![rustpbx_media::negotiate::CodecInfo {
             payload_type: 111,
             codec: audio_codec::CodecType::Opus,

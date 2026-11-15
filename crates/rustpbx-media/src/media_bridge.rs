@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::negotiate::MediaTransport;
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
 use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
@@ -463,10 +464,10 @@ impl MediaBridge {
         // video but share no codec, degrade to the transcoding path: audio
         // still flows (decode → re-encode) and video stops entirely.
         let video_mismatch = !pa.video.is_empty() && !pb.video.is_empty() && video_match.is_none();
-        let a_transport = la.pc().config().transport_mode.clone();
-        let b_transport = lb.pc().config().transport_mode.clone();
-        let has_webrtc_leg = a_transport == rustrtc::TransportMode::WebRtc
-            || b_transport == rustrtc::TransportMode::WebRtc;
+        let a_transport = MediaTransport::from_rtc_config(&la.pc().config());
+        let b_transport = MediaTransport::from_rtc_config(&lb.pc().config());
+        let has_webrtc_leg = a_transport == MediaTransport::WebRtc
+            || b_transport == MediaTransport::WebRtc;
 
         // Idempotent re-bridge: same codec pair on an already-active route is
         // a no-op (avoid rebuilding decoders / re-arming the relay).
@@ -601,11 +602,11 @@ impl MediaBridge {
             rules_b_to_a.extend(video_b_to_a);
 
             let options_a_to_b = RtpRewriteBridgeOptions {
-                strip_extensions: b_transport == rustrtc::TransportMode::Rtp,
+                strip_extensions: b_transport == MediaTransport::Rtp,
                 ..Default::default()
             };
             let options_b_to_a = RtpRewriteBridgeOptions {
-                strip_extensions: a_transport == rustrtc::TransportMode::Rtp,
+                strip_extensions: a_transport == MediaTransport::Rtp,
                 ..Default::default()
             };
 
@@ -1718,7 +1719,7 @@ fn spawn_bridge_stats_task(
              -> Option<crate::media_health::LegMediaHealth> {
                 let leg = leg.as_ref()?;
                 let sample = sample.as_ref()?;
-                let transport_mode = format!("{:?}", leg.pc().config().transport_mode);
+                let transport_mode = format!("{:?}", MediaTransport::from_rtc_config(&leg.pc().config()));
                 let audio = leg
                     .negotiated()
                     .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
@@ -1728,8 +1729,7 @@ fn spawn_bridge_stats_task(
                     .get_selected_pair()
                     .map(|pair| pair.remote.address.to_string());
                 let peer_advertised = leg.peer_advertised_addr();
-                let latched = if leg.pc().config().transport_mode
-                    == rustrtc::TransportMode::Rtp
+                let latched = if MediaTransport::from_rtc_config(&leg.pc().config()) == MediaTransport::Rtp
                 {
                     peer_advertised
                         .as_deref()
@@ -2720,7 +2720,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: MediaTransport::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -2788,7 +2788,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: MediaTransport::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -2856,7 +2856,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: MediaTransport::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
                 codec: audio_codec::CodecType::Opus,
@@ -2946,7 +2946,7 @@ mod tests {
                         ice_servers: Vec::new(),
                         relay_only: false,
                         enable_ice_lite: false,
-                        transport: rustrtc::TransportMode::WebRtc,
+                        transport: MediaTransport::WebRtc,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
                             codec: audio_codec::CodecType::Opus,
@@ -2974,7 +2974,7 @@ mod tests {
                         ice_servers: Vec::new(),
                         relay_only: false,
                         enable_ice_lite: false,
-                        transport: rustrtc::TransportMode::Rtp,
+                        transport: MediaTransport::Rtp,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
                             codec: audio_codec::CodecType::Opus,
@@ -3060,7 +3060,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::WebRtc,
+            transport: MediaTransport::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 0,
                 codec: audio_codec::CodecType::PCMU,
@@ -3090,7 +3090,7 @@ mod tests {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
-            transport: rustrtc::TransportMode::Rtp,
+            transport: MediaTransport::Rtp,
             codecs: vec![CodecInfo {
                 payload_type: 0,
                 codec: audio_codec::CodecType::PCMU,
@@ -3119,6 +3119,8 @@ mod tests {
             t=0 0\r\n\
             m=audio 5000 UDP/TLS/RTP/SAVPF 0\r\n\
             a=rtpmap:0 PCMU/8000\r\n\
+            a=mid:0\r\n\
+            a=rtcp-mux\r\n\
             a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
             a=setup:actpass\r\n\
             a=ice-ufrag:uv50\r\n\

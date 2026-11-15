@@ -418,17 +418,10 @@ impl SipSession {
                         // and a busy transfer target then 486'd the
                         // replacement with both original dialogs already gone
                         // (production 2026-11-14: transfer failed end to end).
-                        let replaced_call_id = replaces
-                            .split(';')
-                            .next()
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
                         self.pending_relayed_refer = Some(super::session::PendingRelayedRefer {
                             source_dialog: source_dialog.clone(),
                             refer_to: refer_to_raw.to_string(),
                             replaces: replaces.to_string(),
-                            replaced_call_id,
                             started_at: std::time::Instant::now(),
                         });
                         // Watchdog: a silent transferee must not hold the

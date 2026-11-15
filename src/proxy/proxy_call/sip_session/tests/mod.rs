@@ -10,6 +10,7 @@ mod child_event_tests;
 mod outbound_failure_tests;
 mod session_id_tests;
 mod packet_diagnostics_tests;
+mod transfer_target_dialog_tests;
 
 #[tokio::test]
 async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
@@ -1426,28 +1427,28 @@ fn test_sdp_transport_mode_classification() {
     // Plain RTP
     assert_eq!(
         SipSession::sdp_transport_mode("m=audio 1000 RTP/AVP 8 0\r\na=sendrecv\r\n"),
-        rustrtc::TransportMode::Rtp
+        MediaTransport::Rtp
     );
     // SDES-SRTP via RTP/SAVP profile (Twilio-style)
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 1000 RTP/SAVP 0 8 101\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
         ),
-        rustrtc::TransportMode::Srtp
+        MediaTransport::Srtp
     );
     // SDES-SRTP advertised only via a=crypto
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 1000 RTP/AVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"
         ),
-        rustrtc::TransportMode::Srtp
+        MediaTransport::Srtp
     );
     // WebRTC (ICE + DTLS) takes precedence even if a crypto line is present
     assert_eq!(
         SipSession::sdp_transport_mode(
             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ice-ufrag:x\r\na=fingerprint:sha-256 AA\r\n"
         ),
-        rustrtc::TransportMode::WebRtc
+        MediaTransport::WebRtc
     );
 }
 
@@ -5543,6 +5544,7 @@ s=-\r\n\
 t=0 0\r\n\
 m=video 4000 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 VP8/90000\r\n\
 a=rtpmap:102 H264/90000\r\n\
@@ -5558,6 +5560,7 @@ m=video 9 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=ice-ufrag:caller-ice\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 VP8/90000\r\n\
 a=rtpmap:102 H264/90000\r\n\
@@ -5867,6 +5870,7 @@ a=group:BUNDLE 0 1\r\n\
 m=audio 4000 UDP/TLS/RTP/SAVPF 111 101\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:0\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
 a=rtpmap:101 telephone-event/48000\r\n\
@@ -5877,6 +5881,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 m=video 4001 UDP/TLS/RTP/SAVPF 96 98\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 H264/90000\r\n\
 a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
@@ -6062,8 +6067,8 @@ async fn ensure_caller_leg_answers_sdes_srtp_offer_with_crypto() {
         .media_leg(&LegId::from("caller"))
         .expect("caller media leg");
     assert_eq!(
-        caller_leg.pc().config().transport_mode,
-        rustrtc::TransportMode::Srtp,
+        MediaTransport::from_rtc_config(&caller_leg.pc().config()),
+        MediaTransport::Srtp,
         "SAVP offer must produce an Srtp caller leg"
     );
 
@@ -6149,6 +6154,8 @@ s=-\r\n\
 t=0 0\r\n\
 m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
 c=IN IP4 0.0.0.0\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
 a=setup:actpass\r\n\
@@ -6157,6 +6164,8 @@ a=ice-pwd:ib8b\r\n\
 a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
 m=video 4001 UDP/TLS/RTP/SAVPF 96\r\n\
 c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 H264/90000\r\n\
 a=setup:actpass\r\n\
@@ -9181,7 +9190,7 @@ async fn consult_media_preserves_peers_body() {
         consult_info.source_leg = Some(LegId::from("callee"));
         session.legs.insert(consult.clone(), consult_info);
         let (peer, offer) = session
-            .create_leg_peer(&consult, rustrtc::TransportMode::Rtp)
+            .create_leg_peer(&consult, MediaTransport::Rtp)
             .await
             .unwrap();
         session.legs.set_media_leg(&consult, peer.clone());

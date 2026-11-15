@@ -1,6 +1,7 @@
 use audio_codec::CodecType;
+use crate::negotiate::MediaTransport;
 use rustrtc::{
-    IceServer, IceTransportPolicy, RtcConfiguration, TransportMode, config::BufferDropStrategy,
+    IceServer, IceTransportPolicy, config::BufferDropStrategy,
     config::VideoCapability,
 };
 use tokio_util::sync::CancellationToken;
@@ -15,7 +16,7 @@ pub struct RtpTrackBuilder {
     bind_ip: Option<String>,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
-    mode: TransportMode,
+    mode: MediaTransport,
     rtp_map: Vec<negotiate::CodecInfo>,
     video_capabilities: Vec<VideoCapability>,
     enable_latching: bool,
@@ -37,7 +38,7 @@ impl RtpTrackBuilder {
             bind_ip: None,
             rtp_start_port: None,
             rtp_end_port: None,
-            mode: TransportMode::Rtp,
+            mode: MediaTransport::Rtp,
             enable_latching: false,
             probation_max_packets: None,
             ice_servers: Vec::new(),
@@ -68,7 +69,7 @@ impl RtpTrackBuilder {
         self
     }
 
-    pub fn with_mode(mut self, mode: TransportMode) -> Self {
+    pub fn with_mode(mut self, mode: MediaTransport) -> Self {
         self.mode = mode;
         self
     }
@@ -129,12 +130,6 @@ impl RtpTrackBuilder {
     }
 
     pub fn build(self) -> RtcTrack {
-        let sdp_compatibility = match self.mode {
-            TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
-            TransportMode::Rtp | TransportMode::Srtp => {
-                rustrtc::config::SdpCompatibilityMode::LegacySip
-            }
-        };
 
         let has_turn_server = self.ice_servers.iter().any(|server| {
             server.urls.iter().any(|url| {
@@ -144,8 +139,8 @@ impl RtpTrackBuilder {
         });
         let audio_capabilities: Vec<_> = if self.rtp_map.is_empty() {
             match self.mode {
-                TransportMode::WebRtc => negotiate::MediaNegotiator::default_webrtc_codecs(),
-                TransportMode::Rtp | TransportMode::Srtp => {
+                MediaTransport::WebRtc => negotiate::MediaNegotiator::default_webrtc_codecs(),
+                MediaTransport::Rtp | MediaTransport::Srtp => {
                     negotiate::MediaNegotiator::default_rtp_codecs()
                 }
             }
@@ -161,47 +156,50 @@ impl RtpTrackBuilder {
                 .collect()
         };
 
-        let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
+        let bind_ip = if matches!(self.mode, MediaTransport::Rtp | MediaTransport::Srtp) {
             self.bind_ip
         } else {
             None
         };
 
-        let config = RtcConfiguration {
-            ice_servers: self.ice_servers,
-            ice_transport_policy: if self.mode == TransportMode::WebRtc && has_turn_server {
-                IceTransportPolicy::Relay
-            } else {
-                IceTransportPolicy::All
-            },
-            transport_mode: self.mode.clone(),
-            // ICE-lite is an RTP-mode-only feature in rustrtc; WebRTC legs must
-            // keep full ICE (browsers require connectivity checks + DTLS), so
-            // the flag is forced off for that mode here.
-            enable_ice_lite: self.mode == TransportMode::Rtp && self.enable_ice_lite,
-            rtp_start_port: self.rtp_start_port,
-            rtp_end_port: self.rtp_end_port,
-            external_ip: self.external_ip,
-            bind_ip,
-            enable_latching: self.enable_latching,
-            probation_max_packets: self.probation_max_packets,
-            media_capabilities: Some(rustrtc::config::MediaCapabilities {
-                audio: audio_capabilities,
-                video: self.video_capabilities.clone(),
-                application: None,
-                image: vec![],
-            }),
-            ssrc_start: rand::random::<u32>(),
-            sdp_compatibility,
-            cname: self.cname,
-            buffer_drop_strategy: BufferDropStrategy::DropOldest,
-            // 500 reserved ~95KB per leg that is almost never reached; 100
-            // (the rustrtc default) matches build_rtc_config in leg.rs and
-            // cuts per-leg reserved memory (~150MB across 1600 legs).
-            rtp_buffer_capacity: 100,
-            runtime_handle: tokio::runtime::Handle::try_current().ok(),
-            ..Default::default()
+        // Prefab carries the transport matrix; per-transport overrides follow
+        // (the legacy RtpTrackBuilder shape mirrors `build_rtc_config`).
+        let mut config = self.mode.rtc_config(self.enable_ice_lite);
+        config.ice_servers = self.ice_servers;
+        config.ice_transport_policy = if self.mode == MediaTransport::WebRtc && has_turn_server {
+            IceTransportPolicy::Relay
+        } else {
+            IceTransportPolicy::All
         };
+        config.rtp_start_port = self.rtp_start_port;
+        config.rtp_end_port = self.rtp_end_port;
+        config.external_ips = self
+            .external_ip
+            .as_deref()
+            .and_then(|s| s.trim().parse().ok())
+            .into_iter()
+            .collect();
+        config.bind_ips = bind_ip
+            .as_deref()
+            .and_then(|s| s.trim().parse().ok())
+            .into_iter()
+            .collect();
+        config.enable_latching = self.enable_latching;
+        config.probation_max_packets = self.probation_max_packets;
+        config.media_capabilities = Some(rustrtc::config::MediaCapabilities {
+            audio: audio_capabilities,
+            video: self.video_capabilities.clone(),
+            application: None,
+            image: vec![],
+        });
+        config.ssrc_start = rand::random::<u32>();
+        config.cname = self.cname;
+        config.buffer_drop_strategy = BufferDropStrategy::DropOldest;
+        // 500 reserved ~95KB per leg that is almost never reached; 100
+        // (the rustrtc default) matches build_rtc_config in leg.rs and
+        // cuts per-leg reserved memory (~150MB across 1600 legs).
+        config.rtp_buffer_capacity = 100;
+        config.runtime_handle = tokio::runtime::Handle::try_current().ok();
 
         if self.video_capabilities.is_empty() {
             RtcTrack::new(self.track_id, config, self.rtp_map)
@@ -214,13 +212,14 @@ impl RtpTrackBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustrtc::{IceServer, IceTransportPolicy, TransportMode};
+    use crate::negotiate::MediaTransport;
+    use rustrtc::{IceServer, IceTransportPolicy};
 
     /// CSV 功能清单 L41/L42: the built WebRTC track must switch
     /// `ice_transport_policy` to `Relay` when a `turn:`/`turns:` server is
     /// configured, and stay `All` when only STUN (or nothing) is available.
     /// RTP-mode tracks never apply the relay policy.
-    async fn policy_of(mode: TransportMode, urls: &[&str]) -> IceTransportPolicy {
+    async fn policy_of(mode: MediaTransport, urls: &[&str]) -> IceTransportPolicy {
         let track = RtpTrackBuilder::new("policy-probe".into())
             .with_mode(mode)
             .with_ice_servers(vec![IceServer::new(
@@ -234,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn webrtc_with_turn_switches_policy_to_relay() {
         assert_eq!(
-            policy_of(TransportMode::WebRtc, &["turn:turn.example.com:3478"]).await,
+            policy_of(MediaTransport::WebRtc, &["turn:turn.example.com:3478"]).await,
             IceTransportPolicy::Relay
         );
     }
@@ -242,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn webrtc_with_turns_switches_policy_to_relay() {
         assert_eq!(
-            policy_of(TransportMode::WebRtc, &["turns:turn.example.com:5349"]).await,
+            policy_of(MediaTransport::WebRtc, &["turns:turn.example.com:5349"]).await,
             IceTransportPolicy::Relay
         );
     }
@@ -250,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn webrtc_with_stun_only_keeps_policy_all() {
         assert_eq!(
-            policy_of(TransportMode::WebRtc, &["stun:stun.example.com:19302"]).await,
+            policy_of(MediaTransport::WebRtc, &["stun:stun.example.com:19302"]).await,
             IceTransportPolicy::All
         );
     }
@@ -258,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn rtp_mode_with_turn_never_applies_relay_policy() {
         assert_eq!(
-            policy_of(TransportMode::Rtp, &["turn:turn.example.com:3478"]).await,
+            policy_of(MediaTransport::Rtp, &["turn:turn.example.com:3478"]).await,
             IceTransportPolicy::All
         );
     }

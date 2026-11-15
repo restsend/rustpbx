@@ -18,6 +18,63 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
+/// The replaced session's dialog toward the transfer target, as reported by
+/// `CallCommand::QueryTransferTargetDialog` (REFER-Replaces takeover).
+///
+/// `remote_registered` distinguishes the two topologies: `false` means the
+/// target UA holds THIS dialog directly (same-node — stamp it verbatim);
+/// `true` means the leg was routed to a peer node's home proxy, so the
+/// dialog the TARGET UA actually holds lives on that peer's cluster child
+/// and must be resolved cross-node (`cluster/query_transfer_target_dialog`)
+/// before stamping — a hop-dialog stamp can never match at the target UA.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferTargetDialog {
+    pub call_id: String,
+    pub local_tag: String,
+    pub remote_tag: String,
+    /// True when the target leg is a cluster hop (`Leg::remote_registered`).
+    #[serde(default)]
+    pub remote_registered: bool,
+    /// Root session id of the reporting session; binds the cross-node query
+    /// to the right logical call so a peer never returns another call's
+    /// dialog for the same extension.
+    #[serde(default)]
+    pub root_session_id: String,
+    /// True when the dialog came from a leg whose ENDPOINT matches the
+    /// dialed target user. `false` = the callee-leg fallback answer — good
+    /// enough for the same-session takeover query, but a peer scan must
+    /// NEVER accept it (an unrelated session on the same logical root —
+    /// e.g. the queue call holding the transferor's leg — would answer with
+    /// the transferor's dialog and poison the stamp).
+    #[serde(default)]
+    pub endpoint_matched: bool,
+}
+
+impl TransferTargetDialog {
+    /// Build from a dialog id (local resolution path).
+    pub fn from_dialog_id(
+        id: &rsipstack::dialog::DialogId,
+        remote_registered: bool,
+        root_session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: id.call_id.clone(),
+            local_tag: id.local_tag.clone(),
+            remote_tag: id.remote_tag.clone(),
+            remote_registered,
+            root_session_id: root_session_id.into(),
+            endpoint_matched: false,
+        }
+    }
+
+    /// Mark the answer as endpoint-matched (the leg's remote user IS the
+    /// dialed target) — the peer-scan acceptance requires this.
+    pub fn endpoint_matched(mut self) -> Self {
+        self.endpoint_matched = true;
+        self
+    }
+}
+
 /// Declared intent of a session-originated dial (`CallCommand::LegAdd`).
 ///
 /// Set by the DIALING side (the app / API that issues the command) so the
@@ -609,7 +666,7 @@ pub enum CallCommand {
     QueryTransferTargetDialog {
         /// Extension of the transfer target (matches the leg's remote user).
         target_user: String,
-        reply: oneshot::Sender<Option<rsipstack::dialog::DialogId>>,
+        reply: oneshot::Sender<Option<super::TransferTargetDialog>>,
     },
 
     #[serde(skip)]

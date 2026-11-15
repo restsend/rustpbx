@@ -1,6 +1,61 @@
 use audio_codec::CodecType;
-use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription, TransportMode};
+use rustrtc::{Attribute, MediaKind, SdpType, SessionDescription};
 use std::collections::{HashMap, HashSet};
+
+/// Media transport classification for a leg, derived from its SDP
+/// (`detect_transport`): WebRTC = ICE+DTLS (`RTP/SAVPF`+fingerprint), Srtp =
+/// SDES (`RTP/SAVP`/`a=crypto`, direct RTP), Rtp = plain `RTP/AVP`.
+///
+/// Upstream rustrtc 0.6.x replaced its `TransportMode` enum with the
+/// orthogonal [`rustrtc::config::Connectivity`] × [`rustrtc::config::Keying`]
+/// pair on `RtcConfiguration`; this enum keeps the classification vocabulary
+/// and maps to a config via [`MediaTransport::rtc_config`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaTransport {
+    WebRtc,
+    Srtp,
+    Rtp,
+}
+
+impl MediaTransport {
+    /// Recover the classification from a PC's applied config.
+    pub fn from_rtc_config(config: &rustrtc::RtcConfiguration) -> Self {
+        use rustrtc::config::{Connectivity, Keying};
+        match (config.connectivity, config.keying) {
+            (Connectivity::Ice, _) => MediaTransport::WebRtc,
+            (_, Keying::Sdes) => MediaTransport::Srtp,
+            _ => MediaTransport::Rtp,
+        }
+    }
+
+    /// RTC config matching this transport (prefab + targeted overrides).
+    ///
+    /// - WebRtc → `webrtc()` prefab: full ICE, DTLS-SRTP, WebRTC extensions,
+    ///   mux required, max-bundle.
+    /// - Srtp → `sip()` prefab with SDES keying (direct RTP, SDES-SRTP).
+    /// - Rtp → `sip()` prefab (direct RTP, plain).
+    ///
+    /// `enable_ice_lite` upgrades a plain-RTP leg's connectivity to ICE-lite
+    /// (RFC 8445 §2.5, the leg answers the full-ICE peer's checks). WebRTC
+    /// keeps full ICE (browsers require connectivity checks + DTLS); the
+    /// flag is ignored for Srtp.
+    pub fn rtc_config(self, enable_ice_lite: bool) -> rustrtc::RtcConfiguration {
+        let mut config = match self {
+            MediaTransport::WebRtc => rustrtc::RtcConfiguration::webrtc(),
+            MediaTransport::Srtp => {
+                let mut c = rustrtc::RtcConfiguration::sip();
+                c.keying = rustrtc::config::Keying::Sdes;
+                c
+            }
+            MediaTransport::Rtp => rustrtc::RtcConfiguration::sip(),
+        };
+        if self == MediaTransport::Rtp && enable_ice_lite {
+            config.connectivity = rustrtc::config::Connectivity::IceLite;
+        }
+        config.disable_ipv6 = true;
+        config
+    }
+}
 
 /// Detect the transport mode implied by an SDP body.
 ///
@@ -9,15 +64,54 @@ use std::collections::{HashMap, HashSet};
 /// - otherwise → Rtp (plain `RTP/AVP`)
 ///
 /// Used by [`crate::leg::Leg`] construction to pick the right
-/// `RtcConfiguration.transport_mode` before the PeerConnection is created.
-pub fn detect_transport(sdp: &str) -> TransportMode {
+/// [`MediaTransport::rtc_config`] before the PeerConnection is created.
+pub fn detect_transport(sdp: &str) -> MediaTransport {
     if sdp.contains("a=fingerprint") || sdp.contains("a=setup:") {
-        TransportMode::WebRtc
+        MediaTransport::WebRtc
     } else if sdp.contains("RTP/SAVP") || sdp.contains("a=crypto") {
-        TransportMode::Srtp
+        MediaTransport::Srtp
     } else {
-        TransportMode::Rtp
+        MediaTransport::Rtp
     }
+}
+
+/// RFC 9429 §9.3 strict-validation shim for legacy full-ICE offers.
+///
+/// Upstream 0.6.x rejects a remote description whose audio/video m-sections
+/// lack the explicit `a=rtcp-mux` attribute when the leg runs full ICE
+/// (rtcp_mux is required under ICE). Legacy peers (older browsers, sipbot
+/// builds, SBCs) omit the attribute while still multiplexing — full-ICE
+/// endpoints MUST mux anyway (RFC 5761 §5.1.1 mandates it under ICE), so
+/// injecting the attribute into every ICE-transport audio/video m-section
+/// that lacks it is semantically correct and restores the 0.4.x tolerance.
+///
+/// Plain-RTP (non-ICE) offers pass through untouched — their mux negotiation
+/// is governed by `rtcp_mux_policy`, not the validator.
+pub fn normalize_mux_for_full_ice(sdp: &str) -> String {
+    let is_full_ice = sdp.contains("a=ice-ufrag");
+    if !is_full_ice || sdp.contains("a=rtcp-mux") {
+        // Not full ICE (mux governed by rtcp_mux_policy), or the offer
+        // already carries explicit mux — byte-for-byte passthrough.
+        return sdp.to_string();
+    }
+    let lines: Vec<&str> = sdp.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    for line in lines {
+        out.push(line.to_string());
+        if line.starts_with("m=") {
+            let kind = line[2..].split_whitespace().next().unwrap_or("");
+            if kind == "audio" || kind == "video" {
+                // Inject right after the m= line — RFC 9429 §5.1.1: a
+                // full-ICE endpoint multiplexes regardless of the attribute.
+                out.push("a=rtcp-mux".to_string());
+            }
+        }
+    }
+    let mut joined = out.join("\r\n");
+    if sdp.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push_str("\r\n");
+    }
+    joined
 }
 
 /// Parsed RTP codec information from SDP, including payload-specific parameters.
@@ -154,7 +248,7 @@ pub struct NegotiatedLegProfile {
     /// ingress tap must listen on every one of these.
     pub dtmf_pts: Vec<u8>,
     /// Transport mode for this leg (RTP or WebRTC/SRTP).
-    pub transport: rustrtc::TransportMode,
+    pub transport: MediaTransport,
 }
 
 impl Default for NegotiatedLegProfile {
@@ -164,7 +258,7 @@ impl Default for NegotiatedLegProfile {
             video: Vec::new(),
             dtmf: None,
             dtmf_pts: Vec::new(),
-            transport: rustrtc::TransportMode::Rtp,
+            transport: MediaTransport::Rtp,
         }
     }
 }
@@ -514,7 +608,7 @@ impl MediaNegotiator {
             video,
             dtmf,
             dtmf_pts: extracted.dtmf.iter().map(|c| c.payload_type).collect(),
-            transport: rustrtc::TransportMode::Rtp,
+            transport: MediaTransport::Rtp,
         }
     }
 

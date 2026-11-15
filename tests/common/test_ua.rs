@@ -213,17 +213,20 @@ impl TestUa {
         media_mode: MediaMode,
     ) -> Self {
         let webrtc_pc = if media_mode != MediaMode::None {
-            let mut rtc_config = rustrtc::RtcConfiguration::default();
-            rtc_config.transport_mode = match media_mode {
-                MediaMode::WebRtc => rustrtc::TransportMode::WebRtc,
-                MediaMode::Srtp => rustrtc::TransportMode::Srtp,
-                MediaMode::None => rustrtc::TransportMode::Rtp,
+            let mut rtc_config = match media_mode {
+                MediaMode::WebRtc => rustrtc::RtcConfiguration::webrtc(),
+                MediaMode::Srtp => {
+                    let mut c = rustrtc::RtcConfiguration::sip();
+                    c.keying = rustrtc::config::Keying::Sdes;
+                    c
+                }
+                MediaMode::None => rustrtc::RtcConfiguration::sip(),
             };
             if media_mode == MediaMode::Srtp {
                 // SDES direct mode: pin the advertised c-line/bind address so
                 // loopback e2e media can flow without ICE.
-                rtc_config.external_ip = Some("127.0.0.1".to_string());
-                rtc_config.bind_ip = Some("127.0.0.1".to_string());
+                rtc_config.external_ips = vec!["127.0.0.1".parse().unwrap()];
+                rtc_config.bind_ips = vec!["127.0.0.1".parse().unwrap()];
             }
             if let Some(caps) = webrtc_audio_caps {
                 let mut media_caps = rustrtc::MediaCapabilities::default();

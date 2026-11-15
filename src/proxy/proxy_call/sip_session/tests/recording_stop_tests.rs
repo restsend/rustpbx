@@ -37,7 +37,7 @@ async fn assert_hold_recording_audio(
     } else {
         owner.legs.insert(id.clone(), Leg::new(id.clone()));
         let (peer, offer) = owner
-            .create_leg_peer(&id, rustrtc::TransportMode::Rtp)
+            .create_leg_peer(&id, MediaTransport::Rtp)
             .await
             .unwrap();
         owner.legs.set_media_leg(&id, peer.clone());
@@ -71,7 +71,7 @@ async fn assert_hold_recording_audio(
     // contribute private speech to the selected A/B recording.
     let consult_id = LegId::from("consult-private");
     let (consult, _) = owner
-        .create_leg_peer(&consult_id, rustrtc::TransportMode::Rtp)
+        .create_leg_peer(&consult_id, MediaTransport::Rtp)
         .await
         .unwrap();
     owner

@@ -23,12 +23,13 @@ use audio_codec::CodecType;
 use rustpbx_media::leg::LegInner;
 use rustpbx_media::media_bridge::{LegSide, MediaBridge};
 use rustpbx_media::negotiate::{CodecInfo, MediaNegotiator};
-use rustrtc::config::{BufferDropStrategy, SdpCompatibilityMode};
+use rustrtc::config::BufferDropStrategy;
+use rustpbx_media::negotiate::MediaTransport;
 use rustrtc::media::MediaStreamTrack;
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::sample_track;
 use rustrtc::peer_connection::RtpObserver;
-use rustrtc::{PeerConnection, RtcConfiguration, SdpType, SessionDescription, TransportMode};
+    use rustrtc::{PeerConnection, RtcConfiguration, SdpType, SessionDescription};
 
 /// A standalone peer that faces one leg of the MediaBridge. Sends audio via a
 /// track source; receives via its receiver track.
@@ -40,7 +41,7 @@ struct TestPeer {
 }
 
 impl TestPeer {
-    fn new(transport: TransportMode, codec: CodecInfo) -> Self {
+    fn new(transport: MediaTransport, codec: CodecInfo) -> Self {
         let cfg = rtc_config(transport, &codec);
         let pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
@@ -56,7 +57,7 @@ impl TestPeer {
     /// Build a peer with an explicit media capability list (e.g. to also offer
     /// telephone-event so a DTMF payload type can be negotiated).
     fn with_caps(
-        transport: TransportMode,
+        transport: MediaTransport,
         codec: CodecInfo,
         caps: rustrtc::config::MediaCapabilities,
     ) -> Self {
@@ -78,11 +79,9 @@ impl TestPeer {
     fn with_video(
         mut self,
         caps: &[rustrtc::config::VideoCapability],
-        sdp_compatibility: SdpCompatibilityMode,
     ) -> Self {
-        let mut cfg = rtc_config(self.pc.config().transport_mode.clone(), &self.codec);
+        let mut cfg = rtc_config(MediaTransport::from_rtc_config(&self.pc.config()), &self.codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps.to_vec();
-        cfg.sdp_compatibility = sdp_compatibility;
         self.pc.close();
         self.pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
@@ -241,23 +240,22 @@ struct TestMediaHarness {
 /// Build an RtcConfiguration restricted to a single audio codec so both sides
 /// negotiate exactly that codec (rustrtc's default capabilities otherwise
 /// include Opus + PCMU, causing an unpredictable first-choice codec).
-fn rtc_config(transport: TransportMode, codec: &CodecInfo) -> RtcConfiguration {
+fn rtc_config(transport: MediaTransport, codec: &CodecInfo) -> RtcConfiguration {
     let mut media_caps = rustrtc::config::MediaCapabilities::default();
     if let Some(audio_cap) = codec.to_audio_capability() {
         media_caps.audio = vec![audio_cap];
     }
     RtcConfiguration {
-        transport_mode: transport,
-        bind_ip: Some("127.0.0.1".into()),
+        bind_ips: vec!["127.0.0.1".parse().unwrap()],
         // host-only ICE: no STUN/TURN → fast localhost gathering
         ice_servers: vec![],
         enable_latching: true,
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
         rtp_buffer_capacity: 500,
-        sdp_compatibility: SdpCompatibilityMode::Standard,
+
         media_capabilities: Some(media_caps),
         runtime_handle: Some(tokio::runtime::Handle::current()),
-        ..Default::default()
+        ..transport.rtc_config(false)
     }
 }
 
@@ -279,9 +277,9 @@ async fn negotiate(test_peer: &TestPeer, leg: &LegInner) {
 
     // RTP / SRTP use a direct transport (no ICE) → wait for the RTP transport
     // to be ready. WebRTC needs ICE+DTLS → wait for Connected.
-    let transport = test_peer.pc.config().transport_mode.clone();
+    let transport = MediaTransport::from_rtc_config(&test_peer.pc.config());
     match transport {
-        rustrtc::TransportMode::WebRtc => {
+        MediaTransport::WebRtc => {
             match tokio::time::timeout(Duration::from_secs(10), test_peer.pc.wait_for_connected())
                 .await
             {
@@ -309,18 +307,18 @@ async fn negotiate(test_peer: &TestPeer, leg: &LegInner) {
 
 impl TestMediaHarness {
     async fn create(
-        transport_a: TransportMode,
+        transport_a: MediaTransport,
         codec_a: CodecType,
-        transport_b: TransportMode,
+        transport_b: MediaTransport,
         codec_b: CodecType,
     ) -> Self {
         Self::create_inner(transport_a, codec_a, transport_b, codec_b, None).await
     }
 
     async fn create_with_recorder(
-        transport_a: TransportMode,
+        transport_a: MediaTransport,
         codec_a: CodecType,
-        transport_b: TransportMode,
+        transport_b: MediaTransport,
         codec_b: CodecType,
         recorder: Box<dyn rustpbx_media::media_recorder::MediaRecorder>,
     ) -> Self {
@@ -328,9 +326,9 @@ impl TestMediaHarness {
     }
 
     async fn create_inner(
-        transport_a: TransportMode,
+        transport_a: MediaTransport,
         codec_a: CodecType,
-        transport_b: TransportMode,
+        transport_b: MediaTransport,
         codec_b: CodecType,
         recorder: Option<Box<dyn rustpbx_media::media_recorder::MediaRecorder>>,
     ) -> Self {
@@ -380,7 +378,7 @@ impl TestMediaHarness {
                 .wait_for_rtp_transport_ready(Duration::from_secs(10))
                 .await;
             // WebRTC: also wait for the full DTLS handshake (SRTP keys ready).
-            if leg.pc().config().transport_mode == rustrtc::TransportMode::WebRtc {
+            if MediaTransport::from_rtc_config(&leg.pc().config()) == MediaTransport::WebRtc {
                 let _ =
                     tokio::time::timeout(Duration::from_secs(10), leg.pc().wait_for_connected())
                         .await;
@@ -569,9 +567,9 @@ fn encode_codec_frames(codec: CodecType, frame_ms: u64) -> Vec<Vec<u8>> {
 #[tokio::test]
 async fn fast_path_rtp_pcmu_rtp_pcmu() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -592,9 +590,9 @@ async fn fast_path_rtp_pcmu_rtp_pcmu() {
 #[tokio::test]
 async fn fast_path_rtp_g722_rtp_g722() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G722,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G722,
     )
     .await;
@@ -614,9 +612,9 @@ async fn fast_path_rtp_g722_rtp_g722() {
 #[tokio::test]
 async fn fast_path_srtp_pcmu_srtp_pcmu() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Srtp,
+        MediaTransport::Srtp,
         CodecType::PCMU,
-        TransportMode::Srtp,
+        MediaTransport::Srtp,
         CodecType::PCMU,
     )
     .await;
@@ -637,9 +635,9 @@ async fn fast_path_srtp_pcmu_srtp_pcmu() {
 #[tokio::test]
 async fn fast_path_webrtc_pcmu_webrtc_pcmu() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
     )
     .await;
@@ -660,9 +658,9 @@ async fn fast_path_webrtc_pcmu_webrtc_pcmu() {
 #[tokio::test]
 async fn fast_path_cross_transport_rtp_to_webrtc() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
     )
     .await;
@@ -686,9 +684,9 @@ async fn fast_path_cross_transport_rtp_to_webrtc() {
 #[tokio::test]
 async fn local_playback_to_webrtc_carries_mid() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -739,9 +737,9 @@ async fn local_playback_to_webrtc_carries_mid() {
 #[tokio::test]
 async fn webrtc_ivr_then_relay_keeps_outbound_timeline() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -836,9 +834,9 @@ async fn webrtc_ivr_then_relay_keeps_outbound_timeline() {
 #[tokio::test]
 async fn webrtc_opus_fastpath_timestamp_steps_are_ptime() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::Opus,
     )
     .await;
@@ -919,9 +917,9 @@ fn first_audio_ssrc_from_sdp(sdp: &str) -> Option<u32> {
 #[tokio::test]
 async fn webrtc_local_playback_ssrc_matches_sdp_advertised() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -985,9 +983,9 @@ async fn webrtc_local_playback_ssrc_matches_sdp_advertised() {
 #[tokio::test]
 async fn webrtc_fastpath_relay_uses_playback_ssrc() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
     )
     .await;
@@ -1019,9 +1017,9 @@ async fn webrtc_fastpath_relay_uses_playback_ssrc() {
 #[tokio::test]
 async fn fast_path_webrtc_opus_webrtc_opus() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
     )
     .await;
@@ -1041,9 +1039,9 @@ async fn fast_path_webrtc_opus_webrtc_opus() {
 #[tokio::test]
 async fn fast_path_webrtc_opus_rtp_opus() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::Opus,
     )
     .await;
@@ -1119,40 +1117,35 @@ fn media_transports_are_bundled(pc: &PeerConnection) -> bool {
 }
 
 async fn create_video_harness(
-    transport_a: TransportMode,
-    transport_b: TransportMode,
+    transport_a: MediaTransport,
+    transport_b: MediaTransport,
     caps_a: Vec<rustrtc::config::VideoCapability>,
     caps_b: Vec<rustrtc::config::VideoCapability>,
-    sdp_compatibility_a: SdpCompatibilityMode,
-    sdp_compatibility_b: SdpCompatibilityMode,
 ) -> VideoTestHarness {
     let codec = MediaNegotiator::codec_info_for_type(CodecType::PCMU);
     let mk_leg = |name: &str,
-                  transport: TransportMode,
+                  transport: MediaTransport,
                   caps: Vec<rustrtc::config::VideoCapability>,
-                  sdp_compatibility: SdpCompatibilityMode| {
+| {
         let mut cfg = rtc_config(transport, &codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps;
-        cfg.sdp_compatibility = sdp_compatibility;
         LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0, None, None).unwrap()
     };
     let leg_a = mk_leg(
         "a",
         transport_a.clone(),
         caps_a.clone(),
-        sdp_compatibility_a.clone(),
-    );
+            );
     let leg_b = mk_leg(
         "b",
         transport_b.clone(),
         caps_b.clone(),
-        sdp_compatibility_b.clone(),
-    );
+            );
 
     let test_a =
-        TestPeer::new(transport_a.clone(), codec.clone()).with_video(&caps_a, sdp_compatibility_a);
+        TestPeer::new(transport_a.clone(), codec.clone()).with_video(&caps_a);
     let test_b =
-        TestPeer::new(transport_b.clone(), codec.clone()).with_video(&caps_b, sdp_compatibility_b);
+        TestPeer::new(transport_b.clone(), codec.clone()).with_video(&caps_b);
     negotiate(&test_a, &leg_a).await;
     negotiate(&test_b, &leg_b).await;
 
@@ -1177,7 +1170,7 @@ async fn create_video_harness(
             .pc()
             .wait_for_rtp_transport_ready(Duration::from_secs(10))
             .await;
-        if leg.pc().config().transport_mode == rustrtc::TransportMode::WebRtc {
+        if MediaTransport::from_rtc_config(&leg.pc().config()) == MediaTransport::WebRtc {
             let _ =
                 tokio::time::timeout(Duration::from_secs(10), leg.pc().wait_for_connected()).await;
         }
@@ -1271,12 +1264,10 @@ impl VideoTestHarness {
 #[tokio::test]
 async fn fast_path_rtp_h264_rtp_h264_video_relay() {
     let mut h = create_video_harness(
-        TransportMode::Rtp,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
+        MediaTransport::Rtp,
         h264_caps(96),
         h264_caps(96),
-        SdpCompatibilityMode::LegacySip,
-        SdpCompatibilityMode::LegacySip,
     )
     .await;
     assert!(
@@ -1307,12 +1298,10 @@ async fn fast_path_rtp_h264_rtp_h264_video_relay() {
 #[tokio::test]
 async fn fast_path_rtp_vp8_rtp_vp8_video_relay() {
     let mut h = create_video_harness(
-        TransportMode::Rtp,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
+        MediaTransport::Rtp,
         vp8_caps(96),
         vp8_caps(110),
-        SdpCompatibilityMode::LegacySip,
-        SdpCompatibilityMode::LegacySip,
     )
     .await;
     assert!(!media_transports_are_bundled(&h.test_a.pc));
@@ -1336,12 +1325,10 @@ async fn fast_path_rtp_vp8_rtp_vp8_video_relay() {
 #[tokio::test]
 async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
     let mut h = create_video_harness(
-        TransportMode::WebRtc,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
+        MediaTransport::WebRtc,
         h264_caps(96),
         h264_caps(96),
-        SdpCompatibilityMode::Standard,
-        SdpCompatibilityMode::Standard,
     )
     .await;
     assert!(
@@ -1371,12 +1358,10 @@ async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
 #[tokio::test]
 async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
     let mut h = create_video_harness(
-        TransportMode::WebRtc,
-        TransportMode::Rtp,
+        MediaTransport::WebRtc,
+        MediaTransport::Rtp,
         h264_caps(96),
         h264_caps(96),
-        SdpCompatibilityMode::Standard,
-        SdpCompatibilityMode::LegacySip,
     )
     .await;
     assert!(
@@ -1405,12 +1390,10 @@ async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
 #[tokio::test]
 async fn video_codec_mismatch_degrades_to_audio_only() {
     let mut h = create_video_harness(
-        TransportMode::Rtp,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
+        MediaTransport::Rtp,
         h264_caps(96),
         vp8_caps(98),
-        SdpCompatibilityMode::LegacySip,
-        SdpCompatibilityMode::LegacySip,
     )
     .await;
     h.assert_video_not_relayed().await;
@@ -1427,9 +1410,9 @@ async fn video_codec_mismatch_degrades_to_audio_only() {
 #[tokio::test]
 async fn transcode_rtp_pcmu_to_rtp_pcma() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
     )
     .await;
@@ -1453,9 +1436,9 @@ async fn transcode_rtp_pcmu_to_rtp_pcma() {
 #[tokio::test]
 async fn transcode_rtp_pcmu_to_webrtc_opus() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
     )
     .await;
@@ -1480,9 +1463,9 @@ async fn transcode_rtp_pcmu_to_webrtc_opus() {
 #[tokio::test]
 async fn transcode_webrtc_opus_to_rtp_pcmu() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -1503,9 +1486,9 @@ async fn transcode_webrtc_opus_to_rtp_pcmu() {
 #[tokio::test]
 async fn transcode_rtp_g722_to_webrtc_opus() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G722,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
     )
     .await;
@@ -1530,9 +1513,9 @@ async fn transcode_rtp_g722_to_webrtc_opus() {
 #[tokio::test]
 async fn fast_path_rtp_g729_rtp_g729() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
     )
     .await;
@@ -1554,9 +1537,9 @@ async fn fast_path_rtp_g729_rtp_g729() {
 #[tokio::test]
 async fn fast_path_rtp_g729_to_webrtc_g729() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::G729,
     )
     .await;
@@ -1579,9 +1562,9 @@ async fn fast_path_rtp_g729_to_webrtc_g729() {
 #[tokio::test]
 async fn transcode_rtp_g729_to_rtp_pcmu() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -1600,9 +1583,9 @@ async fn transcode_rtp_g729_to_rtp_pcmu() {
 #[tokio::test]
 async fn transcode_rtp_g729_to_webrtc_opus() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::Opus,
     )
     .await;
@@ -1622,9 +1605,9 @@ async fn transcode_rtp_g729_to_webrtc_opus() {
 #[tokio::test]
 async fn fast_path_rtp_pcmu_uses_sender_ssrc() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -1668,9 +1651,9 @@ async fn fast_path_rtp_pcmu_uses_sender_ssrc() {
 #[tokio::test]
 async fn relay_full_duplex_rtp_rtp() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -1716,9 +1699,9 @@ async fn relay_full_duplex_rtp_rtp() {
 #[tokio::test]
 async fn relay_full_duplex_webrtc_webrtc() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
     )
     .await;
@@ -1767,9 +1750,9 @@ async fn relay_full_duplex_webrtc_webrtc() {
 #[tokio::test]
 async fn relay_full_duplex_webrtc_rtp() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -1816,9 +1799,9 @@ async fn relay_full_duplex_webrtc_rtp() {
 #[tokio::test]
 async fn relay_full_duplex_rtp_webrtc() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::PCMU,
     )
     .await;
@@ -1925,7 +1908,7 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
         ];
         c
     };
-    let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
+    let mut leg_cfg = rtc_config(MediaTransport::Rtp, &pcmu);
     leg_cfg.media_capabilities = Some(leg_caps);
     let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None, None).unwrap();
 
@@ -1949,7 +1932,7 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
             rtcp_fbs: vec![],
         },
     ];
-    let test_a = TestPeer::with_caps(TransportMode::Rtp, pcmu.clone(), caps);
+    let test_a = TestPeer::with_caps(MediaTransport::Rtp, pcmu.clone(), caps);
     negotiate(&test_a, &leg).await;
 
     // Wait for the leg's RTP transport + SRTP session to be ready so the raw
@@ -2119,9 +2102,9 @@ async fn drain_sipflow_items(
 async fn recording_captures_a_leg_only_not_b_leg() {
     let (recorder, mut rx) = recorder_capture("a-leg-only");
     let mut h = TestMediaHarness::create_with_recorder(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
         recorder,
     )
@@ -2193,9 +2176,9 @@ async fn ivr_playback_is_recorded_as_a_leg_egress() {
 
     let (recorder, mut rx) = recorder_capture("ivr-egress");
     let mut h = TestMediaHarness::create_with_recorder(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
         recorder,
     )
@@ -2243,9 +2226,9 @@ async fn ivr_playback_is_recorded_as_a_leg_egress() {
 async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
     let (recorder, mut rx) = recorder_capture("reinvite-pt");
     let mut h = TestMediaHarness::create_with_recorder(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
         recorder,
     )
@@ -2334,9 +2317,9 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
 async fn recording_transcoded_call_captures_both_speakers_on_a_leg() {
     let (recorder, mut rx) = recorder_capture("transcoded-call");
     let mut h = TestMediaHarness::create_with_recorder(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::Opus,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
         recorder,
     )
@@ -2499,9 +2482,9 @@ fn pcmu_frame_is_near_silent(frame: &AudioFrame) -> bool {
 #[tokio::test]
 async fn canary_media_resumes_bidirectionally_after_play_file_both() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -2574,9 +2557,9 @@ async fn canary_media_resumes_bidirectionally_after_play_file_both() {
 #[tokio::test]
 async fn canary_media_resumes_after_stop_play_loop() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -2625,9 +2608,9 @@ async fn canary_media_resumes_after_stop_play_loop() {
 #[tokio::test]
 async fn canary_media_resumes_after_hold_resume() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -2790,7 +2773,7 @@ macro_rules! transcode_matrix_test {
                 }
                 let context = format!("transcode {:?} → {:?}", $src, dst);
                 let mut h =
-                    TestMediaHarness::create(TransportMode::Rtp, $src, TransportMode::Rtp, dst)
+                    TestMediaHarness::create(MediaTransport::Rtp, $src, MediaTransport::Rtp, dst)
                         .await;
                 h.bridge_and_accept().await;
                 h.assert_relay(false);
@@ -2835,9 +2818,9 @@ transcode_matrix_test!(transcode_matrix_from_opus, CodecType::Opus);
 async fn transcode_recording_preserves_both_directions_g729_pcma() {
     let (recorder, mut rx) = recorder_capture("transcode-rec");
     let mut h = TestMediaHarness::create_with_recorder(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
         recorder,
     )
@@ -2943,9 +2926,9 @@ async fn relay_late_tail_does_not_rewind_paced_hold_clock() {
     }
 
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMU,
     )
     .await;
@@ -3087,9 +3070,9 @@ impl rustpbx_media::audio_source::AudioSource for TestHoldMusicSource {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hold_unhold_route_rebuild_keeps_transcoded_audio_intact() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
     )
     .await;
@@ -3196,9 +3179,9 @@ async fn hold_unhold_route_rebuild_keeps_transcoded_audio_intact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hold_unhold_rebuild_webrtc_leg_keeps_transcoded_audio_intact() {
     let mut h = TestMediaHarness::create(
-        TransportMode::WebRtc,
+        MediaTransport::WebRtc,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
     )
     .await;
@@ -3257,9 +3240,9 @@ async fn hold_unhold_rebuild_webrtc_leg_keeps_transcoded_audio_intact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_hold_unhold_cycles_keep_transcoded_audio_intact() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
     )
     .await;
@@ -3314,9 +3297,9 @@ async fn repeated_hold_unhold_cycles_keep_transcoded_audio_intact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
     let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::G729,
-        TransportMode::Rtp,
+        MediaTransport::Rtp,
         CodecType::PCMA,
     )
     .await;

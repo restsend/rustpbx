@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod recorder_advanced_tests {
-    use super::super::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
+    use super::super::negotiate::{MediaTransport, NegotiatedCodec, NegotiatedLegProfile};
     use super::super::recorder::{DtmfGenerator, Leg, Recorder};
     use audio_codec::CodecType;
     use rustrtc::media::{AudioFrame, MediaSample};
@@ -1134,7 +1134,7 @@ mod recorder_advanced_tests {
                 channels: 1,
             }),
             dtmf_pts: vec![101],
-            transport: rustrtc::TransportMode::Rtp,
+            transport: MediaTransport::Rtp,
         });
 
         let mut encoder = create_encoder(CodecType::Opus);

@@ -143,13 +143,13 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
-rsipstack = "0.7.9"
+rsipstack = "0.7.14"
 # 0.4.11 fixes a G.711 µ-law (PCMU) encoder bug: ~12% of samples were
 # emitted as non-standard codes, adding audible quantization noise ("hiss")
 # on recordings when decoded by standard players/peers.
 audio-codec = "0.4.13"
 # Published fork keeps vendor APIs and adds correlated, rate-limited boundary logs.
-rustrtc = { package = "fork-rustrtc", version = "=0.4.22" }
+rustrtc = "0.6.4"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",

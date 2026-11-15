@@ -179,7 +179,7 @@ impl TestUa {
         webrtc_audio_caps: Option<Vec<rustrtc::config::AudioCapability>>,
     ) -> Self {
         let webrtc_pc = if config.webrtc {
-            let mut rtc_config = rustrtc::RtcConfiguration::default();
+            let mut rtc_config = rustrtc::RtcConfiguration::webrtc();
             if let Some(caps) = webrtc_audio_caps {
                 let mut media_caps = rustrtc::MediaCapabilities::default();
                 media_caps.audio = caps;

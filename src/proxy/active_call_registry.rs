@@ -335,6 +335,13 @@ impl ActiveProxyCallRegistry {
         self.entries.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Snapshot of every live session handle (cluster transfer takeover:
+    /// the peer gate scans for the session holding the transfer target's
+    /// leg when the Replaces call-id names a session homed elsewhere).
+    pub fn handles_snapshot(&self) -> Vec<SipSessionHandle> {
+        self.handles.iter().map(|e| e.value().clone()).collect()
+    }
+
     /// Session and dialog identities whose owner records must remain live.
     pub fn live_call_ids(&self) -> Vec<String> {
         let mut ids = self.session_ids();

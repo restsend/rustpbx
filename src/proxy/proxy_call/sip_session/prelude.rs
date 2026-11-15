@@ -19,6 +19,7 @@ pub use crate::media::media_bridge::{LegSide, MediaBridge};
 pub use crate::media::negotiate::MediaNegotiator;
 pub use crate::models::call_record::extract_sip_username;
 pub use crate::proxy::proxy_call::{
+    leg_registry::MediaTransport,
     reporter::CallReporter,
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,

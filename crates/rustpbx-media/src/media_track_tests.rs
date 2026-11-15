@@ -1,11 +1,11 @@
 use super::*;
-use rustrtc::TransportMode;
+use crate::negotiate::MediaTransport;
 
 #[tokio::test]
 async fn test_media_track_webrtc_mode_basic() {
     // Test WebRTC mode - default mode
     let track = RtpTrackBuilder::new("test-track-webrtc".to_string())
-        .with_mode(TransportMode::WebRtc)
+        .with_mode(MediaTransport::WebRtc)
         .build();
 
     assert_eq!(track.id(), "test-track-webrtc");
@@ -30,7 +30,7 @@ async fn test_media_track_webrtc_mode_basic() {
 async fn test_media_track_rtp_mode_basic() {
     // Test RTP mode
     let track = RtpTrackBuilder::new("test-track-rtp".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_rtp_range(20000, 20100)
         .build();
 
@@ -56,7 +56,7 @@ async fn test_media_track_rtp_mode_basic() {
 async fn test_media_track_rtp_with_external_ip() {
     // Test RTP mode with external IP
     let track = RtpTrackBuilder::new("test-track-rtp-ext-ip".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_rtp_range(30000, 30100)
         .with_external_ip("203.0.113.1".to_string())
         .build();
@@ -124,7 +124,7 @@ async fn test_pcmu_only_preference_excludes_wideband_codecs() {
 #[tokio::test]
 async fn test_media_track_preserves_custom_dtmf_rtpmap() {
     let track = RtpTrackBuilder::new("test-track-dtmf-rtpmap".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_codec_info(vec![
             negotiate::CodecInfo {
                 payload_type: 96,
@@ -173,12 +173,12 @@ async fn test_media_track_preserves_custom_dtmf_rtpmap() {
 async fn test_media_track_handshake() {
     // Test offer-answer handshake
     let track1 = RtpTrackBuilder::new("track1".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_rtp_range(40000, 40100)
         .build();
 
     let track2 = RtpTrackBuilder::new("track2".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_rtp_range(40100, 40200)
         .build();
 
@@ -197,10 +197,10 @@ async fn test_media_track_handshake() {
 #[tokio::test]
 async fn test_media_track_pranswer_then_answer_reuses_rtp_transport() {
     let offerer = RtpTrackBuilder::new("offerer".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .build();
     let answerer = RtpTrackBuilder::new("answerer".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .build();
 
     let offer = offerer.local_description().await.unwrap();
@@ -287,7 +287,7 @@ async fn test_media_track_get_peer_connection() {
 async fn test_media_track_multiple_operations() {
     // Test that multiple operations work correctly with the new design
     let track = RtpTrackBuilder::new("multi-op-track".to_string())
-        .with_mode(TransportMode::Rtp)
+        .with_mode(MediaTransport::Rtp)
         .with_rtp_range(50000, 50100)
         .build();
 

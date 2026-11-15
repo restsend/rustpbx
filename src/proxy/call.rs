@@ -2043,7 +2043,7 @@ impl CallModule {
             let conference_manager = self.inner.server.conference_manager.clone();
 
             // The ownership registry uses the replaced dialog's bare Call-ID.
-            let old_handle = registry.get_handle_by_dialog(&replaces_call_id);
+            let mut old_handle = registry.get_handle_by_dialog(&replaces_call_id);
 
             // Cross-node delegation: the replaced (consult) dialog may be
             // homed on a PEER node — the consulting agent's client REGISTERs
@@ -2115,9 +2115,59 @@ impl CallModule {
                         delegated_cross_node = true;
                     }
                     crate::proxy::cluster_forward::OwnerLocation::Unknown => {
-                        tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
-                            .await?;
-                        return Ok(());
+                        // The replaced session is homed on a PEER node — but
+                        // the TARGET USER's live leg may be homed HERE (the
+                        // consult's cluster child holds the transfer target's
+                        // confirmed dialog). Run the takeover on THIS node
+                        // against that local dialog instead of 481: without
+                        // this the replacement INVITE was rejected and the
+                        // whole transfer degraded to the conference-room
+                        // fallback (production 2026-11-15: 1003 real WSS
+                        // client, cross-node consult, completed via the room
+                        // instead of the REFER-Replaces chain).
+                        let target_user = tx
+                            .original
+                            .uri()
+                            .user()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        let mut takeover_handle = None;
+                        if !target_user.is_empty() {
+                            for handle in self.inner.server.active_call_registry.handles_snapshot() {
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if handle
+                                    .send_command(
+                                        crate::call::domain::CallCommand::QueryTransferTargetDialog {
+                                            target_user: target_user.clone(),
+                                            reply: reply_tx,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+                                if let Ok(Some(_dialog)) = reply_rx.await {
+                                    takeover_handle = Some(handle);
+                                    break;
+                                }
+                            }
+                        }
+                        match takeover_handle {
+                            Some(handle) => {
+                                info!(
+                                    %replaces_call_id,
+                                    %target_user,
+                                    owner_session = %handle.session_id(),
+                                    "Replaced session homed on a peer — target user's leg is local: takeover runs here"
+                                );
+                                old_handle = Some(handle);
+                            }
+                            None => {
+                                tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
                     }
                     crate::proxy::cluster_forward::OwnerLocation::Unavailable(e) => {
                         // Registry outage: retryable, never masquerade as
@@ -2181,7 +2231,7 @@ impl CallModule {
                         .user()
                         .map(|u| u.to_string())
                         .unwrap_or_default();
-                    let target_dialog_id = {
+                    let target_dialog_info = {
                         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                         match old_handle
                             .send_command_async(crate::call::domain::CallCommand::QueryTransferTargetDialog {
@@ -2194,23 +2244,98 @@ impl CallModule {
                             Err(_) => None,
                         }
                     };
-                    let replaces_header = match &target_dialog_id {
-                        // Target-side dialog resolved locally: to-tag = the
-                        // dialog's To tag (the target's tag = our remote_tag
-                        // on this UAC dialog), from-tag = our tag.
-                        Some(dialog_id) => format!(
+                    // Cluster hop target leg (`remote_registered`): the dialog
+                    // this node sees is the call↔peer hop, NOT what the target
+                    // UA holds. RFC 3891 matching happens against the dialog
+                    // the TARGET UA owns — resolve it cross-node from the peer
+                    // whose cluster child serves the target, then stamp with
+                    // THAT. Query failure falls back to the hop-dialog stamp
+                    // (the relayed REFER watchdog / room cascade still
+                    // completes the transfer; production 2026-11-15 showed a
+                    // hop-dialog stamp is always 486/486-busy at the target).
+                    let peer_dialog = if target_dialog_info
+                        .as_ref()
+                        .is_some_and(|info| info.remote_registered)
+                    {
+                        let root = target_dialog_info
+                            .as_ref()
+                            .map(|info| info.root_session_id.clone())
+                            .unwrap_or_default();
+                        let peers = self.inner.server.cluster_peers.clone();
+                        let ami_path = self
+                            .inner
+                            .server
+                            .proxy_config
+                            .load()
+                            .ami_path
+                            .clone()
+                            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+                        static QUERY_CLIENT: std::sync::OnceLock<reqwest::Client> =
+                            std::sync::OnceLock::new();
+                        let client = QUERY_CLIENT.get_or_init(|| {
+                            crate::http_util::build_keepalive_client(None, None)
+                                .unwrap_or_else(|_| reqwest::Client::new())
+                        });
+                        let self_ident = self
+                            .inner
+                            .server
+                            .cluster_self_addr
+                            .as_ref()
+                            .map(|a| a.to_string());
+                        let peer_dialog =
+                            crate::proxy::cluster_forward::query_transfer_target_dialog_on_peers(
+                                client,
+                                &peers,
+                                &ami_path,
+                                &root,
+                                &target_user,
+                                self_ident.as_deref(),
+                            )
+                            .await;
+                        if peer_dialog.is_none() {
+                            warn!(
+                                %old_session_id,
+                                "Cross-node target dialog query failed — stamping the hop dialog (cascade fallback still completes the transfer)"
+                            );
+                        }
+                        peer_dialog
+                    } else {
+                        None
+                    };
+                    let target_dialog_info =
+                        crate::proxy::cluster_forward::resolve_transfer_target_stamp(
+                            target_dialog_info,
+                            peer_dialog,
+                        );
+                    if target_dialog_info
+                        .as_ref()
+                        .is_some_and(|info| info.remote_registered)
+                    {
+                        // Still a hop after resolution — log so production
+                        // traces can tell the degraded stamp apart.
+                        info!(
+                            %old_session_id,
+                            "Transfer target stamp degraded to the cluster hop dialog"
+                        );
+                    }
+                    let replaces_header = match &target_dialog_info {
+                        // Target-side dialog resolved (locally or cross-node):
+                        // to-tag = the dialog's To tag (the target's tag = our
+                        // remote_tag on this UAC dialog), from-tag = our tag.
+                        Some(info) => format!(
                             "{};to-tag={};from-tag={}",
-                            dialog_id.call_id, dialog_id.remote_tag, dialog_id.local_tag
+                            info.call_id, info.remote_tag, info.local_tag
                         ),
                         None => format!(
                             "{};to-tag={};from-tag={}",
                             replaces_call_id, replaces_to_tag, replaces_from_tag
                         ),
                     };
-                    if target_dialog_id.is_some() {
+                    if let Some(info) = &target_dialog_info {
                         info!(
                             %old_session_id,
-                            dialog = %target_dialog_id.as_ref().unwrap().call_id,
+                            dialog = %info.call_id,
+                            cross_node = info.remote_registered,
                             "Replaces header re-stamped for the target-facing dialog (RFC 3891 auto-answer)"
                         );
                     }

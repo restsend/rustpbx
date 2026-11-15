@@ -237,7 +237,8 @@ impl EgressPipeline {
             eof_tail_total: PLAYBACK_EOF_TAIL_MS.div_ceil(ptime_ms.unwrap_or(DEFAULT_PTIME_MS)),
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
-            transcode_overflow_samples: 0,            transcode_probe_tick: 0,
+            transcode_overflow_samples: 0,
+            transcode_probe_tick: 0,
             transcode_armed: false,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
@@ -1183,6 +1184,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -1237,6 +1240,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         let first = task.next_frame().await.expect("first frame");
@@ -1311,6 +1316,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         // The relay left the wire at ts 777_600 with the receiver having
@@ -1382,6 +1389,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1462,6 +1471,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1556,6 +1567,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1603,7 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn playback_after_relay_marks_once_and_reuses_local_timeline() {
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
-        let peer_pc = PeerConnection::new(rustrtc::RtcConfiguration::default());
+        let peer_pc = PeerConnection::new(rustrtc::RtcConfiguration::webrtc());
         let pipe = EgressPipeline::start_with_gate(
             sender,
             pcmu_codec(),
@@ -1804,6 +1817,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1937,6 +1952,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -2018,6 +2035,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -2265,6 +2284,8 @@ mod tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         };
 
         let speech_ref: Bytes = create_encoder(CodecType::PCMU)
@@ -2411,6 +2432,8 @@ mod transcode_drain_tests {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
         }
     }
 
