@@ -126,6 +126,23 @@ pub(crate) struct TransferPartnerBinding {
     pub their_leg: LegId,
 }
 
+/// A REFER relayed to the transferee UA, awaiting the replacement outcome
+/// (see [`SipSession::pending_relayed_refer`]).
+#[derive(Clone)]
+pub(crate) struct PendingRelayedRefer {
+    /// The referrer's dialog — receives the deferred final NOTIFY.
+    pub source_dialog: rsipstack::dialog::DialogId,
+    /// The verbatim Refer-To (target URI + Replaces query).
+    pub refer_to: String,
+    /// The raw `Replaces` value (`call-id;to-tag=…;from-tag=…`) — the room
+    /// fallback parses the replaced dialog identity from it.
+    pub replaces: String,
+    /// The replaced (consult) dialog's bare Call-ID — resolves the consult
+    /// session when the failure path rolls into the room fallback.
+    pub replaced_call_id: String,
+    pub started_at: std::time::Instant,
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -227,6 +244,21 @@ pub struct SipSession {
     /// cross-session hold/unhold routing.
     pub(crate) transfer_partner: Option<TransferPartnerBinding>,
 
+    /// REFER-Replaces chain: a REFER relayed to the transferee UA whose
+    /// replacement outcome is still pending. While armed, the transferee's
+    /// REFER NOTIFY (RFC 3515 subscription on the source dialog) drives the
+    /// final NOTIFY to the referrer — success passes 200 through, failure
+    /// rolls the transfer into the room fallback. Replaces the premature
+    /// "relay accepted → final 200" that released the transferor before the
+    /// replacement ever answered.
+    pub(crate) pending_relayed_refer: Option<PendingRelayedRefer>,
+
+    /// This session instance's registry identity token (the handle's
+    /// instance uuid). Two sessions may share one registry key (the
+    /// REFER-Replaces replacement inherits the root id while the root lives)
+    /// — teardown must only remove the entry it owns.
+    pub(crate) registry_instance: uuid::Uuid,
+
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
     /// bridge ends. SIP INFO DTMF is also forwarded through this channel.
@@ -300,8 +332,19 @@ pub struct SipSessionHandle {
     snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
     app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
     application_source: bool,
+    /// Unique per underlying session instance. Two sessions may share one
+    /// registry key (a REFER-Replaces replacement inherits the root session
+    /// id while the root session is still alive) — the token lets the
+    /// registry's removal tell them apart so the first session's teardown
+    /// cannot delete the second session's entry.
+    instance: uuid::Uuid,
 }
 impl SipSessionHandle {
+    /// Unique token of the underlying session instance (see [`Self::instance`]).
+    pub(crate) fn instance_token(&self) -> uuid::Uuid {
+        self.instance
+    }
+
     pub(crate) fn for_application(&self) -> Self {
         Self {
             application_source: true,
@@ -413,6 +456,7 @@ impl SipSessionHandle {
             snapshot_cache: Arc::new(RwLock::new(None)),
             app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         }
     }
 }
@@ -827,6 +871,7 @@ impl SipSession {
             snapshot_cache,
             app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         };
 
         (handle, cmd_rx)
@@ -1531,6 +1576,7 @@ impl SipSession {
             snapshot_cache: snapshot_cache.clone(),
             app_event_bridge: app_event_bridge.clone(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         };
 
         // Build ApplicationContext for call apps (IVR, voicemail, etc.).
@@ -1847,6 +1893,8 @@ impl SipSession {
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             transfer_partner: None,
+            pending_relayed_refer: None,
+            registry_instance: sip_handle.instance_token(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             resumed_bridge_ctx: Arc::new(parking_lot::Mutex::new(None)),
@@ -3771,6 +3819,20 @@ impl SipSession {
                     ext.insert(m.clone());
                 }
             }
+        }
+        // REFER-Replaces chain: surface the replacement marker to session
+        // hooks (the cc hook admits the auto-answered replacement leg — the
+        // replaced dialog's release beat this connect into Wrapup).
+        if self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::ReferReplacesContext>()
+            .is_some()
+        {
+            self.extensions
+                .write()
+                .insert(crate::call::ReferReplacesMarker);
         }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
@@ -6755,6 +6817,78 @@ impl SipSession {
                     body = %body.trim(),
                     "Received REFER NOTIFY"
                 );
+                // REFER-Replaces chain: a relayed REFER's outcome comes from
+                // the transferee's own subscription NOTIFY. Success passes a
+                // final 200 to the referrer (the generic 2xx teardown below
+                // releases the replaced dialog); failure rolls the transfer
+                // into the room fallback — both original dialogs are still
+                // alive, so the customer is bridged to the consult target.
+                if let Some(pending) = self.pending_relayed_refer.clone() {
+                    if sip_status < 200 {
+                        // Provisional (100 Trying) — keep waiting.
+                        let event = crate::call::domain::ReferNotifyEvent {
+                            call_id: self.id.0.clone(),
+                            sip_status,
+                            reason: None,
+                            event_type: crate::call::domain::ReferNotifyEventType::Notify,
+                        };
+                        let subscribers = self.server.transfer_notify_subscribers.lock().await;
+                        for tx in subscribers.iter() {
+                            let _ = tx.send(event.clone());
+                        }
+                        return Ok(());
+                    }
+                    if (200..300).contains(&sip_status) {
+                        info!(session_id = %self.id,
+                            sip_status,
+                            "Relayed REFER replacement answered — completing the transfer"
+                        );
+                        // Stays armed: the generic 2xx handling below
+                        // delivers the deferred referrer NOTIFY and clears it.
+                    } else {
+                        self.pending_relayed_refer = None;
+                        warn!(session_id = %self.id,
+                            sip_status,
+                            "Relayed REFER replacement failed — falling back to the transfer room"
+                        );
+                        let fallback = self
+                            .run_transfer_room_fallback(
+                                &pending.source_dialog,
+                                &pending.replaces,
+                            )
+                            .await;
+                        let status = match &fallback {
+                            Ok(()) => 200,
+                            Err((status, reason)) => {
+                                warn!(session_id = %self.id, %reason, status, "Transfer room fallback failed");
+                                *status
+                            }
+                        };
+                        if status == 200 {
+                            let target_uri = pending.refer_to.split('?').next().unwrap_or(&pending.refer_to).to_string();
+                            self.stash_transfer_source(None);
+                            self.mark_transferred_with(Some(serde_json::json!({"target": target_uri, "kind": "sip"})));
+                            self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                                call_id: self.context.session_id.clone(), transfer_target: Some(target_uri),
+                                transfer_target_type: Some("sip".into()), transfer_source: None,
+                            });
+                        }
+                        if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(&pending.source_dialog) {
+                            if let Err(error) = SipSession::notify_refer_bounded(
+                                &dialog,
+                                rsipstack::sip::StatusCode::from(status),
+                                "terminated;reason=noresource",
+                            )
+                            .await
+                            {
+                                warn!(session_id = %self.id, %error, "Failed to send deferred REFER NOTIFY");
+                            } else {
+                                info!(session_id = %self.id, status, "Sent deferred REFER NOTIFY after fallback");
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 let event = crate::call::domain::ReferNotifyEvent {
                     call_id: self.id.0.clone(),
                     sip_status,
@@ -6776,6 +6910,25 @@ impl SipSession {
                         sip_status = %sip_status,
                         "REFER completed successfully, hanging up original dialog"
                     );
+                    // REFER-Replaces chain: the referrer's final NOTIFY was
+                    // deferred until this outcome — deliver it now.
+                    if let Some(pending) = self.pending_relayed_refer.take() {
+                        if let Some(Dialog::Invite(dialog)) =
+                            self.server.dialog_layer.get_dialog(&pending.source_dialog)
+                        {
+                            if let Err(error) = SipSession::notify_refer_bounded(
+                                &dialog,
+                                rsipstack::sip::StatusCode::OK,
+                                "terminated;reason=noresource",
+                            )
+                            .await
+                            {
+                                warn!(session_id = %self.id, %error, "Failed to send deferred REFER NOTIFY");
+                            } else {
+                                info!(session_id = %self.id, "Sent deferred final REFER NOTIFY (200)");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -11842,7 +11995,7 @@ impl SipSession {
         // lets recovery mistake normal teardown for a dead call.
         self.server
             .active_call_registry
-            .remove(&self.context.session_id);
+            .remove_if_current(&self.context.session_id, self.registry_instance);
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
@@ -14546,6 +14699,79 @@ impl SipSession {
                     session_id = %self.id,
                     "Call record suppressed (replaced by REFER-Replaces takeover)"
                 );
+                CommandResult::success()
+            }
+
+            CallCommand::RelayedReferTimeout => {
+                // The relayed replacement never reported an outcome within
+                // the watchdog window: fail the transfer with the referrer
+                // kept intact (both dialogs alive — a retry / retrieve is
+                // still possible).
+                let Some(pending) = self.pending_relayed_refer.take() else {
+                    return CommandResult::success();
+                };
+                if pending.started_at.elapsed() < std::time::Duration::from_secs(super::refer::RELAYED_REFER_TIMEOUT_SECS - 2) {
+                    // A stale watchdog from an earlier REFER — the pending
+                    // state was rearmed since. Ignore.
+                    return CommandResult::success();
+                }
+                warn!(
+                    session_id = %self.id,
+                    refer_to = %pending.refer_to,
+                    "Relayed REFER replacement timed out — failing the transfer"
+                );
+                if let Some(Dialog::Invite(dialog)) =
+                    self.server.dialog_layer.get_dialog(&pending.source_dialog)
+                {
+                    if let Err(error) = SipSession::notify_refer_bounded(
+                        &dialog,
+                        rsipstack::sip::StatusCode::RequestTimeout,
+                        "terminated;reason=noresource",
+                    )
+                    .await
+                    {
+                        warn!(session_id = %self.id, %error, "Failed to send REFER timeout NOTIFY");
+                    }
+                }
+                CommandResult::success()
+            }
+
+            CallCommand::QueryTransferTargetDialog { target_user, reply } => {
+                // REFER-Replaces takeover: the replaced session's leg toward
+                // the transfer target — the dialog the target UA will match
+                // the RFC 3891 Replaces header against. Prefer the leg whose
+                // endpoint user matches the dialed target; fall back to the
+                // callee leg (classic consult shape).
+                let mut fallback = None;
+                let mut resolved = None;
+                for (leg_id, leg) in self.legs.iter() {
+                    if *leg_id == LegId::from("caller") {
+                        continue;
+                    }
+                    if !matches!(leg.state, LegState::Connected | LegState::Hold) {
+                        continue;
+                    }
+                    let Some(dialog) = self.legs.get_dialog(leg_id) else {
+                        continue;
+                    };
+                    let id = dialog.id();
+                    if let Some(endpoint) = leg.endpoint.as_deref() {
+                        let user = endpoint
+                            .split('@')
+                            .next()
+                            .unwrap_or(endpoint)
+                            .trim_start_matches("sip:")
+                            .trim_start_matches("sips:");
+                        if user == target_user {
+                            resolved = Some(id);
+                            break;
+                        }
+                    }
+                    if fallback.is_none() && *leg_id == LegId::from("callee") {
+                        fallback = Some(id);
+                    }
+                }
+                let _ = reply.send(resolved.or(fallback));
                 CommandResult::success()
             }
 
@@ -18541,7 +18767,7 @@ impl Drop for SipSession {
         // cleanup() was never called (e.g. tokio task cancellation).
         self.server
             .active_call_registry
-            .remove(&self.context.session_id);
+            .remove_if_current(&self.context.session_id, self.registry_instance);
 
         // Safety net: release any concurrency slots still held (cleanup() takes
         // them on the happy path, so this is empty in that case). Drop can't

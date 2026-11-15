@@ -48,6 +48,14 @@ pub use cookie::{
 /// and skips the `cc_calls` persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CdrSuppressedMarker;
+
+/// Attended-transfer REFER-Replaces chain: marker on the REPLACEMENT session
+/// — its target leg is a RFC 3891 auto-answered transfer. The CC hook admits
+/// the connect even though the replaced dialog's release already pushed the
+/// agent into Wrapup (the replacement is the agent's live call, not a stale
+/// queue answer) so the transferred call keeps its agent-side recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferReplacesMarker;
 pub use user::SipUser;
 
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.

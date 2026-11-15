@@ -5,6 +5,11 @@ use crate::call::cookie::TransactionCookie;
 use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 
+/// How long a relayed REFER waits for the transferee's replacement outcome
+/// before the watchdog fails the transfer (the referrer keeps the call).
+/// Matches the client-side REFER dial timeout family.
+pub(super) const RELAYED_REFER_TIMEOUT_SECS: u64 = 35;
+
 impl SipSession {
     /// Resolve and execute the raw REFER delivered to this session.
     pub(super) async fn handle_received_refer(
@@ -304,7 +309,6 @@ impl SipSession {
         refer_to_raw: &str,
         transferee_ua: Option<&str>,
     ) -> Result<()> {
-        let mut failed_setup = None;
         let result: Result<(), (u16, String)> = async {
             let mut fields = replaces.split(';');
             let call_id = fields.next().unwrap_or_default().trim();
@@ -373,9 +377,20 @@ impl SipSession {
             // replacement attaches in-session as a normal bridge. No
             // conference room. Falls back to the transfer room when the
             // customer's trunk disabled REFER-Replaces or the relay failed.
-            if self.server.proxy_config.load().refer_replaces_relay
-                && (cross_node || self.relay_transfer_refer_supported(transferee_ua))
-            {
+            // Observability for the relay gate (production 2026-11-14: the
+            // decision silently fell to the transfer room and the falling
+            // input was invisible in the logs).
+            let relay_enabled = self.server.proxy_config.load().refer_replaces_relay;
+            let trunk_relay = self.relay_transfer_refer_supported(transferee_ua);
+            info!(
+                session_id = %self.id,
+                relay_enabled,
+                cross_node,
+                transferee_ua = transferee_ua.unwrap_or("<none>"),
+                trunk_relay,
+                "REFER-Replaces relay decision"
+            );
+            if relay_enabled && (cross_node || trunk_relay) {
                 // The transferee = the PEER of the REFER's dialog (the REFER
                 // arrives on the transferor's customer-side dialog; the peer
                 // is the customer's leg).
@@ -392,6 +407,43 @@ impl SipSession {
                 self.sync_rtp_timeout_pause();
                 match self.relay_transfer_refer(&peer_leg, refer_to_raw).await {
                     Ok(()) => {
+                        // The replacement is now in flight inside the
+                        // transferee's UA. The final NOTIFY to the referrer
+                        // waits for the REAL outcome — the transferee's REFER
+                        // NOTIFY (RFC 3515 subscription on the source dialog)
+                        // lands in handle_dialog_notify, which passes 2xx
+                        // through and rolls a failure into the room fallback.
+                        // The old "relay accepted → final 200" released the
+                        // transferor before the replacement ever answered,
+                        // and a busy transfer target then 486'd the
+                        // replacement with both original dialogs already gone
+                        // (production 2026-11-14: transfer failed end to end).
+                        let replaced_call_id = replaces
+                            .split(';')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        self.pending_relayed_refer = Some(super::session::PendingRelayedRefer {
+                            source_dialog: source_dialog.clone(),
+                            refer_to: refer_to_raw.to_string(),
+                            replaces: replaces.to_string(),
+                            replaced_call_id,
+                            started_at: std::time::Instant::now(),
+                        });
+                        // Watchdog: a silent transferee must not hold the
+                        // referrer hostage past the dial timeout.
+                        if let Some(cmd_tx) = self.cmd_tx.clone() {
+                            crate::utils::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    RELAYED_REFER_TIMEOUT_SECS,
+                                ))
+                                .await;
+                                let _ = cmd_tx.send(
+                                    crate::call::domain::CallCommand::RelayedReferTimeout,
+                                );
+                            });
+                        }
                         self.meta.transfer_in_progress = false;
                         self.sync_rtp_timeout_pause();
                         return Ok(());
@@ -407,69 +459,8 @@ impl SipSession {
                     }
                 }
             }
-            let Some(owner) = owner else {
-                // Cross-node: the room fallback needs the consult dialog's
-                // session locally; a peer-homed dialog can only complete via
-                // the relay (which already failed above). Fail loud.
-                return Err((
-                    503,
-                    "consult dialog homed on a peer node and REFER relay failed".into(),
-                ));
-            };
-            let room = crate::call::runtime::ConferenceId::from(format!("transfer-{}", uuid::Uuid::new_v4()));
-            let manager = self.server.conference_server.manager_raw().clone();
-            manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;
-            failed_setup = Some((room.clone(), owner.clone()));
-            self.meta.transfer_in_progress = true;
-            self.sync_rtp_timeout_pause();
-            let result: Result<()> = async {
-                let local_leg = self.handle_join_conference_peer(room.0.clone(), source_dialog.clone()).await?;
-                let (reply, completed) = tokio::sync::oneshot::channel();
-                owner.send_command(crate::call::domain::CallCommand::JoinConferencePeer {
-                    conference_id: room.0.clone(), dialog_id: target_dialog, reply,
-                })?;
-                let remote_leg = tokio::time::timeout(std::time::Duration::from_secs(10), completed)
-                    .await.map_err(|_| anyhow!("Consultation session did not complete the attachment"))??
-                    .map_err(|error| anyhow!(error))?;
-                if self.caller_dialog.as_ref().is_none_or(|dialog| dialog.state().is_terminated()) {
-                    return Err(anyhow!("Caller left before transfer completed"));
-                }
-                let remote_participant = LegId::from(format!("{}-{}", owner.session_id(), remote_leg));
-                manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
-                // Bind the cross-session hold path: after the transferor
-                // departs, each session's in-session bridged peer is the
-                // retired consult dialog — hold/unhold for the room peer must
-                // route to the partner session (its own proven propagate
-                // path applies the hold re-INVITE + hold music on the leg).
-                let cmd_tx = self
-                    .cmd_tx
-                    .clone()
-                    .ok_or_else(|| anyhow!("Session command queue is closed"))?;
-                owner
-                    .send_command(crate::call::domain::CallCommand::BindTransferPartner {
-                        cmd_tx,
-                        partner_session: self.id.to_string(),
-                        their_leg: local_leg.clone(),
-                    })
-                    .map_err(|e| anyhow!("Failed to bind transfer partner: {e}"))?;
-                self.transfer_partner = Some(super::TransferPartnerBinding {
-                    cmd_tx: owner.command_sender(),
-                    partner_session: owner.session_id().to_string(),
-                    their_leg: remote_leg.clone(),
-                });
-                info!(
-                    session_id = %self.id,
-                    peer_session = %owner.session_id(),
-                    %local_leg, %remote_leg,
-                    "Transfer partner bound — hold/unhold routes cross-session"
-                );
-                info!(session_id = %self.id, peer_session = %owner.session_id(), %local_leg, %remote_leg,
-                    room = %room.0, "Attended REFER connected existing participants across sessions");
-                Ok(())
-            }.await;
-            self.meta.transfer_in_progress = false;
-            self.sync_rtp_timeout_pause();
-            result.map_err(|error| (500, error.to_string()))
+            self.run_transfer_room_fallback(source_dialog, replaces)
+                .await
         }.await;
         let status = match &result {
             Ok(()) => 200,
@@ -492,14 +483,116 @@ impl SipSession {
         }
         // Finish the REFER subscription before any cleanup can remove B's dialog.
         // Failure to deliver NOTIFY must not prevent teardown of a failed setup.
-        if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(source_dialog) {
+        // A RELAYED REFER skips this: its final NOTIFY is deferred until the
+        // transferee reports the replacement outcome (handle_dialog_notify).
+        if self.pending_relayed_refer.is_none()
+            && let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(source_dialog)
+        {
             if let Err(error) = SipSession::notify_refer_bounded(&dialog, StatusCode::from(status), "terminated;reason=noresource").await {
                 warn!(session_id = %self.id, %error, "Failed to send final attended REFER NOTIFY");
             } else {
                 info!(session_id = %self.id, status, "Sent final attended REFER NOTIFY");
             }
         }
-        if result.is_err() && let Some((room, _owner)) = failed_setup {
+        Ok(())
+    }
+
+    /// Execute the transfer-room fallback for an attended REFER: merge the
+    /// customer (the source dialog's peer leg) and the consult target (the
+    /// replaced session's dialog leg) into a temporary room, bind the
+    /// cross-session hold path, and roll back atomically on any failure.
+    /// Shared by the non-relayed REFER path and the relayed REFER's failure
+    /// cascade (the transferee declined or the replacement never answered).
+    pub(super) async fn run_transfer_room_fallback(
+        &mut self,
+        source_dialog: &DialogId,
+        replaces: &str,
+    ) -> Result<(), (u16, String)> {
+        let mut fields = replaces.split(';');
+        let call_id = fields.next().unwrap_or_default().trim().to_string();
+        let mut to_tag = None;
+        let mut from_tag = None;
+        for field in fields {
+            let field = field.trim();
+            if let Some((name, value)) = field.split_once('=') {
+                if name.eq_ignore_ascii_case("to-tag") {
+                    to_tag = Some(value.to_string());
+                }
+                if name.eq_ignore_ascii_case("from-tag") {
+                    from_tag = Some(value.to_string());
+                }
+            }
+        }
+        let (Some(local_tag), Some(remote_tag)) = (to_tag, from_tag) else {
+            return Err((400, "Replaces requires both dialog tags".into()));
+        };
+        let target_dialog = DialogId { call_id, local_tag, remote_tag };
+        let Some(owner) = self
+            .server
+            .active_call_registry
+            .get_handle_by_dialog(&target_dialog.call_id)
+        else {
+            // Cross-node: the room fallback needs the consult dialog's
+            // session locally; a peer-homed dialog can only complete via
+            // the relay (which already failed above). Fail loud.
+            return Err((
+                503,
+                "consult dialog homed on a peer node and REFER relay failed".into(),
+            ));
+        };
+        let room = crate::call::runtime::ConferenceId::from(format!("transfer-{}", uuid::Uuid::new_v4()));
+        let manager = self.server.conference_server.manager_raw().clone();
+        manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;
+        self.meta.transfer_in_progress = true;
+        self.sync_rtp_timeout_pause();
+        let result: Result<()> = async {
+            let local_leg = self.handle_join_conference_peer(room.0.clone(), source_dialog.clone()).await?;
+            let (reply, completed) = tokio::sync::oneshot::channel();
+            owner.send_command(crate::call::domain::CallCommand::JoinConferencePeer {
+                conference_id: room.0.clone(), dialog_id: target_dialog, reply,
+            })?;
+            let remote_leg = tokio::time::timeout(std::time::Duration::from_secs(10), completed)
+                .await.map_err(|_| anyhow!("Consultation session did not complete the attachment"))??
+                .map_err(|error| anyhow!(error))?;
+            if self.caller_dialog.as_ref().is_none_or(|dialog| dialog.state().is_terminated()) {
+                return Err(anyhow!("Caller left before transfer completed"));
+            }
+            let remote_participant = LegId::from(format!("{}-{}", owner.session_id(), remote_leg));
+            manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+            // Bind the cross-session hold path: after the transferor
+            // departs, each session's in-session bridged peer is the
+            // retired consult dialog — hold/unhold for the room peer must
+            // route to the partner session (its own proven propagate
+            // path applies the hold re-INVITE + hold music on the leg).
+            let cmd_tx = self
+                .cmd_tx
+                .clone()
+                .ok_or_else(|| anyhow!("Session command queue is closed"))?;
+            owner
+                .send_command(crate::call::domain::CallCommand::BindTransferPartner {
+                    cmd_tx,
+                    partner_session: self.id.to_string(),
+                    their_leg: local_leg.clone(),
+                })
+                .map_err(|e| anyhow!("Failed to bind transfer partner: {e}"))?;
+            self.transfer_partner = Some(super::TransferPartnerBinding {
+                cmd_tx: owner.command_sender(),
+                partner_session: owner.session_id().to_string(),
+                their_leg: remote_leg.clone(),
+            });
+            info!(
+                session_id = %self.id,
+                peer_session = %owner.session_id(),
+                %local_leg, %remote_leg,
+                "Transfer partner bound — hold/unhold routes cross-session"
+            );
+            info!(session_id = %self.id, peer_session = %owner.session_id(), %local_leg, %remote_leg,
+                room = %room.0, "Attended REFER connected existing participants across sessions");
+            Ok(())
+        }.await;
+        self.meta.transfer_in_progress = false;
+        self.sync_rtp_timeout_pause();
+        if let Err(error) = &result {
             // R2: roll back atomically — customer restored held with the
             // agent, both sessions stay up, no zombie room.
             let manager = self.server.conference_server.manager_raw().clone();
@@ -524,6 +617,8 @@ impl SipSession {
                 self.sync_rtp_timeout_pause();
                 info!(session_id = %self.id, %leg, room = %room.0, "Attended REFER rolled back; customer restored to held state");
             }
+            warn!(session_id = %self.id, %error, "Transfer room fallback failed");
+            return Err((500, error.to_string()));
         }
         Ok(())
     }

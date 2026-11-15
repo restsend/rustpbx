@@ -595,6 +595,23 @@ pub enum CallCommand {
     #[serde(skip)]
     SuppressCallRecord,
 
+    /// REFER-Replaces chain: the relayed replacement never reached a final
+    /// REFER NOTIFY within the watchdog window. The session releases the
+    /// pending state and fails the transfer with the referrer kept intact.
+    #[serde(skip)]
+    RelayedReferTimeout,
+
+    /// REFER-Replaces takeover: resolve the replaced session's dialog toward
+    /// the transfer target. The target UA faces THIS dialog, so the Replaces
+    /// header on the outbound target-leg INVITE must carry its identity for
+    /// the RFC 3891 auto-answer to match.
+    #[serde(skip)]
+    QueryTransferTargetDialog {
+        /// Extension of the transfer target (matches the leg's remote user).
+        target_user: String,
+        reply: oneshot::Sender<Option<rsipstack::dialog::DialogId>>,
+    },
+
     #[serde(skip)]
     ConferenceEnded { conference_id: String },
 

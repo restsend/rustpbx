@@ -2166,14 +2166,56 @@ impl CallModule {
                         }
                     };
                     // REFER-Replaces chain: the outbound target-leg INVITE
-                    // carries the verbatim Replaces header so the target UA
-                    // auto-answers it as a replacement of its own dialog (no
-                    // second ring, no conference merge).
-                    dialplan.extensions.insert(crate::call::ReferReplacesContext {
-                        header: format!(
+                    // carries a Replaces header so the target UA auto-answers
+                    // it as a replacement of its own dialog (no second ring,
+                    // no conference merge). RFC 3891 matching happens at the
+                    // TARGET UA: the header must identify the dialog the
+                    // target holds with US (the replaced consult session's
+                    // target-side leg), not the transferor's A-side dialog.
+                    // Refer-To target user (the INVITE's Request-URI user —
+                    // the customer dialled the target AOR with the Replaces
+                    // query), used to resolve the target-facing dialog.
+                    let target_user = tx
+                        .original
+                        .uri()
+                        .user()
+                        .map(|u| u.to_string())
+                        .unwrap_or_default();
+                    let target_dialog_id = {
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        match old_handle
+                            .send_command_async(crate::call::domain::CallCommand::QueryTransferTargetDialog {
+                                target_user: target_user.clone(),
+                                reply: reply_tx,
+                            })
+                            .await
+                        {
+                            Ok(()) => reply_rx.await.ok().flatten(),
+                            Err(_) => None,
+                        }
+                    };
+                    let replaces_header = match &target_dialog_id {
+                        // Target-side dialog resolved locally: to-tag = the
+                        // dialog's To tag (the target's tag = our remote_tag
+                        // on this UAC dialog), from-tag = our tag.
+                        Some(dialog_id) => format!(
+                            "{};to-tag={};from-tag={}",
+                            dialog_id.call_id, dialog_id.remote_tag, dialog_id.local_tag
+                        ),
+                        None => format!(
                             "{};to-tag={};from-tag={}",
                             replaces_call_id, replaces_to_tag, replaces_from_tag
                         ),
+                    };
+                    if target_dialog_id.is_some() {
+                        info!(
+                            %old_session_id,
+                            dialog = %target_dialog_id.as_ref().unwrap().call_id,
+                            "Replaces header re-stamped for the target-facing dialog (RFC 3891 auto-answer)"
+                        );
+                    }
+                    dialplan.extensions.insert(ReferReplacesContext {
+                        header: replaces_header,
                     });
                     // Session-id inheritance: the replacement session adopts
                     // the ROOT session id of the logical call (the original
