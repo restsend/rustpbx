@@ -577,6 +577,12 @@ pub enum CallCommand {
     },
 
     /// The shared room ended; its owning session must hang up the participant.
+    /// REFER-Replaces chain: mark the REPLACED (consult) session so its end
+    /// suppresses the CDR row — the replacement session inherits the root
+    /// session id and carries the transferred call's record.
+    #[serde(skip)]
+    SuppressCallRecord,
+
     #[serde(skip)]
     ConferenceEnded { conference_id: String },
 

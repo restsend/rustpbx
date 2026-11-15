@@ -403,7 +403,7 @@ async fn test_presence_publish_bodyless_renewal() {
             .unwrap();
         let finished = endpoint.finished_transactions.get(&key).unwrap();
         assert!(
-            matches!(finished.value().as_ref(), Some(SipMessage::Response(r))
+            matches!(finished.as_ref(), Some(SipMessage::Response(r))
             if r.status_code == StatusCode::OK)
         );
         let after = manager.get_state("bob");
@@ -459,7 +459,7 @@ async fn test_presence_publish_bodyless_renewal() {
             .unwrap();
         let finished = endpoint.finished_transactions.get(&key).unwrap();
         assert!(
-            matches!(finished.value().as_ref(), Some(SipMessage::Response(r))
+            matches!(finished.as_ref(), Some(SipMessage::Response(r))
             if r.status_code == StatusCode::ConditionalRequestFailed)
         );
         let after = manager.get_state("bob");

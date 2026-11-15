@@ -676,6 +676,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         .and_then(recording_policy_from_metadata);
 
     Some(routing::TrunkConfig {
+        refer_replaces: true,
         dest,
         backup_dest,
         username: model.auth_username.clone(),

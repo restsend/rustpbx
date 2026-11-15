@@ -1,4 +1,5 @@
 use super::prelude::*;
+use crate::call::TrunkContext;
 use super::SipSession;
 use crate::call::cookie::TransactionCookie;
 use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
@@ -95,7 +96,22 @@ impl SipSession {
                     Self::refer_application_headers(request.headers.iter()), callee_state_rx,
                 ).await;
             }
-            return self.handle_refer_replaces(&dialog_id, replaces, &target_uri).await;
+            // The REFERer's User-Agent identifies the transferee's engine: a
+            // restsend-family UA natively executes Refer-To with Replaces
+            // (RFC 5589 transfer target, auto mode), so the REFER-Replaces
+            // chain applies without a trunk.
+            let transferee_ua = request.headers.iter().find_map(|header| match header {
+                rsipstack::sip::Header::UserAgent(value) => Some(value.value().to_string()),
+                rsipstack::sip::Header::Other(name, value)
+                    if name.eq_ignore_ascii_case("User-Agent") =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            });
+            return self
+                .handle_refer_replaces(&dialog_id, replaces, &refer_to, transferee_ua.as_deref())
+                .await;
         }
         let in_session = replaces_header.is_none()
             && (conference_target || app_target.is_some() || self.server.proxy_config.load().inbound_refer_in_session);
@@ -180,13 +196,113 @@ impl SipSession {
         Ok(())
     }
 
+    /// Whether the REFER-Replaces relay is supported for the transferee on
+    /// the source dialog. The transferee must sit on a TRUNK with
+    /// `refer_replaces` enabled (PSTN/SBC executes the transferee role
+    /// natively). Registered UAs (the restsend clients) do not implement the
+    /// transferee role yet — they fall back to the transfer room until the
+    /// client transferee batch ships.
+    fn relay_transfer_refer_supported(&self, transferee_ua: Option<&str>) -> bool {
+        // A restsend-family engine natively executes the transferee role
+        // (Refer-To with Replaces, RFC 5589 auto mode) — relay regardless of
+        // trunk membership.
+        if let Some(ua) = transferee_ua {
+            if ua.to_ascii_lowercase().contains("restsend") {
+                return true;
+            }
+        }
+        // Otherwise resolve the transferee's trunk from the A-leg peer
+        // address (the cookie TrunkContext only exists when the ACL
+        // pre-route hook ran — not every INVITE path). No trunk = an unknown
+        // registered UA: the transferee role is not guaranteed → use the
+        // transfer room.
+        let Some(peer_ip) = self
+            .context
+            .cookie
+            .get_extension::<crate::call::CallerPeerContext>()
+            .and_then(|p| {
+                p.0.split(':').next().and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+            })
+        else {
+            return false;
+        };
+        let from_user = self
+            .meta
+            .routed_caller
+            .clone()
+            .or_else(|| Some(self.context.original_caller.clone()))
+            .and_then(|u| {
+                u.split('@').next().map(|s| s.trim_start_matches("sip:").to_string())
+            });
+        let to_user = self
+            .context
+            .original_callee
+            .split('@')
+            .next()
+            .map(|s| s.trim_start_matches("sip:").to_string());
+        let trunk = self.server.data_context.resolve_inbound_trunk_by_ip(
+            &peer_ip,
+            from_user.as_deref(),
+            to_user.as_deref(),
+        );
+        trunk
+            .and_then(|t| self.server.data_context.get_trunk(&t.name))
+            .map(|cfg| cfg.refer_replaces)
+            .unwrap_or(false)
+    }
+
+    /// Relay the attended-transfer REFER to the transferee UA on the source
+    /// dialog: `REFER(Refer-To=<target?Replaces=<consult dialog>>)`. The
+    /// transferee executes the standard role — dial the Refer-To target with
+    /// the Replaces header — and the replacement attaches in-session on this
+    /// node as a normal bridge (no conference room).
+    async fn relay_transfer_refer(
+        &mut self,
+        peer_leg: &LegId,
+        refer_to: &str,
+    ) -> Result<()> {
+        // The original Refer-To is passed through VERBATIM: it already names
+        // the transfer target with the Replaces parameter identifying the
+        // dialog to be replaced (the consult dialog). The transferee executes
+        // the standard role — INVITE(Replaces) toward the target.
+        use rsipstack::dialog::dialog::Dialog;
+        let Some(peer_dialog) = self.legs.get_dialog(peer_leg) else {
+            return Err(anyhow!("Transferee dialog is gone"));
+        };
+        let response = match peer_dialog {
+            Dialog::Invite(invite) => {
+                invite
+                    .refer(refer_to, None, None)
+                    .await
+                    .map_err(|e| anyhow!("REFER relay failed: {e}"))?
+            }
+            _ => return Err(anyhow!("Transferee dialog does not support REFER")),
+        };
+        let code = response
+            .as_ref()
+            .map(|r| u16::from(r.status_code().clone()))
+            .unwrap_or(202);
+        if !(200..300).contains(&code) {
+            return Err(anyhow!("Transferee rejected the REFER with {code}"));
+        }
+        info!(
+            session_id = %self.context.session_id,
+            %peer_leg,
+            refer_to = %refer_to,
+            code,
+            "Transfer REFER relayed to the transferee UA (REFER-Replaces chain)"
+        );
+        Ok(())
+    }
+
     /// Resolve session ownership by bare Call-ID, then validate the SIP dialog
     /// with Replaces tags. The registry key convention is unchanged.
     async fn handle_refer_replaces(
         &mut self,
         source_dialog: &DialogId,
         replaces: &str,
-        target_uri: &str,
+        refer_to_raw: &str,
+        transferee_ua: Option<&str>,
     ) -> Result<()> {
         let mut failed_setup = None;
         let result: Result<(), (u16, String)> = async {
@@ -235,6 +351,46 @@ impl SipSession {
             }
             if self.meta.transfer_in_progress || self.conference.is_some() {
                 return Err((491, "Call is already transferring or in a conference".into()));
+            }
+            // ── REFER-Replaces chain: relay the transfer to the transferee ──
+            // The customer's UA executes the standard transferee role — dial
+            // the transfer target with `Replaces: <consult dialog>` — and the
+            // replacement attaches in-session as a normal bridge. No
+            // conference room. Falls back to the transfer room when the
+            // customer's trunk disabled REFER-Replaces or the relay failed.
+            if self.server.proxy_config.load().refer_replaces_relay
+                && self.relay_transfer_refer_supported(transferee_ua)
+            {
+                // The transferee = the PEER of the REFER's dialog (the REFER
+                // arrives on the transferor's customer-side dialog; the peer
+                // is the customer's leg).
+                let peer_leg = if self
+                    .caller_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.id() == *source_dialog)
+                {
+                    self.resolve_transfer_leg()
+                } else {
+                    LegId::from("caller")
+                };
+                self.meta.transfer_in_progress = true;
+                self.sync_rtp_timeout_pause();
+                match self.relay_transfer_refer(&peer_leg, refer_to_raw).await {
+                    Ok(()) => {
+                        self.meta.transfer_in_progress = false;
+                        self.sync_rtp_timeout_pause();
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        self.meta.transfer_in_progress = false;
+                        self.sync_rtp_timeout_pause();
+                        tracing::warn!(
+                            session_id = %self.context.session_id,
+                            %error,
+                            "REFER relay to the transferee failed — falling back to the transfer room"
+                        );
+                    }
+                }
             }
             let room = crate::call::runtime::ConferenceId::from(format!("transfer-{}", uuid::Uuid::new_v4()));
             let manager = self.server.conference_server.manager_raw().clone();
@@ -299,6 +455,7 @@ impl SipSession {
             }
         };
         if status == 200 {
+            let target_uri = refer_to_raw.split('?').next().unwrap_or(refer_to_raw).to_string();
             let source = if let Some(leg) = self.leg_id_for_dialog(&source_dialog.to_string()) {
                 self.transfer_source_snapshot(&leg).await
             } else { None };

@@ -1574,6 +1574,12 @@ pub struct ProxyConfig {
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
     pub tls_ca_certificates: Option<String>,
+    /// Idle timeout in seconds for stream (TCP/TLS/WS) connections: a
+    /// connection with no inbound traffic for this long is closed and retired
+    /// from the connection table, reclaiming half-open sockets whose peer
+    /// vanished without a FIN. `0` disables. Defaults to 300 when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout: Option<u64>,
     pub udp_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_ports: Option<Vec<u16>>,
@@ -1731,6 +1737,15 @@ pub struct ProxyConfig {
     /// in-session hand-off; failures roll back atomically. Default: enabled.
     #[serde(default = "default_true")]
     pub inbound_refer_in_session: bool,
+    /// Attended-transfer execution path: when enabled (default), the
+    /// transferor's REFER(Replaces) is RELAYED to the transferee UA, which
+    /// executes the standard transferee role — INVITE(Replaces) toward the
+    /// target — and the replacement attaches in-session as a normal bridge
+    /// (no conference room). When disabled (or the transferee's trunk
+    /// disables `refer_replaces`, or the relay fails), the transfer falls
+    /// back to the server-side transfer room.
+    #[serde(default = "default_true")]
+    pub refer_replaces_relay: bool,
     /// SIP conference factory URI. Disabled when unset.
     #[serde(default)]
     pub conference_factory_uri: Option<String>,
@@ -2377,6 +2392,7 @@ impl Default for ProxyConfig {
             ssl_private_key: None,
             ssl_certificate: None,
             tls_ca_certificates: None,
+            stream_idle_timeout: None,
             udp_port: Some(5060),
             udp_ports: None,
             tcp_port: None,
@@ -2431,6 +2447,7 @@ impl Default for ProxyConfig {
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             inbound_refer_in_session: true,
+            refer_replaces_relay: true,
             conference_factory_uri: None,
             conference_empty_timeout_secs: default_conference_empty_timeout_secs(),
             route_originated_calls: false,

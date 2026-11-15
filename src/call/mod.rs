@@ -38,8 +38,16 @@ pub mod user;
 pub mod uui;
 pub use cookie::{
     CalleeDisplayName, CalleeOfflineMarker, CallerPeerContext, MatchedRoute, OutboundTrunkContext,
-    TransactionCookie, TrunkContext,
+    ReferReplacesContext, TransactionCookie, TrunkContext,
 };
+
+/// Attended-transfer REFER-Replaces chain: marker on the REPLACED (consult)
+/// session — its CDR row is suppressed (the replacement session inherits the
+/// root session id and carries the transferred call's record). The CC
+/// call-session hook reads this marker from the session context extensions
+/// and skips the `cc_calls` persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CdrSuppressedMarker;
 pub use user::SipUser;
 
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.

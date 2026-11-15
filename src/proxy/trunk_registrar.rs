@@ -221,11 +221,13 @@ async fn registration_loop(
     let credential = match (&config.username, &config.password) {
         (Some(user), Some(pass)) => Some(Credential {
             username: user.clone(),
+            auth_username: None, // legacy mapping: `username` already carries the auth ID
             password: pass.clone(),
             realm: None, // extracted from server challenge
         }),
         (Some(user), None) => Some(Credential {
             username: user.clone(),
+            auth_username: None,
             password: String::new(),
             realm: None,
         }),

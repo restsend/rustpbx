@@ -98,6 +98,15 @@ pub struct TrunkConfig {
     pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default = "default_rewrite_hostport")]
     pub rewrite_hostport: bool,
+    /// Whether this trunk's UA executes REFER-with-Replaces (the standard
+    /// attended-transfer transferee role: receive REFER(Refer-To with
+    /// Replaces) → dial the Refer-To target with the Replaces header →
+    /// release the replaced dialog). Defaults to true (PSTN/SBC and modern
+    /// UA behaviour); set false for trunks that do not implement the
+    /// transferee role — their attended transfers fall back to the
+    /// server-side transfer room.
+    #[serde(default = "default_refer_replaces")]
+    pub refer_replaces: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id_mode: Option<CallIdMode>,
     /// Session-id correlation header for THIS trunk, both directions.
@@ -467,6 +476,10 @@ fn default_rewrite_hostport() -> bool {
     true
 }
 
+fn default_refer_replaces() -> bool {
+    true
+}
+
 impl Default for TrunkConfig {
     fn default() -> Self {
         Self {
@@ -476,6 +489,7 @@ impl Default for TrunkConfig {
             password: None,
             codec: Vec::new(),
             disabled: None,
+            refer_replaces: true,
             max_calls: None,
             concurrent_call_limiter: None,
             max_cps: None,

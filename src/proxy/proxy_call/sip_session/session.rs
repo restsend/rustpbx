@@ -4589,6 +4589,27 @@ impl SipSession {
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
 
+        // REFER-Replaces chain: this session is the replacement call — stamp
+        // the verbatim Replaces header onto the outbound target-leg INVITE so
+        // the target UA auto-answers it as a replacement of its own dialog
+        // (no second ring, standard transferee behavior).
+        if let Some(replaces) = self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::ReferReplacesContext>()
+        {
+            headers.push(rsipstack::sip::Header::Other(
+                "Replaces".into(),
+                replaces.header.clone(),
+            ));
+            info!(
+                session_id = %self.id,
+                replaces = %replaces.header,
+                "Outbound leg INVITE carries Replaces (REFER-Replaces takeover)"
+            );
+        }
+
         if route_via_home_proxy {
             debug!(session_id = %self.id,
                 session_id = %self.context.session_id,
@@ -8030,7 +8051,6 @@ impl SipSession {
             ));
         }
 
-        let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
 
         let default_expires = self
@@ -9014,7 +9034,6 @@ impl SipSession {
             ));
         }
 
-        let _local_addrs = self.server.endpoint.get_addrs();
         let _cluster_enabled = !self.server.cluster_peer_ips.is_empty();
         let default_expires = self
             .server
@@ -14255,6 +14274,26 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::SuppressCallRecord => {
+                // REFER-Replaces chain: the replaced (consult) session must
+                // not produce its own CDR row — the replacement session
+                // inherits the root session id and carries the transferred
+                // call's record. cdr_sent=true gates BOTH the cleanup CDR
+                // publication and the Drop safety net; the extension marker
+                // gates the CC call-session hook's cc_calls persist. The
+                // leg teardown / BYE / RWI hangup events stay intact.
+                self.cdr_sent
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.extensions
+                    .write()
+                    .insert(crate::call::CdrSuppressedMarker);
+                info!(
+                    session_id = %self.id,
+                    "Call record suppressed (replaced by REFER-Replaces takeover)"
+                );
+                CommandResult::success()
+            }
+
             CallCommand::ConferenceEnded { conference_id } => {
                 if self
                     .conference
@@ -17789,22 +17828,22 @@ impl SipSession {
         // held party always hears hold audio instead of silence.
         let music = music.or_else(|| self.resolve_hold_music(&[]));
 
-        // Conference-attached held leg (attended-transfer room): pause the
-        // mixer feed BEFORE the hold re-INVITE so the hold music is the
-        // single egress writer on this leg's track — the mixer and the hold
-        // source would otherwise interleave garbage into the held party's
-        // downlink. The room membership is retained for the unhold re-join.
-        // Scoped to the transfer room (partner bound): real conference
-        // holds keep the pre-existing mixer behavior.
-        if self.conference_bridge.bridge_handle.is_some() && self.transfer_partner.is_some() {
-            let conf = self.conference_bridge.conf_id.clone();
-            self.conference_bridge.pause();
-            info!(
-                session_id = %self.id,
-                %leg_id,
-                room = ?conf,
-                "Held leg detached from mixer feed — hold music takes over"
-            );
+        // Transfer-room held leg: the hold music flows through the
+        // conference bridge's hold gate (the mixer feed is substituted in
+        // place) — no leg-level hold source, and the room lifecycle is
+        // untouched. Scoped to the transfer room (partner bound); real
+        // conference holds keep the pre-existing behavior.
+        let room_hold = self.transfer_partner.is_some()
+            && self.legs.conference_bridge_handle(&leg_id).is_some();
+        if room_hold {
+            if let Some(handle) = self.legs.conference_bridge_handle(&leg_id) {
+                handle.set_hold(true);
+                info!(
+                    session_id = %self.id,
+                    %leg_id,
+                    "Transfer-room hold gate engaged — hold music replaces the mixer feed"
+                );
+            }
         }
 
         let hold_sdp = self.generate_sdp_for_side(&leg_id, true)?;
@@ -17835,7 +17874,13 @@ impl SipSession {
                 // CNG/silence. Mirrors propagate_hold_to_callee / _to_caller: without
                 // this the leg stays on EgressSource::RewriteRelay, which parks the
                 // ptime-paced egress loop and emits nothing to the held party.
-                self.apply_hold_media(&leg_id, music).await?;
+                // Transfer-room legs instead hold through the conference
+                // bridge's hold gate — the gate replaces the mixer feed with
+                // hold music in place, so a leg-level hold source would only
+                // fight it.
+                if !room_hold {
+                    self.apply_hold_media(&leg_id, music).await?;
+                }
                 Ok(())
             }
             Err(e) => {
@@ -18002,30 +18047,18 @@ impl SipSession {
             return Ok(());
         }
 
-        // Resume from a paused transfer-room hold: re-attach the mixer feed
-        // so the cross-session audio returns together with the unhold. The
-        // room membership was retained by the hold-time pause.
-        if self.conference_bridge.paused {
-            if let Some(conf) = self.conference_bridge.conf_id.clone() {
-                if let Err(error) =
-                    self.try_start_and_store_bridge(&conf, &leg_id, "transfer-room re-join").await
-                {
-                    warn!(
-                        session_id = %self.id,
-                        %leg_id,
-                        %error,
-                        "Failed to re-join transfer room on unhold"
-                    );
-                }
-            }
-            self.conference_bridge.paused = false;
-            // Stop the hold-music playback: its looping writer contends with
-            // the restored mixer feed (same class as the early-media ringback
-            // vs the caller<->winner relay — the relay starves and the leg
-            // keeps hearing hold music after the unhold).
-            if let Some(peer) = self.media_leg(&leg_id) {
-                peer.stop_playback().await.ok();
-            }
+        // Transfer-room held leg: release the hold gate — the forward loop
+        // switches back to the mixer feed in place (no re-join, no leg-level
+        // source swap; the room lifecycle is untouched).
+        if self.transfer_partner.is_some()
+            && let Some(handle) = self.legs.conference_bridge_handle(&leg_id)
+        {
+            handle.set_hold(false);
+            info!(
+                session_id = %self.id,
+                %leg_id,
+                "Transfer-room hold gate released — mixer feed restored"
+            );
         }
 
         let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;

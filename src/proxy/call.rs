@@ -1,7 +1,8 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
-    Location, MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    Location, MediaConfig, ReferReplacesContext, RouteInvite, RoutingState, SipUser,
+    TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::recorder::RecorderOption;
@@ -2010,6 +2011,15 @@ impl CallModule {
                 "Incoming INVITE contains Replaces header"
             );
 
+            // The replacement session's Call-ID — captured BEFORE any
+            // processing consumes the transaction headers (needed by the
+            // background release task; unavailable after build_and_serve).
+            let new_session_call_id = tx
+                .original
+                .call_id_header()
+                .map(|h| h.value().to_string())
+                .unwrap_or_default();
+
             // Look up the dialog being replaced in the dialog layer
             let _dialog_layer = self.inner.dialog_layer.clone();
             let registry = self.inner.server.active_call_registry.clone();
@@ -2027,15 +2037,71 @@ impl CallModule {
                 let old_leg = crate::call::domain::LegId::new(&old_session_id);
                 let conf_id = conference_manager.get_conference_id_for_leg(&old_leg).await;
 
-                if conf_id.is_some() {
-                    info!(%old_session_id, "Replaces target is in a conference; proceeding with seat replacement");
+                // REFER-Replaces chain: a plain confirmed replaced dialog is
+                // ALSO a valid takeover — the transferee UA (customer) dialled
+                // the target with `Replaces: <consult dialog>`; the replacement
+                // session bridges to the target normally (no conference).
+                let replaced_confirmed = self
+                    .inner
+                    .dialog_layer
+                    .get_dialog(&rsipstack::dialog::DialogId {
+                        call_id: replaces_call_id.clone(),
+                        local_tag: replaces_to_tag.clone(),
+                        remote_tag: replaces_from_tag.clone(),
+                    })
+                    .is_some_and(|dialog| dialog.state().is_confirmed());
+
+                if conf_id.is_some() || replaced_confirmed {
+                    if conf_id.is_some() {
+                        info!(%old_session_id, "Replaces target is in a conference; proceeding with seat replacement");
+                    } else {
+                        info!(%old_session_id, "Replaces target is a confirmed call — proceeding with REFER-Replaces takeover");
+                    }
                     let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
-                    let dialplan = match dialplan {
+                    let mut dialplan = match dialplan {
                         Ok(d) => d,
                         Err(route_err) => {
                             return self.reply_route_error(tx, &cookie, route_err).await;
                         }
                     };
+                    // REFER-Replaces chain: the outbound target-leg INVITE
+                    // carries the verbatim Replaces header so the target UA
+                    // auto-answers it as a replacement of its own dialog (no
+                    // second ring, no conference merge).
+                    dialplan.extensions.insert(crate::call::ReferReplacesContext {
+                        header: format!(
+                            "{};to-tag={};from-tag={}",
+                            replaces_call_id, replaces_to_tag, replaces_from_tag
+                        ),
+                    });
+                    // Session-id inheritance: the replacement session adopts
+                    // the ROOT session id of the logical call (the original
+                    // call's id) so the recording/CDR chain and the
+                    // Session-ID header stay on the original call's identity.
+                    let root_session_id = self
+                        .inner
+                        .server
+                        .rwi_gateway
+                        .as_ref()
+                        .and_then(|gw| {
+                            gw.read()
+                                .meta_store
+                                .get_sync(&old_session_id)
+                                .and_then(|meta| meta.session_id.clone())
+                        })
+                        .unwrap_or_else(|| old_session_id.clone());
+                    dialplan.session_id = Some(root_session_id.clone());
+                    // CDR suppression: the replaced (consult) session must
+                    // not produce its own CDR row — the replacement session
+                    // carries the transferred call's record under the root
+                    // session id.
+                    if replaced_confirmed
+                        && let Err(error) = old_handle
+                            .send_command_async(crate::call::domain::CallCommand::SuppressCallRecord)
+                            .await
+                    {
+                        warn!(%old_session_id, %error, "Failed to mark the replaced session CDR-suppressed");
+                    }
 
                     let server = self.inner.server.clone();
                     let max_forwards = Self::extract_max_forwards(tx);
@@ -2047,27 +2113,37 @@ impl CallModule {
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
                             .with_cancel_token(self.build_session_token(tx));
+                    // Capture the replacement session's Call-ID BEFORE the
+                    // transaction is consumed by build_and_serve (the header
+                    // is unavailable afterwards — the background release task
+                    // would silently never spawn).
+                    let new_session_id = new_session_call_id.clone();
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
-                    let new_session_id = tx
-                        .original
-                        .call_id_header()
-                        .map(|h| h.value().to_string())
-                        .unwrap_or_default();
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
+                        // The release wait key: the conference seat
+                        // replacement tracks the new session's own call-id;
+                        // the REFER-Replaces chain's replacement session
+                        // inherits the ROOT session id, so its registry key
+                        // is the root.
+                        let wait_sid = if replaced_confirmed {
+                            root_session_id.clone()
+                        } else {
+                            new_session_id.clone()
+                        };
                         let sid = new_session_id.clone();
                         crate::utils::spawn(async move {
-                            if reg
+                            let fired = reg
                                 .wait_for_status(
-                                    &sid,
+                                    &wait_sid,
                                     ActiveProxyCallStatus::Talking,
                                     std::time::Duration::from_secs(30),
                                 )
-                                .await
-                            {
-                                info!(session_id = %sid, "New Replaces call answered; executing conference seat replacement");
+                                .await;
+                            if fired {
+                                info!(session_id = %wait_sid, "New Replaces call answered; executing conference seat replacement");
 
                                 if let Some(ref conf) = conf_id {
                                     let _ =
@@ -2076,7 +2152,10 @@ impl CallModule {
                                     let _ = conference_manager.add_participant(conf, new_leg).await;
                                     info!(%old_session_id, %sid, "Conference seat replacement completed for Replaces");
                                 }
-
+                                // (sid convention kept: the seat-replacement
+                                // participant id uses the new session id; the
+                                // REFER-Replaces chain does not touch the
+                                // conference.)
                                 let _ = old_handle_clone
                                     .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
@@ -2132,20 +2211,20 @@ impl CallModule {
                         .unwrap_or_default();
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
-                        let sid = new_session_id.clone();
+                        let merge_sid = new_session_id.clone();
                         crate::utils::spawn(async move {
                             if reg
                                 .wait_for_status(
-                                    &sid,
+                                    &merge_sid,
                                     ActiveProxyCallStatus::Talking,
                                     std::time::Duration::from_secs(30),
                                 )
                                 .await
                             {
-                                info!(session_id = %sid, "New Replaces call answered; creating conference for attended transfer");
+                                info!(session_id = %merge_sid, "New Replaces call answered; creating conference for attended transfer");
 
                                 let conf_id = crate::call::runtime::ConferenceId::from(
-                                    format!("conf-replaces-{}", sid).as_str(),
+                                    format!("conf-replaces-{}", merge_sid).as_str(),
                                 );
                                 let _ = conference_manager
                                     .create_conference(conf_id.clone(), None)
@@ -2156,12 +2235,12 @@ impl CallModule {
                                     .add_participant(&conf_id, old_leg.clone())
                                     .await;
 
-                                let new_leg = crate::call::domain::LegId::new(&sid);
+                                let new_leg = crate::call::domain::LegId::new(&merge_sid);
                                 let _ = conference_manager
                                     .add_participant(&conf_id, new_leg.clone())
                                     .await;
 
-                                info!(%old_session_id, %sid, "Conference created for attended transfer");
+                                info!(%old_session_id, %merge_sid, "Conference created for attended transfer");
 
                                 let _ = old_handle_clone
                                     .send_command_async(crate::call::domain::CallCommand::Hangup(
@@ -2530,7 +2609,16 @@ impl CallModule {
     fn parse_replaces_header(
         request: &rsipstack::sip::Request,
     ) -> Option<(String, String, String)> {
+        let names: Vec<String> = request
+            .headers
+            .iter()
+            .map(|h| format!("{:?}", h.name()))
+            .collect();
+        eprintln!("REPLACES-DBG: INVITE headers: {names:?}");
+        // rsipstack parses `Replaces:` into the TYPED header variant — the
+        // untyped Other fallback covers raw/relay paths.
         let replaces_value = request.headers.iter().find_map(|h| match h {
+            rsipstack::sip::Header::Replaces(inner) => Some(inner.value().to_string()),
             rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Replaces") => {
                 Some(value.to_string())
             }
@@ -2543,6 +2631,7 @@ impl CallModule {
         let mut to_tag = None;
         let mut from_tag = None;
 
+        eprintln!("REPLACES-DBG2: value={replaces:?}");
         for (idx, part) in replaces.split(';').enumerate() {
             if idx == 0 {
                 call_id = Some(part.trim().to_string());
@@ -2552,6 +2641,7 @@ impl CallModule {
                 from_tag = Some(val.trim().to_string());
             }
         }
+        eprintln!("REPLACES-DBG2: parsed call_id={call_id:?} to={to_tag:?} from={from_tag:?}");
 
         Some((call_id?, to_tag?, from_tag?))
     }
@@ -5361,7 +5451,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut cookie = trunk_cookie();
+        let cookie = trunk_cookie();
         cookie.insert_extension(crate::call::TrunkContext {
             id: Some(2),
             name: "customer-x".to_string(),

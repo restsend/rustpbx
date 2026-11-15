@@ -94,9 +94,29 @@ impl SipSession {
             let bridge = crate::call::runtime::ConferenceMediaBridge::new(
                 self.server.conference_server.manager_raw().clone(),
             );
+            // Hold gate: the room leg's hold music flows through the
+            // bridge's forward loop (the mixer feed is substituted in place),
+            // so a held room leg never depends on leg-level hold sources or
+            // on the room staying alive.
+            let hold_gate = match self.resolve_hold_music(&[]) {
+                Some(crate::call::domain::MediaSource::File { path })
+                | Some(crate::call::domain::MediaSource::Url { url: path }) => {
+                    let resolved = if path.starts_with("http://") || path.starts_with("https://") {
+                        path.clone()
+                    } else {
+                        Self::resolve_audio_file_path(&path)
+                    };
+                    crate::call::runtime::hold_gate_from_wav(
+                        &resolved,
+                        self.leg_negotiated_codec(leg_id).clock_rate(),
+                    )
+                }
+                _ => None,
+            };
             return bridge.start_bridge_full_duplex(
                 conf_id, leg_id, tx, Box::new(MediaBridgeLegAudioReceiver::new(audio)),
                 self.leg_negotiated_codec(leg_id),
+                hold_gate,
             ).await;
         }
         Err(anyhow!("Missing media endpoint for {}", local_leg))

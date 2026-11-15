@@ -934,6 +934,9 @@ field_description_placeholder = "关于配置或升级的内部备注。"
 
 # Capacity limits section
 section_capacity = "容量限制"
+section_advanced = "高级设置"
+field_refer_replaces = "REFER-Replaces"
+field_refer_replaces_hint = "支持 REFER-Replaces（完成转接由对方 UA 以标准 Replaces 方式执行；关闭后回落服务端转接房间）"
 field_max_cps = "最大CPS"
 field_max_cps_placeholder = "例如 30"
 field_max_concurrent = "最大并发通话"

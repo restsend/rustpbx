@@ -59,6 +59,7 @@ async fn test_auth_module_invite_success() {
             status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
+            wire_reason: None,
         };
         let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));
@@ -220,6 +221,7 @@ async fn test_auth_module_register_success() {
             status_code: rsipstack::sip::StatusCode::Unauthorized,
             headers: tx.original.headers().clone(),
             body: vec![],
+            wire_reason: None,
         };
         let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::WwwAuthenticate(www_auth));
@@ -512,6 +514,7 @@ async fn test_guest_call_allowed_extension() {
         locator,
         callrecord_sender: None,
         endpoint,
+        local_listen_addrs: Vec::new(),
         dialog_layer,
         dialplan_inspectors: Arc::new(parking_lot::RwLock::new(Vec::new())),
         create_route_invites: Vec::new(),
@@ -977,6 +980,7 @@ async fn test_proxy_auth_invite_success() {
             status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
+            wire_reason: None,
         };
 
         // Add Proxy-Authenticate header
@@ -1110,6 +1114,7 @@ async fn test_proxy_auth_wrong_credentials() {
             status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
+            wire_reason: None,
         };
 
         // Add Proxy-Authenticate header
@@ -1193,6 +1198,7 @@ async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
             status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
+            wire_reason: None,
         };
         let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));

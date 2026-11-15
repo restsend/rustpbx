@@ -368,6 +368,7 @@ mod tests {
                 status_code: StatusCode::OK,
                 headers: request.headers.clone(),
                 body: vec![],
+                wire_reason: None,
             };
             for message in [SipMessage::Request(request), SipMessage::Response(response)] {
                 let inspected = NatInspector::new().after_received(message, Some(&from));

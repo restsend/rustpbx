@@ -330,6 +330,7 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
                 status_code: rsipstack::sip::StatusCode::OK,
                 headers: tx.original.headers().to_owned(),
                 body: vec![],
+                wire_reason: None,
             };
             tx.last_response = Some(resp);
         } else {
@@ -339,6 +340,7 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
                 status_code: rsipstack::sip::StatusCode::Unauthorized,
                 headers: tx.original.headers().to_owned(),
                 body: vec![],
+                wire_reason: None,
             };
             tx.last_response = Some(resp);
         }
@@ -349,6 +351,7 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
             status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().to_owned(),
             body: vec![],
+            wire_reason: None,
         };
         tx.last_response = Some(resp);
     }
@@ -739,6 +742,7 @@ async fn cross_node_wss_bye_with_locator(
                             },
                             headers: headers.into(),
                             body: vec![],
+                            wire_reason: None,
                         }),
                         connection.clone(),
                         phone_flow.clone(),

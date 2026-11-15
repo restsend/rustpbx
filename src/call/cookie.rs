@@ -158,3 +158,13 @@ pub struct TrunkContext {
     pub name: String,
     pub did_numbers: Vec<String>,
 }
+
+/// INVITE-with-Replaces takeover context (attended transfer executed by the
+/// transferee UA per the REFER-Replaces chain). Carries the verbatim
+/// `Replaces` header value from the inbound INVITE; the session attaches it
+/// to the outbound target leg INVITE so the target UA auto-answers it as a
+/// replacement of its own dialog (no second ring).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferReplacesContext {
+    pub header: String,
+}
