@@ -19,4 +19,6 @@ pub(crate) use util::{pct_decode_query, route_outbound_leg};
 pub(crate) use transfer::{BridgeTraceContext, ReturnTargetSpec, TransferDisposition};
 
 pub use session::{SessionSnapshot, SipSession, SipSessionHandle};
+#[allow(unused_imports)]
+pub(crate) use session::TransferPartnerBinding;
 pub use util::{CalleeError, into_callee_err};

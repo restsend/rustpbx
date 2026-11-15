@@ -588,6 +588,17 @@ pub enum CallCommand {
         reply: oneshot::Sender<Result<LegId, String>>,
     },
 
+    /// Bind the attended-transfer partner session: after the transferor
+    /// departs, the in-session bridged peer is the retired consult dialog and
+    /// the real peer leg lives in the partner session. Hold/unhold for the
+    /// room peer routes to the partner via its own proven propagate path.
+    #[serde(skip)]
+    BindTransferPartner {
+        cmd_tx: CallCommandTx,
+        partner_session: String,
+        their_leg: LegId,
+    },
+
     /// Join the caller leg into a conference room, waiting for the leg to be
     /// media-ready first (room dial-in via app=conference). Processed after
     /// any queued Answer command, so the caller leg is Connected by the time

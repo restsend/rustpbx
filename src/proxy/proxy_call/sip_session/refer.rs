@@ -256,6 +256,33 @@ impl SipSession {
                 }
                 let remote_participant = LegId::from(format!("{}-{}", owner.session_id(), remote_leg));
                 manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+                // Bind the cross-session hold path: after the transferor
+                // departs, each session's in-session bridged peer is the
+                // retired consult dialog — hold/unhold for the room peer must
+                // route to the partner session (its own proven propagate
+                // path applies the hold re-INVITE + hold music on the leg).
+                let cmd_tx = self
+                    .cmd_tx
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session command queue is closed"))?;
+                owner
+                    .send_command(crate::call::domain::CallCommand::BindTransferPartner {
+                        cmd_tx,
+                        partner_session: self.id.to_string(),
+                        their_leg: local_leg.clone(),
+                    })
+                    .map_err(|e| anyhow!("Failed to bind transfer partner: {e}"))?;
+                self.transfer_partner = Some(super::TransferPartnerBinding {
+                    cmd_tx: owner.command_sender(),
+                    partner_session: owner.session_id().to_string(),
+                    their_leg: remote_leg.clone(),
+                });
+                info!(
+                    session_id = %self.id,
+                    peer_session = %owner.session_id(),
+                    %local_leg, %remote_leg,
+                    "Transfer partner bound — hold/unhold routes cross-session"
+                );
                 info!(session_id = %self.id, peer_session = %owner.session_id(), %local_leg, %remote_leg,
                     room = %room.0, "Attended REFER connected existing participants across sessions");
                 Ok(())

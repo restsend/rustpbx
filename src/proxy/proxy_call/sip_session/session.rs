@@ -93,6 +93,18 @@ pub(super) struct ConferenceAttachment {
     pub conference_id: crate::call::runtime::ConferenceId,
 }
 
+/// Cross-session hold path for the attended-transfer room. After the
+/// transferor departs, the in-session bridged peer is the retired consult
+/// dialog — the real peer leg lives in the partner session. Hold/unhold for
+/// the room peer routes to the partner, which applies its own proven
+/// propagate path (hold re-INVITE + hold music) on its leg.
+#[derive(Clone)]
+pub(crate) struct TransferPartnerBinding {
+    pub cmd_tx: crate::call::domain::CallCommandTx,
+    pub partner_session: String,
+    pub their_leg: LegId,
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -185,6 +197,11 @@ pub struct SipSession {
     pub extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions,
 
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
+
+    /// Attended-transfer room partner (see [`TransferPartnerBinding`]). Set
+    /// on both sessions during the Replaces handshake; drives the
+    /// cross-session hold/unhold routing.
+    pub(crate) transfer_partner: Option<TransferPartnerBinding>,
 
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
@@ -335,6 +352,13 @@ impl SipSessionHandle {
 
     pub fn session_id(&self) -> &str {
         &self.session_id.0
+    }
+
+    /// Raw command sender for peer-session bindings (transfer-room hold
+    /// routing): the binding stores the sender directly so partner hold
+    /// commands bypass the application-source wrapper.
+    pub(crate) fn command_sender(&self) -> crate::call::domain::CallCommandTx {
+        self.cmd_tx.clone()
     }
 
     pub fn snapshot(&self) -> Option<SessionSnapshot> {
@@ -1788,6 +1812,7 @@ impl SipSession {
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
+            transfer_partner: None,
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             resumed_bridge_ctx: Arc::new(parking_lot::Mutex::new(None)),
@@ -5243,7 +5268,14 @@ impl SipSession {
                                 } else {
                                     LegState::Connected
                                 };
+                                let prev = self.leg_prev_state(&leg_id);
                                 self.update_leg_state(&leg_id, state);
+                                // Conference-attached leg (attended-transfer
+                                // room): the hold/unhold must reach the
+                                // partner session — the in-session bridged
+                                // peer is the retired consult dialog.
+                                self.route_transfer_room_hold(&leg_id, prev, state)
+                                    .await;
                             }
                         }
                         // Negotiation updates the peers; only the session decides
@@ -10657,6 +10689,57 @@ impl SipSession {
         self.restore_recording_routes();
         Ok(())
     }
+    /// Route hold/unhold for an attended-transfer room leg to the partner
+    /// session. After the transferor departs, the in-session bridged peer is
+    /// the retired consult dialog — the real peer leg lives in the partner
+    /// session, which applies its own proven propagate path (hold re-INVITE
+    /// + hold music) on it. The held side's mixer feed is paused by the
+    /// partner's hold handler, so the hold music is the single egress writer
+    /// (mixer + hold source on the same track would interleave garbage).
+    async fn route_transfer_room_hold(
+        &mut self,
+        leg_id: &LegId,
+        prev: Option<LegState>,
+        new_state: LegState,
+    ) {
+        let Some(partner) = self.transfer_partner.clone() else {
+            return;
+        };
+        if !matches!(
+            (prev, new_state),
+            (Some(LegState::Connected), LegState::Hold)
+                | (Some(LegState::Hold), LegState::Connected)
+        ) {
+            return;
+        }
+        let cmd = if new_state == LegState::Hold {
+            crate::call::domain::CallCommand::Hold {
+                leg_id: partner.their_leg.clone(),
+                music: None,
+            }
+        } else {
+            crate::call::domain::CallCommand::Unhold {
+                leg_id: partner.their_leg.clone(),
+            }
+        };
+        info!(
+            session_id = %self.id,
+            leg = leg_id.as_str(),
+            partner_session = %partner.partner_session,
+            their_leg = %partner.their_leg,
+            hold = new_state == LegState::Hold,
+            "Transfer-room hold state routed to partner session"
+        );
+        if let Err(error) = partner.cmd_tx.send(cmd).await {
+            warn!(
+                session_id = %self.id,
+                partner_session = %partner.partner_session,
+                %error,
+                "Failed to route transfer-room hold state to partner"
+            );
+        }
+    }
+
     async fn apply_reinvite_hold_transition(
         &mut self,
         side: DialogSide,
@@ -10732,6 +10815,14 @@ impl SipSession {
                     .into(),
                 });
             }
+        }
+
+        // Attended-transfer room: route the hold/unhold to the partner
+        // session (the bridged peer is the retired consult dialog). The
+        // partner applies the proven propagate path on the real peer leg.
+        self.route_transfer_room_hold(leg_id, prev, new_state).await;
+        if self.transfer_partner.is_some() {
+            return;
         }
 
         // Cross-leg hold propagation only applies when the proxy anchors media
@@ -14142,6 +14233,25 @@ impl SipSession {
                     .await
                     .map_err(|error| error.to_string());
                 let _ = reply.send(result);
+                CommandResult::success()
+            }
+
+            CallCommand::BindTransferPartner {
+                cmd_tx,
+                partner_session,
+                their_leg,
+            } => {
+                info!(
+                    session_id = %self.id,
+                    partner_session = %partner_session,
+                    %their_leg,
+                    "Transfer partner bound — hold/unhold routes cross-session"
+                );
+                self.transfer_partner = Some(TransferPartnerBinding {
+                    cmd_tx,
+                    partner_session,
+                    their_leg,
+                });
                 CommandResult::success()
             }
 
@@ -17679,6 +17789,24 @@ impl SipSession {
         // held party always hears hold audio instead of silence.
         let music = music.or_else(|| self.resolve_hold_music(&[]));
 
+        // Conference-attached held leg (attended-transfer room): pause the
+        // mixer feed BEFORE the hold re-INVITE so the hold music is the
+        // single egress writer on this leg's track — the mixer and the hold
+        // source would otherwise interleave garbage into the held party's
+        // downlink. The room membership is retained for the unhold re-join.
+        // Scoped to the transfer room (partner bound): real conference
+        // holds keep the pre-existing mixer behavior.
+        if self.conference_bridge.bridge_handle.is_some() && self.transfer_partner.is_some() {
+            let conf = self.conference_bridge.conf_id.clone();
+            self.conference_bridge.pause();
+            info!(
+                session_id = %self.id,
+                %leg_id,
+                room = ?conf,
+                "Held leg detached from mixer feed — hold music takes over"
+            );
+        }
+
         let hold_sdp = self.generate_sdp_for_side(&leg_id, true)?;
 
         match self.send_reinvite_to_leg(&leg_id, hold_sdp).await {
@@ -17872,6 +18000,32 @@ impl SipSession {
                 peer.set_ingress_quiet_expected(false);
             }
             return Ok(());
+        }
+
+        // Resume from a paused transfer-room hold: re-attach the mixer feed
+        // so the cross-session audio returns together with the unhold. The
+        // room membership was retained by the hold-time pause.
+        if self.conference_bridge.paused {
+            if let Some(conf) = self.conference_bridge.conf_id.clone() {
+                if let Err(error) =
+                    self.try_start_and_store_bridge(&conf, &leg_id, "transfer-room re-join").await
+                {
+                    warn!(
+                        session_id = %self.id,
+                        %leg_id,
+                        %error,
+                        "Failed to re-join transfer room on unhold"
+                    );
+                }
+            }
+            self.conference_bridge.paused = false;
+            // Stop the hold-music playback: its looping writer contends with
+            // the restored mixer feed (same class as the early-media ringback
+            // vs the caller<->winner relay — the relay starves and the leg
+            // keeps hearing hold music after the unhold).
+            if let Some(peer) = self.media_leg(&leg_id) {
+                peer.stop_playback().await.ok();
+            }
         }
 
         let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;

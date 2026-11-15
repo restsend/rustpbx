@@ -146,3 +146,197 @@ async fn attended_refer_from_queue_agent_preserves_existing_dialogs() {
     .expect("customer departure must release both transferred sessions");
     server.stop();
 }
+
+/// Attended transfer then the transfer TARGET holds: the held party (the
+/// customer) must receive the hold re-INVITE routed through the partner
+/// session. After the transferor departs, the in-session bridged peer is the
+/// retired consult dialog — without the cross-session partner routing the
+/// hold never reaches the customer (regression: no hold music, then silence +
+/// garbage after resume, prd 2026-11-12 audio_f4).
+#[tokio::test]
+async fn attended_transfer_hold_reaches_customer_via_partner_session() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    use super::e2e_test_server::E2eTestServer;
+    use super::test_ua::TestUaEvent;
+    use crate::proxy::routing::{
+        MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
+        RouteQueueTargetConfig, RouteRule,
+    };
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let mut config = ProxyConfig::default();
+    config.media_proxy = crate::config::MediaProxyMode::All;
+    config.queues.insert(
+        "support".into(),
+        RouteQueueConfig {
+            name: Some("support".into()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "sip:bob@127.0.0.1".into(),
+                    label: None,
+                }],
+                ..Default::default()
+            },
+            accept_immediately: false,
+            ..Default::default()
+        },
+    );
+    config.routes = Some(vec![RouteRule {
+        name: "support".into(),
+        priority: 10,
+        match_conditions: MatchConditions {
+            to_user: Some("support".into()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            queue: Some("support".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    let server = E2eTestServer::start_with_config(config).await.unwrap();
+    for mut user in super::test_helpers::standard_test_users() {
+        user.is_support_webrtc = false;
+        server
+            .server_ref
+            .user_backend
+            .create_user(user)
+            .await
+            .unwrap();
+    }
+    let alice = server.create_ua("alice").await.unwrap();
+    let bob = server.create_ua("bob").await.unwrap();
+    let charlie = server.create_ua("charlie").await.unwrap();
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
+    let mut calls = Vec::new();
+    for (caller, callee, target) in [(&alice, &bob, "support"), (&bob, &charlie, "charlie")] {
+        let caller = caller.clone();
+        let offer = sdp.clone();
+        let dial =
+            crate::utils::spawn(
+                async move { caller.make_call(target, Some(offer)).await.unwrap() },
+            );
+        let incoming = timeout(Duration::from_secs(5), async {
+            loop {
+                for event in callee.process_dialog_events().await.unwrap() {
+                    if let TestUaEvent::IncomingCall(id, _) = event {
+                        callee.answer_call(&id, Some(sdp.clone())).await.unwrap();
+                        return id;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        calls.push((dial.await.unwrap(), incoming));
+    }
+    bob.send_reinvite(&calls[0].1, Some(sdp.replace("sendrecv", "sendonly")))
+        .await
+        .unwrap();
+    let consult = &calls[1].0;
+    let replaces = format!(
+        "{};to-tag={};from-tag={}",
+        consult.call_id, consult.remote_tag, consult.local_tag
+    );
+    let target = format!(
+        "sip:charlie@{}?Replaces={}",
+        server.proxy_addr,
+        urlencoding::encode(&replaces)
+    );
+    assert_eq!(bob.send_refer(&calls[0].1, &target).await.unwrap(), 202);
+    timeout(Duration::from_secs(8), async {
+        loop {
+            for ua in [&alice, &bob, &charlie] {
+                ua.process_dialog_events().await.unwrap();
+            }
+            if let Some(room) = server
+                .server_ref
+                .conference_server
+                .list_conferences_detail()
+                .await
+                .into_iter()
+                .find(|room| room.participant_count() == 2)
+            {
+                assert!(room.focus_uri.is_none());
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("queue agent REFER must join the surviving dialogs");
+
+    // Transferor departs: BYE the consult dialog and the customer-side
+    // dialog (the client exits the call entirely after completing a
+    // transfer). The room keeps the customer and the transfer target.
+    bob.hangup(&calls[1].0).await.unwrap();
+    bob.hangup(&calls[0].1).await.unwrap();
+    sleep(Duration::from_millis(300));
+    for ua in [&alice, &charlie] {
+        ua.process_dialog_events().await.unwrap();
+    }
+
+    // The transfer target holds: the hold re-INVITE must reach the CUSTOMER
+    // (sendonly) via the cross-session partner routing.
+    charlie
+        .send_reinvite(&calls[1].1, Some(sdp.replace("sendrecv", "sendonly")))
+        .await
+        .unwrap();
+    let alice_dialog = calls[0].0.clone();
+    timeout(Duration::from_secs(8), async {
+        loop {
+            for event in alice.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::CallUpdated(id, method, Some(body)) = event {
+                    if id == alice_dialog
+                        && method == rsipstack::sip::Method::Invite
+                        && body.contains("a=sendonly")
+                    {
+                        return true;
+                    }
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("hold re-INVITE must reach the customer via the partner session");
+
+    // Unhold: the customer must be restored (sendrecv re-INVITE).
+    charlie.send_reinvite(&calls[1].1, Some(sdp.clone())).await.unwrap();
+    timeout(Duration::from_secs(8), async {
+        loop {
+            for event in alice.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::CallUpdated(id, method, Some(body)) = event {
+                    if id == alice_dialog
+                        && method == rsipstack::sip::Method::Invite
+                        && body.contains("a=sendrecv")
+                    {
+                        return true;
+                    }
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("unhold re-INVITE must reach the customer via the partner session");
+
+    // Cleanup: target hangs up — the customer call must release cleanly.
+    charlie.hangup(&calls[1].1).await.unwrap();
+    timeout(Duration::from_secs(6), async {
+        loop {
+            alice.process_dialog_events().await.unwrap();
+            if server.registry.count() == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("target departure must release the transferred customer call");
+    server.stop();
+}

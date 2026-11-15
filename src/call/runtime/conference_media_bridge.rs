@@ -413,6 +413,11 @@ impl Drop for ConferenceBridgeHandle {
 pub struct SessionConferenceBridge {
     pub bridge_handle: Option<ConferenceBridgeHandle>,
     pub conf_id: Option<String>,
+    /// Hold-time mixer detach: the forward/reverse loops are stopped so the
+    /// hold music is the single egress writer on the leg track, while the
+    /// room membership is retained. Unhold re-joins with the retained
+    /// conf id.
+    pub paused: bool,
 }
 
 impl SessionConferenceBridge {
@@ -420,11 +425,22 @@ impl SessionConferenceBridge {
         Self {
             bridge_handle: None,
             conf_id: None,
+            paused: false,
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.bridge_handle.is_some()
+    }
+
+    /// Stop the mixer feed loops but retain the room membership (conf id) so
+    /// an unhold can re-join without a fresh join handshake.
+    pub fn pause(&mut self) {
+        if let Some(ref handle) = self.bridge_handle {
+            handle.stop();
+        }
+        self.bridge_handle = None;
+        self.paused = true;
     }
 
     pub fn stop_bridge(&mut self) {
@@ -433,6 +449,7 @@ impl SessionConferenceBridge {
         }
         self.bridge_handle = None;
         self.conf_id = None;
+        self.paused = false;
     }
 }
 
