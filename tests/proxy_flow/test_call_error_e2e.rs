@@ -292,9 +292,10 @@ action = { type = "hangup" }
     Ok(())
 }
 
-/// Inline step-mode IVR whose provider `/step` (and `/fail`) endpoint returns
-/// 500: the session must emit a `call_error` with `stage = "ivr_step"` and
-/// persist the matching CDR error trace.
+/// Inline step-mode IVR whose provider next-step endpoint (`POST {base}`,
+/// i.e. `/step`) returns 500 while the lifecycle endpoints (`{base}/start`,
+/// `{base}/end`) succeed: the session must emit a `call_error` with
+/// `stage = "ivr_step"` and persist the matching CDR error trace.
 #[tokio::test]
 async fn test_step_ivr_next_failure_emits_call_error_and_cdr_trace() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
@@ -302,11 +303,15 @@ async fn test_step_ivr_next_failure_emits_call_error_and_cdr_trace() -> Result<(
     // Provider mock: every protocol endpoint fails with 500.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // StepProvider protocol: POST {base}/start, {base}/next-step (the base
+    // URL itself), {base}/end. The step (next-action) call fails with 500 —
+    // the start/end lifecycle endpoints succeed so the session reaches the
+    // failing step (a 404 on start would fail fast and abort the session
+    // before the step ever runs — the expired mock's flat routes did that).
     let app = Router::new()
         .route("/step", post(mock_provider_error))
-        .route("/fail", post(mock_provider_error))
-        .route("/start", post(mock_provider_error))
-        .route("/end", post(mock_provider_error));
+        .route("/step/start", post(axum::Json(serde_json::json!({"ok": true}))))
+        .route("/step/end", post(axum::Json(serde_json::json!({"ok": true}))));
     let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let capture = WebhookCapture::start().await;

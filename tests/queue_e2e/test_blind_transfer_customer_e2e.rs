@@ -383,6 +383,8 @@ fn transfer_command(target: &str) -> CallCommand {
         target: target.to_string(),
         headers: Default::default(),
         application_only: false,
+        operator_agent: None,
+        operator_leg_hint: None,
         completion: None,
     }
 }
@@ -641,5 +643,221 @@ async fn e2e_blind_transfer_customer_trunk_forward() {
     caller.stop();
     bob.stop();
     trunk.stop();
+    harness.server.stop();
+}
+
+/// UA loop that rings the FIRST incoming call (180) but does NOT answer —
+/// for driving the transfer target into the ringing window.
+async fn ring_first_incoming(ua: &TestUa, label: &str) -> Result<DialogId> {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        anyhow::ensure!(Instant::now() < deadline, "{label}: no incoming call arrived");
+        for event in ua.process_dialog_events().await.unwrap_or_default() {
+            if let TestUaEvent::IncomingCall(id, _) = event {
+                ua.ring_call(&id).await?;
+                return Ok(id);
+            }
+        }
+        sleep(Duration::from_millis(30)).await;
+    }
+}
+
+/// Case 1b — the target RINGS but does not answer yet: the transferring
+/// agent must stay on the call until the target answers. The dispatch-time
+/// BYE raced the target leg's setup on its home node — the cluster child
+/// teardown triggered by that BYE cancelled a sibling dial still in setup
+/// (production 2026-11-14: a cross-node single-step transfer between two
+/// peer-homed agents died with 487 before the target ever rang). The
+/// release now rides the target leg's LegConnected edge.
+#[tokio::test]
+#[cfg(feature = "addon-cc")]
+async fn e2e_blind_transfer_customer_agent_survives_until_target_answers() {
+    let _ = tracing_subscriber::fmt().try_init();
+    let harness = start_harness(portpicker::pick_unused_port().unwrap_or(29113))
+        .await
+        .unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12345, false);
+    let caller = harness.server.create_ua("caller").await.unwrap();
+    let bob = harness.server.create_ua("bob").await.unwrap();
+    let target = harness.server.create_ua("alice").await.unwrap();
+
+    let (caller_dialog, bob_dialog, handle) =
+        established_queue_call(&harness.server, &caller, &bob, &sdp)
+            .await
+            .unwrap();
+
+    handle
+        .send_command(transfer_command("alice"))
+        .expect("command dispatch");
+
+    // The transfer target rings; nobody answers yet.
+    let target_dialog = ring_first_incoming(&target, "transfer target ringing")
+        .await
+        .unwrap();
+
+    // While the target is still ringing the agent must NOT have been
+    // released — the old dispatch-time BYE tore the transferor down here.
+    assert_stays_up(
+        &bob,
+        &bob_dialog.call_id,
+        Duration::from_millis(800),
+        "agent must stay on the call while the transfer target is ringing",
+    )
+    .await
+    .unwrap();
+    assert_stays_up(
+        &caller,
+        &caller_dialog.call_id,
+        Duration::from_millis(200),
+        "customer must stay bridged while the transfer target is ringing",
+    )
+    .await
+    .unwrap();
+    // No call_transferred before the target answers.
+    {
+        let received = harness.capture.received.lock().unwrap();
+        assert!(
+            !received.iter().any(|body| body["event_type"] == "call_transferred"),
+            "call_transferred must not be emitted while the target is ringing"
+        );
+    }
+
+    // The target answers: the deferred hand-off completes — the agent is
+    // released only now.
+    target
+        .answer_call(&target_dialog, Some(sdp.to_string()))
+        .await
+        .unwrap();
+    wait_terminated(
+        &bob,
+        &bob_dialog.call_id,
+        Duration::from_secs(3),
+        "agent must be released once the transfer target answers",
+    )
+    .await
+    .unwrap();
+
+    sleep(Duration::from_millis(700)).await;
+    assert_stays_up(
+        &caller,
+        &caller_dialog.call_id,
+        Duration::from_millis(700),
+        "customer must survive the transfer",
+    )
+    .await
+    .unwrap();
+    assert_stays_up(
+        &target,
+        &target_dialog.call_id,
+        Duration::from_millis(400),
+        "target must not be torn down right after answering (stale-callee guard)",
+    )
+    .await
+    .unwrap();
+
+    let transferred = wait_transferred(&harness.capture, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(transferred["event"]["transfer_target_type"], "sip");
+    assert!(transferred["event"]["transfer_target"]
+        .as_str()
+        .is_some_and(|t| t.contains("alice")));
+
+    target.hangup(&target_dialog).await.unwrap();
+    wait_specific_terminated(
+        &caller,
+        &caller_dialog.call_id,
+        Duration::from_secs(3),
+        "target hangup must cascade BYE to the surviving customer dialog",
+    )
+    .await
+    .unwrap();
+
+    caller.stop();
+    bob.stop();
+    target.stop();
+    harness.server.stop();
+}
+
+/// Case 1c — the target REJECTS (486) before answering: the transferor was
+/// never released, so the failed transfer must keep the call alive (agent +
+/// customer stay bridged) and `call_transferred` must NOT be emitted. The
+/// old flow released the agent at dispatch and tore the whole call down on
+/// the late failure.
+#[tokio::test]
+#[cfg(feature = "addon-cc")]
+async fn e2e_blind_transfer_customer_target_reject_preserves_call() {
+    let _ = tracing_subscriber::fmt().try_init();
+    let harness = start_harness(portpicker::pick_unused_port().unwrap_or(29114))
+        .await
+        .unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12345, false);
+    let caller = harness.server.create_ua("caller").await.unwrap();
+    let bob = harness.server.create_ua("bob").await.unwrap();
+    let target = harness.server.create_ua("alice").await.unwrap();
+
+    let (caller_dialog, bob_dialog, handle) =
+        established_queue_call(&harness.server, &caller, &bob, &sdp)
+            .await
+            .unwrap();
+
+    handle
+        .send_command(transfer_command("alice"))
+        .expect("command dispatch");
+
+    let target_dialog = ring_first_incoming(&target, "transfer target ringing")
+        .await
+        .unwrap();
+    target.reject_call(&target_dialog).await.unwrap();
+    wait_terminated(
+        &target,
+        &target_dialog.call_id,
+        Duration::from_secs(3),
+        "rejected transfer leg must clear on the target side",
+    )
+    .await
+    .unwrap();
+
+    // Give the failure path a beat to run its restore.
+    sleep(Duration::from_millis(500)).await;
+    assert_stays_up(
+        &bob,
+        &bob_dialog.call_id,
+        Duration::from_millis(800),
+        "failed transfer must keep the transferring agent on the call",
+    )
+    .await
+    .unwrap();
+    assert_stays_up(
+        &caller,
+        &caller_dialog.call_id,
+        Duration::from_millis(800),
+        "failed transfer must keep the customer on the call",
+    )
+    .await
+    .unwrap();
+    {
+        let received = harness.capture.received.lock().unwrap();
+        assert!(
+            !received.iter().any(|body| body["event_type"] == "call_transferred"),
+            "call_transferred must not be emitted for a failed transfer"
+        );
+    }
+
+    // The preserved call still works end to end: the customer hangs up and
+    // the session cascades normally.
+    caller.hangup(&caller_dialog).await.unwrap();
+    wait_specific_terminated(
+        &bob,
+        &bob_dialog.call_id,
+        Duration::from_secs(3),
+        "customer hangup must cascade to the preserved agent dialog",
+    )
+    .await
+    .unwrap();
+
+    caller.stop();
+    bob.stop();
+    target.stop();
     harness.server.stop();
 }

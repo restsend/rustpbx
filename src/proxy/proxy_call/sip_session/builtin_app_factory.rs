@@ -493,7 +493,7 @@ impl BuiltinAppFactory {
                     if plan.hold.is_none() {
                         plan.hold = Some(
                             crate::call::QueueHoldConfig::default()
-                                .with_audio_file(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+                                .with_audio_file(crate::call::DEFAULT_QUEUE_WAIT_AUDIO.to_string()),
                         );
                         config.hold = plan.hold.clone();
                     }

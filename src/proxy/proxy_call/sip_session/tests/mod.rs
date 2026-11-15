@@ -4093,6 +4093,8 @@ async fn test_customer_blind_transfer_route_to_queue() {
                 target: "8000".to_string(),
                 headers: Default::default(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -4258,6 +4260,8 @@ async fn outbound_transfer_fixture_with(
                         target: "sip:target@127.0.0.1:5099".into(),
                         headers: HashMap::new(),
                         application_only: false,
+                        operator_agent: None,
+                        operator_leg_hint: None,
                         completion: None,
                     },
                     Some(&mut callee_states),
@@ -4426,9 +4430,11 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
         let customer = LegId::from("callee");
         let agent_dialog = session.caller_dialog_id();
         let customer_peer = session.media_leg(&customer).unwrap();
-        assert!(!session.legs.contains_key(&caller));
-        assert!(session.pending_hangup.contains(&agent_dialog));
-        assert!(session.app_media_leg.read().is_none());
+        // Deferred release (production 2026-11-14): the transferor stays on
+        // the call until the target leg ANSWERS; the hand-off is armed.
+        assert!(session.legs.contains_key(&caller));
+        assert!(session.pending_customer_transfer_release.is_some());
+        assert!(!session.pending_hangup.contains(&agent_dialog));
 
         // The server's BYE completion arrives after the transfer command retires the agent.
         if outcome != "reject_before_agent_bye" {
@@ -4467,8 +4473,12 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
                 .await;
             assert!(!result.success);
             assert!(
-                session.pending_hangup.contains(&customer_dialog),
-                "failed transfer must release the customer"
+                !session.pending_hangup.contains(&customer_dialog),
+                "a failed transfer must keep the customer (restored bridge)"
+            );
+            assert!(
+                session.legs.contains_key(&customer),
+                "the customer leg must survive a failed transfer"
             );
             if outcome == "reject_before_agent_bye" {
                 session
@@ -4578,6 +4588,18 @@ async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
     let _guard = session.cancel_token.clone().drop_guard();
     let caller = LegId::from("caller");
     let customer = LegId::from("callee");
+    // Deferred release (production 2026-11-14): the transferor stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target.clone(),
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
     assert!(
         !session.legs.contains_key(&caller),
         "transferor (agent on the caller leg) must be released"
@@ -4616,6 +4638,18 @@ async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
     let _guard = session.cancel_token.clone().drop_guard();
     let caller = LegId::from("caller");
     let customer = LegId::from("callee");
+    // Deferred release (production 2026-11-14): the transferor stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target.clone(),
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
     assert!(
         !session.legs.contains_key(&caller),
         "transferor (agent on the caller leg) must be released"
@@ -4830,6 +4864,8 @@ async fn test_customer_blind_transfer_dynamic_agent_leg_resolves_customer() {
                 target: "8000".to_string(),
                 headers: Default::default(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -5069,6 +5105,8 @@ async fn assert_customer_blind_transfer_route(
                 target: target.to_string(),
                 headers: Default::default(),
                 application_only: restricted,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -5112,9 +5150,27 @@ async fn assert_customer_blind_transfer_route(
         "dial-as-is dispatch must succeed: {:?}",
         result.message
     );
+    // Deferred release (production 2026-11-14): the agent leg stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    let target_leg = session
+        .legs
+        .iter()
+        .find(|(_, leg)| leg.source_leg.as_ref() == Some(&LegId::from("caller")))
+        .map(|(id, _)| id.clone())
+        .expect("transfer target must be customer-anchored");
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target_leg,
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            Some(&mut callee_rx),
+        )
+        .await;
     assert!(
         session.legs.get(&LegId::from("callee")).is_none(),
-        "agent leg must be released once the hand-off is dispatched"
+        "agent leg must be released once the hand-off completes"
     );
     assert!(
         session.legs.get(&LegId::from("caller")).is_some(),
@@ -6883,6 +6939,71 @@ async fn test_hold_sdp_contains_sendonly() {
     );
 }
 
+// ── Layer 3b: hold/resume offers never re-open codec negotiation ──
+
+/// Production regression (2026-11-14, transfer-room cross-platform call over
+/// TURN): the hold/resume re-INVITE re-offered the whole codec list; the peer
+/// answered with a different codec than the one the anchored media path had
+/// armed, so the egress sender stamped the new payload type on the old
+/// codec's bytes and the peer played wideband noise right after resuming.
+/// `pin_sdp_codec` keeps the already-negotiated codec in the offer.
+#[test]
+fn hold_offer_pins_the_negotiated_codec() {
+    let sdp = concat!(
+        "v=0\r\n",
+        "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+        "s=Talk\r\n",
+        "c=IN IP4 192.0.2.10\r\n",
+        "t=0 0\r\n",
+        "m=audio 40000 RTP/AVP 18 8 0 111 101\r\n",
+        "a=rtpmap:18 G729/8000\r\n",
+        "a=rtpmap:8 PCMA/8000\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+        "a=rtpmap:111 opus/48000/2\r\n",
+        "a=rtpmap:101 telephone-event/8000\r\n",
+        "a=sendonly\r\n",
+    )
+    .to_string();
+
+    let pinned = super::pin_sdp_codec(
+        sdp.clone(),
+        Some(audio_codec::CodecType::PCMA),
+    );
+    assert!(
+        pinned.contains("a=rtpmap:8 PCMA/8000"),
+        "pinned offer must keep the negotiated codec: {pinned}"
+    );
+    assert!(
+        pinned.contains("a=rtpmap:101 telephone-event/8000"),
+        "telephone-event must survive the pin: {pinned}"
+    );
+    for foreign in [
+        "a=rtpmap:18 G729/8000",
+        "a=rtpmap:0 PCMU/8000",
+        "a=rtpmap:111 opus/48000/2",
+    ] {
+        assert!(
+            !pinned.contains(foreign),
+            "{foreign} must be dropped from the hold offer: {pinned}"
+        );
+    }
+    assert!(
+        pinned.contains("a=sendonly"),
+        "direction must be preserved: {pinned}"
+    );
+    let mline = pinned
+        .lines()
+        .find(|l| l.starts_with("m=audio"))
+        .expect("audio m-line");
+    assert!(
+        !mline.contains(" 18 ") && !mline.contains(" 111 "),
+        "m-line payload list must be narrowed: {mline}"
+    );
+
+    // No live profile → untouched (legacy/unknown path).
+    assert_eq!(super::pin_sdp_codec(sdp.clone(), None), sdp);
+}
+
 // ── Layer 1: parse_info_command dispatch (pure function, no session needed) ──
 
 #[test]
@@ -7430,7 +7551,9 @@ async fn test_default_queue_prompts_resolve_and_are_playable() {
     use crate::media::audio_source::{AudioSource, FileAudioSource};
 
     let cases = [
-        ("hold", crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+        ("ringback", crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+        ("queue-waiting", crate::call::DEFAULT_QUEUE_WAIT_AUDIO),
+        ("hold-music", crate::call::DEFAULT_HOLD_AUDIO),
         ("failure", crate::call::DEFAULT_QUEUE_FAILURE_AUDIO),
         ("transfer-zh", crate::call::DEFAULT_QUEUE_TRANSFER_PROMPT_ZH),
         ("busy-zh", crate::call::DEFAULT_QUEUE_BUSY_PROMPT_ZH),
@@ -14982,6 +15105,8 @@ async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
                 target: target_uri,
                 headers: HashMap::new(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             OutboundTransferCommand::RwiCallerLeg => CallCommand::Transfer {

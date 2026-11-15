@@ -164,6 +164,14 @@ pub struct CallSessionContext {
     /// `HashMap<String, String>` — read via
     /// `ctx.extensions.read().get::<HashMap<String, String>>()`.
     pub extensions: SessionExtensions,
+    /// The agent identity bound to the CALLBACK'S OWN leg, for legs whose
+    /// agent differs from the session attribution: a customer-anchored blind
+    /// transfer hands the SESSION attribution to the target only at the
+    /// answer edge, while the target leg's ring/connect events and the
+    /// transferor's departure must resolve to their own leg's agent. Filled
+    /// only for transfer-target legs (`transfer-*`); `None` keeps the
+    /// session-attribution resolution everywhere else.
+    pub leg_agent_id: Option<String>,
 }
 
 impl CallSessionContext {
@@ -198,6 +206,7 @@ impl Clone for CallSessionContext {
             leg_role: self.leg_role.clone(),
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
+            leg_agent_id: self.leg_agent_id.clone(),
             extensions: self.extensions.clone(),
         }
     }
@@ -216,6 +225,7 @@ impl fmt::Debug for CallSessionContext {
             .field("skill_group_id", &self.skill_group_id)
             .field("transferred", &self.transferred)
             .field("leg_role", &self.leg_role)
+            .field("leg_agent_id", &self.leg_agent_id)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
             .field("extensions", &"<http::Extensions>")

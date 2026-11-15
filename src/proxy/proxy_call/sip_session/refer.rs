@@ -322,21 +322,36 @@ impl SipSession {
             let (Some(local_tag), Some(remote_tag)) = (to_tag, from_tag) else {
                 return Err((400, "Replaces requires both dialog tags".into()));
             };
-            let owner = self.server.active_call_registry.get_handle_by_dialog(call_id)
-                .ok_or_else(|| (481, "Replaces Call-ID is not owned by a local session".into()))?;
+            // Cross-node: the consult dialog may be homed on a PEER node — the
+            // consulting agent REGISTERs through its own node, so the dialog
+            // lives there while this REFER arrives on the transferee's home
+            // node. That is fine: the REFER is relayed to the transferee and
+            // the transferee's INVITE(Replaces) routes to the dialog's home
+            // node through normal routing (call.rs delegates when the
+            // dialog's local client dialog is present). Production
+            // 2026-11-14: 481 here dropped the whole call on the dual-node
+            // cluster.
+            let owner = self.server.active_call_registry.get_handle_by_dialog(call_id);
+            let cross_node = owner.is_none();
             let target_dialog = DialogId { call_id: call_id.into(), local_tag, remote_tag };
-            let dialog = self.server.dialog_layer.get_dialog(&target_dialog)
-                .ok_or_else(|| (481, "Replaces tags do not match a local dialog".into()))?;
-            if !dialog.state().is_confirmed() || early_only {
-                tracing::warn!(
-                    session_id = %self.context.session_id,
-                    state = ?dialog.state(), early_only,
-                    "Replaces target dialog not established (diagnostic)"
-                );
-                return Err((486, "Replaces requires an established consultation".into()));
-            }
-            if owner.session_id() == self.context.session_id {
-                return Err((501, "Same-session Replaces is not supported by this cross-session path".into()));
+            // The dialog-side checks only apply when the consult dialog is
+            // homed locally (they would wrongly 481 a peer-homed dialog that
+            // this node can still hand off via routing).
+            let dialog = self.server.dialog_layer.get_dialog(&target_dialog);
+            if let Some(dialog) = &dialog {
+                if !dialog.state().is_confirmed() || early_only {
+                    tracing::warn!(
+                        session_id = %self.context.session_id,
+                        state = ?dialog.state(), early_only,
+                        "Replaces target dialog not established (diagnostic)"
+                    );
+                    return Err((486, "Replaces requires an established consultation".into()));
+                }
+                if owner.as_ref().is_some_and(|owner| owner.session_id() == self.context.session_id) {
+                    return Err((501, "Same-session Replaces is not supported by this cross-session path".into()));
+                }
+            } else if !cross_node {
+                return Err((481, "Replaces tags do not match a local dialog".into()));
             }
             // Queue dispatch and replacement agents use dynamic leg IDs.
             // Accept the caller or the currently selected callee, while keeping
@@ -359,7 +374,7 @@ impl SipSession {
             // conference room. Falls back to the transfer room when the
             // customer's trunk disabled REFER-Replaces or the relay failed.
             if self.server.proxy_config.load().refer_replaces_relay
-                && self.relay_transfer_refer_supported(transferee_ua)
+                && (cross_node || self.relay_transfer_refer_supported(transferee_ua))
             {
                 // The transferee = the PEER of the REFER's dialog (the REFER
                 // arrives on the transferor's customer-side dialog; the peer
@@ -392,6 +407,15 @@ impl SipSession {
                     }
                 }
             }
+            let Some(owner) = owner else {
+                // Cross-node: the room fallback needs the consult dialog's
+                // session locally; a peer-homed dialog can only complete via
+                // the relay (which already failed above). Fail loud.
+                return Err((
+                    503,
+                    "consult dialog homed on a peer node and REFER relay failed".into(),
+                ));
+            };
             let room = crate::call::runtime::ConferenceId::from(format!("transfer-{}", uuid::Uuid::new_v4()));
             let manager = self.server.conference_server.manager_raw().clone();
             manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;

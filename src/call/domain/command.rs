@@ -208,6 +208,18 @@ pub enum CallCommand {
         /// Require unresolved destinations to match a configured application or forwarding route.
         #[serde(default)]
         application_only: bool,
+        /// The agent whose client issued this transfer (CTI operator). The
+        /// session resolves the TRANSFEROR leg from this identity first —
+        /// never from positional caller/callee roles: on agent-dialed calls
+        /// the agent IS the caller, and an A2A session's CC attribution may
+        /// name the callee instead.
+        #[serde(default, skip)]
+        operator_agent: Option<String>,
+        /// The CTI request's `call_id` — the operator's OWN dialog Call-ID.
+        /// Highest-priority transferor hint: the operation names the leg it
+        /// acts on, independent of stamps or CC attribution.
+        #[serde(default, skip)]
+        operator_leg_hint: Option<String>,
         #[serde(skip)]
         completion: Option<oneshot::Sender<crate::call::runtime::CommandResult>>,
     },

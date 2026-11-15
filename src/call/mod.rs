@@ -51,7 +51,26 @@ pub struct CdrSuppressedMarker;
 pub use user::SipUser;
 
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
+/// Agent-ringback tone: played to the *caller* once an agent's leg actually
+/// returns 180 Ringing (`[proxy] queue_agent_ringback_enabled`). This is a
+/// "ringing" sound on purpose — it must NOT be used as queue waiting music.
 pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
+
+/// Built-in queue waiting music (Chinese guzheng 五声 loop, **A 宫** — bright
+/// and forward moving with a soft quarter-note bass pulse; 8 kHz mono, the
+/// native telephone rate; original & royalty-free — regenerate with
+/// `tools/gen_builtin_music.py`). Played while the caller is queued / no agent
+/// is available, i.e. the "waiting" half of the queue experience.
+/// `[proxy] queue_hold_music` overrides it.
+pub const DEFAULT_QUEUE_WAIT_AUDIO: &str = "sounds/queue-waiting-8k.wav";
+
+/// Built-in music for the party **on hold** (Chinese guzheng 五声 loop in a
+/// deliberately **different key**: **D 宫**, slower and airier, so a caller can
+/// tell "still queued" from "on hold" by ear alone; regenerate with
+/// `tools/gen_builtin_music.py`). `[proxy] hold_music` overrides it. Distinct
+/// from [`DEFAULT_QUEUE_HOLD_AUDIO`] (the agent ringback) so a held caller
+/// never mistakes "hold" for "someone's phone is ringing".
+pub const DEFAULT_HOLD_AUDIO: &str = "sounds/hold-music-8k.wav";
 /// Default prompt played when a queue cannot find an available agent.
 pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
 
@@ -510,13 +529,18 @@ impl QueueHoldConfig {
 }
 
 /// Fill a queue plan's wait audio from the PBX-wide default
-/// (`[proxy] queue_hold_music`) when the queue has no audio of its own.
+/// (`queue_wait_music()` = `[proxy] queue_hold_music` > built-in
+/// `sounds/queue-waiting-8k.wav`) when the queue has no audio of its own.
 ///
 /// Priority: per-queue `[proxy.queues.<name>.hold].audio_file` > global
 /// default. An existing hold config keeps its `loop_playback` setting — only
 /// the missing audio file is filled. When this leaves the hold audio unset,
 /// downstream behavior is unchanged (skill-group queues still fall back to
 /// the built-in ringback in the app factory; plain route queues stay silent).
+///
+/// The wait audio is deliberately distinct from the agent ringback
+/// (`DEFAULT_QUEUE_HOLD_AUDIO`): a queued caller must not mistake "waiting
+/// for an agent" for "an agent's phone is ringing".
 pub fn apply_queue_hold_music_default(plan: &mut QueuePlan, global: Option<String>) {
     let needs_file = match plan.hold.as_ref() {
         None => true,
@@ -555,7 +579,8 @@ impl Default for BusyWaitPlan {
         Self {
             max_wait: Some(Duration::from_secs(60)),
             retry_interval: Duration::from_secs(5),
-            hold_audio: DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
+            // Camp-on (busy wait) is a *waiting* phase, not a ringback.
+            hold_audio: DEFAULT_QUEUE_WAIT_AUDIO.to_string(),
         }
     }
 }
@@ -582,9 +607,12 @@ impl Default for QueuePlan {
         Self {
             accept_immediately: false,
             passthrough_ringback: false,
-            hold: Some(
-                QueueHoldConfig::default().with_audio_file(DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
-            ),
+            // No wait audio of its own: `apply_queue_hold_music_default`
+            // fills it from `[proxy] queue_hold_music` / `hold_music`, and
+            // skill-group queues fall back to the built-in ringback in the
+            // app factory when nothing is configured. Carrying the ringback
+            // here made every queued caller hear the "agent ringing" tone.
+            hold: None,
             fallback: Some(QueueFallbackAction::Failure(
                 FailureAction::PlayThenHangup {
                     audio_file: DEFAULT_QUEUE_FAILURE_AUDIO.to_string(),

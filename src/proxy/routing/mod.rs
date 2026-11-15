@@ -904,7 +904,7 @@ impl RouteBusyWaitConfig {
             hold_audio: self
                 .hold_audio
                 .clone()
-                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_WAIT_AUDIO.to_string()),
         }
     }
 }

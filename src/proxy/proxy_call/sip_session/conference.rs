@@ -133,6 +133,27 @@ impl SipSession {
                 .unwrap_or(leg_id.as_str()),
         );
         let leg_id = &local_leg;
+        // Prefer the leg's LIVE negotiated profile: that is the codec the
+        // RTP path actually decodes/encodes with (and whose payload type the
+        // leg's egress sender stamps). The stored SDP answer can list a
+        // different codec order — building the room encoder from it made the
+        // bridge emit one codec's bytes under another codec's payload type
+        // after a re-negotiation (audible wideband noise, production
+        // 2026-11-14: transfer-room hold/resume).
+        if let Some(codec) = self
+            .legs
+            .media_leg(leg_id)
+            .and_then(|leg| leg.negotiated())
+            .and_then(|profile| profile.audio)
+            .map(|audio| audio.codec)
+        {
+            debug!(session_id = %self.id,
+                leg_id = %leg_id,
+                codec = ?codec,
+                "Resolved per-leg codec from the live media profile"
+            );
+            return codec;
+        }
         let sdp = self.legs.get_answer(leg_id).or_else(|| {
             if leg_id.as_str() == "caller" {
                 self.media.answer.as_deref()

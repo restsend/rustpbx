@@ -667,6 +667,8 @@ async fn test_agent_transfer_stream_role_and_client_ip() -> Result<()> {
             target: "carol".to_string(),
             headers: Default::default(),
             application_only: false,
+            operator_agent: None,
+            operator_leg_hint: None,
             completion: None,
         })
         .map_err(|e| anyhow!("command dispatch: {e}"))?;

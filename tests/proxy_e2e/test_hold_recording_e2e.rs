@@ -140,6 +140,13 @@ fn assert_tone(channel: &[i16], rate: u32, freq: f64, label: &str) {
 const PRE_WINDOW: (f64, f64) = (0.04, 0.14);
 const HOLD_WINDOW: (f64, f64) = (0.28, 0.44);
 const POST_WINDOW: (f64, f64) = (0.58, 0.72);
+/// Q2.A recording contract (2026-10-30): during hold BOTH parties' ingress
+/// capture is switched off and the held party's lane carries the hold music
+/// they hear — the hold window must contain NO private talk. The pre/post
+/// windows keep both parties' own tones (voice → MOH → voice timeline).
+/// (The pre-Q2.A expectation — the caller's tone continuing through hold —
+/// expired when private-talk suppression shipped; see
+/// `apply_hold_recording_routes`.)
 
 /// Minimal RTP link used by both parties: one socket that streams a tone
 /// toward the PBX and tracks sequence-number continuity of everything it
@@ -390,18 +397,43 @@ async fn test_hold_keeps_both_parties_in_recording_and_rtp_continuous() -> Resul
         window(&callee_channel, HOLD_WINDOW.0, HOLD_WINDOW.1),
         window(&callee_channel, POST_WINDOW.0, POST_WINDOW.1),
     ];
-    for (phase, w) in caller_windows.iter().enumerate() {
-        let label = format!("caller channel phase {phase} (rms {:.0})", rms(w));
-        assert_tone(w, rate, CALLER_TONE_HZ, &label);
-    }
-    for (phase, w) in callee_windows.iter().enumerate() {
-        let label = if phase == 1 {
-            format!("callee channel DURING HOLD (rms {:.0})", rms(w))
-        } else {
-            format!("callee channel phase {phase} (rms {:.0})", rms(w))
-        };
-        assert_tone(w, rate, CALLEE_TONE_HZ, &label);
-    }
+    // Q2.A recording contract (未命名表格(2) 行13): during HOLD both parties'
+    // ingress capture is switched off — the held party's lane carries the hold
+    // music they actually hear, and neither party's private talk is recorded.
+    assert_tone(
+        caller_windows[0],
+        rate,
+        CALLER_TONE_HZ,
+        "caller channel phase 0 (pre-hold talk)",
+    );
+    assert_tone(
+        callee_windows[0],
+        rate,
+        CALLEE_TONE_HZ,
+        "callee channel phase 0 (pre-hold talk)",
+    );
+    let caller_hold = rms(caller_windows[1]);
+    assert!(
+        caller_hold < RMS_FLOOR,
+        "hold window must not record the parties' private talk (caller rms {caller_hold:.0} ≥ {RMS_FLOOR})"
+    );
+    let callee_hold = rms(callee_windows[1]);
+    assert!(
+        callee_hold > RMS_FLOOR,
+        "hold window must carry the hold music on the held lane (rms {callee_hold:.0} ≤ {RMS_FLOOR})"
+    );
+    assert_tone(
+        caller_windows[2],
+        rate,
+        CALLER_TONE_HZ,
+        "caller channel phase 2 (post-unhold talk)",
+    );
+    assert_tone(
+        callee_windows[2],
+        rate,
+        CALLEE_TONE_HZ,
+        "callee channel phase 2 (post-unhold talk)",
+    );
 
     // ── RTP timeline continuity on the held leg's downlink ───────────────
     // The callee receives relayed caller audio (pre/post) and hold music

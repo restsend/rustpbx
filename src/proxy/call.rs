@@ -583,7 +583,19 @@ impl CallModule {
                     if let Some(id) =
                         crate::call::session_id::extract_from_source_header(original, name)
                     {
-                        return id;
+                        // Same back-off as the cluster child-leg adoption: a
+                        // live local session already holding this id (the
+                        // trunk reusing a correlation value while the previous
+                        // call is still tearing down) must not collapse into
+                        // it — fall through to the Call-ID derivation.
+                        if server.active_call_registry.get(&id).is_some() {
+                            debug!(
+                                root = %id,
+                                "trunk correlation id already live on this node; keeping a unique session id"
+                            );
+                        } else {
+                            return id;
+                        }
                     }
                 }
             }
@@ -629,7 +641,12 @@ impl CallModule {
             .as_deref()
             .filter(|leg| crate::call::uui::is_known_leg_role(leg))?;
         let root = crate::call::session_id::extract_inherited(original)
-            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))?;
+            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))
+            // Peer-trusted seam: a peer may dispatch a child leg of a call
+            // whose root is a CUSTOM correlation string (trunk-level
+            // `session_id_header`) — the bounded charset keeps it wire-safe.
+            // The standard `Session-ID` header channel stays hex-gated.
+            .or_else(|| crate::call::session_id::normalize_custom(&cc_uui.session_id))?;
         if server.active_call_registry.get(&root).is_some() {
             debug!(
                 root = %root,
@@ -2028,6 +2045,90 @@ impl CallModule {
             // The ownership registry uses the replaced dialog's bare Call-ID.
             let old_handle = registry.get_handle_by_dialog(&replaces_call_id);
 
+            // Cross-node delegation: the replaced (consult) dialog may be
+            // homed on a PEER node — the consulting agent's client REGISTERs
+            // through its own node, so the consult dialog lives there while
+            // the transferee's INVITE(Replaces) arrives at the transferee's
+            // home node (production 2026-11-14: transfer dropped the whole
+            // call, both agents hung up, the customer stayed on a dead call).
+            // When a peer owns the dialog, delegate instead of 481: fall
+            // through to NORMAL routing — the shared database locator finds
+            // the target's registration on the peer, and the INVITE (with its
+            // Replaces header intact) lands on the peer, whose local takeover
+            // gate then matches and bridges the transfer. This node becomes a
+            // B2BUA hop (transferee ↔ this node ↔ peer ↔ target), which the
+            // media path tolerates. Single-node deployments never enter this
+            // branch (the dialog is always local).
+            let mut delegated_cross_node = false;
+            if old_handle.is_none() {
+                // The replaced dialog's OTHER face may live here: in a B2BUA
+                // cluster the consult dialog has a client face (the UAC node
+                // that originated the consult INVITE) and a server face (the
+                // node hosting the target's registration). The registry keys
+                // the session handle by the dialog's Call-ID only on the
+                // SESSION's node; the other node still holds the dialog in
+                // its dialog layer. Honor either face: a local dialog means
+                // the INVITE (and its Replaces header, transparent to the
+                // final UA) can be served from here via normal routing.
+                let dialog_face_present = [(
+                    replaces_to_tag.clone(),
+                    replaces_from_tag.clone(),
+                ), (
+                    replaces_from_tag.clone(),
+                    replaces_to_tag.clone(),
+                )]
+                .iter()
+                .any(|(local, remote)| {
+                    self.inner
+                        .dialog_layer
+                        .get_dialog(&rsipstack::dialog::DialogId {
+                            call_id: replaces_call_id.clone(),
+                            local_tag: local.clone(),
+                            remote_tag: remote.clone(),
+                        })
+                        .is_some()
+                });
+                let located = if dialog_face_present {
+                    Some(crate::proxy::cluster_forward::OwnerLocation::Found(
+                        "local-dialog-face".to_string(),
+                    ))
+                } else {
+                    None
+                };
+                match located
+                    .map(|o| o)
+                    .unwrap_or(
+                        // Fall back to the shared session registry when the
+                        // dialog face is not here either.
+                        crate::proxy::cluster_forward::OwnerLocation::Unknown,
+                    )
+                {
+                    crate::proxy::cluster_forward::OwnerLocation::Found(_) => {
+                        info!(
+                            %replaces_call_id,
+                            "Replaces dialog homed on a peer node — delegating via cross-node routing"
+                        );
+                        // Fall through to NORMAL routing below: the shared
+                        // locator carries the INVITE (and its Replaces
+                        // header) to the peer, where the dialog-local
+                        // takeover branch runs.
+                        delegated_cross_node = true;
+                    }
+                    crate::proxy::cluster_forward::OwnerLocation::Unknown => {
+                        tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
+                            .await?;
+                        return Ok(());
+                    }
+                    crate::proxy::cluster_forward::OwnerLocation::Unavailable(e) => {
+                        // Registry outage: retryable, never masquerade as
+                        // "not found".
+                        warn!(error = %e, "session registry unavailable for Replaces lookup");
+                        tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await?;
+                        return Ok(());
+                    }
+                }
+            }
+
             if let Some(ref old_handle) = old_handle {
                 let old_session_id = old_handle.session_id().to_string();
                 let old_handle_clone = old_handle.clone();
@@ -2279,12 +2380,15 @@ impl CallModule {
 
                     return result;
                 }
-            } else {
+            } else if !delegated_cross_node {
                 warn!(%replaces_call_id, "Replaces header refers to unknown dialog; returning 481");
                 tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
                     .await?;
                 return Ok(());
             }
+            // delegated_cross_node: fall through to the normal routing below —
+            // the INVITE (with its Replaces header) routes to the dialog's
+            // home node via the shared locator.
         }
 
         let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
@@ -2609,12 +2713,6 @@ impl CallModule {
     fn parse_replaces_header(
         request: &rsipstack::sip::Request,
     ) -> Option<(String, String, String)> {
-        let names: Vec<String> = request
-            .headers
-            .iter()
-            .map(|h| format!("{:?}", h.name()))
-            .collect();
-        eprintln!("REPLACES-DBG: INVITE headers: {names:?}");
         // rsipstack parses `Replaces:` into the TYPED header variant — the
         // untyped Other fallback covers raw/relay paths.
         let replaces_value = request.headers.iter().find_map(|h| match h {
@@ -2631,7 +2729,6 @@ impl CallModule {
         let mut to_tag = None;
         let mut from_tag = None;
 
-        eprintln!("REPLACES-DBG2: value={replaces:?}");
         for (idx, part) in replaces.split(';').enumerate() {
             if idx == 0 {
                 call_id = Some(part.trim().to_string());
@@ -2641,7 +2738,6 @@ impl CallModule {
                 from_tag = Some(val.trim().to_string());
             }
         }
-        eprintln!("REPLACES-DBG2: parsed call_id={call_id:?} to={to_tag:?} from={from_tag:?}");
 
         Some((call_id?, to_tag?, from_tag?))
     }
@@ -5554,6 +5650,105 @@ mod tests {
         assert_eq!(
             resolved, root,
             "cluster child-leg adoption must outrank a configured source header"
+        );
+    }
+
+    /// A cluster peer may dispatch a child leg whose root is a CUSTOM
+    /// correlation string (trunk-level `session_id_header`): the peer-trusted
+    /// seam must adopt it, or the agent-home node forks the id (the
+    /// "sessionid changed when the agent picked up" divergence for non-hex
+    /// roots). The dispatching node cannot stamp a non-hex value on the
+    /// `Session-ID` header, so the UUI data is the only carrier.
+    #[tokio::test]
+    async fn cluster_child_adopts_non_hex_custom_root() {
+        let root = "ORD-88923";
+        let (server, cookie) = peer_server_and_cookie().await;
+        // First agent-facing dial: the wire Call-IS IS the root id. No
+        // `Session-ID` header — `build_wire_header` refuses non-hex values,
+        // so the CC UUI data is the only correlation carrier on this INVITE.
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(rsipstack::sip::Header::CallId(
+            rsipstack::sip::headers::CallId::new(root.to_string()),
+        ));
+        headers.push(crate::call::uui::build_uui_header(
+            root,
+            None,
+            None,
+            None,
+            Some("agent"),
+        ));
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:1001@rustpbx.com".parse().unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers,
+            body: Vec::new(),
+        };
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server, &cookie, &request, root, true,
+        );
+        assert_eq!(
+            resolved, root,
+            "a cluster child leg must adopt a non-hex custom root from the peer UUI"
+        );
+    }
+
+    /// A trunk reusing a correlation value while the previous call is still
+    /// live must not collapse into the live session — the same back-off the
+    /// cluster child-leg path applies. Falls through to Call-ID derivation.
+    #[tokio::test]
+    async fn live_local_correlation_id_blocks_adoption() {
+        use crate::proxy::active_call_registry::ActiveProxyCallEntry;
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+        let _settings = SourceHeaderSettings::install(Some("X-Call-Session-Id"));
+        let (server, _config) = create_test_server().await;
+        let live_id = "ORD-88923";
+        let dialplan = Dialplan::new(
+            "previous-leg".to_string(),
+            crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            DialDirection::Inbound,
+        );
+        let (_session, handle, _rx) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        server.active_call_registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: live_id.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: chrono::Utc::now(),
+                answered_at: None,
+                status: ActiveProxyCallStatus::Ringing,
+            },
+            handle,
+        );
+
+        let cookie = trunk_cookie();
+        let request = source_header_invite(
+            "X-Call-Session-Id",
+            live_id,
+            "aabbccddeeff00112233445566778899",
+        );
+        let resolved = CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            "aabbccddeeff00112233445566778899",
+            true,
+        );
+        assert_ne!(
+            resolved, live_id,
+            "a live local session with the correlation id must block adoption"
+        );
+        assert_eq!(
+            resolved, "aabbccddeeff00112233445566778899",
+            "fall-through must land on the Call-ID derivation"
         );
     }
 }

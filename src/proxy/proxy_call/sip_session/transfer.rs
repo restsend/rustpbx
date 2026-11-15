@@ -1,4 +1,5 @@
 use super::SipSession;
+use super::session::PendingCustomerTransferRelease;
 use crate::call::domain::{CallCommand, LegId, LegState, ReturnAppSpec};
 use crate::media::negotiate::MediaNegotiator;
 use anyhow::{Result, anyhow};
@@ -808,12 +809,58 @@ impl SipSession {
     /// stamped with that identity. Falls back to a single agent-stamped leg
     /// (agent-DIALED call: `stamp_caller_agent_identity` marks the caller),
     /// then to the active callee. `None` when no agent leg can be identified.
-    pub(super) fn resolve_cc_agent_leg(&self) -> Option<LegId> {
+    pub(super) fn resolve_cc_agent_leg(
+        &self,
+        operator_agent: Option<&str>,
+        operator_leg_hint: Option<&str>,
+    ) -> Option<LegId> {
         let callee = LegId::from("callee");
+        // Priority 0 — the operation NAMES its leg: the CTI request's
+        // `call_id` is the operator's own dialog Call-ID (the agent's leg is
+        // the one the client is on). Exact match only; the `-r{n}` sibling
+        // scheme keeps every leg's dialog id unique.
+        if let Some(hint) = operator_leg_hint
+            && !hint.is_empty()
+            && let Some((id, _)) = self.legs.iter().find(|(id, _)| {
+                id.as_str() == hint
+                    || self
+                        .legs
+                        .get_dialog(id)
+                        .is_some_and(|dialog| dialog.id().call_id == hint)
+            })
+        {
+            return Some(id.clone());
+        }
         let callee_live = self
             .legs
             .get(&callee)
             .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold));
+        // Priority 0 — the OPERATOR of the current request: the transferor is
+        // the leg that agent's own client operates on. Identity match (leg
+        // stamp, original party, dial endpoint), never positional roles: an
+        // A2A session's CC attribution may name the callee, and the agent on
+        // an agent-dialed call IS the caller.
+        if let Some(operator) = operator_agent
+            && let Some((id, _)) = self
+                .legs
+                .iter()
+                .find(|(id, leg)| {
+                    leg.agent_id.as_deref() == Some(operator)
+                        || leg
+                            .endpoint
+                            .as_deref()
+                            .and_then(Self::uri_user_part)
+                            .is_some_and(|user| user == operator)
+                        || (id.as_str() == "caller"
+                            && Self::uri_user_part(&self.context.original_caller)
+                                .is_some_and(|user| user == operator))
+                        || (id.as_str() == "callee"
+                            && Self::uri_user_part(&self.context.original_callee)
+                                .is_some_and(|user| user == operator))
+                })
+        {
+            return Some(id.clone());
+        }
         let served = self
             .pinned_agent_id()
             .or_else(|| self.session_ext_get("agent_id"));
@@ -823,6 +870,23 @@ impl SipSession {
                 .iter()
                 .find(|(_, leg)| leg.agent_id.as_deref() == Some(agent_id.as_str()))
             {
+                return Some(id.clone());
+            }
+            // The served agent's OWN dialog (agent-DIALED call): the caller
+            // leg carries the agent's AOR as its endpoint and usually has no
+            // `agent_id` stamp (the stamp happens on the callee answer path,
+            // which belongs to the customer here). Resolve by endpoint
+            // identity BEFORE the callee fallback — otherwise the customer's
+            // leg is mistaken for the agent leg and a blind transfer releases
+            // the customer instead of the transferor (production 2026-11-14
+            // outbound-direction single-step transfer: customer torn down, the
+            // agent stayed bridged to the target).
+            if let Some((id, _)) = self.legs.iter().find(|(_, leg)| {
+                leg.endpoint
+                    .as_deref()
+                    .and_then(Self::uri_user_part)
+                    .is_some_and(|user| user == agent_id.as_str())
+            }) {
                 return Some(id.clone());
             }
             // The served agent IS the active callee (classic inbound / queue).
@@ -845,9 +909,11 @@ impl SipSession {
     }
 
     /// The CUSTOMER leg (the party that keeps talking) for a customer-anchored
-    /// transfer: the caller/callee leg opposite the resolved agent leg.
-    /// Queue-dispatched agents dial into DYNAMIC legs (`LegPurpose::Agent`),
-    /// so for those the customer is the other side of the active bridge pair.
+    /// transfer: **the transferor's CURRENT bridge peer** — the operation acts
+    /// on the live bridge pair, never on positional slots. Positional
+    /// caller/callee roles invert the parties on agent-dialed calls (the agent
+    /// IS the caller there), so they are only a last-resort fallback when no
+    /// bridge is armed.
     ///
     /// The peer must be a LIVE party (Connected/Hold): a slot-only or
     /// not-yet-established entry is nobody to hand off. The consult-into-queue
@@ -862,12 +928,10 @@ impl SipSession {
                 matches!(leg.state, LegState::Connected | LegState::Hold)
             })
         };
-        let caller = LegId::from("caller");
-        let callee = LegId::from("callee");
-        if agent_leg == &caller || agent_leg == &callee {
-            let customer = if agent_leg == &caller { callee } else { caller };
-            return live(&customer).then_some(customer);
-        }
+        // 1) The transferor's bridge peer — the party it is actually talking
+        // to right now (both directions resolve the same way: caller-slot
+        // agent on agent-dialed calls, callee-slot / dynamic agent on
+        // queue-dispatched ones).
         if self.bridge.legs.len() == 2 && self.bridge.contains_leg(agent_leg) {
             if let Some(peer) = self
                 .bridge
@@ -877,6 +941,16 @@ impl SipSession {
             {
                 return Some(peer.clone());
             }
+        }
+        // 2) Positional fallback only when no bridge is armed (the transfer
+        // arrived between bridge re-configurations). Classic inbound keeps
+        // working (customer == caller); agent-dialed calls reach here only in
+        // the degenerate no-bridge window.
+        let caller = LegId::from("caller");
+        let callee = LegId::from("callee");
+        if agent_leg == &caller || agent_leg == &callee {
+            let customer = if agent_leg == &caller { callee } else { caller };
+            return live(&customer).then_some(customer);
         }
         None
     }
@@ -919,7 +993,7 @@ impl SipSession {
         // The transferor: the CC-attributed AGENT leg, regardless of which
         // slot it occupies (caller on agent-dialed calls, callee/dynamic on
         // queue-dispatched ones).
-        let agent_leg = self.resolve_cc_agent_leg()?;
+        let agent_leg = self.resolve_cc_agent_leg(None, None)?;
         if !self
             .legs
             .get(&agent_leg)
@@ -2210,8 +2284,13 @@ impl SipSession {
     }
 
     /// Dial the transfer target as an independent leg anchored on the
-    /// customer, release the agent, and bridge customer ↔ target. Shared by
-    /// every [`Self::handle_customer_blind_transfer_sip`] dial outcome.
+    /// customer and bridge customer ↔ target; the transferring agent is
+    /// released when the target ANSWERS (see
+    /// `PendingCustomerTransferRelease`), not at dial time — a dispatch-time
+    /// BYE races the target leg's setup on its home node (cluster child
+    /// teardown cancels a sibling dial still in setup) and a failed dial
+    /// must keep the call alive. Shared by every
+    /// [`Self::handle_customer_blind_transfer_sip`] dial outcome.
     async fn dial_customer_transfer_leg(
         &mut self,
         agent_leg: &LegId,
@@ -2245,6 +2324,16 @@ impl SipSession {
                 target,
             ])
             .await;
+        // Canonical event form: a bare extension target ("1003") is reported
+        // as `sip:1003` — URI-shaped like the B2BUA dial path.
+        let target_display = {
+            let t = target.trim();
+            if !t.contains('@') && !t.starts_with("sip:") && !t.starts_with("sips:") {
+                format!("sip:{t}")
+            } else {
+                t.to_string()
+            }
+        };
         self.handle_add_leg_routed(
             target.to_string(),
             Some(target_leg.clone()),
@@ -2254,8 +2343,65 @@ impl SipSession {
             location,
         )
         .await?;
-        self.release_api_transfer_agent_leg(agent_leg).await;
+        // The transferring agent is released when the target ANSWERS
+        // (`complete_pending_customer_transfer` from the leg's LegConnected),
+        // not at dial time: an immediate BYE races the target leg's setup on
+        // its home node — the cluster child teardown triggered by that BYE
+        // cancels a sibling dial still in setup (production 2026-11-14,
+        // cross-node single-step transfer died with 487 before the target
+        // rang). A failed dial restores the customer↔agent bridge instead
+        // (`abort_pending_customer_transfer`), so a failed transfer keeps
+        // the call alive.
+        self.pending_customer_transfer_release = Some(PendingCustomerTransferRelease {
+            agent_leg: agent_leg.clone(),
+            customer_leg: customer_leg.clone(),
+            target_leg: target_leg.clone(),
+            target_display,
+            transfer_source: source,
+            attribution_handed_over: false,
+        });
+        // The bridge defers until the target leg negotiates; LegConnected
+        // re-runs it for the answered pair before the release completes.
         self.setup_bridge(customer_leg.clone(), target_leg.clone()).await;
+        Ok(())
+    }
+
+    /// Consume the pending customer-transfer release if `leg_id` is its
+    /// target leg.
+    pub(super) fn take_pending_customer_transfer_for(
+        &mut self,
+        leg_id: &LegId,
+    ) -> Option<PendingCustomerTransferRelease> {
+        if self
+            .pending_customer_transfer_release
+            .as_ref()
+            .is_some_and(|pending| &pending.target_leg == leg_id)
+        {
+            self.pending_customer_transfer_release.take()
+        } else {
+            None
+        }
+    }
+
+    /// Hand-over HALF of the deferred customer-transfer completion: move the
+    /// session attribution to the target agent BEFORE the leg's answer events
+    /// fire (the per-leg `call_answered` enrichment reads the session
+    /// attribution at emit time — the old dial-time release had already
+    /// re-pinned by that point). Leg/media state is untouched; the releasing
+    /// half (`finish_pending_customer_transfer`) runs once the answer edge
+    /// and the bridge are settled.
+    pub(super) fn begin_pending_customer_transfer(
+        &mut self,
+        mut pending: PendingCustomerTransferRelease,
+    ) -> PendingCustomerTransferRelease {
+        if pending.attribution_handed_over {
+            return pending;
+        }
+        info!(
+            session_id = %self.id,
+            target = %pending.target_display,
+            "customer blind transfer target answered; handing attribution to the target"
+        );
         // The transfer target (independent leg anchored on the customer) owns
         // the call's next stage — the departing agent's attribution stops
         // here; its identity lives on in the stashed `transfer_source`. A
@@ -2265,7 +2411,7 @@ impl SipSession {
         // (→ client_ip) — the blanket clear used to strip the new agent too.
         let target_agent = self
             .legs
-            .get(&target_leg)
+            .get(&pending.target_leg)
             .and_then(|leg| leg.agent_id.clone());
         self.clear_agent_attribution();
         if let Some(agent) = target_agent {
@@ -2276,23 +2422,63 @@ impl SipSession {
             self.session_ext_set("agent_id", agent);
             self.sync_agent_context_to_rwi_meta();
         }
-        // Canonical event form: a bare extension target ("1003") is reported
-        // as `sip:1003` — URI-shaped like the B2BUA dial path.
-        let target_event = {
-            let t = target.trim();
-            if !t.contains('@') && !t.starts_with("sip:") && !t.starts_with("sips:") {
-                format!("sip:{t}")
-            } else {
-                t.to_string()
-            }
-        };
+        pending.attribution_handed_over = true;
+        pending
+    }
+
+    /// Releasing HALF of the deferred customer-transfer completion: BYE the
+    /// transferor and emit the canonical `call_transferred` event. Runs AFTER
+    /// the target leg is Connected and the customer↔target bridge is set up —
+    /// removing the transferor re-runs the media-path selection, which must
+    /// see the target leg already established (a Ringing-state target would
+    /// be dropped as the unpaired leg).
+    pub(super) async fn finish_pending_customer_transfer(
+        &mut self,
+        pending: PendingCustomerTransferRelease,
+    ) {
+        info!(
+            session_id = %self.id,
+            target = %pending.target_display,
+            agent_leg = %pending.agent_leg,
+            "customer blind transfer complete; releasing the transferor"
+        );
+        self.release_api_transfer_agent_leg(&pending.agent_leg).await;
         self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
             call_id: self.context.session_id.to_string(),
-            transfer_target: Some(target_event),
+            transfer_target: Some(pending.target_display),
             transfer_target_type: Some("sip".to_string()),
-            transfer_source: source,
+            transfer_source: pending.transfer_source,
         });
-        Ok(())
+    }
+
+    /// Target leg failed/ended before answering: restore the original
+    /// customer↔agent bridge so the call survives the failed transfer (the
+    /// transferor was never released). Mirrors the restoration the command's
+    /// error arm used to do for dial-issued failures.
+    pub(super) async fn abort_pending_customer_transfer(
+        &mut self,
+        pending: PendingCustomerTransferRelease,
+        reason: &str,
+    ) {
+        warn!(
+            session_id = %self.id,
+            target = %pending.target_display,
+            %reason,
+            "customer blind transfer target failed before answer; preserving the call"
+        );
+        self.meta.transfer_in_progress = false;
+        self.sync_rtp_timeout_pause();
+        let agent_alive = self.legs.get(&pending.agent_leg).is_some_and(|leg| {
+            matches!(leg.state, LegState::Connected | LegState::Hold)
+        });
+        let customer_alive = self.legs.get(&pending.customer_leg).is_some_and(|leg| {
+            matches!(leg.state, LegState::Connected | LegState::Hold)
+        });
+        if agent_alive && customer_alive {
+            self.setup_bridge(pending.customer_leg.clone(), pending.agent_leg.clone())
+                .await;
+            self.update_media_path().await;
+        }
     }
 
     /// Consult the route table for a blind-transfer B-leg target, mapping every
@@ -2560,7 +2746,7 @@ impl SipSession {
                 queue_name: format!("agent:{ext}"),
                 ..Default::default()
             }
-            .with_default_hold_music(self.server.proxy_config.load().queue_hold_music.clone());
+            .with_default_hold_music(self.server.proxy_config.load().queue_wait_music());
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);
             }
@@ -2596,7 +2782,7 @@ impl SipSession {
                     "queue": format!("skill-group:{sg_id}")
                 }))?;
             queue_plan = queue_plan.with_default_hold_music(
-                self.server.proxy_config.load().queue_hold_music.clone(),
+                self.server.proxy_config.load().queue_wait_music(),
             );
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);

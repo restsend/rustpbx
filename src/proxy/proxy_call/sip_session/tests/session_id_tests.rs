@@ -317,6 +317,31 @@ fn correlation_header_of(
         .map(|header| header.value().to_string())
 }
 
+/// A CLUSTER PEER dispatching a child leg whose root is a CUSTOM correlation
+/// string (non-hex): the constructor's root linkage must accept the UUI data
+/// from the peer-trusted seam, so the agent-home session keeps one id across
+/// the logical call (`meta.session_id` = root). Untrusted sources stay
+/// hex-only — a non-peer INVITE with the same UUI must NOT link.
+#[tokio::test]
+async fn cluster_child_root_linkage_accepts_non_hex_custom_root() {
+    for (from_peer, expected) in [(true, Some("ORD-88923")), (false, None)] {
+        let session = inherited_delivery_session(
+            "", // no standard `Session-ID` header — build_wire_header refuses non-hex
+            Some("ORD-88923"),
+            true,
+            Some("agent"),
+            from_peer,
+            false,
+        )
+        .await;
+        assert_eq!(
+            session.meta.root_session_id.as_deref(),
+            expected,
+            "peer UUI data with a non-hex root links; untrusted sources do not"
+        );
+    }
+}
+
 /// Outbound round trip: a leg routed to a trunk with `session_id_header`
 /// stamps that header with the current session id — the verbatim string the
 /// trunk sent on ingress comes back on egress.

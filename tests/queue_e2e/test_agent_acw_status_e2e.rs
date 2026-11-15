@@ -480,22 +480,21 @@ async fn e2e_direct_call_during_acw_is_tracked_and_wrapup_timer_cannot_idle_mid_
 // -------------------------------------------------------------------------
 // Case 2 — CTI blind transfer whose TARGET agent is in ACW.
 //
-// IGNORED: product bug found while writing this case. `BlindTransferCustomer`
-// to a REGISTERED CC AGENT cancels the transfer leg ~2ms after the INVITE —
-// deterministically, before the target can even ring (487 Request
-// Terminated → "Command execution failed" → BYE cascade to the customer).
-// A non-agent extension target (test_blind_transfer_customer_e2e) works.
 // The transfer leg carries `purpose=Agent` (UUI leg=agent) + the target's
 // digest credentials, so the agent-target dial path differs from the plain
-// extension path that works.
+// extension path.
 //
-// When the cancel is fixed, remove the `#[ignore]`: this body then asserts
-// the full tracking chain (ACW target → transfer → Busy{new call} → the
-// previous call's wrapup timer cannot Idle mid-call → own Wrapup).
+// Historical note: this case was `#[ignore]`d for months because
+// `BlindTransferCustomer` released the transferring agent AT DIAL TIME and
+// the dispatch-time BYE cancelled the transfer leg ~2ms after the INVITE
+// (487 Request Terminated) before the target could ring — deterministically,
+// on every agent target. The release now rides the target leg's answer edge
+// (`PendingCustomerTransferRelease`), so the ignore is lifted and this body
+// asserts the full tracking chain (ACW target → transfer → Busy{new call} →
+// the previous call's wrapup timer cannot Idle mid-call → own Wrapup).
 // -------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "product bug: BlindTransferCustomer to a registered agent leg is canceled ~2ms after INVITE (487), before the target can ring"]
 #[cfg(feature = "addon-cc")]
 async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
     let _ = tracing_subscriber::fmt().try_init();
@@ -591,6 +590,8 @@ async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
             target: "bob".to_string(),
             headers: Default::default(),
             application_only: false,
+            operator_agent: None,
+            operator_leg_hint: None,
             completion: None,
         })
         .expect("transfer command dispatch");

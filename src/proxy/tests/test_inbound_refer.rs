@@ -138,7 +138,12 @@ async fn attended_refer_from_queue_agent_preserves_existing_dialogs() {
     alice.hangup(&calls[0].0).await.unwrap();
     timeout(Duration::from_secs(5), async {
         loop {
-            charlie.process_dialog_events().await.unwrap();
+            // Keep every UA polled: the final attended-REFER NOTIFY is still
+            // in flight to the transferor when the room first appears, and an
+            // unpolled test UA would let it time out (5 s) instead of ACKing.
+            for ua in [&alice, &bob, &charlie] {
+                ua.process_dialog_events().await.unwrap();
+            }
             if server.registry.count() == 0 {
                 break;
             }
@@ -467,7 +472,6 @@ let server = E2eTestServer::start_with_config(config).await.unwrap();
                 eprintln!("alice process_dialog_events error: {e}");
                 Vec::new()
             }) {
-                eprintln!("alice event: {:?}", event);
                 if let TestUaEvent::Referred(_, refer_to) = event {
                     return refer_to;
                 }

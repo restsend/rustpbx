@@ -58,6 +58,20 @@ session id。该通道**优先于**标准 `Session-ID` 头(trunk 声明了自己
 就以它为准);标准 `Session-ID` 头本身保持原有全信任语义(现有对端关联不破坏)。
 值不安全(空/超长/越界字符集)不生效(warn + 回落),不会导致呼叫失败。
 
+**并发复用退避**:同一关联值在旧呼叫未完全拆除时再次入站(同 id 双活)→
+退避生成新 id(warn 记录),与集群 child 继承的 live-registry 退避行为一致;
+顺序复用(旧呼叫已结束)不受影响。
+
+### 集群部署语义(非 hex 自定义值)
+
+集群 child 腿继承链(queue 重拨 / consult / transfer 到 agent-home 节点)在
+**peer 信任缝内**接受非 hex 自定义根值:派发节点无法把非 hex 值 stamp 到
+标准 `Session-ID` 头(`build_wire_header` 拒绝),**CC UUI 数据是唯一载体**
+——agent-home 节点从 UUI(`leg=` intent + 根值)采纳,构造器根挂回同样接受
+peer 声明的非 hex 根。非 peer 来源的 UUI 仍只认 hex(不放宽),伪造面不变。
+转接 / REFER / consult 全程经 CallMeta 权威继承,单节点与集群的
+session id 关联链路一致。
+
 ## agent 腿的 SIP Call-ID(queue 派发 / consult)
 
 带 `LegPurpose::Agent` / `LegPurpose::Consult` 的动态腿(queue 派发 agent、

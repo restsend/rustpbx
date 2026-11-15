@@ -403,6 +403,7 @@ mod tests {
             leg_role: None,
             direction: "inbound".into(),
             started_at: None,
+            leg_agent_id: None,
             extensions: ext.clone(),
         };
         (ctx, ext)
@@ -426,6 +427,7 @@ mod tests {
             leg_role: None,
             direction: "inbound".into(),
             started_at: None,
+            leg_agent_id: None,
             extensions: ext,
         };
         let result = hook.on_app_exited(&ctx, None).await;
