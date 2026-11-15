@@ -2115,16 +2115,58 @@ impl CallModule {
                         delegated_cross_node = true;
                     }
                     crate::proxy::cluster_forward::OwnerLocation::Unknown => {
-                        // The replaced session is homed on a PEER node — but
-                        // the TARGET USER's live leg may be homed HERE (the
+                        // The replaced session may live on a PEER node with
+                        // BOTH the transferor and the transfer target homed
+                        // there (production 2026-11-15 real call: browser
+                        // transferor + target both on the agent node,
+                        // transferee here). Delegate: carry the ORIGINAL
+                        // Replaces verbatim on the home-proxy hop — the
+                        // peer's gate finds the replaced session locally
+                        // (Found) and runs the takeover THERE, where the
+                        // target's real dialog lives.
+                        let owner = crate::proxy::cluster_forward::locate_owner(
+                            &self.inner.server.session_registry,
+                            &replaces_call_id,
+                        )
+                        .await;
+                        let self_ident = self
+                            .inner
+                            .server
+                            .cluster_self_addr
+                            .as_ref()
+                            .map(|a| a.to_string())
+                            .unwrap_or_default();
+                        if let crate::proxy::cluster_forward::OwnerLocation::Found(owner_node) =
+                            &owner
+                            && !owner_node.is_empty()
+                            && Some(owner_node.as_str()) != Some(self_ident.as_str())
+                            && owner_node != "local"
+                        {
+                            info!(
+                                %replaces_call_id,
+                                owner = %owner_node,
+                                "Replaced session homed on a peer — delegating the replacement INVITE (Replaces carried verbatim on the home-proxy hop)"
+                            );
+                            // The dialplan does not exist yet at this point —
+                            // ride the context on the transaction cookie;
+                            // build_target_invite_option reads it from there
+                            // and keeps the Replaces header on the hop.
+                            cookie.insert_extension(crate::call::ReferReplacesContext {
+                                header: format!(
+                                    "{};to-tag={};from-tag={}",
+                                    replaces_call_id, replaces_to_tag, replaces_from_tag
+                                ),
+                                delegate_via_home_proxy: true,
+                            });
+                            delegated_cross_node = true;
+                        } else {
+                        // The TARGET USER's live leg may be homed HERE (the
                         // consult's cluster child holds the transfer target's
                         // confirmed dialog). Run the takeover on THIS node
                         // against that local dialog instead of 481: without
                         // this the replacement INVITE was rejected and the
                         // whole transfer degraded to the conference-room
-                        // fallback (production 2026-11-15: 1003 real WSS
-                        // client, cross-node consult, completed via the room
-                        // instead of the REFER-Replaces chain).
+                        // fallback.
                         let target_user = tx
                             .original
                             .uri()
@@ -2167,6 +2209,7 @@ impl CallModule {
                                     .await?;
                                 return Ok(());
                             }
+                        }
                         }
                     }
                     crate::proxy::cluster_forward::OwnerLocation::Unavailable(e) => {
@@ -2341,6 +2384,7 @@ impl CallModule {
                     }
                     dialplan.extensions.insert(ReferReplacesContext {
                         header: replaces_header,
+                        delegate_via_home_proxy: false,
                     });
                     // Session-id inheritance: the replacement session adopts
                     // the ROOT session id of the logical call (the original

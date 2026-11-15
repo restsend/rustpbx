@@ -2771,6 +2771,18 @@ impl SipSession {
                         // way — production 2026-11-14 cross-node blind
                         // transfer). Only dialogs untracked by any leg
                         // qualify as aliases.
+                        //
+                        // Pending customer transfer: the target dial's dialog
+                        // is in flight — its Call-ID shares this root and it
+                        // is NOT yet tracked in the legs map (the dialog slot
+                        // fills at answer), so the prefix alias would match
+                        // and CANCEL the ringing transfer dial (production
+                        // 2026-11-15: 发起即释放 released the transferor, a
+                        // second drain round's alias killed the target dial,
+                        // 487 before the answer; the ACW queue_e2e case).
+                        if self.pending_customer_transfer_release.is_some() {
+                            return None;
+                        }
                         let prefix = format!("{}-", dialog_id.call_id);
                         let tracked: Vec<String> = self
                             .legs
@@ -4708,15 +4720,29 @@ impl SipSession {
         // what forced the replacement into the conference-room fallback).
         // Direct-to-registration routing carries the Replaces header to the
         // target UA itself, whose own dialog matches (RFC 3891 auto-answer).
-        let refer_replaces_takeover = self
+        let refer_replaces_ctx = self
             .context
             .dialplan
             .extensions
             .get::<crate::call::ReferReplacesContext>()
-            .is_some();
-        let route_via_home_proxy =
-            Self::route_via_home_proxy(target, cluster_enabled, self_ident.as_ref())
-                && !refer_replaces_takeover;
+            .cloned()
+            // Delegated takeover: the gate rides the context on the
+            // transaction cookie before the dialplan exists.
+            .or_else(|| {
+                self.context
+                    .cookie
+                    .with_extensions(|ext| ext.get::<crate::call::ReferReplacesContext>().cloned())
+                    .flatten()
+            });
+        let refer_replaces_takeover = refer_replaces_ctx.is_some();
+        let delegate_hop = refer_replaces_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.delegate_via_home_proxy);
+        // Delegated takeover (replaced session homed on the peer): the
+        // home-proxy hop IS the delivery path — the peer's gate consumes the
+        // Replaces and runs the takeover locally.
+        let route_via_home_proxy = Self::route_via_home_proxy(target, cluster_enabled, self_ident.as_ref())
+            && (!refer_replaces_takeover || delegate_hop);
         let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
         let mut headers: Vec<rsipstack::sip::Header> =
@@ -4726,11 +4752,15 @@ impl SipSession {
         // the verbatim Replaces header onto the outbound target-leg INVITE so
         // the target UA auto-answers it as a replacement of its own dialog
         // (no second ring, standard transferee behavior).
-        if let Some(replaces) = self
-            .context
-            .dialplan
-            .extensions
-            .get::<crate::call::ReferReplacesContext>()
+        if let Some(replaces) = refer_replaces_ctx
+            .clone()
+            .or_else(|| {
+                self.context
+                    .dialplan
+                    .extensions
+                    .get::<crate::call::ReferReplacesContext>()
+                    .cloned()
+            })
         {
             // Cross-node target: with home-proxy routing a Replaces-bearing
             // INVITE would be 481'd by the peer gate before reaching the
@@ -4739,7 +4769,7 @@ impl SipSession {
             // the target UA and RFC 3891 auto-answer works cross-node too.
             // (The drop branch remains as the safety net for any future path
             // that still routes the hop.)
-            if route_via_home_proxy {
+            if route_via_home_proxy && !delegate_hop {
                 info!(
                     session_id = %self.id,
                     replaces = %replaces.header,
@@ -4894,8 +4924,13 @@ impl SipSession {
             // The peer node keys the replaced dialog's session handle on the
             // takeover node and 481s a Replaces-bearing INVITE before the UA
             // ever sees the call (production 2026-11-14: cross-node transfer
-            // dropped the whole call).
-            if route_via_home_proxy {
+            // dropped the whole call). EXCEPTION — the DELEGATED takeover:
+            // the stamped Replaces IS the delegation payload the peer's gate
+            // consumes; stripping it turned the hop into a plain INVITE, the
+            // busy target answered 486 and the transfer fell back to the
+            // conference room (production 2026-11-15: noise + seconds-long
+            // switch on every real cross-node transfer).
+            if route_via_home_proxy && !delegate_hop {
                 headers.retain(|header| !header.name().eq_ignore_ascii_case("Replaces"));
             }
         }
@@ -5615,6 +5650,31 @@ impl SipSession {
                     self.release_transferor_caller_leg(&dialog_id).await;
                     return Ok(());
                 }
+                // A COMPLETED customer blind transfer already released the
+                // transferor server-side (queue-dispatched sessions dial the
+                // agent leg as `caller`). The transferor device's own BYE for
+                // that dialog races in AFTER the leg removal (the deferred
+                // release consumes `pending_customer_transfer_release` at the
+                // target-answer edge, so the guard above no longer holds) —
+                // it is the release's echo, NOT a call-ending customer
+                // hangup: retire just the dialog and keep the
+                // customer↔target bridge alive. (production 2026-11-15: the
+                // late BYE hit the caller-terminated teardown and dropped
+                // the whole transferred call.)
+                if self.meta.transferred
+                    && !self.legs.contains_key(&LegId::from("caller"))
+                    && self.legs.len() >= 2
+                {
+                    self.unschedule_timer(&dialog_id);
+                    self.timers.remove(&dialog_id);
+                    self.update_refresh_disabled.remove(&dialog_id);
+                    self.unregister_dialog_owner(&dialog_id).await;
+                    self.server.dialog_layer.remove_dialog(&dialog_id);
+                    self.update_snapshot_cache();
+                    info!(session_id = %self.id,
+                        "Late BYE for the released transferor leg — transferred bridge preserved");
+                    return Ok(());
+                }
                 // A pending customer-anchored transfer: the transferor's own
                 // BYE is the "already handed off" hangup — retire only its leg
                 // and let the pending hand-off complete (the target answer
@@ -5629,6 +5689,31 @@ impl SipSession {
                         .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
                 {
                     self.release_transferor_caller_leg(&dialog_id).await;
+                    return Ok(());
+                }
+                // A COMPLETED customer blind transfer already released the
+                // transferor server-side (queue-dispatched sessions dial the
+                // agent leg as `caller`). The transferor device's own BYE for
+                // that dialog races in AFTER the leg removal (the deferred
+                // release consumes `pending_customer_transfer_release` at the
+                // target-answer edge, so the guard above no longer holds) —
+                // it is the release's echo, NOT a call-ending customer
+                // hangup: retire just the dialog and keep the
+                // customer↔target bridge alive. (production 2026-11-15: the
+                // late BYE hit the caller-terminated teardown and dropped
+                // the whole transferred call.)
+                if self.meta.transferred
+                    && !self.legs.contains_key(&LegId::from("caller"))
+                    && self.legs.len() >= 2
+                {
+                    self.unschedule_timer(&dialog_id);
+                    self.timers.remove(&dialog_id);
+                    self.update_refresh_disabled.remove(&dialog_id);
+                    self.unregister_dialog_owner(&dialog_id).await;
+                    self.server.dialog_layer.remove_dialog(&dialog_id);
+                    self.update_snapshot_cache();
+                    info!(session_id = %self.id,
+                        "Late BYE for the released transferor leg — transferred bridge preserved");
                     return Ok(());
                 }
                 // A pending customer-anchored transfer: the transferor's own
@@ -7488,6 +7573,34 @@ impl SipSession {
                         None,
                     ))
                     .await;
+                    return Ok(());
+                }
+                // 发起即释放 echo: the transferor was already released
+                // server-side (dial-time release — its leg and dialog
+                // bookkeeping are gone, hence no terminated_leg / tracking).
+                // The released device's own BYE races in afterwards; retire
+                // the dialog and keep the customer↔target bridge alive — the
+                // generic cascade below would CANCEL the still-ringing
+                // transfer target (production 2026-11-15: the whole
+                // transferred call dropped; the queue_e2e ACW case: 487 at
+                // the target).
+                if self.meta.transferred
+                    && terminated_leg.is_none()
+                    && !tracked_callee_terminated
+                    && !connected_callee_terminated
+                {
+                    self.pending_hangup.remove(&terminated_dialog_id);
+                    self.unschedule_timer(&terminated_dialog_id);
+                    self.timers.remove(&terminated_dialog_id);
+                    self.update_refresh_disabled.remove(&terminated_dialog_id);
+                    self.unregister_dialog_owner(&terminated_dialog_id).await;
+                    self.server
+                        .dialog_layer
+                        .remove_dialog(&terminated_dialog_id);
+                    self.update_snapshot_cache();
+                    info!(session_id = %self.id,
+                        dialog_id = %terminated_dialog_id,
+                        "Released transferor's late BYE — transferred bridge preserved");
                     return Ok(());
                 }
                 let application_peer_terminated = self
@@ -15024,6 +15137,7 @@ impl SipSession {
                 }
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
                 if !self.legs.contains_key(&leg_id) {
+                    eprintln!("DEBUG legconnected-orphan leg={leg_id} dialog={dialog_id:?}");
                     // The dial task can receive 200 OK and queue LegConnected
                     // behind a Cancel/LegRemove command. That command removes
                     // the leg before this notification is handled, but the

@@ -167,4 +167,10 @@ pub struct TrunkContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferReplacesContext {
     pub header: String,
+    /// True when this INVITE is being DELEGATED to the peer node that owns
+    /// the replaced session (the takeover will run THERE): the outbound
+    /// home-proxy hop must carry the Replaces header verbatim (the peer's
+    /// gate consumes it and runs the local takeover) instead of the usual
+    /// direct-to-registration routing.
+    pub delegate_via_home_proxy: bool,
 }

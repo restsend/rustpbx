@@ -864,12 +864,20 @@ impl SipSession {
         let served = self
             .pinned_agent_id()
             .or_else(|| self.session_ext_get("agent_id"));
+        // An INBOUND session's caller leg is the CUSTOMER dialog — even when
+        // the customer device is itself a registered agent (SELF-DISPATCH:
+        // 1003 dialed *81support and ACD handed the call BACK to 1003, whose
+        // device is a support agent). The LegConnected endpoint stamp still
+        // pins agent_id on that customer leg, which used to make the
+        // served-agent match below release THE CUSTOMER on single-step
+        // transfer (production 2026-11-15: the whole call dropped).
+        let inbound_caller_is_customer = self.context.dialplan.direction
+            == crate::call::DialDirection::Inbound;
         if let Some(agent_id) = served {
-            if let Some((id, _)) = self
-                .legs
-                .iter()
-                .find(|(_, leg)| leg.agent_id.as_deref() == Some(agent_id.as_str()))
-            {
+            if let Some((id, _)) = self.legs.iter().find(|(id, leg)| {
+                !(inbound_caller_is_customer && id.as_str() == "caller")
+                    && leg.agent_id.as_deref() == Some(agent_id.as_str())
+            }) {
                 return Some(id.clone());
             }
             // The served agent's OWN dialog (agent-DIALED call): the caller
@@ -881,11 +889,13 @@ impl SipSession {
             // the customer instead of the transferor (production 2026-11-14
             // outbound-direction single-step transfer: customer torn down, the
             // agent stayed bridged to the target).
-            if let Some((id, _)) = self.legs.iter().find(|(_, leg)| {
-                leg.endpoint
-                    .as_deref()
-                    .and_then(Self::uri_user_part)
-                    .is_some_and(|user| user == agent_id.as_str())
+            if let Some((id, _)) = self.legs.iter().find(|(id, leg)| {
+                !(inbound_caller_is_customer && id.as_str() == "caller")
+                    && leg
+                        .endpoint
+                        .as_deref()
+                        .and_then(Self::uri_user_part)
+                        .is_some_and(|user| user == agent_id.as_str())
             }) {
                 return Some(id.clone());
             }
@@ -898,7 +908,10 @@ impl SipSession {
         let mut agent_legs = self
             .legs
             .iter()
-            .filter(|(_, leg)| leg.agent_id.is_some())
+            .filter(|(id, leg)| {
+                !(inbound_caller_is_customer && id.as_str() == "caller")
+                    && leg.agent_id.is_some()
+            })
             .map(|(id, _)| id.clone());
         let first = agent_legs.next();
         if first.is_some() && agent_legs.next().is_none() {
@@ -2356,13 +2369,36 @@ impl SipSession {
             agent_leg: agent_leg.clone(),
             customer_leg: customer_leg.clone(),
             target_leg: target_leg.clone(),
-            target_display,
-            transfer_source: source,
+            target_display: target_display.clone(),
+            transfer_source: source.clone(),
             attribution_handed_over: false,
         });
         // The bridge defers until the target leg negotiates; LegConnected
-        // re-runs it for the answered pair before the release completes.
+        // re-runs it for the answered pair (the media pair is REGISTERED
+        // here, before the transferor leaves — a removal re-running the
+        // media path must see the pair or it clears the route).
         self.setup_bridge(customer_leg.clone(), target_leg.clone()).await;
+        // 发起即释放 — standard blind-transfer semantics, RESTORED (accepted
+        // 2026-10-13): the transferor exits at DIAL time; the target rings
+        // with no take-back. The races that forced the 11-14 deferral are
+        // guarded at their actual sites now:
+        //   - the pending_hangup alias fallback skips while this pending is
+        //     set, so a drain round cannot CANCEL the in-flight target dial;
+        //   - the release's termination echo no longer tears the session
+        //     down (the caller-leg + callee-dialog transferred guards);
+        //   - the CC hook admits the stamped TARGET leg's instant-answer
+        //     connect (the wrapup late-answer rebind), so the ACW agent
+        //     goes Busy on the transferred answer.
+        // The ATTRIBUTION hand-over stays on the target's answer edge (the
+        // CC hook reads the session pin when the leg connects — the target
+        // leg has no agent stamp at dial time).
+        self.release_api_transfer_agent_leg(agent_leg).await;
+        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+            call_id: self.context.session_id.to_string(),
+            transfer_target: Some(target_display.clone()),
+            transfer_target_type: Some("sip".to_string()),
+            transfer_source: source.clone(),
+        });
         Ok(())
     }
 
@@ -2478,6 +2514,18 @@ impl SipSession {
             self.setup_bridge(pending.customer_leg.clone(), pending.agent_leg.clone())
                 .await;
             self.update_media_path().await;
+            return;
+        }
+        if !agent_alive {
+            // 发起即释放: the transferor already left at dial time — after a
+            // failed target there is nobody left to serve the customer. End
+            // the call cleanly instead of stranding them in an unbridged
+            // session (blind-transfer semantics: no take-back).
+            self.handle_hangup(&crate::call::domain::HangupCommand::all(
+                Some(crate::callrecord::CallRecordHangupReason::Canceled),
+                None,
+            ))
+            .await;
         }
     }
 
