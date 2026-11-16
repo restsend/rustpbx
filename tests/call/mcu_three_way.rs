@@ -285,6 +285,7 @@ async fn test_full_duplex_media_bridge() {
                 sender_tx,
                 receiver,
                 audio_codec::CodecType::PCMU,
+                None,
             )
             .await;
         (handle, sender_rx)

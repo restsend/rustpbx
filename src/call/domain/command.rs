@@ -18,6 +18,63 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
+/// The replaced session's dialog toward the transfer target, as reported by
+/// `CallCommand::QueryTransferTargetDialog` (REFER-Replaces takeover).
+///
+/// `remote_registered` distinguishes the two topologies: `false` means the
+/// target UA holds THIS dialog directly (same-node — stamp it verbatim);
+/// `true` means the leg was routed to a peer node's home proxy, so the
+/// dialog the TARGET UA actually holds lives on that peer's cluster child
+/// and must be resolved cross-node (`cluster/query_transfer_target_dialog`)
+/// before stamping — a hop-dialog stamp can never match at the target UA.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferTargetDialog {
+    pub call_id: String,
+    pub local_tag: String,
+    pub remote_tag: String,
+    /// True when the target leg is a cluster hop (`Leg::remote_registered`).
+    #[serde(default)]
+    pub remote_registered: bool,
+    /// Root session id of the reporting session; binds the cross-node query
+    /// to the right logical call so a peer never returns another call's
+    /// dialog for the same extension.
+    #[serde(default)]
+    pub root_session_id: String,
+    /// True when the dialog came from a leg whose ENDPOINT matches the
+    /// dialed target user. `false` = the callee-leg fallback answer — good
+    /// enough for the same-session takeover query, but a peer scan must
+    /// NEVER accept it (an unrelated session on the same logical root —
+    /// e.g. the queue call holding the transferor's leg — would answer with
+    /// the transferor's dialog and poison the stamp).
+    #[serde(default)]
+    pub endpoint_matched: bool,
+}
+
+impl TransferTargetDialog {
+    /// Build from a dialog id (local resolution path).
+    pub fn from_dialog_id(
+        id: &rsipstack::dialog::DialogId,
+        remote_registered: bool,
+        root_session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: id.call_id.clone(),
+            local_tag: id.local_tag.clone(),
+            remote_tag: id.remote_tag.clone(),
+            remote_registered,
+            root_session_id: root_session_id.into(),
+            endpoint_matched: false,
+        }
+    }
+
+    /// Mark the answer as endpoint-matched (the leg's remote user IS the
+    /// dialed target) — the peer-scan acceptance requires this.
+    pub fn endpoint_matched(mut self) -> Self {
+        self.endpoint_matched = true;
+        self
+    }
+}
+
 /// Declared intent of a session-originated dial (`CallCommand::LegAdd`).
 ///
 /// Set by the DIALING side (the app / API that issues the command) so the
@@ -83,7 +140,8 @@ impl TransferOutcome {
     }
 }
 
-/// Type alias for CallCommand receiver.
+/// Type aliases for the CallCommand channel ends.
+pub type CallCommandTx = mpsc::Sender<CallCommand>;
 pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 
 /// Unified command for session control
@@ -206,6 +264,18 @@ pub enum CallCommand {
         /// Require unresolved destinations to match a configured application or forwarding route.
         #[serde(default)]
         application_only: bool,
+        /// The agent whose client issued this transfer (CTI operator). The
+        /// session resolves the TRANSFEROR leg from this identity first —
+        /// never from positional caller/callee roles: on agent-dialed calls
+        /// the agent IS the caller, and an A2A session's CC attribution may
+        /// name the callee instead.
+        #[serde(default, skip)]
+        operator_agent: Option<String>,
+        /// The CTI request's `call_id` — the operator's OWN dialog Call-ID.
+        /// Highest-priority transferor hint: the operation names the leg it
+        /// acts on, independent of stamps or CC attribution.
+        #[serde(default, skip)]
+        operator_leg_hint: Option<String>,
         #[serde(skip)]
         completion: Option<oneshot::Sender<crate::call::runtime::CommandResult>>,
     },
@@ -579,6 +649,29 @@ pub enum CallCommand {
     },
 
     /// The shared room ended; its owning session must hang up the participant.
+    /// REFER-Replaces chain: mark the REPLACED (consult) session so its end
+    /// suppresses the CDR row — the replacement session inherits the root
+    /// session id and carries the transferred call's record.
+    #[serde(skip)]
+    SuppressCallRecord,
+
+    /// REFER-Replaces chain: the relayed replacement never reached a final
+    /// REFER NOTIFY within the watchdog window. The session releases the
+    /// pending state and fails the transfer with the referrer kept intact.
+    #[serde(skip)]
+    RelayedReferTimeout,
+
+    /// REFER-Replaces takeover: resolve the replaced session's dialog toward
+    /// the transfer target. The target UA faces THIS dialog, so the Replaces
+    /// header on the outbound target-leg INVITE must carry its identity for
+    /// the RFC 3891 auto-answer to match.
+    #[serde(skip)]
+    QueryTransferTargetDialog {
+        /// Extension of the transfer target (matches the leg's remote user).
+        target_user: String,
+        reply: oneshot::Sender<Option<super::TransferTargetDialog>>,
+    },
+
     #[serde(skip)]
     ConferenceEnded { conference_id: String },
 
@@ -588,6 +681,17 @@ pub enum CallCommand {
         conference_id: String,
         dialog_id: rsipstack::dialog::DialogId,
         reply: oneshot::Sender<Result<LegId, String>>,
+    },
+
+    /// Bind the attended-transfer partner session: after the transferor
+    /// departs, the in-session bridged peer is the retired consult dialog and
+    /// the real peer leg lives in the partner session. Hold/unhold for the
+    /// room peer routes to the partner via its own proven propagate path.
+    #[serde(skip)]
+    BindTransferPartner {
+        cmd_tx: CallCommandTx,
+        partner_session: String,
+        their_leg: LegId,
     },
 
     /// Join the caller leg into a conference room, waiting for the leg to be

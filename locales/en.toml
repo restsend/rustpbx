@@ -943,6 +943,9 @@ field_description_placeholder = "Internal notes about provisioning or escalation
 
 # Capacity limits section
 section_capacity = "Capacity limits"
+section_advanced = "Advanced"
+field_refer_replaces = "REFER-Replaces"
+field_refer_replaces_hint = "Executes REFER-with-Replaces (attended transfer performed by the trunk's own UA); disable to fall back to the server-side transfer room"
 field_max_cps = "Max CPS"
 field_max_cps_placeholder = "e.g. 30"
 field_max_concurrent = "Max concurrent calls"

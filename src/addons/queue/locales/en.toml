@@ -131,7 +131,7 @@ field_tags_placeholder = "premium, apac, vip"
 
 # Hold section
 section_hold = "Hold treatment"
-section_hold_desc = "Upload prompts separately and reference the storage path here. Leave blank to fall back to config/sounds/phone-calling.wav."
+section_hold_desc = "Upload prompts separately and reference the storage path here. Leave blank to fall back to config/sounds/queue-waiting-8k.wav."
 hold_enable_label = "Play custom hold audio"
 hold_audio_file = "Audio file path"
 hold_audio_file_placeholder = "sounds/hold.wav"

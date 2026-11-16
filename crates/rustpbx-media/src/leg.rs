@@ -41,7 +41,7 @@ use crate::ingress_tap::{DtmfEvent, IngressTap, TapStats};
 use crate::leg_id::LegId;
 use crate::leg_stats::{LegRtcpStats, SrTimeTracker, spawn_rtcp_listener};
 use crate::media_recorder::RecorderSender;
-use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile, TransportMode};
+use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile, TransportMode, normalize_mux_for_full_ice};
 
 /// Outcome of a [`PlaybackHandle`]'s play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -866,7 +866,10 @@ impl LegInner {
             video_mline = ?video_mline,
             "leg SDP applied",
         );
-        let desc = SessionDescription::parse(sdp_type, remote)?;
+        // RFC 9429 §9.3 shim: legacy full-ICE offers without `a=rtcp-mux`
+        // are normalized before validation (see negotiate::normalize_mux_for_full_ice).
+        let remote = normalize_mux_for_full_ice(remote);
+        let desc = SessionDescription::parse(sdp_type, &remote)?;
         if let Some(addr) = advertised_audio_addr(&desc) {
             *self.peer_advertised_addr.lock() = Some(addr);
         }
@@ -883,8 +886,7 @@ impl LegInner {
         // direct UDP like plain RTP and their SRTP packets keep the clear
         // RTP header, so latching works identically there. WebRTC legs
         // resolve their address via ICE and are excluded.
-        if (TransportMode::of(self.pc.config()) == TransportMode::Rtp
-            || TransportMode::of(self.pc.config()) == TransportMode::Srtp)
+        if TransportMode::of(self.pc.config()) != TransportMode::WebRtc
             && self.pc.config().enable_latching
         {
             for transceiver in self.pc.get_transceivers() {
@@ -897,7 +899,7 @@ impl LegInner {
         }
 
         if sdp_type != SdpType::Offer {
-            self.sync_answer_profile(remote, remote).await?;
+            self.sync_answer_profile(&remote, &remote).await?;
         }
         Ok(())
     }
@@ -910,12 +912,15 @@ impl LegInner {
         Ok(self.pc.create_answer().await?)
     }
 
+    /// Sync the sender's codec/PT to the negotiated answer. The profile is
+    /// extracted from the answer SDP: the local answer we just produced
+    /// (as UAS), or the remote answer we applied (as UAC).
     async fn sync_answer_profile(&self, answer: &str, remote: &str) -> Result<()> {
         let profile = negotiate::MediaNegotiator::extract_leg_profile(answer);
 
         self.sync_negotiated_profile(&profile).await?;
 
-        let remote_dtmf_pts: Vec<u8> = negotiate::MediaNegotiator::extract_dtmf_codecs(remote)
+        let remote_dtmf_pts: Vec<u8> = negotiate::MediaNegotiator::extract_dtmf_codecs(&remote)
             .iter()
             .map(|c| c.payload_type)
             .collect();
@@ -2796,6 +2801,7 @@ mod tests {
             m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
             a=rtpmap:111 opus/48000/2\r\n\
             a=mid:0\r\n\
+            a=rtcp-mux\r\n\
             a=sendrecv\r\n\
             a=rtcp-mux\r\n\
             a=setup:actpass\r\n\
@@ -2806,6 +2812,7 @@ mod tests {
             a=rtpmap:96 H264/90000\r\n\
             a=rtpmap:98 VP8/90000\r\n\
             a=mid:1\r\n\
+            a=rtcp-mux\r\n\
             a=sendrecv\r\n\
             a=rtcp-mux\r\n\
             a=setup:actpass\r\n\
@@ -3052,6 +3059,9 @@ mod p24_uac_test {
         let leg = LegInner::new("plain-rtp-av", &cfg, None).expect("leg");
         let offer = leg.create_offer().await.expect("offer");
         println!("plain RTP A/V offer:\n{offer}");
+        // Upstream 0.6.x's `sip()` prefab (Balanced + Negotiate) keeps the
+        // strict-SIP compat points: no bundle-only m-lines, an RTCP port per
+        // m-line (RFC 5761 §5.1.1), no datachannel section.
         assert!(
             !offer.contains("a=bundle-only"),
             "a peer without BUNDLE rejects bundle-only m-lines:\n{offer}"
@@ -3064,6 +3074,15 @@ mod p24_uac_test {
         assert!(
             !offer.contains("m=application"),
             "m=application causes 488 on strict SIP phones:\n{offer}"
+        );
+        assert!(
+            offer.contains("a=group:BUNDLE"),
+            "0.6.x bundles multi-m-line offers (documented shape change):\n{offer}"
+        );
+        assert_eq!(
+            offer.lines().filter(|l| l.starts_with("a=rtcp:")).count(),
+            2,
+            "each m-line advertises its RTCP port (Negotiate):\n{offer}"
         );
         let audio_port = offer
             .lines()
@@ -3220,7 +3239,7 @@ mod ice_lite_tests {
             call_id: None,
             root_session_id: None,
             transport: TransportMode::WebRtc,
-            enable_ice_lite: true,
+            /* ice-lite rides connectivity */ enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
         };
         let rtc = build_rtc_config(&cfg);
@@ -3239,7 +3258,7 @@ mod ice_lite_tests {
             call_id: None,
             root_session_id: None,
             transport: TransportMode::Srtp,
-            enable_ice_lite: true,
+            /* ice-lite rides connectivity */ enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
         });
         assert_eq!(

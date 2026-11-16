@@ -1,7 +1,8 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, DialplanFlow,
-    Location, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    Location, ReferReplacesContext, RouteInvite, RoutingState, SipUser,
+    TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::recorder::RecorderOption;
@@ -570,6 +571,34 @@ impl CallModule {
             return root;
         }
         if session_id_enabled {
+            // Custom correlation header — the TOP-priority adopt channel for
+            // trunk-sourced INVITEs (after cluster child-leg inheritance):
+            // trunk-level `session_id_header` wins over the global default,
+            // and both outrank the standard `Session-ID` header / Call-ID
+            // reuse. Registered clients and anonymous peers (no
+            // `TrunkContext`) cannot merge calls by planting the header.
+            if let Some(trunk) = cookie.get_extension::<TrunkContext>() {
+                let header_name = server.data_context.session_id_header_for(Some(&trunk.name));
+                if let Some(name) = header_name.as_deref() {
+                    if let Some(id) =
+                        crate::call::session_id::extract_from_source_header(original, name)
+                    {
+                        // Same back-off as the cluster child-leg adoption: a
+                        // live local session already holding this id (the
+                        // trunk reusing a correlation value while the previous
+                        // call is still tearing down) must not collapse into
+                        // it — fall through to the Call-ID derivation.
+                        if server.active_call_registry.get(&id).is_some() {
+                            debug!(
+                                root = %id,
+                                "trunk correlation id already live on this node; keeping a unique session id"
+                            );
+                        } else {
+                            return id;
+                        }
+                    }
+                }
+            }
             crate::call::session_id::derive_from_call_id(dialog_id)
         } else {
             dialog_id.to_string()
@@ -612,7 +641,12 @@ impl CallModule {
             .as_deref()
             .filter(|leg| crate::call::uui::is_known_leg_role(leg))?;
         let root = crate::call::session_id::extract_inherited(original)
-            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))?;
+            .or_else(|| crate::call::session_id::normalize_inherited(&cc_uui.session_id))
+            // Peer-trusted seam: a peer may dispatch a child leg of a call
+            // whose root is a CUSTOM correlation string (trunk-level
+            // `session_id_header`) — the bounded charset keeps it wire-safe.
+            // The standard `Session-ID` header channel stays hex-gated.
+            .or_else(|| crate::call::session_id::normalize_custom(&cc_uui.session_id))?;
         if server.active_call_registry.get(&root).is_some() {
             debug!(
                 root = %root,
@@ -2072,13 +2106,199 @@ impl CallModule {
                 "Incoming INVITE contains Replaces header"
             );
 
+            // The replacement session's Call-ID — captured BEFORE any
+            // processing consumes the transaction headers (needed by the
+            // background release task; unavailable after build_and_serve).
+            let new_session_call_id = tx
+                .original
+                .call_id_header()
+                .map(|h| h.value().to_string())
+                .unwrap_or_default();
+
             // Look up the dialog being replaced in the dialog layer
             let _dialog_layer = self.inner.dialog_layer.clone();
             let registry = self.inner.server.active_call_registry.clone();
             let conference_manager = self.inner.server.conference_manager.clone();
 
             // The ownership registry uses the replaced dialog's bare Call-ID.
-            let old_handle = registry.get_handle_by_dialog(&replaces_call_id);
+            let mut old_handle = registry.get_handle_by_dialog(&replaces_call_id);
+
+            // Cross-node delegation: the replaced (consult) dialog may be
+            // homed on a PEER node — the consulting agent's client REGISTERs
+            // through its own node, so the consult dialog lives there while
+            // the transferee's INVITE(Replaces) arrives at the transferee's
+            // home node (production 2026-11-14: transfer dropped the whole
+            // call, both agents hung up, the customer stayed on a dead call).
+            // When a peer owns the dialog, delegate instead of 481: fall
+            // through to NORMAL routing — the shared database locator finds
+            // the target's registration on the peer, and the INVITE (with its
+            // Replaces header intact) lands on the peer, whose local takeover
+            // gate then matches and bridges the transfer. This node becomes a
+            // B2BUA hop (transferee ↔ this node ↔ peer ↔ target), which the
+            // media path tolerates. Single-node deployments never enter this
+            // branch (the dialog is always local).
+            let mut delegated_cross_node = false;
+            if old_handle.is_none() {
+                // The replaced dialog's OTHER face may live here: in a B2BUA
+                // cluster the consult dialog has a client face (the UAC node
+                // that originated the consult INVITE) and a server face (the
+                // node hosting the target's registration). The registry keys
+                // the session handle by the dialog's Call-ID only on the
+                // SESSION's node; the other node still holds the dialog in
+                // its dialog layer. Honor either face: a local dialog means
+                // the INVITE (and its Replaces header, transparent to the
+                // final UA) can be served from here via normal routing.
+                let dialog_face_present = [(
+                    replaces_to_tag.clone(),
+                    replaces_from_tag.clone(),
+                ), (
+                    replaces_from_tag.clone(),
+                    replaces_to_tag.clone(),
+                )]
+                .iter()
+                .any(|(local, remote)| {
+                    self.inner
+                        .dialog_layer
+                        .get_dialog(&rsipstack::dialog::DialogId {
+                            call_id: replaces_call_id.clone(),
+                            local_tag: local.clone(),
+                            remote_tag: remote.clone(),
+                        })
+                        .is_some()
+                });
+                let located = if dialog_face_present {
+                    Some(crate::proxy::cluster_forward::OwnerLocation::Found(
+                        "local-dialog-face".to_string(),
+                    ))
+                } else {
+                    None
+                };
+                match located
+                    .map(|o| o)
+                    .unwrap_or(
+                        // Fall back to the shared session registry when the
+                        // dialog face is not here either.
+                        crate::proxy::cluster_forward::OwnerLocation::Unknown,
+                    )
+                {
+                    crate::proxy::cluster_forward::OwnerLocation::Found(_) => {
+                        info!(
+                            %replaces_call_id,
+                            "Replaces dialog homed on a peer node — delegating via cross-node routing"
+                        );
+                        // Fall through to NORMAL routing below: the shared
+                        // locator carries the INVITE (and its Replaces
+                        // header) to the peer, where the dialog-local
+                        // takeover branch runs.
+                        delegated_cross_node = true;
+                    }
+                    crate::proxy::cluster_forward::OwnerLocation::Unknown => {
+                        // The replaced session may live on a PEER node with
+                        // BOTH the transferor and the transfer target homed
+                        // there (production 2026-11-15 real call: browser
+                        // transferor + target both on the agent node,
+                        // transferee here). Delegate: carry the ORIGINAL
+                        // Replaces verbatim on the home-proxy hop — the
+                        // peer's gate finds the replaced session locally
+                        // (Found) and runs the takeover THERE, where the
+                        // target's real dialog lives.
+                        let owner = crate::proxy::cluster_forward::locate_owner(
+                            &self.inner.server.session_registry,
+                            &replaces_call_id,
+                        )
+                        .await;
+                        let self_ident = self
+                            .inner
+                            .server
+                            .cluster_self_addr
+                            .as_ref()
+                            .map(|a| a.to_string())
+                            .unwrap_or_default();
+                        if let crate::proxy::cluster_forward::OwnerLocation::Found(owner_node) =
+                            &owner
+                            && !owner_node.is_empty()
+                            && Some(owner_node.as_str()) != Some(self_ident.as_str())
+                            && owner_node != "local"
+                        {
+                            info!(
+                                %replaces_call_id,
+                                owner = %owner_node,
+                                "Replaced session homed on a peer — delegating the replacement INVITE (Replaces carried verbatim on the home-proxy hop)"
+                            );
+                            // The dialplan does not exist yet at this point —
+                            // ride the context on the transaction cookie;
+                            // build_target_invite_option reads it from there
+                            // and keeps the Replaces header on the hop.
+                            cookie.insert_extension(crate::call::ReferReplacesContext {
+                                header: format!(
+                                    "{};to-tag={};from-tag={}",
+                                    replaces_call_id, replaces_to_tag, replaces_from_tag
+                                ),
+                                delegate_via_home_proxy: true,
+                            });
+                            delegated_cross_node = true;
+                        } else {
+                        // The TARGET USER's live leg may be homed HERE (the
+                        // consult's cluster child holds the transfer target's
+                        // confirmed dialog). Run the takeover on THIS node
+                        // against that local dialog instead of 481: without
+                        // this the replacement INVITE was rejected and the
+                        // whole transfer degraded to the conference-room
+                        // fallback.
+                        let target_user = tx
+                            .original
+                            .uri()
+                            .user()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        let mut takeover_handle = None;
+                        if !target_user.is_empty() {
+                            for handle in self.inner.server.active_call_registry.handles_snapshot() {
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if handle
+                                    .send_command(
+                                        crate::call::domain::CallCommand::QueryTransferTargetDialog {
+                                            target_user: target_user.clone(),
+                                            reply: reply_tx,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+                                if let Ok(Some(_dialog)) = reply_rx.await {
+                                    takeover_handle = Some(handle);
+                                    break;
+                                }
+                            }
+                        }
+                        match takeover_handle {
+                            Some(handle) => {
+                                info!(
+                                    %replaces_call_id,
+                                    %target_user,
+                                    owner_session = %handle.session_id(),
+                                    "Replaced session homed on a peer — target user's leg is local: takeover runs here"
+                                );
+                                old_handle = Some(handle);
+                            }
+                            None => {
+                                tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
+                        }
+                    }
+                    crate::proxy::cluster_forward::OwnerLocation::Unavailable(e) => {
+                        // Registry outage: retryable, never masquerade as
+                        // "not found".
+                        warn!(error = %e, "session registry unavailable for Replaces lookup");
+                        tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await?;
+                        return Ok(());
+                    }
+                }
+            }
 
             if let Some(ref old_handle) = old_handle {
                 let old_session_id = old_handle.session_id().to_string();
@@ -2089,15 +2309,189 @@ impl CallModule {
                 let old_leg = crate::call::domain::LegId::new(&old_session_id);
                 let conf_id = conference_manager.get_conference_id_for_leg(&old_leg).await;
 
-                if conf_id.is_some() {
-                    info!(%old_session_id, "Replaces target is in a conference; proceeding with seat replacement");
+                // REFER-Replaces chain: a plain confirmed replaced dialog is
+                // ALSO a valid takeover — the transferee UA (customer) dialled
+                // the target with `Replaces: <consult dialog>`; the replacement
+                // session bridges to the target normally (no conference).
+                let replaced_confirmed = self
+                    .inner
+                    .dialog_layer
+                    .get_dialog(&rsipstack::dialog::DialogId {
+                        call_id: replaces_call_id.clone(),
+                        local_tag: replaces_to_tag.clone(),
+                        remote_tag: replaces_from_tag.clone(),
+                    })
+                    .is_some_and(|dialog| dialog.state().is_confirmed());
+
+                if conf_id.is_some() || replaced_confirmed {
+                    if conf_id.is_some() {
+                        info!(%old_session_id, "Replaces target is in a conference; proceeding with seat replacement");
+                    } else {
+                        info!(%old_session_id, "Replaces target is a confirmed call — proceeding with REFER-Replaces takeover");
+                    }
                     let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
-                    let dialplan = match dialplan {
+                    let mut dialplan = match dialplan {
                         Ok(d) => d,
                         Err(route_err) => {
                             return self.reply_route_error(tx, &cookie, route_err).await;
                         }
                     };
+                    // REFER-Replaces chain: the outbound target-leg INVITE
+                    // carries a Replaces header so the target UA auto-answers
+                    // it as a replacement of its own dialog (no second ring,
+                    // no conference merge). RFC 3891 matching happens at the
+                    // TARGET UA: the header must identify the dialog the
+                    // target holds with US (the replaced consult session's
+                    // target-side leg), not the transferor's A-side dialog.
+                    // Refer-To target user (the INVITE's Request-URI user —
+                    // the customer dialled the target AOR with the Replaces
+                    // query), used to resolve the target-facing dialog.
+                    let target_user = tx
+                        .original
+                        .uri()
+                        .user()
+                        .map(|u| u.to_string())
+                        .unwrap_or_default();
+                    let target_dialog_info = {
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        match old_handle
+                            .send_command_async(crate::call::domain::CallCommand::QueryTransferTargetDialog {
+                                target_user: target_user.clone(),
+                                reply: reply_tx,
+                            })
+                            .await
+                        {
+                            Ok(()) => reply_rx.await.ok().flatten(),
+                            Err(_) => None,
+                        }
+                    };
+                    // Cluster hop target leg (`remote_registered`): the dialog
+                    // this node sees is the call↔peer hop, NOT what the target
+                    // UA holds. RFC 3891 matching happens against the dialog
+                    // the TARGET UA owns — resolve it cross-node from the peer
+                    // whose cluster child serves the target, then stamp with
+                    // THAT. Query failure falls back to the hop-dialog stamp
+                    // (the relayed REFER watchdog / room cascade still
+                    // completes the transfer; production 2026-11-15 showed a
+                    // hop-dialog stamp is always 486/486-busy at the target).
+                    let peer_dialog = if target_dialog_info
+                        .as_ref()
+                        .is_some_and(|info| info.remote_registered)
+                    {
+                        let root = target_dialog_info
+                            .as_ref()
+                            .map(|info| info.root_session_id.clone())
+                            .unwrap_or_default();
+                        let peers = self.inner.server.cluster_peers.clone();
+                        let ami_path = self
+                            .inner
+                            .server
+                            .proxy_config
+                            .load()
+                            .ami_path
+                            .clone()
+                            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+                        static QUERY_CLIENT: std::sync::OnceLock<reqwest::Client> =
+                            std::sync::OnceLock::new();
+                        let client = QUERY_CLIENT.get_or_init(|| {
+                            crate::http_util::build_keepalive_client(None, None)
+                                .unwrap_or_else(|_| reqwest::Client::new())
+                        });
+                        let self_ident = self
+                            .inner
+                            .server
+                            .cluster_self_addr
+                            .as_ref()
+                            .map(|a| a.to_string());
+                        let peer_dialog =
+                            crate::proxy::cluster_forward::query_transfer_target_dialog_on_peers(
+                                client,
+                                &peers,
+                                &ami_path,
+                                &root,
+                                &target_user,
+                                self_ident.as_deref(),
+                            )
+                            .await;
+                        if peer_dialog.is_none() {
+                            warn!(
+                                %old_session_id,
+                                "Cross-node target dialog query failed — stamping the hop dialog (cascade fallback still completes the transfer)"
+                            );
+                        }
+                        peer_dialog
+                    } else {
+                        None
+                    };
+                    let target_dialog_info =
+                        crate::proxy::cluster_forward::resolve_transfer_target_stamp(
+                            target_dialog_info,
+                            peer_dialog,
+                        );
+                    if target_dialog_info
+                        .as_ref()
+                        .is_some_and(|info| info.remote_registered)
+                    {
+                        // Still a hop after resolution — log so production
+                        // traces can tell the degraded stamp apart.
+                        info!(
+                            %old_session_id,
+                            "Transfer target stamp degraded to the cluster hop dialog"
+                        );
+                    }
+                    let replaces_header = match &target_dialog_info {
+                        // Target-side dialog resolved (locally or cross-node):
+                        // to-tag = the dialog's To tag (the target's tag = our
+                        // remote_tag on this UAC dialog), from-tag = our tag.
+                        Some(info) => format!(
+                            "{};to-tag={};from-tag={}",
+                            info.call_id, info.remote_tag, info.local_tag
+                        ),
+                        None => format!(
+                            "{};to-tag={};from-tag={}",
+                            replaces_call_id, replaces_to_tag, replaces_from_tag
+                        ),
+                    };
+                    if let Some(info) = &target_dialog_info {
+                        info!(
+                            %old_session_id,
+                            dialog = %info.call_id,
+                            cross_node = info.remote_registered,
+                            "Replaces header re-stamped for the target-facing dialog (RFC 3891 auto-answer)"
+                        );
+                    }
+                    dialplan.extensions.insert(ReferReplacesContext {
+                        header: replaces_header,
+                        delegate_via_home_proxy: false,
+                    });
+                    // Session-id inheritance: the replacement session adopts
+                    // the ROOT session id of the logical call (the original
+                    // call's id) so the recording/CDR chain and the
+                    // Session-ID header stay on the original call's identity.
+                    let root_session_id = self
+                        .inner
+                        .server
+                        .rwi_gateway
+                        .as_ref()
+                        .and_then(|gw| {
+                            gw.read()
+                                .meta_store
+                                .get_sync(&old_session_id)
+                                .and_then(|meta| meta.session_id.clone())
+                        })
+                        .unwrap_or_else(|| old_session_id.clone());
+                    dialplan.session_id = Some(root_session_id.clone());
+                    // CDR suppression: the replaced (consult) session must
+                    // not produce its own CDR row — the replacement session
+                    // carries the transferred call's record under the root
+                    // session id.
+                    if replaced_confirmed
+                        && let Err(error) = old_handle
+                            .send_command_async(crate::call::domain::CallCommand::SuppressCallRecord)
+                            .await
+                    {
+                        warn!(%old_session_id, %error, "Failed to mark the replaced session CDR-suppressed");
+                    }
 
                     let server = self.inner.server.clone();
                     let max_forwards = Self::extract_max_forwards(tx);
@@ -2109,27 +2503,37 @@ impl CallModule {
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
                             .with_cancel_token(self.build_session_token(tx));
+                    // Capture the replacement session's Call-ID BEFORE the
+                    // transaction is consumed by build_and_serve (the header
+                    // is unavailable afterwards — the background release task
+                    // would silently never spawn).
+                    let new_session_id = new_session_call_id.clone();
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
-                    let new_session_id = tx
-                        .original
-                        .call_id_header()
-                        .map(|h| h.value().to_string())
-                        .unwrap_or_default();
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
+                        // The release wait key: the conference seat
+                        // replacement tracks the new session's own call-id;
+                        // the REFER-Replaces chain's replacement session
+                        // inherits the ROOT session id, so its registry key
+                        // is the root.
+                        let wait_sid = if replaced_confirmed {
+                            root_session_id.clone()
+                        } else {
+                            new_session_id.clone()
+                        };
                         let sid = new_session_id.clone();
                         crate::utils::spawn(async move {
-                            if reg
+                            let fired = reg
                                 .wait_for_status(
-                                    &sid,
+                                    &wait_sid,
                                     ActiveProxyCallStatus::Talking,
                                     std::time::Duration::from_secs(30),
                                 )
-                                .await
-                            {
-                                info!(session_id = %sid, "New Replaces call answered; executing conference seat replacement");
+                                .await;
+                            if fired {
+                                info!(session_id = %wait_sid, "New Replaces call answered; executing conference seat replacement");
 
                                 if let Some(ref conf) = conf_id {
                                     let _ =
@@ -2138,7 +2542,10 @@ impl CallModule {
                                     let _ = conference_manager.add_participant(conf, new_leg).await;
                                     info!(%old_session_id, %sid, "Conference seat replacement completed for Replaces");
                                 }
-
+                                // (sid convention kept: the seat-replacement
+                                // participant id uses the new session id; the
+                                // REFER-Replaces chain does not touch the
+                                // conference.)
                                 let _ = old_handle_clone
                                     .send_command_async(crate::call::domain::CallCommand::Hangup(
                                         crate::call::domain::HangupCommand::local(
@@ -2194,20 +2601,20 @@ impl CallModule {
                         .unwrap_or_default();
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
-                        let sid = new_session_id.clone();
+                        let merge_sid = new_session_id.clone();
                         crate::utils::spawn(async move {
                             if reg
                                 .wait_for_status(
-                                    &sid,
+                                    &merge_sid,
                                     ActiveProxyCallStatus::Talking,
                                     std::time::Duration::from_secs(30),
                                 )
                                 .await
                             {
-                                info!(session_id = %sid, "New Replaces call answered; creating conference for attended transfer");
+                                info!(session_id = %merge_sid, "New Replaces call answered; creating conference for attended transfer");
 
                                 let conf_id = crate::call::runtime::ConferenceId::from(
-                                    format!("conf-replaces-{}", sid).as_str(),
+                                    format!("conf-replaces-{}", merge_sid).as_str(),
                                 );
                                 let _ = conference_manager
                                     .create_conference(conf_id.clone(), None)
@@ -2218,12 +2625,12 @@ impl CallModule {
                                     .add_participant(&conf_id, old_leg.clone())
                                     .await;
 
-                                let new_leg = crate::call::domain::LegId::new(&sid);
+                                let new_leg = crate::call::domain::LegId::new(&merge_sid);
                                 let _ = conference_manager
                                     .add_participant(&conf_id, new_leg.clone())
                                     .await;
 
-                                info!(%old_session_id, %sid, "Conference created for attended transfer");
+                                info!(%old_session_id, %merge_sid, "Conference created for attended transfer");
 
                                 let _ = old_handle_clone
                                     .send_command_async(crate::call::domain::CallCommand::Hangup(
@@ -2262,12 +2669,15 @@ impl CallModule {
 
                     return result;
                 }
-            } else {
+            } else if !delegated_cross_node {
                 warn!(%replaces_call_id, "Replaces header refers to unknown dialog; returning 481");
                 tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist)
                     .await?;
                 return Ok(());
             }
+            // delegated_cross_node: fall through to the normal routing below —
+            // the INVITE (with its Replaces header) routes to the dialog's
+            // home node via the shared locator.
         }
 
         let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
@@ -2608,7 +3018,10 @@ impl CallModule {
     pub(crate) fn parse_replaces_header(
         request: &rsipstack::sip::Request,
     ) -> Option<(String, String, String)> {
+        // rsipstack parses `Replaces:` into the TYPED header variant — the
+        // untyped Other fallback covers raw/relay paths.
         let replaces_value = request.headers.iter().find_map(|h| match h {
+            rsipstack::sip::Header::Replaces(inner) => Some(inner.value().to_string()),
             rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Replaces") => {
                 Some(value.to_string())
             }

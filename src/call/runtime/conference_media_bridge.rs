@@ -68,6 +68,7 @@ impl ConferenceMediaBridge {
         audio_sender: S,
         audio_receiver: Box<dyn AudioReceiver>,
         codec: audio_codec::CodecType,
+        hold_gate: Option<HoldGateHandle>,
     ) -> anyhow::Result<ConferenceBridgeHandle>
     where
         S: AudioSender + Send + Sync + 'static,
@@ -100,6 +101,9 @@ impl ConferenceMediaBridge {
             );
         };
 
+        // Hold gate: pre-resample the hold music to the codec rate so the
+        // forward loop can substitute frames without re-encoding state.
+
         info!(
             conf_id = %conf_id,
             leg_id = %leg_id,
@@ -113,6 +117,7 @@ impl ConferenceMediaBridge {
         let forward_cancel = cancel_token.child_token();
         let leg_id_forward = leg_id.clone();
         let conf_id_forward = conf_id.to_string();
+        let hold_gate_for_task = hold_gate.clone();
         let forward_handle = crate::utils::spawn(async move {
             Self::forward_loop(
                 output_rx,
@@ -121,6 +126,7 @@ impl ConferenceMediaBridge {
                 conf_id_forward,
                 forward_cancel,
                 codec,
+                hold_gate_for_task,
             )
             .await;
         });
@@ -144,6 +150,7 @@ impl ConferenceMediaBridge {
         Ok(ConferenceBridgeHandle {
             _tasks: vec![forward_handle, reverse_handle],
             cancel_token,
+            hold: hold_gate,
         })
     }
 
@@ -155,6 +162,7 @@ impl ConferenceMediaBridge {
         conf_id: String,
         cancel_token: tokio_util::sync::CancellationToken,
         codec: audio_codec::CodecType,
+        hold_gate: Option<HoldGateHandle>,
     ) where
         S: AudioSender + Send + Sync + 'static,
     {
@@ -183,6 +191,17 @@ impl ConferenceMediaBridge {
         let mut pcm_buf: Vec<i16> = Vec::with_capacity(samples_per_frame * 4);
         let mut frame_buf: Vec<i16> = vec![0i16; samples_per_frame];
 
+        // Hold-gate pacer: while held, the hold music is emitted on this
+        // self-paced 20ms ticker — INDEPENDENT of the mixer output cadence.
+        // The room mixer starves when the remote party holds (their uplink
+        // gate closes), and its starvation handling pads/re-arms in ways
+        // that would break a mixer-paced hold source (silence → stale-buffer
+        // garbage). Self-pacing decouples the hold audio from all of that.
+        let mut hold_pacer = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+        hold_pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let is_held = || hold_gate.as_ref().is_some_and(|g| g.is_held());
+
         loop {
             tokio::select! {
                 biased;
@@ -194,7 +213,52 @@ impl ConferenceMediaBridge {
                     );
                     break;
                 }
-                Some(frame) = output_rx.recv() => {
+                _ = hold_pacer.tick(), if is_held() => {
+                    // Emit one hold-music frame on the pacer tick.
+                    frame_buf.fill(0);
+                    if let Some(gate) = &hold_gate {
+                        gate.next_frame_into(&mut frame_buf);
+                    }
+
+                    // Drain-and-discard the mixer output that keeps arriving
+                    // while held. The room mixer never stops; without this the
+                    // channel (capacity 100 frames = 2 s) accumulates stale
+                    // audio and the gate release replays the whole hold tail
+                    // before reaching live audio (production incident
+                    // 2026-11-13: garbled audio after hold/resume on a
+                    // transfer-room call). Discarding keeps the release at
+                    // live audio immediately.
+                    loop {
+                        match output_rx.try_recv() {
+                            Ok(_) => continue,
+                            Err(_) => break,
+                        }
+                    }
+
+                    let encoded = encoder.encode(&frame_buf);
+                    let rtc_frame = RtcAudioFrame {
+                        rtp_timestamp,
+                        clock_rate: clock_rate,
+                        data: encoded.into(),
+                        sequence_number: Some(sequence_number),
+                        payload_type: Some(payload_type),
+                        marker: false,
+                        header_extension: None,
+                        raw_packet: None,
+                        source_addr: None,
+                    };
+                    if let Err(e) = audio_sender.send(MediaSample::Audio(rtc_frame)).await {
+                        warn!(
+                            leg_id = %leg_id,
+                            error = %e,
+                            "Failed to send hold audio to media track"
+                        );
+                        return;
+                    }
+                    rtp_timestamp = rtp_timestamp.wrapping_add(rtp_ticks_per_frame);
+                    sequence_number = sequence_number.wrapping_add(1);
+                }
+                Some(frame) = output_rx.recv(), if !is_held() => {
                     // Resample to the encoder rate if needed (linear interpolation)
                     if frame.sample_rate == sample_rate {
                         pcm_buf.clear();
@@ -384,6 +448,7 @@ pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> 
 pub struct ConferenceBridgeHandle {
     pub(crate) _tasks: Vec<tokio::task::JoinHandle<()>>,
     pub cancel_token: tokio_util::sync::CancellationToken,
+    pub(crate) hold: Option<HoldGateHandle>,
 }
 
 impl ConferenceBridgeHandle {
@@ -391,7 +456,132 @@ impl ConferenceBridgeHandle {
     pub fn stop(&self) {
         self.cancel_token.cancel();
     }
+
+    /// Flip the hold gate: while held, the forward loop feeds hold music
+    /// instead of the mixer output (the loops and the room membership stay
+    /// intact — the room ends when a participant truly departs, not when a
+    /// participant holds).
+    pub fn set_hold(&self, held: bool) {
+        if let Some(gate) = &self.hold {
+            gate.set_held(held);
+        }
+    }
 }
+
+/// Hold music gate for a conference-attached leg: while held, the bridge's
+/// forward loop feeds looped hold-music PCM instead of the mixer output.
+/// The mixer channel keeps flowing (frames are dropped while held) so the
+/// gate is independent of the room lifecycle.
+pub struct HoldGate {
+    held: std::sync::atomic::AtomicBool,
+    pcm: std::sync::Mutex<MohPcm>,
+}
+
+struct MohPcm {
+    /// Pre-resampled to the bridge codec rate.
+    samples: Vec<i16>,
+    pos: usize,
+}
+
+#[derive(Clone)]
+pub struct HoldGateHandle(Arc<HoldGate>);
+
+impl HoldGate {
+    fn new(samples: Vec<i16>) -> Self {
+        Self {
+            held: std::sync::atomic::AtomicBool::new(false),
+            pcm: std::sync::Mutex::new(MohPcm { samples, pos: 0 }),
+        }
+    }
+}
+
+impl HoldGateHandle {
+    pub fn set_held(&self, held: bool) {
+        self.0.held.store(held, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_held(&self) -> bool {
+        self.0.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Fill `frame_buf` with the next hold-music frame (looping). The buffer
+    /// is the encoder frame (samples_per_frame long).
+    fn next_frame_into(&self, frame_buf: &mut [i16]) {
+        let mut pcm = match self.0.pcm.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if pcm.samples.is_empty() {
+            frame_buf.fill(0);
+            return;
+        }
+        for slot in frame_buf.iter_mut() {
+            *slot = pcm.samples[pcm.pos % pcm.samples.len()];
+            pcm.pos = (pcm.pos + 1) % pcm.samples.len();
+        }
+    }
+}
+
+/// Decode a PCM16 mono WAV into samples. Returns None for anything other
+/// than a plain PCM16 RIFF file (the hold-music fixtures are all PCM16).
+fn load_wav_pcm16(path: &str) -> Option<(Vec<i16>, u32)> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return None;
+    }
+    // Walk chunks: fmt (audio_format=1/PCM16, channels, rate) then data.
+    let mut off = 12usize;
+    let (mut channels, mut rate, mut bits) = (0u16, 0u32, 0u16);
+    let mut pcm: Option<Vec<i16>> = None;
+    while off + 8 <= data.len() {
+        let id = &data[off..off + 4];
+        let size = u32::from_le_bytes(data[off + 4..off + 8].try_into().ok()?) as usize;
+        let body = data.get(off + 8..off + 8 + size)?;
+        match id {
+            b"fmt " => {
+                channels = u16::from_le_bytes(body.get(2..4)?.try_into().ok()?);
+                rate = u32::from_le_bytes(body.get(4..8)?.try_into().ok()?);
+                bits = u16::from_le_bytes(body.get(14..16)?.try_into().ok()?);
+            }
+            b"data" => {
+                if bits == 16 {
+                    let usable = body.len() - body.len() % 2;
+                    let step = channels.max(1) as usize;
+                    pcm = Some(
+                        body[..usable]
+                            .chunks_exact(2 * step)
+                            .map(|c| i16::from_le_bytes([c[0], c[step * 2 - 1]]))
+                            .collect(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        off += 8 + size + (size & 1);
+    }
+    let samples = pcm?;
+    (channels == 1 || channels >= 1).then_some((samples, rate))
+}
+
+/// Resample linearly into a fresh vector (reuses the crate's chunk resampler).
+fn resample_to_target(samples: &[i16], from: u32, to: u32) -> Vec<i16> {
+    if from == to || from == 0 || to == 0 {
+        return samples.to_vec();
+    }
+    let mut out = Vec::with_capacity(samples.len() * to as usize / from as usize + to as usize);
+    resample_linear_into(samples, from, to, &mut out);
+    out
+}
+
+/// Build a hold gate from a PCM16 WAV file (pre-resampled to `codec_rate`).
+/// None when the file is missing or not plain PCM16.
+pub(crate) fn hold_gate_from_wav(path: &str, codec_rate: u32) -> Option<HoldGateHandle> {
+    let (samples, rate) = load_wav_pcm16(path)?;
+    Some(HoldGateHandle(Arc::new(HoldGate::new(resample_to_target(
+        &samples, rate, codec_rate,
+    )))))
+}
+
 
 impl Drop for ConferenceBridgeHandle {
     fn drop(&mut self) {
@@ -469,6 +659,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::PCMU,
+                None,
             )
             .await;
         });
@@ -526,6 +717,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::PCMU,
+                None,
             )
             .await;
         });
@@ -566,6 +758,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::PCMU,
+                None,
             )
             .await;
         });
@@ -668,6 +861,7 @@ mod tests {
                 sender,
                 Box::new(receiver),
                 audio_codec::CodecType::PCMU,
+                None,
             )
             .await;
         assert!(
@@ -707,6 +901,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::PCMU,
+                None
             )
             .await;
         });
@@ -812,6 +1007,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::G722,
+                None
             )
             .await;
         });
@@ -867,6 +1063,7 @@ mod tests {
                 "conf-1".to_string(),
                 cancel_clone,
                 audio_codec::CodecType::G722,
+                None
             )
             .await;
         });
@@ -912,6 +1109,7 @@ mod tests {
             cancel1_clone.cancelled().await;
         });
         bridge.bridge_handle = Some(ConferenceBridgeHandle {
+            hold: None,
             _tasks: vec![task1],
             cancel_token: cancel1,
         });
@@ -928,6 +1126,7 @@ mod tests {
             }
         });
         bridge.bridge_handle = Some(ConferenceBridgeHandle {
+            hold: None,
             _tasks: vec![task2],
             cancel_token: cancel2,
         });
@@ -935,4 +1134,162 @@ mod tests {
         // Drop the bridge entirely — second handle should be cleaned up
         drop(bridge);
     }
+
+    /// Regression (production 2026-11-13): a transfer-room hold must NOT
+    /// replay stale mixer frames after release. While held, the room mixer
+    /// keeps producing frames; the channel (capacity 100) accumulates them.
+    /// The hold gate now drains the channel every pacer tick, so the release
+    /// resumes at live audio: frames pushed while held must never reach the
+    /// wire, and frames pushed after release must be the first ones heard.
+    #[tokio::test]
+    async fn test_forward_loop_hold_release_does_not_replay_stale_frames() {
+        use tokio::sync::mpsc;
+
+        let gate = HoldGateHandle(Arc::new(HoldGate::new(vec![500i16; 160])));
+        let gate_handle = gate.clone();
+        let (output_tx, output_rx) = mpsc::channel::<AudioFrame>(100);
+        let sender = MockAudioSender::new();
+        let sender_for_loop = MockAudioSender {
+            samples: sender.samples.clone(),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let handle = crate::utils::spawn(async move {
+            ConferenceMediaBridge::forward_loop(
+                output_rx,
+                sender_for_loop,
+                LegId::new("hold-leg"),
+                "conf-hold".to_string(),
+                cancel_clone,
+                audio_codec::CodecType::PCMU,
+                Some(gate_handle),
+            )
+            .await;
+        });
+
+        let push = |value: i16| {
+            let samples: Vec<i16> = vec![value; 160];
+            let tx = output_tx.clone();
+            async move {
+                tx.send(AudioFrame {
+                    sample_rate: 8000,
+                    samples,
+                    timestamp: 0,
+                })
+                .await
+                .unwrap();
+            }
+        };
+
+        // Pre-hold live audio: value 1200 must be forwarded while not held.
+        push(1200).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+
+        // Hold. From here on, mixer frames (2400) keep flowing into the
+        // channel and the loop must discard them while emitting gate audio.
+        gate.set_held(true);
+        for _ in 0..8 {
+            push(2400).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+        // More stale frames queued right before the release.
+        push(2400).await;
+        // Give the pacer one more tick to run its drain (the real flow's
+        // release is driven by signaling, seconds after the last hold pacer
+        // tick — the channel is empty by then).
+        tokio::time::sleep(tokio::time::Duration::from_millis(40)).await;
+
+        // Release. The very next audible frames must be LIVE audio (3600),
+        // not the stale hold-window frames (2400).
+        gate.set_held(false);
+        push(3600).await;
+        for _ in 0..6 {
+            push(3600).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
+
+        let sent = sender.get_samples().await;
+        assert!(
+            !sent.is_empty(),
+            "forward loop must emit frames across hold and release"
+        );
+        if std::env::var("HOLD_TEST_DEBUG").is_ok() {
+            let mut counts: std::collections::HashMap<i16, usize> = Default::default();
+            for sample in &sent {
+                if let MediaSample::Audio(frame) = sample {
+                    let mut decoder =
+                        audio_codec::create_decoder(audio_codec::CodecType::PCMU);
+                    let pcm = decoder.decode(&frame.data);
+                    let peak = pcm.iter().map(|v| v.abs()).max().unwrap_or(0);
+                    if peak < 100 {
+                        *counts.entry(0).or_default() += 1;
+                    } else {
+                        // bucket to nearest 200
+                        let first = pcm.first().copied().unwrap_or(0);
+                        let bucket = ((first as f64 / 200.0).round() * 200.0) as i16;
+                        *counts.entry(bucket).or_default() += 1;
+                    }
+                }
+            }
+            eprintln!("HOLD-TEST buckets: {:?}", counts);
+        }
+
+        // Classify emitted frames by decoding PCMU payloads. The release edge
+        // races the last hold pacer tick, so at most a couple of boundary
+        // frames may slip through — what must NEVER happen is the old
+        // behavior: replaying the whole hold tail (up to the channel capacity
+        // of 100 frames / 2 s) before live audio.
+        let mut saw_hold_music = false;
+        let mut stale_count = 0usize;
+        let mut saw_live_after_release = false;
+        let mut released = false;
+        for sample in &sent {
+            if let MediaSample::Audio(frame) = sample {
+                // Decode PCMU payload.
+                let mut decoder = audio_codec::create_decoder(audio_codec::CodecType::PCMU);
+                let pcm = decoder.decode(&frame.data);
+                let first = pcm.first().copied().unwrap_or(0);
+                let peak = pcm.iter().map(|v| v.abs()).max().unwrap_or(0);
+                if peak < 100 {
+                    continue; // silence frame, ignore
+                }
+                let close = |target: i16| (first - target).abs() <= 150;
+                if close(500) {
+                    saw_hold_music = true;
+                    released = false;
+                } else if close(1200) {
+                    // Pre-hold live audio: legal only before the hold.
+                    if released {
+                        stale_count += 1;
+                    }
+                } else if close(2400) {
+                    // Stale hold-window frame reached the wire.
+                    stale_count += 1;
+                } else if close(3600) {
+                    saw_live_after_release = true;
+                    released = true;
+                }
+            }
+        }
+        assert!(
+            saw_hold_music,
+            "hold window must emit gate (hold music) frames"
+        );
+        assert!(
+            saw_live_after_release,
+            "after release the live audio (3600) must reach the wire"
+        );
+        assert!(
+            stale_count <= 2,
+            "{stale_count} stale hold-window frames (2400) reached the wire after release — \
+             the gate's drain must keep the replay below a couple of boundary \
+             frames (the old behavior replayed the whole 2 s hold tail)"
+        );
+    }
+
 }

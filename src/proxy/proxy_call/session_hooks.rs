@@ -59,11 +59,39 @@ impl SessionExtensions {
             .expect("map inserted above")
             .insert(Self::AGENT_ATTRIBUTION_KEY.to_string(), agent_id.to_string());
     }
+
+    /// The agent who answered and served this call, captured when a transfer
+    /// hands the customer away (`clear_agent_attribution`). Unlike the live
+    /// pin this key survives the hand-off so the end-of-call CDR stays
+    /// attributed to the served agent instead of drifting to the transfer
+    /// target (prd 2026-11-10: answered-by-agent calls lost their cc_calls
+    /// row / it drifted to the target after a blind transfer).
+    pub fn served_agent_attribution(&self) -> Option<String> {
+        self.read()
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get(Self::SERVED_AGENT_KEY).cloned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Capture the served agent id (first writer wins for chained transfers).
+    pub fn set_served_agent_attribution(&self, agent_id: &str) {
+        let mut ext = self.write();
+        if ext.get_mut::<std::collections::HashMap<String, String>>().is_none() {
+            ext.insert(std::collections::HashMap::<String, String>::new());
+        }
+        ext.get_mut::<std::collections::HashMap<String, String>>()
+            .expect("map inserted above")
+            .entry(Self::SERVED_AGENT_KEY.to_string())
+            .or_insert_with(|| agent_id.to_string());
+    }
 }
 
 /// Storage key backing [`SessionExtensions::agent_attribution`].
 impl SessionExtensions {
     pub const AGENT_ATTRIBUTION_KEY: &'static str = "resolved_agent_id";
+
+    /// Storage key backing [`SessionExtensions::served_agent_attribution`].
+    pub const SERVED_AGENT_KEY: &'static str = "served_agent_id";
 }
 
 /// A typed, addon-contributed RWI event enrichment section (payload part —
@@ -251,6 +279,14 @@ pub struct CallSessionContext {
     /// `HashMap<String, String>` — read via
     /// `ctx.extensions.read().get::<HashMap<String, String>>()`.
     pub extensions: SessionExtensions,
+    /// The agent identity bound to the CALLBACK'S OWN leg, for legs whose
+    /// agent differs from the session attribution: a customer-anchored blind
+    /// transfer hands the SESSION attribution to the target only at the
+    /// answer edge, while the target leg's ring/connect events and the
+    /// transferor's departure must resolve to their own leg's agent. Filled
+    /// only for transfer-target legs (`transfer-*`); `None` keeps the
+    /// session-attribution resolution everywhere else.
+    pub leg_agent_id: Option<String>,
 }
 
 impl CallSessionContext {
@@ -285,6 +321,7 @@ impl Clone for CallSessionContext {
             leg_role: self.leg_role.clone(),
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
+            leg_agent_id: self.leg_agent_id.clone(),
             extensions: self.extensions.clone(),
         }
     }
@@ -303,6 +340,7 @@ impl fmt::Debug for CallSessionContext {
             .field("skill_group_id", &self.skill_group_id)
             .field("transferred", &self.transferred)
             .field("leg_role", &self.leg_role)
+            .field("leg_agent_id", &self.leg_agent_id)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
             .field("extensions", &"<http::Extensions>")

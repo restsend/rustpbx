@@ -246,11 +246,21 @@ pub fn is_sip_transport_header(h: &rsipstack::sip::Header) -> bool {
 pub fn extract_sip_headers(request: &rsipstack::sip::Request) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     for h in request.headers.iter() {
-        if !is_sip_transport_header(h) {
+        if !is_sip_transport_header(h) && !is_dialog_routing_header(h) {
             headers.insert(h.name().to_string(), h.value().to_string());
         }
     }
     headers
+}
+
+/// Dialog-routing headers are consumed by THIS proxy's INVITE handling (the
+/// Replaces takeover gate) and must never ride along as call-context headers
+/// onto outbound legs — on a cluster the peer node keys the replaced dialog's
+/// session handle elsewhere and 481s a Replaces-bearing INVITE before the UA
+/// ever sees it (production 2026-11-14: the cross-node transfer target leg
+/// re-inherited Replaces through the location header carry).
+pub fn is_dialog_routing_header(h: &rsipstack::sip::Header) -> bool {
+    h.name().eq_ignore_ascii_case("Replaces")
 }
 
 /// Snapshot standalone SIP headers (e.g. the custom headers riding an
@@ -259,7 +269,7 @@ pub fn extract_sip_headers(request: &rsipstack::sip::Request) -> HashMap<String,
 pub fn sip_headers_from(headers: &[rsipstack::sip::Header]) -> HashMap<String, String> {
     headers
         .iter()
-        .filter(|h| !is_sip_transport_header(h))
+        .filter(|h| !is_sip_transport_header(h) && !is_dialog_routing_header(h))
         .map(|h| (h.name().to_string(), h.value().to_string()))
         .collect()
 }

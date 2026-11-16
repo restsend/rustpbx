@@ -676,6 +676,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         .and_then(recording_policy_from_metadata);
 
     Some(routing::TrunkConfig {
+        refer_replaces: true,
         dest,
         outbound_proxy: backup_dest.clone(),
         backup_dest,
@@ -716,6 +717,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .and_then(|sbc| sbc.get("send_p_asserted_identity"))
             .and_then(|value| value.as_bool()),
         call_id_mode: None,
+        session_id_header: None,
         health_check_enabled: None,
         health_check_per_ip: None,
         health_check_interval_secs: None,

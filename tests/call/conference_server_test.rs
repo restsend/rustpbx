@@ -115,6 +115,7 @@ async fn test_join_and_leave_with_media() {
                 PcmAudioFrame::new(vec![2000i16; 160], 8000),
             ])),
             audio_codec::CodecType::PCMU,
+                None,
         )
         .await
         .unwrap();
@@ -250,6 +251,7 @@ async fn test_end_to_end_audio_flow() {
                 PcmAudioFrame::new(vec![1000i16; 160], 8000),
             ])),
             audio_codec::CodecType::PCMU,
+                None,
         )
         .await
         .unwrap();
@@ -263,6 +265,7 @@ async fn test_end_to_end_audio_flow() {
             sender_b.clone_with_shared(),
             Box::new(MockAudioReceiver::new(vec![])),
             audio_codec::CodecType::PCMU,
+                None,
         )
         .await
         .unwrap();

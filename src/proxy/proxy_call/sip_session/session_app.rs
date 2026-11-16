@@ -660,6 +660,24 @@ impl SipSession {
             &mut plan,
             self.server.proxy_config.load().queue_hold_music.clone(),
         );
+        // Still no audio file: the built-in queue WAITING loop — deliberately
+        // distinct from the agent ringback, so a queued caller can tell
+        // "waiting for an agent" from "an agent's phone is ringing"
+        // (product 2026-11-14; `hold_music` never leaks into the queue).
+        let needs_wait_file = match plan.hold.as_ref() {
+            None => true,
+            Some(hold) => hold.audio_file.is_none(),
+        };
+        if needs_wait_file {
+            let file = self
+                .server
+                .proxy_config
+                .load()
+                .queue_wait_music()
+                .expect("queue_wait_music always resolves to the built-in loop");
+            let base = plan.hold.take().unwrap_or_default();
+            plan.hold = Some(base.with_audio_file(file));
+        }
 
         // A skill-group target enables skill routing in the queue app, which
         // re-resolves the group in `on_enter` — so the app may dial agents the

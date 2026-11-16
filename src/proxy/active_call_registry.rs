@@ -181,11 +181,21 @@ impl ActiveProxyCallRegistry {
         // Emit dialog_created only for genuinely new sessions — upsert may be
         // called again for an existing session (e.g. media updates).
         let direction = entry.direction.clone();
-        let is_new = self.entries.insert(entry.session_id.clone(), entry).is_none();
+        let entry_key = entry.session_id.clone();
+        let is_new = self.entries.insert(entry_key.clone(), entry).is_none();
         if is_new {
             crate::metrics::sip::dialog_created(&direction);
         }
-        self.handles.insert(handle.session_id().to_string(), handle);
+        self.handles.insert(handle.session_id().to_string(), handle.clone());
+        // Session-id inheritance (REFER-Replaces replacement / cluster
+        // children): the ENTRY is keyed by the logical (root) session id the
+        // session adopted, while the handle's own id stays the physical
+        // dialog call-id. Index the logical key too, or `get_handle(root)`
+        // misses the replacement session and its hook callbacks (recording
+        // segment start) resolve no handle.
+        if entry_key != handle.session_id().to_string() {
+            self.handles_by_dialog.insert(entry_key, handle);
+        }
         self.notify_waiters();
     }
 
@@ -261,8 +271,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn remove(&self, session_id: &str) {
-        if let Some((_, entry)) = self.entries.remove(session_id) {
-            crate::metrics::sip::dialog_terminated(&entry.direction, "hangup");
+        if let Some((_, entry)) = self.entries.remove(session_id) {            crate::metrics::sip::dialog_terminated(&entry.direction, "hangup");
         }
         self.handles.remove(session_id);
         self.context_meta.remove(session_id);
@@ -271,6 +280,24 @@ impl ActiveProxyCallRegistry {
             for dialog_id in dialogs {
                 self.handles_by_dialog.remove(&dialog_id);
             }
+        }
+    }
+
+    /// Identity-guarded removal: the entry is only deleted when the
+    /// registered handle's instance token matches the caller's. Two sessions
+    /// can share one key (a REFER-Replaces replacement inherits the root
+    /// session id while the root session is still alive) — without the guard
+    /// the FIRST session's teardown would delete the SECOND session's
+    /// registry entry (its handle, context meta and heartbeat) out from
+    /// under it.
+    pub fn remove_if_current(&self, session_id: &str, instance: uuid::Uuid) {
+        let matches = self
+            .handles
+            .get(session_id)
+            .map(|handle| handle.instance_token() == instance)
+            .unwrap_or(false);
+        if matches {
+            self.remove(session_id);
         }
     }
 
@@ -318,6 +345,13 @@ impl ActiveProxyCallRegistry {
     /// Get all active session IDs
     pub fn session_ids(&self) -> Vec<String> {
         self.entries.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Snapshot of every live session handle (cluster transfer takeover:
+    /// the peer gate scans for the session holding the transfer target's
+    /// leg when the Replaces call-id names a session homed elsewhere).
+    pub fn handles_snapshot(&self) -> Vec<SipSessionHandle> {
+        self.handles.iter().map(|e| e.value().clone()).collect()
     }
 
     /// Session and dialog identities whose owner records must remain live.
@@ -377,6 +411,11 @@ impl ActiveProxyCallRegistry {
             answered_at: None,
             status: ActiveProxyCallStatus::Ringing,
         };
+        tracing::debug!(
+            registered_as = %session_id,
+            handle_id = %handle.session_id(),
+            "session registry register"
+        );
         self.upsert(entry, handle);
     }
 

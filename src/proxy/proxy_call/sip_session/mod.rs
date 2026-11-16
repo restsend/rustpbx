@@ -27,4 +27,6 @@ pub(crate) use transfer::{BridgeTraceContext, ReturnTargetSpec, TransferDisposit
 pub use session::{DialogSide, SessionSnapshot, SipSession, SipSessionHandle};
 pub use session::CMD_CHANNEL_CAPACITY;
 pub use session::RUSTPBX_COMMAND_CT;
+#[allow(unused_imports)]
+pub(crate) use session::TransferPartnerBinding;
 pub use util::{CalleeError, into_callee_err};
