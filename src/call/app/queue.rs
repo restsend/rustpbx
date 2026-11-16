@@ -2125,11 +2125,23 @@ impl QueueApp {
                 else {
                     break;
                 };
-                if matches!(
-                    Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await,
-                    Some(false)
-                ) {
-                    info!(call_id = %self.call_id, agent = %next_uri, "Queue: skipping agent (no longer available)");
+                // dial-time exclusion: the caller's own device sits in the
+                // plan when the ACD reserved the caller before this app
+                // started (the caller device can itself be a registered
+                // agent - production 2026-11-15: 1003 dialed *81support and
+                // was handed back to itself). Never ring the caller.
+                let next_agent_id = self.agent_id_for_uri(&next_uri).await;
+                let is_the_caller = self
+                    .caller_agent_id
+                    .as_ref()
+                    .is_some_and(|caller| next_agent_id == *caller);
+                if is_the_caller
+                    || matches!(
+                        Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await,
+                        Some(false)
+                    )
+                {
+                    info!(call_id = %self.call_id, agent = %next_uri, caller_excluded = is_the_caller, "Queue: skipping agent (caller exclusion or no longer available)");
                     self.current_agent_idx += 1;
                     self.dial_attempts += 1;
                     if skill_group_dispatch {

@@ -746,3 +746,164 @@ async fn e2e_consult_target_in_acw_is_refused_not_rung() -> Result<()> {
     .await;
     Ok(())
 }
+
+// -------------------------------------------------------------------------
+// Away (break) at the wiring level: the ACW tests above prove the Wrapup
+// branch end-to-end; this proves the Away branch rides the same gate -
+// the queue dispatch skips the break agent AND a blind transfer to them
+// is refused before any ring (dial-time exclusion, production
+// 2026-11-16: consulted agents must not be dialed).
+// -------------------------------------------------------------------------
+#[tokio::test]
+#[cfg(feature = "addon-cc")]
+async fn e2e_blind_transfer_target_on_break_is_refused_not_rung() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    let harness = start_harness(&["bob"]).await.unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12446, false);
+
+    // bob starts on break: not dispatchable, and not a legal transfer target.
+    harness
+        .cc_registry
+        .update_status("bob", AgentStatus::Away("2".to_string()))
+        .await
+        .unwrap();
+
+    let caller = harness.server.create_ua("caller").await.unwrap();
+    let bob = harness.server.create_ua("bob").await.unwrap();
+    let alice = harness.server.create_ua("alice").await.unwrap();
+    // bob's pump WOULD answer if the exclusion broke - a ring is detectable.
+    let bob_gate = Arc::new(AtomicBool::new(false));
+    let _bob_pump = spawn_gated_pump(bob.clone(), bob_gate.clone());
+    let _alice_pump = spawn_auto_answer_pump(alice.clone());
+    sleep(Duration::from_millis(300)).await;
+
+    // alice joins the registry now: with bob on break, the queue dispatch
+    // must land on alice alone (the break agent is excluded from dispatch).
+    harness
+        .cc_registry
+        .register("alice".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    harness
+        .cc_registry
+        .update_status("alice", AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let caller_dialog = caller
+        .make_call(QUEUE_NUMBER, Some(sdp.clone()))
+        .await
+        .unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must be dispatched (bob on break is excluded)",
+        |s| matches!(s, AgentStatus::Busy { .. }),
+    )
+    .await;
+    let bob_during = harness.cc_registry.get_agent("bob").await.unwrap();
+    assert!(
+        matches!(bob_during.status, AgentStatus::Away(_)),
+        "the break agent must stay Away during dispatch, got {}",
+        bob_during.status
+    );
+
+    // Blind transfer to the break target: refused before any ring.
+    let handle = harness
+        .server
+        .registry
+        .get_handle_by_call_id(&caller_dialog.call_id)
+        .ok_or_else(|| anyhow!("call must resolve to its owner session"))?;
+    handle
+        .send_command(CallCommand::BlindTransferCustomer {
+            target: "bob".to_string(),
+            headers: Default::default(),
+            application_only: false,
+            operator_agent: None,
+            operator_leg_hint: None,
+            completion: None,
+        })
+        .expect("transfer command dispatch");
+
+    sleep(Duration::from_secs(2)).await;
+    let bob_after = harness.cc_registry.get_agent("bob").await.unwrap();
+    assert!(
+        matches!(bob_after.status, AgentStatus::Away(_)),
+        "the break target must stay Away (never rung), got {}",
+        bob_after.status
+    );
+    assert_eq!(bob_after.current_calls, 0, "the break target was not rung");
+
+    // The customer↔alice call survives the refused transfer.
+    caller.hangup(&caller_dialog).await.unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must enter her own Wrapup after the hangup",
+        |s| matches!(s, AgentStatus::Wrapup { .. }),
+    )
+    .await;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Self-dispatch exclusion at the wiring level (production 2026-11-15: 1003
+// dialed *81support and ACD handed the call BACK to 1003 - the customer
+// talked to themselves). A registered idle agent dialing the queue from
+// their own device must never be dispatched to themselves: the other agent
+// takes the call and the caller stays Idle throughout.
+// -------------------------------------------------------------------------
+#[tokio::test]
+#[cfg(feature = "addon-cc")]
+async fn e2e_queue_dispatch_never_hands_the_call_back_to_the_caller_agent() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    // Both bob and alice are registered idle agents; bob's own device is
+    // the queue caller.
+    let harness = start_harness(&["bob", "alice"]).await.unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12546, false);
+
+    let bob = harness.server.create_ua("bob").await.unwrap();
+    let alice = harness.server.create_ua("alice").await.unwrap();
+    let _alice_pump = spawn_auto_answer_pump(alice.clone());
+    sleep(Duration::from_millis(300)).await;
+
+    // The agent device itself dials the queue: dispatch must exclude bob
+    // and ring alice alone.
+    let caller_dialog = bob
+        .make_call(QUEUE_NUMBER, Some(sdp.clone()))
+        .await
+        .unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must be dispatched (the caller bob is excluded from dispatch)",
+        |s| matches!(s, AgentStatus::Busy { .. }),
+    )
+    .await;
+
+    // Bounded negative window: bob never leaves Idle - no ring, no busy,
+    // no self-answer (the exclusion held on this dispatch round).
+    for _ in 0..10 {
+        let bob_now = harness.cc_registry.get_agent("bob").await.unwrap();
+        assert!(
+            matches!(bob_now.status, AgentStatus::Idle),
+            "the caller agent must stay Idle (never self-dispatched), got {}",
+            bob_now.status
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    bob.hangup(&caller_dialog).await.unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must enter her own Wrapup after the hangup",
+        |s| matches!(s, AgentStatus::Wrapup { .. }),
+    )
+    .await;
+    Ok(())
+}
