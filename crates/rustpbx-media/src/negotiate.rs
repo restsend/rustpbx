@@ -629,10 +629,10 @@ impl MediaNegotiator {
             .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp))
             .map(|desc| {
                 desc.media_sections
-                    .into_iter()
+                    .iter()
                     .filter(|section| {
                         section.kind == rustrtc::MediaKind::Video
-                            && section.port != 0
+                            && !desc.is_media_rejected(section)
                             && section.direction != rustrtc::Direction::Inactive
                     })
                     .flat_map(|section| section.to_video_capabilities())
@@ -1637,6 +1637,46 @@ a=rtcp-mux\r\n";
         );
         assert_eq!(video[1].name, "VP8");
         assert_eq!(video[1].payload_type, 98);
+    }
+
+    #[test]
+    fn linphone_bundle_only_video_answer_preserves_accepted_capabilities() {
+        // Local Linphone 5.4.102 SDK response to the offer from issue #303.
+        // The video transport is the audio BUNDLE tag, despite its zero port.
+        let sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=Talk\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 4000 RTP/AVP 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtcp-mux\r\n\
+a=mid:0\r\n\
+m=video 0 RTP/AVP 102 96\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 profile-level-id=42801F; packetization-mode=1\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-mux\r\n\
+a=mid:1\r\n\
+a=bundle-only\r\n";
+        let video = MediaNegotiator::extract_video_codecs(sdp);
+        assert_eq!(video.len(), 2);
+        assert_eq!(video[0].name, "H264");
+        assert_eq!(video[1].name, "VP8");
+        let offered = MediaNegotiator::video_caps_for_config(
+            &video, &["H264".to_string(), "VP8".to_string()],
+        );
+        assert_eq!(MediaNegotiator::accepted_video_capabilities(&offered, sdp).len(), 2);
+
+        for rejected in [
+            sdp.replace("a=bundle-only\r\n", ""),
+            sdp.replace("BUNDLE 0 1", "BUNDLE 0"),
+            sdp.replace("BUNDLE 0 1", "BUNDLE 1 0"),
+            sdp.replace("a=bundle-only", "a=inactive\r\na=bundle-only"),
+        ] {
+            assert!(MediaNegotiator::extract_video_codecs(&rejected).is_empty());
+        }
     }
 
     #[test]

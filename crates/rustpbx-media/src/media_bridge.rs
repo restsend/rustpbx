@@ -1967,8 +1967,9 @@ fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sy
 /// Whether the relay strips RTP header extensions before forwarding to a leg
 /// of this transport. The extensions a WebRTC source sends (abs-send-time,
 /// audio-level, transport-cc, mid) use the ids it negotiated with us, which a
-/// SIP peer never agreed to, plain RTP or SDES-SRTP alike: only a WebRTC
-/// destination keeps them (and gets its own sdes:mid stamped).
+/// SIP peer never agreed to, plain RTP or SDES-SRTP alike. A negotiated
+/// destination SDES-MID must still be stamped after stripping those source
+/// extensions, including for bundled SIP peers such as Linphone.
 fn strip_extensions_toward(destination: &TransportMode) -> bool {
     *destination != TransportMode::WebRtc
 }
