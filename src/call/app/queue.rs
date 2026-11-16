@@ -546,6 +546,13 @@ pub struct QueueApp {
     /// which is transient phantom-release bookkeeping and is drained by
     /// `release_phantom_agents`.
     no_answer_agents: Vec<String>,
+    /// The caller's own agent identity (the caller device is itself a
+    /// registered agent — self-dispatch). ACD must never hand a queue call
+    /// back to the caller's own device: production 2026-11-15, 1003 dialed
+    /// *81support and ACD dispatched the call BACK to 1003 (the customer
+    /// talked to themselves, then the single-step transfer from that
+    /// self-dispatched state dropped the whole call).
+    caller_agent_id: Option<String>,
     /// Whether the `max_wait_timeout` has been armed for this queue entry.
     /// Re-entering wait retention (e.g. after a failed dial round) must NOT
     /// re-arm it — `set_timeout` replaces timers, which would extend the
@@ -618,6 +625,7 @@ impl QueueApp {
             fallback_executed: false,
             attempted_agents: Vec::new(),
             no_answer_agents: Vec::new(),
+            caller_agent_id: None,
             max_wait_armed: false,
             max_wait_grace_used: false,
             joined_emitted_externally: false,
@@ -868,6 +876,40 @@ impl QueueApp {
             "max_wait_timeout",
             Duration::from_secs(self.config.max_wait_secs),
         );
+    }
+
+    /// Exclusions for the next dispatch round: the ring-timeout/no-answer
+    /// rotation plus THE CALLER'S OWN identity (never self-dispatch — the
+    /// caller device can itself be a registered agent).
+    fn dispatch_exclusions(&self) -> Vec<String> {
+        let mut excluded = self.no_answer_agents.clone();
+        if let Some(id) = &self.caller_agent_id
+            && !excluded.contains(id)
+        {
+            excluded.push(id.clone());
+        }
+        excluded
+    }
+
+    /// Resolve the caller URI to its agent identity once (the caller device
+    /// can itself be a registered agent — self-dispatch: 1003 dialed
+    /// *81support and ACD handed the call BACK to 1003, production
+    /// 2026-11-15). A non-agent caller leaves this empty.
+    async fn resolve_caller_agent_id(&mut self) {
+        if self.caller_agent_id.is_some() {
+            return;
+        }
+        if let Some(registry) = &self.agent_registry
+            && let Some(record) = registry.find_agent_by_uri(&self.caller).await
+        {
+            info!(
+                call_id = %self.call_id,
+                agent_id = %record.agent_id,
+                %self.caller,
+                "Queue: caller is itself a registered agent — excluded from dispatch (no self-dispatch)"
+            );
+            self.caller_agent_id = Some(record.agent_id);
+        }
     }
 
     /// Remember an agent id this queue entry dialed (for phantom release).
@@ -1162,7 +1204,7 @@ impl QueueApp {
                 None,
                 &self.call_id,
                 priority,
-                &self.no_answer_agents,
+                &self.dispatch_exclusions(),
             )
             .await;
         if uris.is_empty() {
@@ -1180,7 +1222,7 @@ impl QueueApp {
                         None,
                         &self.call_id,
                         priority,
-                        &self.no_answer_agents,
+                        &self.dispatch_exclusions(),
                     )
                     .await;
             }
@@ -1197,7 +1239,7 @@ impl QueueApp {
                         None,
                         &self.call_id,
                         priority,
-                        &self.no_answer_agents,
+                        &self.dispatch_exclusions(),
                     )
                     .await;
                 if !candidate.is_empty() {
@@ -1213,14 +1255,18 @@ impl QueueApp {
         }
         // Start a new rotation only after every joined group has had a
         // chance to reserve a candidate that has not already no-answered.
+        // The fresh rotation drops the no-answer exclusions but KEEPS the
+        // caller exclusion — a rotation reset must never dispatch the call
+        // back to the caller's own device (self-dispatch).
         if uris.is_empty() && !self.no_answer_agents.is_empty() {
             for group in &poll_groups {
                 uris = registry
-                    .resolve_target_with_priority(
+                    .resolve_target_with_exclusions(
                         &format!("skill-group:{group}"),
                         None,
                         &self.call_id,
                         priority,
+                        &self.caller_agent_id.iter().cloned().collect::<Vec<_>>(),
                     )
                     .await;
                 if !uris.is_empty() {
@@ -1560,6 +1606,11 @@ impl QueueApp {
 
     /// Resolve agents dynamically if agent registry is available.
     async fn resolve_agents(&mut self) {
+        // The caller identity resolves before any registry borrow: the
+        // caller device can itself be a registered agent (self-dispatch —
+        // production 2026-11-15: 1003 dialed *81support and ACD handed the
+        // call BACK to 1003) and every dispatch round must exclude it.
+        self.resolve_caller_agent_id().await;
         if let Some(ref registry) = self.agent_registry {
             let queue_id = self.config.name.as_str();
 
@@ -1586,8 +1637,22 @@ impl QueueApp {
             {
                 let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
                 let target = format!("skill-group:{}", skill_group);
+                // dial-time exclusion: never self-dispatch — the caller's own device is
+                // excluded from the offer set (the caller device can itself be
+                // a registered agent).
+                let caller_exclusion = self
+                    .caller_agent_id
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let uris = registry
-                    .resolve_target_with_priority(&target, None, &self.call_id, priority)
+                    .resolve_target_with_exclusions(
+                        &target,
+                        None,
+                        &self.call_id,
+                        priority,
+                        &caller_exclusion,
+                    )
                     .await;
                 if !uris.is_empty() {
                     let locations: Vec<Location> = uris
@@ -2137,7 +2202,7 @@ impl QueueApp {
                     None,
                     &self.call_id,
                     crate::call::clamp_priority_u32_to_i32(self.config.priority),
-                    &self.no_answer_agents,
+                    &self.dispatch_exclusions(),
                 )
                 .await;
             info!(call_id = %self.call_id, skill_group = %group, excluded_agent_ids = ?self.no_answer_agents,
@@ -2422,7 +2487,7 @@ impl QueueApp {
                                     &self.call_id,
                                     step.fair,
                                     include_primary,
-                                    &self.no_answer_agents,
+                                    &self.dispatch_exclusions(),
                                 )
                                 .await
                         }
@@ -2734,6 +2799,11 @@ impl CallApp for QueueApp {
         let queue_id = self.config.name.clone();
         info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
         self.caller = ctx.call_info.caller.clone();
+        // The caller's extension may itself be a registered agent (a helpdesk
+        // line staffed by the same people who call it). Resolve the identity
+        // once so every dispatch round can exclude the caller's own device.
+        self.caller_agent_id = None;
+        self.resolve_caller_agent_id().await;
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
         self.transfer_prompt_enabled = ctx.config.proxy.queue_transfer_prompt_enabled;
@@ -3865,5 +3935,46 @@ impl CallApp for QueueApp {
 
         self.state = QueueState::Done;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod caller_exclusion_tests {
+    use super::*;
+
+    /// dial-time exclusion (production 2026-11-15): the caller device can itself be a
+    /// registered agent (1003 dialed *81support and ACD handed the call BACK
+    /// to 1003 — the customer talked to themselves and the subsequent
+    /// single-step transfer from that self-dispatched state dropped the
+    /// whole call). `dispatch_exclusions` must carry the caller's own
+    /// identity on every dispatch round; a non-agent caller adds nothing.
+    #[test]
+    fn dispatch_exclusions_carry_the_caller_agent_identity() {
+        let mut app = QueueApp::new(QueuePlan::default(), QueueConfig {
+            name: "sg_self".into(),
+            ..Default::default()
+        });
+        app.caller = "sip:1003@pbx.ruzhila.cn".into();
+        app.caller_agent_id = Some("1003".into());
+        app.no_answer_agents = vec!["1001".into()];
+
+        let excluded = app.dispatch_exclusions();
+        assert!(
+            excluded.contains(&"1003".to_string()),
+            "the caller's own identity must be excluded from dispatch"
+        );
+        assert!(
+            excluded.contains(&"1001".to_string()),
+            "the no-answer rotation exclusions ride along"
+        );
+
+        // A non-agent caller: only the rotation exclusions.
+        let mut app = QueueApp::new(QueuePlan::default(), QueueConfig {
+            name: "sg_self".into(),
+            ..Default::default()
+        });
+        app.no_answer_agents = vec!["1001".into()];
+        let excluded = app.dispatch_exclusions();
+        assert_eq!(excluded, vec!["1001".to_string()]);
     }
 }

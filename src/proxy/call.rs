@@ -671,6 +671,26 @@ impl CallModule {
         let callee_uri = resolve_callee_uri(original).map_err(|e| {
             RouteError::from((e, None)).with_code(&crate::proxy::error_catalog::CALLEE_URI_INVALID)
         })?;
+        // dial-time exclusion: a help/consult dial (the INVITE carries the RFC 7433
+        // `leg=consult` UUI) to an agent in break (Away) or after-call work (Wrapup)
+        // is refused — the helpdesk requires the consult target to be
+        // dispatchable (production 2026-11-16: 1001 consulted 1002 while
+        // 1002 was in wrapup; the wrapup agent got rung). The INVITE is
+        // rejected and the caller's client surfaces the consult failure.
+        if let Some(cc_uui) = crate::call::uui::extract_cc_uui(&original.headers)
+            && cc_uui.leg.as_deref() == Some("consult")
+            && let Some(agent_registry) = self.inner.server.agent_registry.as_ref()
+            && let Some(user) = callee_uri.user().map(|u| u.to_string())
+            && let Some(agent_id) = agent_registry.unavailable_transfer_target(&user).await
+        {
+            warn!(callee = %user, target_agent = %agent_id,
+                "consult target is on break/after-call work — refusing the consult dial (consulted agents must not be dialed)");
+            return Err(RouteError::from((
+                anyhow::anyhow!("consult target is on break or after-call work"),
+                None,
+            ))
+            .with_code(&crate::proxy::error_catalog::CALLEE_OFFLINE));
+        }
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
