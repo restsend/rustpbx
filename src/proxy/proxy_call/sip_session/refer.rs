@@ -390,6 +390,42 @@ impl SipSession {
                 trunk_relay,
                 "REFER-Replaces relay decision"
             );
+            // dial-time exclusion: the transfer/consult target agent in break (Away)
+            // or after-call work (Wrapup) must not be rung — reject the REFER here
+            // (the failed NOTIFY keeps the transferor on the call; the
+            // customer never leaves the current agent). Non-agent targets
+            // (external numbers, queues, IVRs) are untouched — their
+            // admission is the dispatcher's business.
+            //
+            // dial-time exclusion: the transfer/consult target agent in break (Away)
+            // or after-call work (Wrapup) must not be rung — refuse the REFER (the
+            // Err -> failure NOTIFY keeps the transferor on the call; the
+            // customer never leaves the current agent). Checked here with a
+            // direct await inside this async block — a block_on would park
+            // the session actor's thread while the registry lookup awaits
+            // the same runtime (deadlock; the ACW queue_e2e case hung
+            // 30min). Non-agent targets (external numbers, queues, IVRs)
+            // are untouched.
+            let refer_target_user = rsipstack::sip::Uri::try_from(
+                refer_to_raw.split(['?', ';']).next().unwrap_or(""),
+            )
+            .ok()
+            .and_then(|uri| uri.user().map(|u| u.to_string()));
+            if let Some(target_user) = refer_target_user
+                && let Some(registry) = self.server.agent_registry.as_ref()
+                && let Some(target_agent_id) = registry.unavailable_transfer_target(&target_user).await
+            {
+                warn!(
+                    session_id = %self.id,
+                    target_user = %target_user,
+                    target_agent = %target_agent_id,
+                    "REFER target is on break/after-call work — transfer refused (consulted agents must not be dialed)"
+                );
+                return Err((
+                    480,
+                    "transfer target is on break or after-call work".into(),
+                ));
+            }
             if relay_enabled && (cross_node || trunk_relay) {
                 // The transferee = the PEER of the REFER's dialog (the REFER
                 // arrives on the transferor's customer-side dialog; the peer

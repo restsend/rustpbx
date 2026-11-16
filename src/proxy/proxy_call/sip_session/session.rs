@@ -16881,15 +16881,37 @@ impl SipSession {
                 // own identity against the agent registry only: a registered
                 // agent target yields `leg_role: "agent"`, anything else
                 // stays `leg_role: "consult"`.
+                // dial-time exclusion (production 2026-11-16: 1001 consulted 1002 in
+                // wrapup and the wrapup agent got rung): the FIRST dial of a
+                // multi-step transfer is the consult — refusing here keeps
+                // the break/after-call work agent unrung; the LegAdd failure surfaces
+                // to the transferring agent via the CTI API. Non-agent and
+                // dispatchable targets pass.
+                if let (Some(user), Some(registry)) = (
+                    Self::uri_user_part(target.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    if let Some(target_agent_id) = registry.unavailable_transfer_target(&user).await
+                    {
+                        warn!(
+                            session_id = %self.id,
+                            target_agent = %target_agent_id,
+                            target = %target,
+                            "consult target is on break/after-call work — consult refused (consulted agents must not be dialed)"
+                        );
+                        return Err(anyhow!(
+                            "consult target {target_agent_id} is on break or after-call work"
+                        ));
+                    }
+                }
                 let target_agent = match (
                     Self::uri_user_part(target.as_str()),
                     self.server.agent_registry.as_ref(),
                 ) {
                     (Some(user), Some(registry)) => registry
-                        .get_agent(&user)
+                        .resolve_dial_target_agent(&user)
                         .await
-                        .is_some()
-                        .then(|| user.to_string()),
+                        .map(|record| record.agent_id),
                     _ => None,
                 };
                 leg.agent_id = target_agent;

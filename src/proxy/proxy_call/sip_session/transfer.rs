@@ -2337,6 +2337,25 @@ impl SipSession {
                 target,
             ])
             .await;
+        // dial-time exclusion: the transfer target agent in break (Away) or after-call work
+        // (Wrapup) must not be rung — refuse BEFORE the dial and BEFORE the
+        // transferor release, so the original customer↔agent call is fully
+        // preserved and the CTI API reports the failure to the transferor
+        // (production 2026-11-16: consulted agents must not be dialed). Non-agent targets and
+        // dispatchable (Idle) targets pass.
+        if let Some(target_agent_id) = &target_agent
+            && let Some(registry) = self.server.agent_registry.as_ref()
+            && let Some(refused_agent) = registry.unavailable_transfer_target(target_agent_id).await
+        {
+            warn!(
+                session_id = %self.id,
+                target_agent = %refused_agent,
+                "transfer target is on break/after-call work — transfer refused (consulted agents must not be dialed)"
+            );
+            return Err(anyhow::anyhow!(
+                "transfer target {refused_agent} is on break or after-call work"
+            ));
+        }
         // Canonical event form: a bare extension target ("1003") is reported
         // as `sip:1003` — URI-shaped like the B2BUA dial path.
         let target_display = {

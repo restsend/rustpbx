@@ -27,7 +27,7 @@ use rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook;
 use rustpbx::addons::cc::config::CcConfig;
 use rustpbx::addons::cc::metrics::MetricsCollector;
 use rustpbx::addons::cc::skill_group::CreateSkillGroupRequest;
-use rustpbx::call::domain::CallCommand;
+use rustpbx::call::domain::{CallCommand, LegId, LegPurpose};
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
 use rustpbx::proxy::active_call_registry::ActiveProxyCallRegistry;
@@ -494,9 +494,10 @@ async fn e2e_direct_call_during_acw_is_tracked_and_wrapup_timer_cannot_idle_mid_
 // the previous call's wrapup timer cannot Idle mid-call → own Wrapup).
 // -------------------------------------------------------------------------
 
+
 #[tokio::test]
 #[cfg(feature = "addon-cc")]
-async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
+async fn e2e_blind_transfer_target_in_acw_is_refused_not_rung() -> Result<()> {
     let _ = tracing_subscriber::fmt().try_init();
     // Only bob starts as a CC agent (deterministic call1 dispatch). alice is
     // registered into the CC registry AFTER call1: by then bob sits in ACW
@@ -525,16 +526,8 @@ async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
     )
     .await
     .unwrap();
-    wait_status(
-        &harness.cc_registry,
-        "bob",
-        Duration::from_secs(5),
-        "bob must be Busy after call1",
-        |s| matches!(s, AgentStatus::Busy { .. }),
-    )
-    .await;
     caller1.hangup(&caller1_dialog).await.unwrap();
-    let wrapup_status = wait_status(
+    wait_status(
         &harness.cc_registry,
         "bob",
         Duration::from_secs(5),
@@ -542,10 +535,6 @@ async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
         |s| matches!(s, AgentStatus::Wrapup { .. }),
     )
     .await;
-    let acw_call_id = wrapup_status
-        .current_call_id()
-        .ok_or_else(|| anyhow!("Wrapup must be bound to the ended call"))?
-        .to_string();
 
     // alice joins the CC registry now: bob (ACW) is not dispatchable, so
     // call2 must dispatch to alice.
@@ -575,11 +564,9 @@ async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
     )
     .await;
 
-    // 3. CTI blind transfer of the customer to bob while he is in ACW. The
-    // transfer dispatch tolerates only a very short answer window (an
-    // unanswered target leg is canceled within milliseconds), so bob answers
-    // immediately — the RINGING-phase admission is locked by the hook unit
-    // tests; this case asserts the end-to-end tracking outcome.
+    // 3. CTI blind transfer of the customer to bob while he is in ACW: the
+    // transfer dial is REFUSED before any ring — the ACW target must not be
+    // rung (dial-time exclusion, production 2026-11-16).
     let handle = harness
         .server
         .registry
@@ -596,52 +583,166 @@ async fn e2e_blind_transfer_target_in_acw_is_tracked() -> Result<()> {
         })
         .expect("transfer command dispatch");
 
-    // 4. Bob answers the transferred call → tracked Busy, bound to a NEW
-    // call (not the ACW call), with capacity consumed.
-    let busy = wait_status(
+    // 4. bob stays Wrapup (never rung, never Busy) and alice's leg survives.
+    // A short bounded wait that must NOT observe the ACW target leaving
+    // Wrapup (no ring, no Busy, no re-queue admission).
+    sleep(Duration::from_secs(2)).await;
+    let bob_still = harness.cc_registry.get_agent("bob").await.unwrap();
+    assert!(
+        matches!(bob_still.status, AgentStatus::Wrapup { .. }),
+        "the ACW target must stay Wrapup (never rung), got {}",
+        bob_still.status
+    );
+    let bob_after = harness.cc_registry.get_agent("bob").await.unwrap();
+    assert!(
+        matches!(bob_after.status, AgentStatus::Wrapup { .. }),
+        "the ACW target must stay in Wrapup, got {}",
+        bob_after.status
+    );
+    assert_eq!(bob_after.current_calls, 0, "the ACW target was not rung");
+
+    // 5. The customer↔alice call survives the refused transfer: the customer
+    // hangs up → the call ends cleanly.
+    caller2.hangup(&caller2_dialog).await.unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must enter her own Wrapup after the hangup",
+        |s| matches!(s, AgentStatus::Wrapup { .. }),
+    )
+    .await;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Multi-step transfer, STEP 1 (CTI consult): the consult dial itself is
+// refused when the target sits in ACW/Wrapup — the helpdesk agent must
+// never hear the consult ring (dial-time exclusion, production 2026-11-16: 1001
+// consulted 1002 while 1002 was in wrapup; the wrapup agent got rung).
+// The LegAdd failure surfaces to the consulting agent via the CTI API;
+// the customer↔consulting-agent call is untouched.
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg(feature = "addon-cc")]
+async fn e2e_consult_target_in_acw_is_refused_not_rung() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    // Identical deterministic shape to the blind-transfer case: bob takes
+    // call1 and lands in ACW; alice joins afterwards and owns call2.
+    let harness = start_harness(&["bob"]).await.unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12346, false);
+
+    let caller1 = harness.server.create_ua("caller").await.unwrap();
+    let caller2 = harness.server.create_ua("caller2").await.unwrap();
+    let bob = harness.server.create_ua("bob").await.unwrap();
+    let alice = harness.server.create_ua("alice").await.unwrap();
+
+    let bob_gate = Arc::new(AtomicBool::new(false));
+    let _bob_pump = spawn_gated_pump(bob.clone(), bob_gate.clone());
+    let _alice_pump = spawn_auto_answer_pump(alice.clone());
+    sleep(Duration::from_millis(300)).await;
+
+    // 1. call1: caller1 → queue → bob; hangup → bob in ACW (4s timer).
+    let caller1_dialog = established_queue_call(
+        &harness.server,
+        &harness.cc_registry,
+        &caller1,
+        "bob",
+        &sdp,
+        &bob_gate,
+    )
+    .await
+    .unwrap();
+    caller1.hangup(&caller1_dialog).await.unwrap();
+    wait_status(
         &harness.cc_registry,
         "bob",
-        Duration::from_secs(10),
-        "answered transfer must transition the ACW agent to Busy",
+        Duration::from_secs(5),
+        "bob must enter Wrapup after call1",
+        |s| matches!(s, AgentStatus::Wrapup { .. }),
+    )
+    .await;
+
+    // alice joins the CC registry now: bob (ACW) is not dispatchable, so
+    // call2 must dispatch to alice.
+    harness
+        .cc_registry
+        .register("alice".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    harness
+        .cc_registry
+        .update_status("alice", AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    // 2. call2: caller2 → queue → alice answers.
+    let caller2_dialog = caller2
+        .make_call(QUEUE_NUMBER, Some(sdp.clone()))
+        .await
+        .unwrap();
+    wait_status(
+        &harness.cc_registry,
+        "alice",
+        Duration::from_secs(8),
+        "alice must be dispatched and Busy on call2",
         |s| matches!(s, AgentStatus::Busy { .. }),
     )
     .await;
-    let transferred_call_id = busy
-        .current_call_id()
-        .ok_or_else(|| anyhow!("Busy must be bound to the transferred call"))?
-        .to_string();
-    assert_ne!(
-        transferred_call_id, acw_call_id,
-        "the transfer must be tracked as a NEW call, not the ACW call"
-    );
-    let agent = harness.cc_registry.get_agent("bob").await.unwrap();
-    assert_eq!(agent.current_calls, 1);
 
-    // 5. call1's wrapup timer expires mid-call — must not Idle bob.
-    sleep(Duration::from_secs(TIMER_OVERSHOOT_SECS)).await;
-    let agent = harness.cc_registry.get_agent("bob").await.unwrap();
+    // 3. STEP 1 of a multi-step transfer: alice consults bob (ACW) via the
+    // CTI LegAdd consult dial. The command channel is fire-and-forget; the
+    // outcome is asserted through the session snapshot and the CC registry.
+    let handle = harness
+        .server
+        .registry
+        .get_handle_by_call_id(&caller2_dialog.call_id)
+        .ok_or_else(|| anyhow!("call2 must resolve to its owner session"))?;
+    handle
+        .send_command(CallCommand::LegAdd {
+            source_leg: None,
+            target: "bob".to_string(),
+            leg_id: Some(LegId::from("consult")),
+            headers: Vec::new(),
+            purpose: Some(LegPurpose::Consult),
+        })
+        .expect("consult command dispatch");
+
+    // 4. The gate must refuse BEFORE any leg is created or INVITE sent:
+    //    the session keeps its two legs (customer + alice) — a rung consult
+    //    would add a third "consult" leg — and bob is never rung.
+    sleep(Duration::from_secs(3)).await;
+    let snapshot = handle
+        .snapshot()
+        .ok_or_else(|| anyhow!("call2 must publish a session snapshot"))?;
+    assert_eq!(
+        snapshot.leg_count, 2,
+        "the refused consult must not create a consult leg (caller + agent only)"
+    );
+    let bob_after = harness.cc_registry.get_agent("bob").await.unwrap();
     assert!(
-        matches!(&agent.status,
-            AgentStatus::Busy { call_id, .. } if *call_id == transferred_call_id),
-        "expired ACW timer must not Idle a mid-call agent, got {}",
-        agent.status
+        matches!(bob_after.status, AgentStatus::Wrapup { .. }),
+        "the ACW target must stay Wrapup (consult never rang), got {}",
+        bob_after.status
+    );
+    assert_eq!(bob_after.current_calls, 0, "the ACW target was not rung");
+    let alice_after = harness.cc_registry.get_agent("alice").await.unwrap();
+    assert!(
+        matches!(alice_after.status, AgentStatus::Busy { .. }),
+        "the customer↔alice call must survive the refused consult, got {}",
+        alice_after.status
     );
 
-    // 6. Customer hangs up → bob enters the transfer call's own ACW.
+    // 5. The customer hangup ends the call cleanly (alice → her own Wrapup).
     caller2.hangup(&caller2_dialog).await.unwrap();
-    let after = wait_status(
+    wait_status(
         &harness.cc_registry,
-        "bob",
+        "alice",
         Duration::from_secs(8),
-        "ended transfer call must enter its own Wrapup",
-        |s| matches!(s, AgentStatus::Wrapup { call_id, .. } if *call_id == transferred_call_id),
+        "alice must enter her own Wrapup after the hangup",
+        |s| matches!(s, AgentStatus::Wrapup { .. }),
     )
     .await;
-    assert_eq!(
-        after.current_call_id().as_deref(),
-        Some(transferred_call_id.as_str())
-    );
-    let agent = harness.cc_registry.get_agent("bob").await.unwrap();
-    assert_eq!(agent.current_calls, 0);
     Ok(())
 }
