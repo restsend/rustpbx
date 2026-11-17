@@ -549,6 +549,10 @@ impl SipSession {
                 routed.credential = option.credential.clone();
                 routed.headers = option.headers.clone();
                 routed.contact_raw = Some(option.callee.to_string());
+                routed.outbound_trunk = hints
+                    .as_ref()
+                    .and_then(|hints| hints.extensions.get::<OutboundTrunkContext>())
+                    .cloned();
                 Ok((routed, hints))
             }
             Some(crate::config::RouteResult::NotHandled(_, _))
@@ -4654,6 +4658,76 @@ impl SipSession {
         )
     }
 
+    /// Stamp the outbound trunk's session-id correlation header
+    /// (`session_id_header`, falling back to the global default) with the
+    /// logical-call ROOT id.
+    ///
+    /// `trunk` is the route-table-selected target trunk when known. Without
+    /// one, the destination host:port is matched against configured trunk
+    /// destinations (route-disabled / legacy direct dials). Internal targets
+    /// never match a trunk destination, so agent/registration legs stay
+    /// header-free. A header already forwarded from the original INVITE is
+    /// replaced when it differs — the peer must see the retained root, not a
+    /// stale value.
+    fn stamp_outbound_correlation_header(
+        &self,
+        headers: &mut Vec<rsipstack::sip::Header>,
+        trunk: Option<&str>,
+        target: &crate::call::Location,
+        callee_uri: &rsipstack::sip::Uri,
+    ) {
+        let Some(root) = self.session_id_raw_candidate() else {
+            return;
+        };
+        let Some(root) = crate::call::session_id::normalize_custom(&root) else {
+            tracing::warn!(
+                session_id = %self.id,
+                value = %root,
+                "outbound session-id correlation value is not wire-safe; skipping header"
+            );
+            return;
+        };
+        let header_name = match trunk {
+            Some(name) => self
+                .server
+                .data_context
+                .session_id_header_for(Some(name)),
+            None => {
+                let (host, port) = Self::outbound_destination_host_port(target, callee_uri);
+                self.server
+                    .data_context
+                    .session_id_header_for_destination(&host, port)
+            }
+        };
+        if let Some(name) = header_name {
+            crate::call::session_id::set_correlation_header(headers, &name, &root);
+        }
+    }
+
+    /// Destination the outbound INVITE will actually be sent to. The explicit
+    /// `Location.destination` (route trunk next-hop) wins over the Request-URI
+    /// host; both feed the trunk-destination fallback.
+    fn outbound_destination_host_port(
+        target: &crate::call::Location,
+        callee_uri: &rsipstack::sip::Uri,
+    ) -> (String, u16) {
+        if let Some(destination) = target.destination.as_ref() {
+            (
+                destination.addr.host.to_string(),
+                destination.addr.port.map(|port| port.0).unwrap_or(5060),
+            )
+        } else {
+            (
+                callee_uri.host().to_string(),
+                callee_uri
+                    .host_with_port
+                    .port
+                    .map(|port| port.0)
+                    .unwrap_or(5060),
+            )
+        }
+    }
+
     /// True when the inbound request arrived from a configured cluster peer.
     ///
     /// Gate for the UUI `leg=` dial-intent marker: the marker changes this
@@ -5121,25 +5195,30 @@ impl SipSession {
         }
 
         // Trunk-bound legs stamp the configured correlation header with the
-        // current session id (verbatim string channel) — closing the round
+        // logical-call ROOT id (verbatim string channel) — closing the round
         // trip for trunk-level `session_id_header` adopters: the value a
-        // trunk sent on ingress comes back on egress. Only legs actually
-        // routed to a trunk (`OutboundTrunkContext`) stamp; internal /
-        // agent-bound legs carry no correlation header.
-        if let Some(trunk) = self.context.dialplan.extensions.get::<OutboundTrunkContext>() {
-            let name = self.server.data_context.session_id_header_for(Some(&trunk.name));
-            let id = self
-                .session_id_raw_candidate()
-                .as_deref()
-                .and_then(crate::call::session_id::normalize_custom);
-            if let (Some(name), Some(id)) = (name, id) {
-                // header_passthrough may already have forwarded the
-                // ingress header — never duplicate it.
-                if !headers.iter().any(|h| h.name().eq_ignore_ascii_case(&name)) {
-                    headers.push(rsipstack::sip::Header::Other(name, id));
-                }
-            }
-        }
+        // trunk sent on ingress comes back on egress. The per-target trunk
+        // context wins over the session dialplan context (a transfer target
+        // may route out a different trunk than the one this session entered
+        // on). Without either, a destination matching a configured trunk's
+        // next-hop is used (route-disabled / legacy direct dials); internal
+        // and agent-bound legs carry no correlation header.
+        let target_trunk = target
+            .outbound_trunk
+            .as_ref()
+            .map(|trunk| trunk.name.clone());
+        let dialplan_trunk = self
+            .context
+            .dialplan
+            .extensions
+            .get::<OutboundTrunkContext>()
+            .map(|trunk| trunk.name.clone());
+        self.stamp_outbound_correlation_header(
+            &mut headers,
+            target_trunk.as_deref().or(dialplan_trunk.as_deref()),
+            target,
+            &callee_uri,
+        );
 
         // CTI uses the agent leg's SIP Call-ID, including while it is ringing.
         // Register it before either sequential or parallel dialing sends INVITE.
@@ -17463,6 +17542,21 @@ impl SipSession {
             uuid::Uuid::new_v4().to_string()
         };
         self.meta.callee_call_ids.insert(bleg_call_id.clone());
+        // Dynamic legs (leg_add / consult / customer transfer / queue
+        // dispatch) rebuild their INVITE here instead of going through
+        // `build_target_invite_option`: stamp the route-selected trunk's
+        // session-id correlation header with the logical-call root. The
+        // destination fallback covers direct dials when routing is disabled.
+        let dynamic_trunk = location
+            .outbound_trunk
+            .as_ref()
+            .map(|trunk| trunk.name.clone());
+        self.stamp_outbound_correlation_header(
+            &mut headers,
+            dynamic_trunk.as_deref(),
+            &location,
+            &callee_uri,
+        );
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),

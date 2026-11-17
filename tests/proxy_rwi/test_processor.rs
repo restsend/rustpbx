@@ -975,6 +975,88 @@ async fn test_originate_explicit_trunk_skips_route() {
     );
 }
 
+/// RWI originate WITHOUT an explicit trunk selects a trunk through the route
+/// table: the outbound INVITE must carry that trunk's `session_id_header`
+/// with the logical-call root (the reported G-system X-GSession-ID gap).
+#[tokio::test]
+async fn test_originate_route_table_stamps_trunk_correlation_header() {
+    use crate::common::e2e_test_server::E2eTestServer;
+    use rustpbx::config::ProxyConfig;
+    use rustpbx::proxy::routing::{
+        DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig,
+    };
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let trunk_dest = format!("sip:{}", socket.local_addr().unwrap());
+    let mut config = ProxyConfig::default();
+    config.route_originated_calls = true;
+    config.routes = Some(vec![RouteRule {
+        name: "outbound-g".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("9.*".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("g-system".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    config.trunks = std::collections::HashMap::from([(
+        "g-system".to_string(),
+        TrunkConfig {
+            dest: trunk_dest,
+            session_id_header: Some("X-GSession-ID".to_string()),
+            ..Default::default()
+        },
+    )]);
+
+    let server = E2eTestServer::start_with_config(config)
+        .await
+        .expect("start e2e server");
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        Arc::new(RwLock::new(RwiGateway::new())),
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    const ROOT: &str = "708fed201de7cbb";
+    let result = processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                session_id: Some(ROOT.to_string()),
+                call_id: "route-g-header".into(),
+                destination: "sip:9001@rustpbx.com".into(),
+                caller_id: None,
+                timeout_secs: Some(2),
+                extra_headers: std::collections::HashMap::new(),
+                agent: None,
+                trunk: None,
+                route_originated_calls: Some(true),
+                record: None,
+            },
+        ))
+        .await;
+    assert!(result.is_ok(), "route-table originate failed: {result:?}");
+
+    let mut buffer = [0u8; 8192];
+    let (size, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        socket.recv_from(&mut buffer),
+    )
+    .await
+    .expect("routed originate INVITE must reach the trunk")
+    .expect("UDP receive");
+    let invite = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
+    assert!(
+        invite.contains(&format!("\r\nx-gsession-id: {ROOT}")),
+        "route-table originate must stamp the selected trunk's header: {invite}"
+    );
+}
+
 /// Agent click-to-call (CTI originate): the RWI originate path must emit the
 /// full unified `call_*` webhook chain — `call_ringing` when the dialed
 /// customer leg rings (180), `call_answered` when it connects — enriched with

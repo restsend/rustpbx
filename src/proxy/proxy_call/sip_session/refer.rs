@@ -1,5 +1,4 @@
 use super::prelude::*;
-use crate::call::TrunkContext;
 use super::SipSession;
 use crate::call::cookie::TransactionCookie;
 use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
@@ -1001,6 +1000,24 @@ impl SipSession {
             None,
             Some(refer_role),
         ));
+        // Legacy standalone REFER execution bypasses the route table, so the
+        // target trunk is resolved from its next-hop host:port. When the
+        // transfer target is a configured trunk (durable external transfer,
+        // e.g. the G system), stamp the trunk's correlation header with the
+        // original logical-call root id.
+        let refer_host = destination_uri.host().to_string();
+        let refer_port = destination_uri
+            .host_with_port
+            .port
+            .map(|port| port.0)
+            .unwrap_or(5060);
+        if let Some(name) = server
+            .data_context
+            .session_id_header_for_destination(&refer_host, refer_port)
+            && let Some(root) = crate::call::session_id::normalize_custom(&root_session_id)
+        {
+            crate::call::session_id::set_correlation_header(&mut headers, &name, &root);
+        }
         let media = server.default_media_config();
         let external_ip = media
             .external_ip

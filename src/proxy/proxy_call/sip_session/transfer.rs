@@ -2606,10 +2606,27 @@ impl SipSession {
                 routed.credential = option.credential.clone();
                 routed.headers = option.headers.clone();
                 routed.contact_raw = Some(option.callee.to_string());
+                routed.outbound_trunk = hints
+                    .as_ref()
+                    .and_then(|hints| {
+                        hints
+                            .extensions
+                            .get::<crate::call::OutboundTrunkContext>()
+                    })
+                    .cloned();
                 Ok(BlindTransferRoute::Dial(routed, hints))
             }
             Some(crate::config::RouteResult::NotHandled(_, hints)) => {
-                Ok(BlindTransferRoute::Dial(location.clone(), hints))
+                let mut routed = location.clone();
+                routed.outbound_trunk = hints
+                    .as_ref()
+                    .and_then(|hints| {
+                        hints
+                            .extensions
+                            .get::<crate::call::OutboundTrunkContext>()
+                    })
+                    .cloned();
+                Ok(BlindTransferRoute::Dial(routed, hints))
             }
             Some(crate::config::RouteResult::Queue { queue, hints, .. }) => {
                 Ok(BlindTransferRoute::Queue { queue, hints })

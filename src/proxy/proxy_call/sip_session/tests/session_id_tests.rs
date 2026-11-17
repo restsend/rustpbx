@@ -259,6 +259,14 @@ async fn trunk_correlation_session(with_trunk_context: bool) -> SipSession {
             ..Default::default()
         },
     );
+    server.data_context.trunks.insert(
+        "target-g".to_string(),
+        TrunkConfig {
+            dest: "sip:1.2.3.4:5060".to_string(),
+            session_id_header: Some("X-GSession-ID".to_string()),
+            ..Default::default()
+        },
+    );
     let request = create_test_request(
         rsipstack::sip::Method::Invite,
         "alice",
@@ -315,6 +323,34 @@ fn correlation_header_of(
         .iter()
         .find(|header| header.name().eq_ignore_ascii_case("X-Correlation-Id"))
         .map(|header| header.value().to_string())
+}
+
+fn header_value_of(
+    option: &rsipstack::dialog::invitation::InviteOption,
+    name: &str,
+) -> Option<String> {
+    option
+        .headers
+        .as_ref()?
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+        .map(|header| header.value().to_string())
+}
+
+fn header_count_of(
+    option: &rsipstack::dialog::invitation::InviteOption,
+    name: &str,
+) -> usize {
+    option
+        .headers
+        .as_ref()
+        .map(|headers| {
+            headers
+                .iter()
+                .filter(|header| header.name().eq_ignore_ascii_case(name))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// A CLUSTER PEER dispatching a child leg whose root is a CUSTOM correlation
@@ -381,6 +417,189 @@ async fn internal_legs_do_not_stamp_correlation_header() {
         None,
         "internal legs must not stamp the trunk correlation header"
     );
+}
+
+/// A route-selected TARGET trunk wins over the trunk this session entered
+/// on: blind/consult transfers out a different trunk must carry THAT trunk's
+/// header, not the ingress trunk's.
+#[tokio::test]
+async fn target_trunk_correlation_header_wins_over_dialplan_trunk() {
+    let mut session = trunk_correlation_session(true).await;
+    let target = crate::call::Location {
+        aor: "sip:13800000000@1.2.3.4:5060".parse().unwrap(),
+        outbound_trunk: Some(crate::call::OutboundTrunkContext {
+            id: Some(2),
+            name: "target-g".to_string(),
+            dest: Some("sip:1.2.3.4:5060".to_string()),
+            tenant_id: None,
+        }),
+        ..Default::default()
+    };
+    let (option, _callee, _call_id, _via_home) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("target-trunk INVITE must build");
+    assert_eq!(
+        header_value_of(&option, "X-GSession-ID").as_deref(),
+        Some("ORD-88923")
+    );
+    assert_eq!(
+        correlation_header_of(&option),
+        None,
+        "the ingress trunk's header must not be stamped on a different target trunk"
+    );
+}
+
+/// Dynamic legs / direct dials without routing hints fall back to matching
+/// the destination host:port against configured trunk next-hops.
+#[tokio::test]
+async fn destination_matching_stamps_trunk_correlation_header() {
+    let mut session = trunk_correlation_session(false).await;
+    let target = crate::call::Location {
+        aor: "sip:13800000000@1.2.3.4:5060".parse().unwrap(),
+        ..Default::default()
+    };
+    let (option, _callee, _call_id, _via_home) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("destination-matched INVITE must build");
+    assert_eq!(
+        header_value_of(&option, "X-GSession-ID").as_deref(),
+        Some("ORD-88923")
+    );
+}
+
+/// A stale same-name header (header passthrough / route rewrite / CTI
+/// headers) must be replaced by the logical-call root, not left in place or
+/// duplicated.
+#[tokio::test]
+async fn root_id_replaces_stale_correlation_header() {
+    let mut session = trunk_correlation_session(true).await;
+    let target = crate::call::Location {
+        aor: "sip:13800000000@1.2.3.4".parse().unwrap(),
+        headers: Some(vec![rsipstack::sip::Header::Other(
+            "X-Correlation-Id".to_string(),
+            "stale-id".to_string(),
+        )]),
+        ..Default::default()
+    };
+    let (option, _callee, _call_id, _via_home) = session
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("trunk INVITE must build");
+    assert_eq!(
+        correlation_header_of(&option).as_deref(),
+        Some("ORD-88923"),
+        "the root id must win over a stale forwarded header"
+    );
+    assert_eq!(
+        header_count_of(&option, "X-Correlation-Id"),
+        1,
+        "exactly one correlation header must be sent"
+    );
+}
+
+/// The dynamic-leg INVITE builder (`initiate_sip_leg` — leg_add / consult /
+/// customer transfer / queue dispatch) must carry the same header on the
+/// wire, not only in the plan-level option.
+#[tokio::test]
+async fn dynamic_leg_wire_invite_stamps_root_correlation_header() {
+    use crate::call::{DialDirection, Dialplan, OutboundTrunkContext};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::TrunkConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway,
+    };
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    use std::time::Duration;
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        ProxyConfig::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .data_context
+        .trunks
+        .insert(
+            "target-g".to_string(),
+            TrunkConfig {
+                session_id_header: Some("X-GSession-ID".to_string()),
+                ..Default::default()
+            },
+        );
+    // The shared test server installs a mock (channel) transport. Replace it
+    // with a real UDP transport and serve the endpoint so the dynamic leg's
+    // INVITE actually reaches the test socket.
+    let endpoint = server.endpoint.inner.clone();
+    server.endpoint.inner.transport_layer.del_transport(&SipAddr {
+        r#type: Some(rsipstack::sip::Transport::Udp),
+        addr: "127.0.0.1:5060".try_into().unwrap(),
+    });
+    let transport =
+        rsipstack::transport::udp::UdpConnection::create_connection(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    server
+        .endpoint
+        .inner
+        .transport_layer
+        .add_transport(transport.into());
+    crate::utils::spawn(async move {
+        let _ = endpoint.serve().await;
+    });
+
+    let root = "708fed201de7cbb";
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "example.test",
+        None,
+    );
+    let dialplan = Dialplan::new(root.to_string(), request, DialDirection::Outbound)
+        .with_caller("sip:alice@example.test".parse().unwrap())
+        .with_session_id_enabled(true);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let target = crate::call::Location {
+        aor: format!("sip:agent@{address}").parse().unwrap(),
+        outbound_trunk: Some(OutboundTrunkContext {
+            id: Some(1),
+            name: "target-g".to_string(),
+            dest: None,
+            tenant_id: None,
+        }),
+        ..Default::default()
+    };
+    let leg = LegId::from("dynamic-g");
+    session
+        .legs
+        .insert(leg.clone(), crate::call::domain::Leg::new(leg.clone()));
+    session
+        .initiate_sip_leg(&leg, target, None)
+        .await
+        .expect("dynamic leg must start");
+
+    let mut buffer = [0u8; 8192];
+    let (size, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        .await
+        .expect("dynamic-leg INVITE must reach the target")
+        .expect("UDP receive");
+    let invite = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
+    assert!(
+        invite.contains(&format!("\r\nx-gsession-id: {root}")),
+        "dynamic-leg INVITE must carry the root id: {invite}"
+    );
+    session.cancel_token.cancel();
 }
 
 #[tokio::test]

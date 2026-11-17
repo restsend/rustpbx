@@ -674,6 +674,7 @@ impl ProxyModule for RegistrarModule {
                     .user_agent_header()
                     .map(|header| header.value().to_string()),
                 home_proxy,
+                outbound_trunk: None,
             };
 
             if location.transport.is_none() {

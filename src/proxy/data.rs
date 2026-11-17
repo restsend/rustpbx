@@ -86,6 +86,21 @@ impl ProxyDataContext {
             .or_else(|| crate::call::session_id::settings().source_header.clone())
     }
 
+    /// Same as [`Self::session_id_header_for`], resolved from the destination
+    /// (host:port) when no trunk name is available — direct-to-trunk dialing,
+    /// legacy REFER execution, or dynamic legs built without routing hints.
+    /// Only destinations that match a configured trunk destination are
+    /// considered; an unmatched (non-trunk) target never gets a correlation
+    /// header through this fallback.
+    pub fn session_id_header_for_destination(&self, host: &str, port: u16) -> Option<String> {
+        let trunks = self.trunks_snapshot();
+        let trunk = crate::proxy::routing::find_trunk_by_dest(&trunks, host, port)?;
+        trunk
+            .session_id_header
+            .clone()
+            .or_else(|| crate::call::session_id::settings().source_header.clone())
+    }
+
     pub async fn new(config: Arc<ProxyConfig>, db: Option<DatabaseConnection>) -> Result<Self> {
         let trunk_registrar = Arc::new(TrunkRegistrar::new());
 
@@ -1266,6 +1281,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
                 _ => None,
             }
         }),
+        session_id_header: from_str(sbc.and_then(|s| s.get("session_id_header"))),
         health_check_enabled: from_bool(sbc.and_then(|s| s.get("health_check_enabled"))),
         health_check_per_ip: from_bool(sbc.and_then(|s| s.get("health_check_per_ip"))),
         health_check_interval_secs: sbc
@@ -1386,6 +1402,9 @@ pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkCon
             let sbc = sbc_config_from_metadata(meta);
             if sbc.call_id_mode.is_some() {
                 trunk.call_id_mode = sbc.call_id_mode;
+            }
+            if sbc.session_id_header.is_some() {
+                trunk.session_id_header = sbc.session_id_header;
             }
             if sbc.health_check_enabled.is_some() {
                 trunk.health_check_enabled = sbc.health_check_enabled;
@@ -2514,6 +2533,28 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert_eq!(trunk.ice_lite, None);
+    }
+
+    /// Console/DB-managed trunks carry SBC overrides in `metadata.sbc`.
+    /// `session_id_header` must survive the model → TrunkConfig conversion —
+    /// otherwise per-trunk correlation headers silently fall back to the
+    /// global default (or disappear entirely).
+    #[test]
+    fn convert_trunk_merges_sbc_session_id_header() {
+        let model = sip_trunk::Model {
+            id: 7,
+            name: "g-system".to_string(),
+            sip_server: Some("sip:10.0.0.9:5060".to_string()),
+            metadata: Some(serde_json::json!({
+                "sbc": {"session_id_header": "X-GSession-ID"}
+            })),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert_eq!(
+            trunk.session_id_header.as_deref(),
+            Some("X-GSession-ID")
+        );
     }
 
     #[test]
