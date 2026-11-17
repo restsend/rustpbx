@@ -14944,6 +14944,45 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::QueryAnsweredConsultTarget { reply } => {
+                // Attended-REFER gate: the party that already ANSWERED this
+                // (consult) session — the first CONNECTED|HOLD leg that is
+                // not the transferor's own caller leg. Classic consults keep
+                // it in the `callee` slot; queue/IVR dispatched legs hang off
+                // dynamic leg ids with the dialed party as `endpoint`.
+                // Application-target consults (IVR prompt playing) surface
+                // the app leg's endpoint — the caller discriminates via the
+                // agent registry.
+                let mut candidates: Vec<_> = self
+                    .legs
+                    .iter()
+                    .filter(|(id, leg)| {
+                        id.as_str() != "caller"
+                            && matches!(leg.state, LegState::Connected | LegState::Hold)
+                    })
+                    .collect();
+                // Classic callee shape first, then dynamic legs in leg order.
+                candidates.sort_by_key(|(id, _)| if id.as_str() == "callee" { 0 } else { 1 });
+                let answer = candidates.into_iter().find_map(|(_, leg)| {
+                    let endpoint = leg.endpoint.as_deref().unwrap_or_default();
+                    if endpoint.is_empty() {
+                        return None;
+                    }
+                    let user = endpoint
+                        .split('@')
+                        .next()
+                        .unwrap_or(endpoint)
+                        .trim_start_matches("sip:")
+                        .trim_start_matches("sips:");
+                    Some(crate::call::domain::AnsweredConsultTarget {
+                        endpoint_user: user.to_string(),
+                        endpoint: endpoint.to_string(),
+                    })
+                });
+                let _ = reply.send(answer);
+                CommandResult::success()
+            }
+
             CallCommand::ConferenceEnded { conference_id } => {
                 if self
                     .conference
@@ -15923,7 +15962,15 @@ impl SipSession {
                 .as_ref()
                 .is_none_or(|d| d.state().is_terminated());
 
-        if !caller_alive {
+        // An outbound hand-off retires the TRANSFEROR's caller leg while the
+        // customer (callee) survives. A bridge step that carries a return app
+        // (the facade step-IVR's `return_ivr_resume`) must CONTINUE the tree
+        // on the surviving leg — only a bare bridge with no return app ends
+        // the call here (production 2026-11-16: the announcement bridge close
+        // hung up the transferred customer because the retired caller leg was
+        // mistaken for "the caller died while suspended").
+        let has_return_app = self.meta.transfer_return_app.is_some();
+        if !caller_alive && !has_return_app {
             // An outbound transfer retired the caller/agent, not the customer;
             // the surviving primary dialog still needs the target's hangup.
             if self.meta.transferred && !self.legs.contains_key(&LegId::from("caller")) {
@@ -16049,8 +16096,17 @@ impl SipSession {
             }
         }
 
-        // 3. Neither hook nor return app — hang up the caller.
-        self.pending_hangup.insert(self.caller_dialog_id());
+        // 3. Neither hook nor return app — hang up the surviving primary
+        // dialog (the caller when alive; the transferred customer otherwise).
+        let hangup_dialog = if caller_alive {
+            self.caller_dialog_id()
+        } else {
+            self.meta
+                .connected_callee_dialog_id
+                .clone()
+                .unwrap_or_else(|| self.caller_dialog_id())
+        };
+        self.pending_hangup.insert(hangup_dialog);
         CommandResult::success()
     }
 
@@ -16838,9 +16894,21 @@ impl SipSession {
         if self.app_runtime.current_app().as_deref() == Some("queue")
             && self.media_leg(&LegId::from("caller")).is_none()
         {
-            self.prepare_app_caller_media_bridge()
-                .await
-                .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
+            // Outbound hand-off into the queue (blind transfer whose
+            // transferor WAS the caller leg): the caller leg was retired on
+            // purpose and the customer survives as the CALLEE media leg —
+            // the app's media is already anchored there (waiting music plays
+            // to the callee). The caller-leg repair must not abort the agent
+            // dispatch (production 2026-11-17: the dispatch died before the
+            // INVITE, the agent never rang, and the 30s no-answer pushed the
+            // client into a break).
+            let caller_retired_by_handoff =
+                self.meta.transferred && !self.legs.contains_key(&LegId::from("caller"));
+            if !caller_retired_by_handoff {
+                self.prepare_app_caller_media_bridge()
+                    .await
+                    .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
+            }
         }
 
         let mut leg =
