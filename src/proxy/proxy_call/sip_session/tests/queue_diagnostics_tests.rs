@@ -323,6 +323,7 @@ impl crate::proxy::locator::Locator for DelayedRecoveryLocator {
     async fn unregister_with_address(
         &self,
         _: &rsipstack::transport::SipAddr,
+        _: &(dyn for<'l> Fn(&'l crate::call::Location) -> bool + Send + Sync),
     ) -> anyhow::Result<Option<Vec<crate::call::Location>>> {
         Ok(None)
     }

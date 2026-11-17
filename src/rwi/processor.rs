@@ -1487,9 +1487,9 @@ impl RwiCommandProcessor {
             let originate_sip_headers = crate::call::app::sip_headers_from(
                 invite_option.headers.as_deref().unwrap_or(&[]),
             );
-            let mut invitation = dialog_layer
-                .do_invite(invite_option, caller_state_tx)
-                .boxed();
+            let mut invitation =
+                crate::proxy::push::send_invite(server.clone(), invite_option, caller_state_tx)
+                    .boxed();
 
             let entry = ActiveProxyCallEntry {
                 session_id: call_id.clone(),
@@ -1590,7 +1590,7 @@ impl RwiCommandProcessor {
                 async {
                     loop {
                         tokio::select! {
-                            res = &mut invitation => break Some(res),
+                            (res, _sent) = &mut invitation => break Some(res),
                             state = caller_state_rx.recv() => {
                                 match state {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
