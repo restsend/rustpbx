@@ -3546,6 +3546,26 @@ impl SipSession {
                     }
                 };
 
+                // Stateful FIR for decode-rate → WS-rate conversion, built
+                // once: filter state must persist across frames (a per-frame
+                // instance clicks at every boundary, and naive decimation
+                // aliases the upper voice band).
+                let mut reverse_resampler = if dec_sample_rate != ws_sample_rate {
+                    match audio_codec::BoxedResampler::new(
+                        dec_sample_rate as usize,
+                        ws_sample_rate as usize,
+                    ) {
+                        Ok(rs) => Some(rs),
+                        Err(e) => {
+                            warn!(session_id = %session_id, %dec_sample_rate, %ws_sample_rate, %e,
+                                "Bridge reverse resampler build failed; passing PCM through");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 loop {
                     tokio::select! {
                         biased;
@@ -3579,12 +3599,9 @@ impl SipSession {
                                     if !is_dtmf {
                                         // Regular audio frame — decode to PCM, resample, send as binary
                                         let pcm = decoder.decode(&frame.data);
-                                        let samples = if dec_sample_rate != ws_sample_rate {
-                                            crate::call::runtime::conference_media_bridge::resample_linear(
-                                                &pcm, dec_sample_rate, ws_sample_rate,
-                                            )
-                                        } else {
-                                            pcm
+                                        let samples = match &mut reverse_resampler {
+                                            Some(rs) => rs.resample(&pcm),
+                                            None => pcm,
                                         };
                                         let mut bytes = Vec::with_capacity(samples.len() * 2);
                                         for s in &samples {
@@ -4755,26 +4772,5 @@ mod tests {
         assert_eq!(&last[..40], &tx_samples[160..]);
         assert!(last[40..].iter().all(|sample| *sample == 0));
         assert_eq!(source.read_samples(&mut last), 0);
-    }
-
-    #[tokio::test]
-    async fn test_voip_bridge_resample_linear_8k_to_16k() {
-        // Generate 160 samples of 8kHz PCM (= 20ms)
-        let input: Vec<i16> = (0..160).map(|i| (i * 100) as i16).collect();
-        let output =
-            crate::call::runtime::conference_media_bridge::resample_linear(&input, 8000, 16000);
-        // 160 samples at 8kHz → 320 samples at 16kHz (same duration)
-        assert_eq!(output.len(), 320, "8k→16k should double sample count");
-        // First and last samples should match
-        assert_eq!(output[0], input[0]);
-        assert_eq!(output[output.len() - 1], input[input.len() - 1]);
-    }
-
-    #[tokio::test]
-    async fn test_voip_bridge_resample_linear_16k_to_8k() {
-        let input: Vec<i16> = (0..320).map(|i| (i * 50) as i16).collect();
-        let output =
-            crate::call::runtime::conference_media_bridge::resample_linear(&input, 16000, 8000);
-        assert_eq!(output.len(), 160, "16k→8k should halve sample count");
     }
 }

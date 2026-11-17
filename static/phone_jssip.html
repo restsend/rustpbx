@@ -1,11 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CC SIP Phone (jssip 3.10.0)</title>
     <style>
-        * { box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+        }
+
         body {
             font-family: 'Segoe UI', Arial, sans-serif;
             max-width: 1400px;
@@ -13,45 +17,61 @@
             padding: 20px;
             background-color: #f5f5f5;
         }
+
         .container {
             background: white;
             padding: 30px;
             border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
         }
+
         .layout {
             display: flex;
             gap: 20px;
             flex-wrap: wrap;
         }
-        .left-panel, .right-panel {
+
+        .left-panel,
+        .right-panel {
             flex: 1 1 380px;
             display: flex;
             flex-direction: column;
             gap: 20px;
         }
+
         .section {
             margin-bottom: 20px;
             padding: 20px;
             border: 1px solid #ddd;
             border-radius: 5px;
         }
+
         .section h3 {
             margin-top: 0;
             color: #333;
             border-bottom: 2px solid #007bff;
             padding-bottom: 8px;
         }
+
         .form-group {
             margin-bottom: 15px;
         }
+
         label {
             display: block;
             margin-bottom: 5px;
             font-weight: bold;
             font-size: 13px;
         }
-        input[type="text"], input[type="password"], input[type="url"], input[type="tel"], input[type="number"], textarea, button, select {
+
+        input[type="text"],
+        input[type="password"],
+        input[type="url"],
+        input[type="tel"],
+        input[type="number"],
+        textarea,
+        button,
+        select {
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
@@ -59,13 +79,19 @@
             box-sizing: border-box;
             font-size: 13px;
         }
-        input[type="checkbox"] { width: auto; margin-right: 8px; }
+
+        input[type="checkbox"] {
+            width: auto;
+            margin-right: 8px;
+        }
+
         label.checkbox-inline {
             display: inline-flex;
             align-items: center;
             gap: 8px;
             font-weight: normal;
         }
+
         button {
             background: #007bff;
             color: white;
@@ -73,28 +99,88 @@
             margin-top: 10px;
             font-weight: 600;
         }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        button.secondary { background: #6c757d; }
-        button.secondary:hover { background: #545b62; }
-        button.danger { background: #dc3545; }
-        button.danger:hover { background: #c82333; }
-        button.success { background: #28a745; }
-        button.success:hover { background: #218838; }
-        button.warning { background: #ffc107; color: #212529; }
-        button.warning:hover { background: #e0a800; }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: #6c757d;
+        }
+
+        button.secondary:hover {
+            background: #545b62;
+        }
+
+        button.danger {
+            background: #dc3545;
+        }
+
+        button.danger:hover {
+            background: #c82333;
+        }
+
+        button.success {
+            background: #28a745;
+        }
+
+        button.success:hover {
+            background: #218838;
+        }
+
+        button.warning {
+            background: #ffc107;
+            color: #212529;
+        }
+
+        button.warning:hover {
+            background: #e0a800;
+        }
+
         .status {
             padding: 10px;
             margin: 10px 0;
             border-radius: 4px;
             font-size: 13px;
         }
-        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .status.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-        .status.warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
-        .call-controls { display: none; }
-        .call-controls.active { display: block; }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .status.warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .call-controls {
+            display: none;
+        }
+
+        .call-controls.active {
+            display: block;
+        }
+
         .logs {
             height: 280px;
             overflow-y: auto;
@@ -107,6 +193,7 @@
             word-break: break-all;
             border-radius: 4px;
         }
+
         .incoming-call {
             display: none;
             background: #fff3cd;
@@ -115,21 +202,39 @@
             border-radius: 5px;
             margin: 10px 0;
         }
-        .incoming-call.active { display: block; }
-        .call-info { margin: 10px 0; font-weight: bold; }
+
+        .incoming-call.active {
+            display: block;
+        }
+
+        .call-info {
+            margin: 10px 0;
+            font-weight: bold;
+        }
+
         .video-container {
             display: none;
             gap: 10px;
             flex-wrap: wrap;
         }
-        .video-container.active { display: flex; }
+
+        .video-container.active {
+            display: flex;
+        }
+
         .video-box {
             flex: 1 1 200px;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
-        .video-box label { font-size: 12px; color: #666; margin-bottom: 4px; }
+
+        .video-box label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+
         .video-box video {
             width: 100%;
             max-width: 320px;
@@ -146,6 +251,7 @@
             gap: 10px;
             margin-top: 10px;
         }
+
         .stat-box {
             background: #f8f9fa;
             border: 1px solid #e9ecef;
@@ -153,21 +259,32 @@
             padding: 10px;
             text-align: center;
         }
+
         .stat-box .stat-label {
             font-size: 11px;
             color: #6c757d;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
+
         .stat-box .stat-value {
             font-size: 18px;
             font-weight: bold;
             color: #212529;
             margin-top: 4px;
         }
-        .stat-box .stat-value.good { color: #28a745; }
-        .stat-box .stat-value.warning { color: #ffc107; }
-        .stat-box .stat-value.bad { color: #dc3545; }
+
+        .stat-box .stat-value.good {
+            color: #28a745;
+        }
+
+        .stat-box .stat-value.warning {
+            color: #ffc107;
+        }
+
+        .stat-box .stat-value.bad {
+            color: #dc3545;
+        }
 
         /* Quality Bar */
         .quality-bar {
@@ -178,14 +295,24 @@
             overflow: hidden;
             margin-top: 6px;
         }
+
         .quality-bar-fill {
             height: 100%;
             border-radius: 4px;
             transition: width 0.5s ease, background-color 0.5s ease;
         }
-        .quality-bar-fill.good { background: #28a745; }
-        .quality-bar-fill.warning { background: #ffc107; }
-        .quality-bar-fill.bad { background: #dc3545; }
+
+        .quality-bar-fill.good {
+            background: #28a745;
+        }
+
+        .quality-bar-fill.warning {
+            background: #ffc107;
+        }
+
+        .quality-bar-fill.bad {
+            background: #dc3545;
+        }
 
         /* CC Controls */
         .cc-controls {
@@ -194,6 +321,7 @@
             gap: 8px;
             margin-top: 10px;
         }
+
         .cc-controls button {
             margin-top: 0;
             padding: 8px;
@@ -211,15 +339,28 @@
             max-height: 200px;
             overflow-y: auto;
         }
+
         .debug-panel .debug-entry {
             margin-bottom: 4px;
             padding: 2px 0;
             border-bottom: 1px solid #333;
         }
-        .debug-panel .debug-time { color: #858585; }
-        .debug-panel .debug-info { color: #4fc1ff; }
-        .debug-panel .debug-warn { color: #ffcc00; }
-        .debug-panel .debug-error { color: #f48771; }
+
+        .debug-panel .debug-time {
+            color: #858585;
+        }
+
+        .debug-panel .debug-info {
+            color: #4fc1ff;
+        }
+
+        .debug-panel .debug-warn {
+            color: #ffcc00;
+        }
+
+        .debug-panel .debug-error {
+            color: #f48771;
+        }
 
         /* Tabs */
         .tabs {
@@ -227,6 +368,7 @@
             border-bottom: 2px solid #dee2e6;
             margin-bottom: 15px;
         }
+
         .tab {
             padding: 10px 20px;
             cursor: pointer;
@@ -238,25 +380,42 @@
             border-bottom: 2px solid transparent;
             margin-bottom: -2px;
         }
-        .tab:hover { color: #495057; }
+
+        .tab:hover {
+            color: #495057;
+        }
+
         .tab.active {
             color: #007bff;
             border-bottom-color: #007bff;
         }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
 
         /* Transfer Dialog */
         .transfer-dialog {
             display: none;
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.5);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
             z-index: 1000;
             justify-content: center;
             align-items: center;
         }
-        .transfer-dialog.active { display: flex; }
+
+        .transfer-dialog.active {
+            display: flex;
+        }
+
         .transfer-dialog-content {
             background: white;
             padding: 30px;
@@ -266,10 +425,22 @@
         }
 
         @media (max-width: 768px) {
-            body { max-width: 100%; padding: 10px; }
-            .layout { flex-direction: column; }
-            .stats-grid { grid-template-columns: 1fr; }
-            .cc-controls { grid-template-columns: 1fr; }
+            body {
+                max-width: 100%;
+                padding: 10px;
+            }
+
+            .layout {
+                flex-direction: column;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .cc-controls {
+                grid-template-columns: 1fr;
+            }
         }
 
         /* DTMF Keypad */
@@ -278,12 +449,14 @@
             padding-top: 12px;
             border-top: 1px solid #e9ecef;
         }
+
         .dtmf-section h4 {
             margin: 0 0 8px 0;
             font-size: 13px;
             color: #495057;
             font-weight: 600;
         }
+
         .dtmf-display {
             font-family: 'Consolas', 'Monaco', monospace;
             background: #f8f9fa;
@@ -296,11 +469,13 @@
             letter-spacing: 3px;
             color: #212529;
         }
+
         .dtmf-keypad {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 6px;
         }
+
         .dtmf-btn {
             background: #f8f9fa;
             color: #212529;
@@ -319,14 +494,24 @@
             transition: background 0.1s, transform 0.05s;
             width: 100%;
         }
-        .dtmf-btn:hover { background: #e2e6ea; border-color: #adb5bd; }
-        .dtmf-btn:active { background: #adb5bd; transform: scale(0.95); }
+
+        .dtmf-btn:hover {
+            background: #e2e6ea;
+            border-color: #adb5bd;
+        }
+
+        .dtmf-btn:active {
+            background: #adb5bd;
+            transform: scale(0.95);
+        }
+
         .dtmf-btn small {
             font-size: 9px;
             font-weight: normal;
             color: #6c757d;
             letter-spacing: 0.5px;
         }
+
         .dtmf-actions {
             display: flex;
             gap: 6px;
@@ -334,6 +519,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <h1>CC SIP Phone <small style="font-size:14px;color:#6c757d;">(jssip 3.10.0 + CC Debug)</small></h1>
@@ -345,24 +531,28 @@
                     <h3>Registration</h3>
                     <div class="form-group">
                         <label for="server">SIP Server (WebSocket URL):</label>
-                        <input type="text" id="server" data-default-path="/ws" placeholder="ws://localhost:8080/ws">
+                        <input type="text" id="server" data-default-path="/ws" value="ws://192.168.108.218:8080/ws"
+                            placeholder="ws://localhost:8080/ws">
                     </div>
                     <div class="form-group">
                         <label for="username">Username:</label>
-                        <input type="text" id="username" value="bob" placeholder="bob">
+                        <input type="text" id="username" value="1017" placeholder="bob">
                     </div>
                     <div class="form-group">
                         <label for="password">Password:</label>
-                        <input type="password" id="password" value="123456" placeholder="password">
+                        <input type="password" id="password" value="1234" placeholder="password">
                     </div>
                     <div class="form-group">
                         <label for="displayName">Display Name:</label>
                         <input type="text" id="displayName" value="Bob" placeholder="Bob">
                     </div>
                     <div class="form-group">
-                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE servers</label>
-                        <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly"> Relay Only</label>
-                        <textarea id="iceServers" rows="3" style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE
+                            servers</label>
+                        <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly">
+                            Relay Only</label>
+                        <textarea id="iceServers" rows="3"
+                            style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
                     </div>
                     <div class="form-group">
                         <label for="audioCodec">Audio codec (offer preference):</label>
@@ -457,22 +647,28 @@
                         <label>Video Source:</label>
                         <div style="margin-bottom:6px;">
                             <label class="checkbox-inline" style="margin-right:16px;">
-                                <input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked> Camera
+                                <input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked>
+                                Camera
                             </label>
                             <label class="checkbox-inline">
-                                <input type="radio" name="videoSource" id="videoSourceClock" value="clock"> Clock (Virtual)
+                                <input type="radio" name="videoSource" id="videoSourceClock" value="clock"> Clock
+                                (Virtual)
                             </label>
                         </div>
                         <div id="cameraSelectorDiv">
                             <div style="display:flex;gap:6px;align-items:center;">
-                                <select id="cameraSelect" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                                <select id="cameraSelect"
+                                    style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
                                     <option value="">Default Camera</option>
                                 </select>
-                                <button type="button" id="refreshCamerasBtn" style="width:auto;flex-shrink:0;margin:0;padding:8px 10px;" title="Refresh camera list">&#x21BB;</button>
+                                <button type="button" id="refreshCamerasBtn"
+                                    style="width:auto;flex-shrink:0;margin:0;padding:8px 10px;"
+                                    title="Refresh camera list">&#x21BB;</button>
                             </div>
                         </div>
                         <div id="videoPreviewDiv" style="display:none;margin-top:8px;">
-                            <canvas id="clockCanvas" width="320" height="240" style="width:100%;border-radius:4px;display:block;background:#111;"></canvas>
+                            <canvas id="clockCanvas" width="320" height="240"
+                                style="width:100%;border-radius:4px;display:block;background:#111;"></canvas>
                         </div>
                     </div>
                     <button id="callBtn" disabled>Call</button>
@@ -504,14 +700,17 @@
                                 <button type="button" class="dtmf-btn" data-key="#">#</button>
                             </div>
                             <div class="dtmf-actions">
-                                <label for="dtmfTransport" style="display:flex;align-items:center;gap:6px;margin:0;font-size:12px;color:#555;">
+                                <label for="dtmfTransport"
+                                    style="display:flex;align-items:center;gap:6px;margin:0;font-size:12px;color:#555;">
                                     Transport:
-                                    <select id="dtmfTransport" style="padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:4px;">
+                                    <select id="dtmfTransport"
+                                        style="padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:4px;">
                                         <option value="RFC2833" selected>RFC2833</option>
                                         <option value="INFO">INFO</option>
                                     </select>
                                 </label>
-                                <button type="button" id="dtmfClearBtn" class="secondary" style="width:auto;padding:6px 14px;font-size:12px;margin-top:0;">Clear</button>
+                                <button type="button" id="dtmfClearBtn" class="secondary"
+                                    style="width:auto;padding:6px 14px;font-size:12px;margin-top:0;">Clear</button>
                             </div>
                         </div>
                     </div>
@@ -589,8 +788,10 @@
                             <textarea id="ccRawCommand" rows="3">{"action":"status.update","status":"idle"}</textarea>
                         </div>
                         <button type="button" id="connectCcWsBtn" style="width:auto;">Connect CC WS</button>
-                        <button type="button" id="disconnectCcWsBtn" class="secondary" style="width:auto;">Disconnect</button>
-                        <button type="button" id="sendCcCmdBtn" class="warning" style="width:auto;">Send Command</button>
+                        <button type="button" id="disconnectCcWsBtn" class="secondary"
+                            style="width:auto;">Disconnect</button>
+                        <button type="button" id="sendCcCmdBtn" class="warning" style="width:auto;">Send
+                            Command</button>
                         <div id="ccWsStatus" class="status info" style="margin-top:10px;">CC WS: disconnected</div>
                         <div class="debug-panel" id="ccWsLog" style="margin-top:10px;height:150px;"></div>
                     </div>
@@ -598,33 +799,44 @@
                         <div class="debug-panel" id="callStateDebug" style="height:200px;">
                             <div class="debug-entry">No active call</div>
                         </div>
-                        <button type="button" id="refreshStateBtn" style="width:auto;margin-top:8px;">Refresh State</button>
+                        <button type="button" id="refreshStateBtn" style="width:auto;margin-top:8px;">Refresh
+                            State</button>
                     </div>
                     <div class="tab-content" id="debug-sip">
                         <div class="debug-panel" id="sipMessagesLog" style="height:200px;"></div>
-                        <button type="button" id="clearSipLogBtn" class="secondary" style="width:auto;margin-top:8px;">Clear SIP Log</button>
+                        <button type="button" id="clearSipLogBtn" class="secondary"
+                            style="width:auto;margin-top:8px;">Clear SIP Log</button>
                     </div>
                     <div class="tab-content" id="debug-sip-commands">
                         <div class="form-group">
                             <label>Preset:</label>
                             <select id="sipCmdPreset" style="width:100%;" onchange="onSipCmdPresetChange()">
                                 <option value="">-- Custom --</option>
-                                <option value='{"action":"media.play","params":{"source":{"source_type":"silence"}}}'>media.play (silence)</option>
+                                <option value='{"action":"media.play","params":{"source":{"source_type":"silence"}}}'>
+                                    media.play (silence)</option>
                                 <option value='{"action":"media.stop","params":{}}'>media.stop</option>
-                                <option value='{"action":"media.inject_start","params":{"source":{"source_type":"silence"}}}'>media.inject_start</option>
+                                <option
+                                    value='{"action":"media.inject_start","params":{"source":{"source_type":"silence"}}}'>
+                                    media.inject_start</option>
                                 <option value='{"action":"media.inject_stop","params":{}}'>media.inject_stop</option>
-                                <option value='{"action":"record.start","params":{"path":"/tmp/recording.wav","beep":true}}'>record.start</option>
+                                <option
+                                    value='{"action":"record.start","params":{"path":"/tmp/recording.wav","beep":true}}'>
+                                    record.start</option>
                                 <option value='{"action":"record.stop","params":{}}'>record.stop</option>
                                 <option value='{"action":"hold","params":{"leg_id":"caller"}}'>hold</option>
                                 <option value='{"action":"unhold","params":{"leg_id":"caller"}}'>unhold</option>
-                                <option value='{"action":"media.play","params":{"source":{"source_type":"files","uris":["/tmp/announce.wav","/tmp/music.wav"]}}}'>media.play (multi-url)</option>
+                                <option
+                                    value='{"action":"media.play","params":{"source":{"source_type":"files","uris":["/tmp/announce.wav","/tmp/music.wav"]}}}'>
+                                    media.play (multi-url)</option>
                             </select>
                         </div>
                         <div class="form-group">
                             <label>JSON Body (SIP INFO):</label>
-                            <textarea id="sipCmdBody" rows="4">{"action":"media.play","params":{"source":{"source_type":"silence"}}}</textarea>
+                            <textarea id="sipCmdBody"
+                                rows="4">{"action":"media.play","params":{"source":{"source_type":"silence"}}}</textarea>
                         </div>
-                        <button type="button" id="sendSipInfoCmdBtn" style="width:auto;" onclick="sendSipInfoCommand()">Send INFO Command</button>
+                        <button type="button" id="sendSipInfoCmdBtn" style="width:auto;"
+                            onclick="sendSipInfoCommand()">Send INFO Command</button>
                         <div class="debug-panel" id="sipCmdLog" style="margin-top:10px;height:150px;"></div>
                     </div>
                     <div class="tab-content" id="debug-http-commands">
@@ -639,7 +851,8 @@
 
                         <div class="form-group">
                             <label>JSON Body:</label>
-                             <textarea id="httpCmdBody" rows="6">{"action":"play","leg_id":"both","source":{"type":"url","url":"http://192.168.3.181:8000/H000026548852213211.wav"},"loop_playback":false}</textarea>
+                            <textarea id="httpCmdBody"
+                                rows="6">{"action":"play","leg_id":"both","source":{"type":"url","url":"http://192.168.3.181:8000/H000026548852213211.wav"},"loop_playback":false}</textarea>
                         </div>
                         <button type="button" id="sendHttpCmdBtn" onclick="sendHttpCommand()">Send HTTP Command</button>
                         <div class="debug-panel" id="httpCmdLog" style="margin-top:10px;height:150px;"></div>
@@ -664,7 +877,7 @@
         </div>
     </div>
 
-    <script src="//jssip.net/download/releases/jssip-3.10.0.min.js"></script>
+    <script src="jssip-3.10.0.min.js"></script>
     <script>
         'use strict';
 
@@ -923,7 +1136,7 @@
                     _phoneConfig = cfg;
                     return cfg;
                 }
-            } catch (e) {}
+            } catch (e) { }
             return _phoneConfig;
         }
 
@@ -1100,7 +1313,7 @@
                 if (inbound && inbound.codecId && codecs[inbound.codecId]) {
                     return codecs[inbound.codecId].replace(/^audio\//i, '');
                 }
-            } catch (_) {}
+            } catch (_) { }
             return null;
         }
 
@@ -1309,7 +1522,7 @@
                 closed = true; iceDiagInProgress = false;
                 if (runIceDiagBtn) runIceDiagBtn.disabled = false;
                 if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
-                if (pc) { try { pc.close(); } catch (e) {} }
+                if (pc) { try { pc.close(); } catch (e) { } }
                 const elapsed = Date.now() - startedAt;
                 const typeCounts = candidates.reduce((acc, c) => { acc[c.type || 'unknown'] = (acc[c.type || 'unknown'] || 0) + 1; return acc; }, {});
                 const summary = Object.keys(typeCounts).length ? Object.keys(typeCounts).map((k) => `${k}:${typeCounts[k]}`).join(', ') : 'none';
@@ -1558,7 +1771,7 @@
                         out.relatedPort = Number.isNaN(parsedRport) ? null : parsedRport;
                     }
                 }
-            } catch (error) {}
+            } catch (error) { }
             return out;
         }
 
@@ -1920,7 +2133,7 @@
             try {
                 const pcConfig = getEnabledPcConfigFromUi();
                 if (pcConfig) callOptions.pcConfig = pcConfig;
-            } catch (e) {}
+            } catch (e) { }
 
             lastOutgoingCallTime = Date.now();
             lastOutgoingCallLabel = target;
@@ -2006,7 +2219,7 @@
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `consult:${fallbackRemote}`;
                     monitorIceGatheringJs(session, data.peerconnection, label);
-                } catch (e) {}
+                } catch (e) { }
             });
             if (session.connection) {
                 attachMedia(session.connection);
@@ -2014,10 +2227,10 @@
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `consult:${fallbackRemote}`;
                     monitorIceGatheringJs(session, session.connection, label);
-                } catch (e) {}
+                } catch (e) { }
             }
             session.on('icecandidate', (event) => {
-                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
+                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) { }
             });
         }
 
@@ -2086,7 +2299,7 @@
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
                     monitorIceGatheringJs(session, data.peerconnection, label);
-                } catch (e) {}
+                } catch (e) { }
             });
             if (session.connection) {
                 log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
@@ -2096,10 +2309,10 @@
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
                     monitorIceGatheringJs(session, session.connection, label);
-                } catch (e) {}
+                } catch (e) { }
             }
             session.on('icecandidate', (event) => {
-                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
+                try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) { }
             });
             session.on('sdp', (data) => {
                 if (data.originator === 'local' && data.sdp) {
@@ -2249,7 +2462,7 @@
                 dtmfSender.ontonechange = (event) => {
                     try {
                         if (typeof originalOnToneChange === 'function') originalOnToneChange(event);
-                    } catch (e) {}
+                    } catch (e) { }
 
                     if (!settled && event && event.tone === tone) {
                         settled = true;
@@ -2469,7 +2682,7 @@
                 session._iceMonitorAttached = true;
                 try {
                     if (typeof pc.getConfiguration === 'function') session._icePcConfig = pc.getConfiguration();
-                } catch (error) {}
+                } catch (error) { }
                 const tracker = getIceTracker(session, label);
                 updateIceStatsDisplay(session, tracker.status);
                 pc.addEventListener('icegatheringstatechange', () => {
@@ -2845,28 +3058,28 @@
                 },
                 body: JSON.stringify(parsedBody)
             })
-            .then(async response => {
-                const text = await response.text();
-                logHttpMsg('Status: ' + response.status + ' ' + response.statusText, 'info');
-                let contentType = response.headers.get('Content-Type') || '';
-                logHttpMsg('Content-Type: ' + contentType, 'info');
-                if (text) {
-                    try {
-                        const pretty = JSON.stringify(JSON.parse(text), null, 2);
-                        logHttpMsg('Response: ' + pretty, 'info');
-                    } catch (e) {
-                        logHttpMsg('Response: ' + text, 'info');
+                .then(async response => {
+                    const text = await response.text();
+                    logHttpMsg('Status: ' + response.status + ' ' + response.statusText, 'info');
+                    let contentType = response.headers.get('Content-Type') || '';
+                    logHttpMsg('Content-Type: ' + contentType, 'info');
+                    if (text) {
+                        try {
+                            const pretty = JSON.stringify(JSON.parse(text), null, 2);
+                            logHttpMsg('Response: ' + pretty, 'info');
+                        } catch (e) {
+                            logHttpMsg('Response: ' + text, 'info');
+                        }
+                    } else {
+                        logHttpMsg('Response: (empty)', 'info');
                     }
-                } else {
-                    logHttpMsg('Response: (empty)', 'info');
-                }
-                if (!response.ok) {
-                    logHttpMsg('Request failed with status ' + response.status, 'error');
-                }
-            })
-            .catch(error => {
-                logHttpMsg('Request error: ' + error.message, 'error');
-            });
+                    if (!response.ok) {
+                        logHttpMsg('Request failed with status ' + response.status, 'error');
+                    }
+                })
+                .catch(error => {
+                    logHttpMsg('Request error: ' + error.message, 'error');
+                });
         }
 
         // ========== SIP Message Logging ==========
@@ -2894,4 +3107,5 @@
         log('CC SIP Phone initialized');
     </script>
 </body>
+
 </html>
