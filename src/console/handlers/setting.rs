@@ -4840,7 +4840,7 @@ mod tests {
         let state = setup_state().await;
         state.set_app_state(Some(Arc::downgrade(&app)));
         let quality = json!({"enabled":true, "url":"ws://127.0.0.1:8095/v1/quality",
-            "sides":"callee", "receive_timeout_secs":15, "headers":[["Authorization","Bearer example"]],
+            "sides":"callee", "start_when":"early_media", "receive_timeout_secs":15, "headers":[["Authorization","Bearer example"]],
             "parameters":{"beep_enabled":true,"asr_languages":["en","id"]}});
         let response = update_proxy_settings(State(state.clone()), AuthRequired(superuser()),
             Json(serde_json::from_value(json!({"quality":quality})).unwrap())).await;

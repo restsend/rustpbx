@@ -868,3 +868,70 @@ async fn test_quality_service_messages_keep_both_sides_alive() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(3), service).await??;
     Ok(())
 }
+
+/// Provisional SDP starts inspection only when opted in; answer never duplicates it.
+#[tokio::test]
+async fn test_quality_start_when_early_media_or_accepted() -> Result<()> {
+    use rustpbx::call::quality::{QualitySides, QualityStartWhen};
+    for start_when in [QualityStartWhen::default(), QualityStartWhen::EarlyMedia] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let env = start_transcript_server(QualityConfig {
+            url: format!("ws://{}", listener.local_addr()?), enabled: true,
+            sides: QualitySides::Callee, start_when, ..Default::default()
+        }).await?;
+        let alice = Arc::new(create_ua(env.port, "alice", "password123").await?);
+        let bob = create_ua(env.port, "bob", "password456").await?;
+        let mut tap = env.gateway.read().subscribe_events();
+        let caller = alice.clone();
+        let calling = tokio::spawn(async move {
+            caller.make_call("bob", Some(test_helpers::pcmu_sdp("127.0.0.1", 21000))).await
+        });
+        let dialog = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                for event in bob.process_dialog_events().await? {
+                    if let TestUaEvent::IncomingCall(id, _) = event {
+                        return Ok::<_, anyhow::Error>(id);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await??;
+        bob.send_ringing(&dialog, None).await?;
+        assert!(wait_for_event(&mut tap, |e| e.event_type == "transcript_started", Duration::from_millis(200)).await.is_none(),
+            "plain ringing must not start quality");
+        let sdp = test_helpers::pcmu_sdp("127.0.0.1", 21010);
+        bob.send_ringing(&dialog, Some(sdp.clone())).await?;
+        if start_when == QualityStartWhen::EarlyMedia {
+            wait_for_event(&mut tap, |e| e.event_type == "transcript_started", Duration::from_secs(5)).await
+                .expect("early media must start inspection before answer");
+            assert!(!calling.is_finished(), "call must still be unanswered");
+        } else {
+            assert!(wait_for_event(&mut tap, |e| e.event_type == "transcript_started", Duration::from_millis(300)).await.is_none(),
+                "default policy must wait for answer");
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        }
+        // In early-media mode verify the actual WebSocket starts before answering.
+        if start_when == QualityStartWhen::Accepted {
+            bob.answer_call(&dialog, Some(sdp.clone())).await?;
+            wait_for_event(&mut tap, |e| e.event_type == "transcript_started", Duration::from_secs(5)).await
+                .expect("default policy starts on answer");
+        }
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
+        let mut ws = tokio_tungstenite::accept_async(socket).await?;
+        let message = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap()?;
+        let start: serde_json::Value = serde_json::from_str(message.to_text()?)?;
+        assert_eq!(start["type"], "start");
+        assert_eq!(start["side"], "callee");
+        if start_when == QualityStartWhen::EarlyMedia {
+            bob.answer_call(&dialog, Some(sdp)).await?;
+        }
+        tokio::time::timeout(Duration::from_secs(5), calling).await???;
+        assert!(wait_for_event(&mut tap, |e| e.event_type == "transcript_started", Duration::from_millis(300)).await.is_none(),
+            "answer must not restart inspection");
+        assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err(),
+            "answer must not open a duplicate quality connection");
+        alice.stop();
+        bob.stop();
+    }
+    Ok(())
+}

@@ -11,15 +11,25 @@ pub enum QualitySides {
     Both,
 }
 
+/// Earliest media phase at which automatic inspection may begin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityStartWhen {
+    #[default]
+    Accepted,
+    EarlyMedia,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityConfig {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub parameters: serde_json::Map<String, serde_json::Value>,
-    /// Start inspection automatically after answer when enabled.
+    /// Start inspection automatically at the configured media phase when enabled.
     pub enabled: bool,
     pub sides: QualitySides,
+    pub start_when: QualityStartWhen,
     /// Maximum seconds without a message from the quality service.
     pub receive_timeout_secs: u64,
 }
@@ -29,6 +39,7 @@ impl Default for QualityConfig {
         Self {
             url: String::new(), headers: Vec::new(), parameters: Default::default(),
             enabled: false, sides: QualitySides::default(), receive_timeout_secs: 15,
+            start_when: QualityStartWhen::default(),
         }
     }
 }
@@ -39,6 +50,7 @@ pub struct QualityPlan {
     pub routing: QualityRoutingContext,
     pub enabled: Option<bool>,
     pub sides: Option<QualitySides>,
+    pub start_when: Option<QualityStartWhen>,
     pub receive_timeout_secs: Option<u64>,
     pub url: Option<String>,
     pub headers: Option<Vec<(String, String)>>,
@@ -47,6 +59,7 @@ pub struct QualityPlan {
 impl QualityConfig {
     pub fn apply(&mut self, plan: &QualityPlan) {
         if let Some(sides) = plan.sides { self.sides = sides; }
+        if let Some(start_when) = plan.start_when { self.start_when = start_when; }
         if let Some(seconds) = plan.receive_timeout_secs { self.receive_timeout_secs = seconds; }
         if let Some(url) = &plan.url { self.url = url.clone(); }
         if let Some(headers) = &plan.headers { self.headers = headers.clone(); }
@@ -111,6 +124,22 @@ pub struct TranscriptSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn start_when_defaults_and_overrides() {
+        let mut config: QualityConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.start_when, QualityStartWhen::Accepted);
+        assert_eq!(QualityConfig::default().start_when, QualityStartWhen::Accepted);
+        let plan: QualityPlan = serde_json::from_str(r#"{"start_when":"early_media"}"#).unwrap();
+        config.apply(&plan);
+        assert_eq!(config.start_when, QualityStartWhen::EarlyMedia);
+        config.apply(&QualityPlan::default());
+        assert_eq!(config.start_when, QualityStartWhen::EarlyMedia);
+        let plan: QualityPlan = serde_json::from_str(r#"{"start_when":"accepted"}"#).unwrap();
+        config.apply(&plan);
+        assert_eq!(config.start_when, QualityStartWhen::Accepted);
+        assert!(serde_json::from_str::<QualityConfig>(r#"{"start_when":"ringing"}"#).is_err());
+    }
+
     #[test]
     fn receive_timeout_defaults_and_overrides() {
         assert_eq!(QualityConfig::default().receive_timeout_secs, 15);

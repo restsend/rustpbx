@@ -1691,19 +1691,20 @@ impl RwiCommandProcessor {
                                             if sdp.contains("v=0")
                                                 && caller_early_sdp.as_deref() != Some(sdp.as_str())
                                             {
-                                                let early_media = match session.media.bridge.as_ref().and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+                                                let early_media = match session.media_leg(&crate::call::domain::LegId::from("caller"))
                                                 {
                                                     Some(leg) => leg
                                                         .apply_remote_sdp(&sdp, rustrtc::SdpType::Pranswer)
                                                         .await,
                                                     None => Err(anyhow::anyhow!(
-                                                        "Originate caller MediaBridge A leg is missing"
+                                                        "Originate caller media leg is missing"
                                                     )),
                                                 };
                                                 match early_media {
                                                     Ok(_) => {
                                                         tracing::debug!(%call_id, "Early media SDP applied to caller leg");
                                                         caller_early_sdp = Some(sdp);
+                                                        session.maybe_autostart_live_quality(crate::call::quality::QualityStartWhen::EarlyMedia).await;
 
                                                         if !originate_recording_started
                                                             && let Some(config) = originate_ringing_config.as_ref()
