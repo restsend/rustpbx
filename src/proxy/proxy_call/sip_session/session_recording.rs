@@ -124,12 +124,29 @@ impl SipSession {
     /// packets, so the idle cost is a single lightweight task per session.
     pub(crate) fn setup_recording_capture(
         &mut self,
-    ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
+    ) -> Option<crate::media::media_recorder::RecorderSender> {
+        if let Some(sender) = self.media.recording.capture_sender() {
+            return Some(sender);
+        }
         let _media_runtime_guard = crate::utils::media_enter();
         // Match the recorder's target so enabling its logs also enables call context.
-        let sender = tracing::info_span!(target: "rustpbx_media::recorder", "recording", session_id = %self.id)
-            .in_scope(|| self.media.recording.setup_recorder_task())?;
-        Ok(Some(sender))
+        match tracing::info_span!(
+            target: "rustpbx_media::recorder",
+            "recording",
+            session_id = %self.id
+        )
+        .in_scope(|| self.media.recording.setup_recorder_task())
+        {
+            Ok(sender) => Some(sender),
+            Err(error) => {
+                warn!(
+                    session_id = %self.id,
+                    %error,
+                    "Failed to setup recording capture task; continuing call without recording"
+                );
+                None
+            }
+        }
     }
 
     pub(super) fn caller_recording_profile(&self) -> Result<crate::media::negotiate::NegotiatedLegProfile> {
@@ -1170,15 +1187,6 @@ impl SipSession {
                     serde_json::Value::String(side_str.to_string()),
                 );
             }
-            // AMD verdict (answering machine / AI assistant detection), when
-            // the resolved `amd` config enabled detection. Mirrored into
-            // metadata so the DB JSON column stays queryable without a schema
-            // migration; the same verdict also rides `details.amd`.
-            if let Some(ref verdict) = self.amd_verdict {
-                if let Ok(value) = serde_json::to_value(verdict) {
-                    meta.insert("amd".to_string(), value);
-                }
-            }
             if let Some(leg) = self.meta.rtp_timeout_leg.clone() {
                 meta.insert("rtpTimeoutLeg".to_string(), serde_json::Value::String(leg));
             }
@@ -1242,6 +1250,7 @@ impl SipSession {
                 // The End event is pushed directly (not via record_trace), so
                 // stamp its timestamp explicitly or it would render as "+0ms".
                 let mut end = end;
+                end.detail = self.meta.hangup_trace_detail.clone();
                 end.ts = self.context.start_time.elapsed().as_millis() as i64;
                 trace.push(end);
             }
@@ -1330,7 +1339,6 @@ impl SipSession {
             transferred: self.meta.transferred,
             leg_timeline: self.meta.leg_timeline.clone(),
             metadata,
-            amd: self.amd_verdict.clone(),
             media_quality,
             recording_segments: self.recording.completed_segments.clone(),
             extensions,

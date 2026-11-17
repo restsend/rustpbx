@@ -568,6 +568,8 @@ impl CallRouter for HttpCallRouter {
                 if rtp_external_ip.is_some() {
                     dialplan.media.external_ip = rtp_external_ip;
                 }
+                dialplan.caller_media_network =
+                    crate::call::MediaNetworkConfig::from(&dialplan.media);
 
                 if let Some(uri) = dialplan_caller {
                     dialplan = dialplan.with_caller(uri);

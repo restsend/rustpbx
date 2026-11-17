@@ -14,7 +14,7 @@ pub(crate) mod session;
 pub(crate) mod util;
 
 mod conference;
-mod live_transcription;
+mod live_quality;
 mod refer;
 mod supervisor;
 mod transfer;

@@ -881,6 +881,8 @@ read_only = "只读"
 search_sip_trunks = "搜索SIP中继"
 
 [sip_trunk_detail]
+field_send_p_asserted_identity = "发送 P-Asserted-Identity"
+field_send_p_asserted_identity_hint = "默认关闭。启用后使用域名改写前的原始主叫 URI 追加 PAI，不依赖中继认证配置，并保留已有头部。"
 new_trunk = "新建中继"
 edit_trunk = "编辑中继"
 back_to_list = "返回SIP中继列表"

@@ -8,6 +8,8 @@ mod test_auth;
 #[cfg(test)]
 mod test_inbound_refer;
 #[cfg(test)]
+mod test_indialog_unknown_dialog;
+#[cfg(test)]
 mod test_presence;
 #[cfg(test)]
 mod test_presence_e2e;
@@ -48,3 +50,6 @@ pub mod test_ws_call_recovery;
 mod test_trunk_config_tests;
 #[cfg(test)]
 mod test_call;
+
+#[cfg(test)]
+mod test_sipp_media_network;

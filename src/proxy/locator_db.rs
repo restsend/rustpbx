@@ -1233,7 +1233,7 @@ mod tests {
 
         let destination = SipAddr {
             r#type: Some(Transport::Wss),
-            addr: "122.235.198.105:24534"
+            addr: "198.51.100.105:24534"
                 .try_into()
                 .expect("valid destination"),
         };
@@ -1248,7 +1248,7 @@ mod tests {
         };
 
         locator
-            .register("bob", Some("kefutest.xiaojukeji.com"), location)
+            .register("bob", Some("pbx.example.com"), location)
             .await
             .expect("register location");
 
@@ -1301,7 +1301,7 @@ mod tests {
         let locator = make_locator_with_webrtc_binding(
             "xwork_5g_test",
             "sip:qn27nogk@2kbkhn3beiif.invalid;transport=ws",
-            "58.40.134.154:41428",
+            "203.0.113.154:41428",
         )
         .await;
 
@@ -1321,7 +1321,7 @@ mod tests {
         );
 
         let dest = locations[0].destination.as_ref().expect("has destination");
-        assert_eq!(dest.addr.to_string(), "58.40.134.154:41428");
+        assert_eq!(dest.addr.to_string(), "203.0.113.154:41428");
     }
 
     /// Regression: the BYE Request-URI may carry extra params (;ob) that the

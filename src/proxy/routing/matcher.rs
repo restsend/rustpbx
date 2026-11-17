@@ -217,6 +217,13 @@ async fn match_invite_impl(
         source_trunk.and_then(|source| trunks.and_then(|trunks| trunks.get(&source.name)))
     {
         merge_trunk_media_hints(&mut source_hints, trunk);
+        if let Some(hints) = source_hints.as_mut() {
+            // Source-trunk media network settings belong to the caller leg
+            // (`Dialplan::caller_media_network`), not the callee leg.
+            hints.network_profile_id = None;
+            hints.external_ip = None;
+            hints.bind_ip = None;
+        }
     }
 
     let routes = match routes {
@@ -1510,7 +1517,7 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         addr: next_hop.host_with_port,
     });
 
-    // Save original caller before potential rewrite for P-Asserted-Identity header
+    // Preserve the legacy asserted identity from before trunk host rewriting.
     let original_caller = option.caller.clone();
 
     if trunk.rewrite_hostport {
@@ -1528,20 +1535,11 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         });
     }
 
-    // Add trunk related headers
-    if option.headers.is_none() {
-        option.headers = Some(Vec::new());
-    }
-
-    let headers = option.headers.as_mut().unwrap();
-
-    // Add P-Asserted-Identity header (using original caller, not rewritten)
-    if trunk.username.is_some() {
-        let pai_header = rsipstack::sip::Header::Other(
+    if trunk.send_p_asserted_identity.unwrap_or(false) {
+        option.headers.get_or_insert_with(Vec::new).push(rsipstack::sip::Header::Other(
             "P-Asserted-Identity".to_string(),
             format!("<{}>", original_caller),
-        );
-        headers.push(pai_header);
+        ));
     }
 
     Ok(())
@@ -1562,7 +1560,6 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
         && trunk.profile.is_none()
         && trunk.diversion_headers.is_none()
         && trunk.history_info.is_none()
-        && trunk.amd.is_none()
     {
         return;
     }
@@ -1621,14 +1618,6 @@ pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkC
     if let Some(passthrough) = trunk.passthrough_custom_sdp_attrs {
         hints.passthrough_custom_sdp_attrs =
             Some(hints.passthrough_custom_sdp_attrs.unwrap_or(true) && passthrough);
-    }
-    // AMD: route hints outrank the trunk (per-field), the trunk fills gaps —
-    // the session then overlays `app_params` and falls back to `[proxy] amd`.
-    if let Some(trunk_amd) = &trunk.amd {
-        match &mut hints.amd {
-            Some(existing) => existing.overlay(trunk_amd.clone()),
-            None => hints.amd = Some(trunk_amd.clone()),
-        }
     }
 }
 
@@ -1800,16 +1789,16 @@ mod apply_trunk_config_tests {
     fn separate_digest_identity_does_not_replace_invite_caller() {
         let trunk: TrunkConfig = toml::from_str(r#"
             dest = "sip:ims.test"
-            username = "+8675789985014"
-            auth_username = "8675789985014@ims.test"
+            username = "+12025550123"
+            auth_username = "12025550123@ims.test"
             password = "test-password"
         "#).unwrap();
         let mut option = option();
         apply_trunk_config(&mut option, &trunk).unwrap();
         assert_eq!(option.caller.user(), Some("alice"));
         let credential = option.credential.unwrap();
-        assert_eq!(credential.username, "+8675789985014");
-        assert_eq!(credential.digest_username(), "8675789985014@ims.test");
+        assert_eq!(credential.username, "+12025550123");
+        assert_eq!(credential.digest_username(), "12025550123@ims.test");
     }
 
     #[test]

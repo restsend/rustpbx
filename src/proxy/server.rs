@@ -105,6 +105,8 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub locator_event_lock: LocatorEventLock,
+    /// Top-level realtime presets, snapshotted when each call session is created.
+    pub realtime_presets: ArcSwap<Option<Vec<crate::config::RealtimePreset>>>,
     pub sipflow_config: Arc<arc_swap::ArcSwap<Option<SipFlowConfig>>>,
     pub recording_policy: Arc<arc_swap::ArcSwap<Option<RecordingPolicy>>>,
     pub sip_flow: Option<SipFlow>,
@@ -214,6 +216,7 @@ pub struct SipServerBuilder {
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
+    realtime_presets: Option<Vec<crate::config::RealtimePreset>>,
     sipflow_config: Option<SipFlowConfig>,
     /// Shared sipflow config slot (takes precedence over `sipflow_config`);
     /// lets the app share one live config handle between the server, the
@@ -280,6 +283,7 @@ impl SipServerBuilder {
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
             storage: None,
+            realtime_presets: None,
             sipflow_config: None,
             sipflow_config_slot: None,
             recording_policy_slot: None,
@@ -316,6 +320,11 @@ impl SipServerBuilder {
 
     pub fn with_cluster_config(mut self, config: Option<ClusterConfig>) -> Self {
         self.cluster_config = config;
+        self
+    }
+
+    pub fn with_realtime_presets(mut self, presets: Option<Vec<crate::config::RealtimePreset>>) -> Self {
+        self.realtime_presets = presets;
         self
     }
 
@@ -1061,31 +1070,23 @@ impl SipServerBuilder {
         let locator_local_addrs = endpoint_local_addrs.clone();
         let cluster_enabled = !self.cluster_peers.is_empty();
 
-        endpoint_builder = endpoint_builder
-            .with_target_locator(DialogTargetLocator::new(
-                locator.clone(),
-                locator_local_addrs,
-                cluster_enabled,
-            ))
-            .with_transport_inspector(TransportInspectorLocator::new(
-                locator.clone(),
-                locator_events.clone(),
-                locator_event_lock.clone(),
-            ));
-
-        let endpoint = endpoint_builder.build();
-
         // Resolve this node's cluster-internal address from `[cluster].peers` by
         // matching a peer `addr:sip_port` entry against the local endpoint
         // listeners. The matching peer entry IS this node; its address is what
         // other peers use to reach us, so it is stamped as `home_proxy` on
         // registrations instead of a possibly-NATed/external endpoint address.
+        // Resolved BEFORE the target locator exists: the locator's local-home
+        // decision must compare against this same deterministic identity —
+        // with a wildcard listener (docker / multi-homed host) the bare
+        // listener-address comparison misreads the node's OWN registrations as
+        // remote and loops in-dialog requests back to the node's own listener
+        // ("dialog not found" on its own call layer — 2026-11-06 PRD
+        // consult_state relay regression).
         let cluster_self_addr = self.cluster_config.as_ref().and_then(|cc| {
             if cc.peers.is_empty() {
                 return None;
             }
-            let mut local_addr_strs: Vec<String> = endpoint
-                .get_addrs()
+            let mut local_addr_strs: Vec<String> = locator_local_addrs
                 .iter()
                 .map(|a| a.addr.to_string())
                 .collect();
@@ -1105,6 +1106,21 @@ impl SipServerBuilder {
                 }
             }
         });
+
+        endpoint_builder = endpoint_builder
+            .with_target_locator(DialogTargetLocator::new(
+                locator.clone(),
+                locator_local_addrs,
+                cluster_enabled,
+                cluster_self_addr.clone(),
+            ))
+            .with_transport_inspector(TransportInspectorLocator::new(
+                locator.clone(),
+                locator_events.clone(),
+                locator_event_lock.clone(),
+            ));
+
+        let endpoint = endpoint_builder.build();
 
         let mut call_router = self.call_router;
         if call_router.is_none()
@@ -1332,6 +1348,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             locator_event_lock,
+            realtime_presets: ArcSwap::from_pointee(self.realtime_presets),
             sipflow_config: self.sipflow_config_slot.unwrap_or_else(|| {
                 Arc::new(ArcSwap::new(Arc::new(self.sipflow_config.clone())))
             }),
@@ -2046,7 +2063,7 @@ impl SipServerInner {
         let rtp = self.rtp_config.load();
         let media_proxy = **self.media_proxy.load();
         let proxy_config = self.proxy_config.load();
-        MediaConfig::new()
+        let mut media = MediaConfig::new()
             .with_proxy_mode(media_proxy)
             .with_external_ip(rtp.external_ip.clone())
             .with_bind_ip(rtp.bind_ip.clone())
@@ -2064,7 +2081,12 @@ impl SipServerInner {
             .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
             .with_quality_stats(rtp.quality_stats.clone())
             .with_volume_stats(rtp.volume_stats.clone())
-            .with_inband_dtmf(rtp.inband_dtmf)
+            .with_inband_dtmf(rtp.inband_dtmf);
+        if !self.network_profiles.load().is_empty() {
+            let profile = self.default_network_profile();
+            self.apply_network_profile_to_media(&profile, &mut media);
+        }
+        media
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings
@@ -2144,6 +2166,10 @@ impl SipServerInner {
         }
 
         let mut parts: Vec<String> = Vec::new();
+        if self.realtime_presets.load().as_ref() != &config.realtime {
+            self.realtime_presets.store(Arc::new(config.realtime.clone()));
+            parts.push("realtime".to_string());
+        }
         let old = &old_proxy;
         if old.rtp_timeout != new_proxy.rtp_timeout {
             parts.push("rtp_timeout".to_string());
@@ -2215,6 +2241,9 @@ impl SipServerInner {
         }
         if old.max_ring_time != new_proxy.max_ring_time {
             parts.push("max_ring_time".to_string());
+        }
+        if old.quality != new_proxy.quality {
+            parts.push("quality".to_string());
         }
         if format!("{:?}", old.locator_webhook) != format!("{:?}", new_proxy.locator_webhook) {
             parts.push("locator_webhook".to_string());
@@ -2932,7 +2961,7 @@ mod contact_uri_tests {
         // This node is the first peer (Node B); its listener matches peer[0].
         let local_addrs = vec![
             "172.25.224.232:15060".to_string(),
-            "116.62.250.247:15060".to_string(),
+            "192.0.2.247:15060".to_string(),
         ];
 
         let result = resolve_cluster_self_addr(&peers, &local_addrs).unwrap();

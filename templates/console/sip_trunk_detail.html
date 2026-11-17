@@ -266,6 +266,12 @@ default('RustPBX') }}{% endblock %}
                     </label>
                 </section>
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <label class="mb-4 flex items-start gap-3 text-sm text-slate-700">
+                        <input type="checkbox" x-model="form.send_p_asserted_identity" class="mt-1 rounded border-slate-300">
+                        <span>{{ "sip_trunk_detail.field_send_p_asserted_identity" | t }}
+                            <span class="block text-xs text-slate-500">{{ "sip_trunk_detail.field_send_p_asserted_identity_hint" | t }}</span>
+                        </span>
+                    </label>
                     <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_header_passthrough" | t }}</h2>
                     <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_header_passthrough_desc" | t }}</p>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -716,6 +722,7 @@ default('RustPBX') }}{% endblock %}
                 video_policy: '',
                 audio_codecs: '',
                 video_codecs: '',
+                send_p_asserted_identity: false,
                 header_passthrough_mode: '',
                 header_passthrough_headers: '',
                 ringback_ring: '',
@@ -808,6 +815,7 @@ default('RustPBX') }}{% endblock %}
                     this.form.video_policy = sbc.video_policy || '';
                     this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
                     this.form.video_codecs = Array.isArray(sbc.video_codecs) ? sbc.video_codecs.join('\n') : '';
+                    this.form.send_p_asserted_identity = sbc.send_p_asserted_identity === true;
                     const hp = sbc.header_passthrough;
                     if (hp && typeof hp === 'object') {
                         const whitelist = Array.isArray(hp.whitelist) ? hp.whitelist : [];
@@ -1121,6 +1129,7 @@ default('RustPBX') }}{% endblock %}
                     } else {
                         delete meta.sbc.video_codecs;
                     }
+                    meta.sbc.send_p_asserted_identity = this.form.send_p_asserted_identity === true;
                     const hpMode = this.form.header_passthrough_mode;
                     if (hpMode) {
                         const hpHeaders = this.form.header_passthrough_headers.split('\n').map(s => s.trim()).filter(s => s);

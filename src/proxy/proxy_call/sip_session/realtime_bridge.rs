@@ -269,6 +269,7 @@ impl SipSession {
                                 reason: Some(crate::callrecord::CallRecordHangupReason::BySystem),
                                 code: None,
                                 rtp_timeout_side: None,
+                                trace_detail: None,
                             }))
                             .await;
                     }
@@ -338,6 +339,7 @@ impl SipSession {
                 reason: Some(crate::callrecord::CallRecordHangupReason::BySystem),
                 code: None,
                 rtp_timeout_side: None,
+                trace_detail: None,
             })
             .await;
         }

@@ -881,6 +881,8 @@ read_only = "read-only"
 search_sip_trunks = "Search SIP trunks"
 
 [sip_trunk_detail]
+field_send_p_asserted_identity = "Send P-Asserted-Identity"
+field_send_p_asserted_identity_hint = "Disabled by default. When enabled, appends PAI using the original caller URI before domain rewriting, regardless of trunk credentials. Existing headers are preserved."
 new_trunk = "New Trunk"
 edit_trunk = "Edit Trunk"
 back_to_list = "Back to SIP trunks"

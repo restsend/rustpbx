@@ -18,13 +18,13 @@ fn normalize_originate_caller_id_shapes() {
     let realm = "pbx.example.com";
     // Bare E.164 number: the common case — becomes sip:<num>@realm.
     assert_eq!(
-        P::normalize_originate_caller_id(Some("+16142159851"), realm),
-        "sip:+16142159851@pbx.example.com"
+        P::normalize_originate_caller_id(Some("+12025550123"), realm),
+        "sip:+12025550123@pbx.example.com"
     );
     // Number without '+'.
     assert_eq!(
-        P::normalize_originate_caller_id(Some("16142159851"), realm),
-        "sip:16142159851@pbx.example.com"
+        P::normalize_originate_caller_id(Some("12025550123"), realm),
+        "sip:12025550123@pbx.example.com"
     );
     // Full SIP URI with a user is preserved verbatim.
     assert_eq!(
@@ -38,8 +38,8 @@ fn normalize_originate_caller_id_shapes() {
     );
     // scheme present but NO user -> re-wrapped so From carries a user.
     assert_eq!(
-        P::normalize_originate_caller_id(Some("sip:+16142159851"), realm),
-        "sip:+16142159851@pbx.example.com"
+        P::normalize_originate_caller_id(Some("sip:+12025550123"), realm),
+        "sip:+12025550123@pbx.example.com"
     );
     // Bare user@host (no scheme) must NOT double-affix into
     // sip:user@host@realm — take the user token only.
@@ -49,8 +49,8 @@ fn normalize_originate_caller_id_shapes() {
     );
     // Params on a bare token don't leak into the URI host.
     assert_eq!(
-        P::normalize_originate_caller_id(Some("+16142159851;user=phone"), realm),
-        "sip:+16142159851@pbx.example.com"
+        P::normalize_originate_caller_id(Some("+12025550123;user=phone"), realm),
+        "sip:+12025550123@pbx.example.com"
     );
     // None / blank -> the unchanged rwi fallback.
     assert_eq!(
@@ -71,7 +71,7 @@ fn normalize_originate_caller_id_shapes() {
         );
     }
     // Every result must parse as a URI whose From would carry a user.
-    for input in ["+16142159851", "sip:+16142159851", "device@example.com"] {
+    for input in ["+12025550123", "sip:+12025550123", "device@example.com"] {
         let out = P::normalize_originate_caller_id(Some(input), realm);
         let uri = rsipstack::sip::Uri::try_from(out.as_str())
             .unwrap_or_else(|_| panic!("normalized caller_id must parse: {out}"));

@@ -4,6 +4,25 @@ use rustrtc::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaNegotiationError {
+    MissingOffer,
+    NoCompatibleCodecs,
+    NoFreeVideoPayloadType,
+}
+
+impl std::fmt::Display for MediaNegotiationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingOffer => f.write_str("No caller offer available"),
+            Self::NoCompatibleCodecs => f.write_str("no codecs"),
+            Self::NoFreeVideoPayloadType => f.write_str("no free dynamic video payload type"),
+        }
+    }
+}
+
+impl std::error::Error for MediaNegotiationError {}
+
 /// The kind of media transport of a leg. rustrtc configures it with
 /// `connectivity` and `keying`: see [`TransportMode::rtc_configuration`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,7 +717,7 @@ impl MediaNegotiator {
             if used_payload_types.contains(&cap.payload_type) {
                 cap.payload_type = (96..=127)
                     .find(|payload_type| !used_payload_types.contains(payload_type))
-                    .ok_or_else(|| anyhow::anyhow!("no free dynamic video payload type"))?;
+                    .ok_or(MediaNegotiationError::NoFreeVideoPayloadType)?;
             }
             used_payload_types.insert(cap.payload_type);
             // The rtx association follows its primary: when the primary moved
@@ -709,9 +728,7 @@ impl MediaNegotiator {
                     cap.rtx_payload_type = Some(
                         (96..=127)
                             .find(|payload_type| !used_payload_types.contains(payload_type))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("no free dynamic video payload type")
-                            })?,
+                            .ok_or(MediaNegotiationError::NoFreeVideoPayloadType)?,
                     );
                 }
                 if let Some(rtx) = cap.rtx_payload_type {
@@ -733,8 +750,7 @@ impl MediaNegotiator {
         sdp: &str,
         caps: &[rustrtc::config::VideoCapability],
     ) -> anyhow::Result<String> {
-        let mut desc = SessionDescription::parse(sdp_type, sdp)
-            .map_err(|error| anyhow::anyhow!("failed to parse SDP: {error}"))?;
+        let mut desc = SessionDescription::parse(sdp_type, sdp)?;
         // The session's own mux posture, captured before the mutable video
         // borrow: BUNDLE grouping, or any audio m-line with `a=rtcp-mux`.
         let session_mux_posture = desc.session.attributes.iter().any(|a| {
@@ -2588,9 +2604,9 @@ a=rtpmap:101 telephone-event/8000\r\n";
     #[test]
     fn test_bridge_codecs_ignores_unrecognized_rtpmap_entries() {
         let caller_sdp = "v=0\r\n\
-o=- 1777370486 1777370486 IN IP4 58.246.19.74\r\n\
+o=- 1777370486 1777370486 IN IP4 198.51.100.74\r\n\
 s=-\r\n\
-c=IN IP4 58.246.19.74\r\n\
+c=IN IP4 198.51.100.74\r\n\
 t=0 0\r\n\
 m=audio 16844 RTP/AVP 98 96 111 106 18 8 0 100\r\n\
 a=rtpmap:98 AMR-WB/16000/1\r\n\

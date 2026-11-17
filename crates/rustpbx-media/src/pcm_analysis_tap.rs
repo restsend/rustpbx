@@ -2,18 +2,17 @@
 //!
 //! There is at most ONE tap per leg: the RTP observer + decode task are only
 //! started when at least one analyser actually needs ingress audio (in-band
-//! DTMF, AMD detection) and dropped again when the last sink goes away, so
+//! DTMF detection) and dropped again when the last sink goes away, so
 //! legs that never ask for audio analysis pay nothing.
 //!
 //! Pipeline: RTP observer (ingress, audio payload types only) → codec decode
 //! → fixed 20 ms blocks → [`PcmBlockSink`] fan-out via a shared sink registry
 //! (one slot per analyser kind, addable/removable while the task runs). A
 //! codec change rebuilds the whole tap — the caller recreates the sinks and
-//! decides per analysis whether detector state is carried across (AMD) or
-//! restarted (DTMF).
+//! restarts detector state for the new codec.
 //!
 //! Starved ticks feed digital silence so gap-counting state machines (DTMF
-//! re-arm, AMD pause tracking) keep advancing while the peer is silent; an
+//! re-arm) keep advancing while the peer is silent; an
 //! all-zero block can never classify as tone or speech.
 //!
 //! Lifecycle mirrors [`crate::app_ingress::LegPcmStream`]: dropping the tap
@@ -38,7 +37,7 @@ use crate::leg_id::LegId;
 use crate::negotiate::NegotiatedLegProfile;
 
 /// Analysis block length fed by the tap's decode task. Matches the DTMF
-/// detector's block and gives AMD ~20 ms timing granularity.
+/// detector's block for consistent timing granularity.
 pub const ANALYSIS_BLOCK_MS: u64 = 20;
 
 /// Consumer of decoded ingress PCM blocks. Exactly one block per call with
@@ -53,7 +52,6 @@ pub trait PcmBlockSink: Send {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisSinkKind {
     InbandDtmf,
-    Amd,
 }
 
 /// Shared sink registry — the decode task iterates this every 20 ms block.

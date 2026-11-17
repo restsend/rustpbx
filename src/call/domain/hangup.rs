@@ -92,6 +92,9 @@ pub struct HangupCommand {
     /// When `reason == RtpTimeout`, which side of the bridge caused it.
     /// Only set for the RTP-inactivity watchdog; `None` otherwise.
     pub rtp_timeout_side: Option<RtpTimeoutSide>,
+    /// Internal diagnostics for the terminal End trace only; never sent in SIP signalling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_detail: Option<serde_json::Value>,
 }
 
 impl HangupCommand {
@@ -106,6 +109,7 @@ impl HangupCommand {
             reason,
             code,
             rtp_timeout_side: None,
+            trace_detail: None,
         }
     }
 
@@ -124,6 +128,7 @@ impl HangupCommand {
             reason,
             code,
             rtp_timeout_side: None,
+            trace_detail: None,
         }
     }
 
@@ -145,6 +150,7 @@ impl HangupCommand {
             reason: cdr_reason,
             code: Some(sip_code),
             rtp_timeout_side: None,
+            trace_detail: None,
         }
     }
 

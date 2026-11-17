@@ -47,6 +47,7 @@ pub struct PcmFrame {
 /// the leg is starved).
 pub struct LegPcmStream {
     rx: mpsc::Receiver<PcmFrame>,
+    sample_rate: u32,
     cancel: CancellationToken,
     /// Shared with the installed `PacketForwarder` observer; set to `false`
     /// on drop so the observer stops forwarding packets even though rustrtc
@@ -98,9 +99,18 @@ impl LegPcmStream {
 
         Ok(Self {
             rx: frame_rx,
+            sample_rate,
             cancel,
             observer_active,
         })
+    }
+
+    /// Fixed decoded PCM rate for this ingress tap, available before the first frame.
+    /// Uses the same value as the decode task; this is not the RTP clock rate
+    /// (e.g. G.722 decodes at 16 kHz despite its 8 kHz RTP clock). This tap reads
+    /// ingress RTP directly, before bridge/mixer/egress resampling.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// Receive the next PCM frame. Returns `None` when the stream is closed
@@ -192,6 +202,31 @@ async fn decode_task(
 mod tests {
     use super::*;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    #[tokio::test]
+    async fn per_leg_pcm_rate_is_available_before_audio_and_matches_frames() {
+        let mut taps = Vec::new();
+        for (id, codec, rate) in [("caller", CodecType::PCMU, 8000), ("callee", CodecType::G722, 16000), ("webrtc", CodecType::Opus, 48000)] {
+            let pc = rustrtc::PeerConnection::new(rustrtc::RtcConfiguration::sip());
+            let profile = NegotiatedLegProfile {
+                audio: Some(crate::negotiate::NegotiatedCodec {
+                    codec, payload_type: codec.payload_type(),
+                    clock_rate: if codec == CodecType::G722 { 8000 } else { rate }, channels: 1,
+                }), ..Default::default()
+            };
+            let stream = LegPcmStream::attach(&pc, profile, LegId::from(id), CancellationToken::new()).unwrap();
+            // No recv, packet, or task yield is required to learn each leg's PCM rate.
+            assert_eq!(stream.sample_rate(), rate);
+            assert_eq!(create_decoder(codec).sample_rate(), rate);
+            taps.push((pc, stream, rate));
+        }
+        for (_pc, mut stream, rate) in taps {
+            let frame = tokio::time::timeout(Duration::from_millis(200), stream.recv()).await.unwrap().unwrap();
+            assert!(frame.silence);
+            assert_eq!(frame.frame.sample_rate, stream.sample_rate());
+            assert_eq!(frame.frame.samples.len(), rate as usize / 50);
+        }
+    }
 
     /// Drive the decode task directly (no PeerConnection) and verify it emits
     /// silence frames when starved, and PCM frames when fed.

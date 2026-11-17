@@ -134,10 +134,6 @@ pub struct TrunkConfig {
     pub inbound_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingPolicy>,
-    /// Per-trunk AMD (answering machine / AI assistant) detection config:
-    /// overlays the global `[proxy] amd` per-field; route hints override both.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amd: Option<crate::media::amd::AmdConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_from_user_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +150,10 @@ pub struct TrunkConfig {
     pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default = "default_rewrite_hostport")]
     pub rewrite_hostport: bool,
+    /// Automatically append PAI using the original caller URI for this trunk.
+    /// Disabled when unset, independently of authentication credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_p_asserted_identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id_mode: Option<CallIdMode>,
 
@@ -574,7 +574,6 @@ impl Default for TrunkConfig {
         Self {
             dest: String::new(),
             backup_dest: None,
-            amd: None,
             outbound_proxy: None,
             username: None,
             auth_username: None,
@@ -599,6 +598,7 @@ impl Default for TrunkConfig {
             register_expires: None,
             register_extra_headers: None,
             rewrite_hostport: true,
+            send_p_asserted_identity: None,
             call_id_mode: None,
             health_check_enabled: None,
             health_check_per_ip: None,

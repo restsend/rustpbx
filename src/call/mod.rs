@@ -34,7 +34,7 @@ pub mod realtime;
 pub mod runtime;
 pub mod session_id;
 pub mod sip;
-pub mod transcription;
+pub mod quality;
 pub mod user;
 pub mod uui;
 
@@ -925,6 +925,27 @@ impl Default for FailureAction {
     }
 }
 
+/// Resolved per-leg media network settings (advertised SDP IP, socket bind IP,
+/// and RTP port range). SIP Contact/Via policy is deliberately separate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaNetworkConfig {
+    pub external_ip: Option<String>,
+    pub bind_ip: Option<String>,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
+}
+
+impl From<&MediaConfig> for MediaNetworkConfig {
+    fn from(media: &MediaConfig) -> Self {
+        Self {
+            external_ip: media.external_ip.clone(),
+            bind_ip: media.bind_ip.clone(),
+            rtp_start_port: media.rtp_start_port,
+            rtp_end_port: media.rtp_end_port,
+        }
+    }
+}
+
 /// Media configuration for call control
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
@@ -1183,8 +1204,12 @@ pub struct Dialplan {
     pub recording: CallRecordingConfig,
     /// Optional route/trunk-specific recording policy override.
     pub recording_policy: Option<RecordingPolicy>,
-    /// Media configuration
+    /// Media configuration (callee/egress leg network; caller leg uses `caller_media_network`)
     pub media: MediaConfig,
+    /// Resolved media network settings for the original caller (A-leg), seeded
+    /// from the global / default-profile baseline (`with_media`) and overridden
+    /// only by an inbound trunk, isolated from outbound trunk overrides on `media`.
+    pub caller_media_network: MediaNetworkConfig,
     /// Maximum call duration
     pub max_call_duration: Option<Duration>,
     /// RTP timeout per direction (None = use proxy default)
@@ -1245,12 +1270,6 @@ pub struct Dialplan {
     /// routing hints are applied. `None` → the session falls back to globals.
     pub diversion_policy: Option<crate::proxy::routing::DiversionPolicy>,
 
-    /// AMD (answering machine / AI assistant) detection config for the
-    /// outbound callee leg: route hints over trunk config (stamped at
-    /// routing), overlaid by `app_params` at answer time and the global
-    /// `[proxy] amd` as the last fallback. `None` → globals only.
-    pub amd: Option<crate::media::amd::AmdConfig>,
-
     /// Headers modified/added by routing (rewrite rules, trunk config, HTTP router).
     /// When present, these take priority over the original SIP request headers
     /// when building CallInfo for application flows (IVR, voicemail, etc.).
@@ -1275,6 +1294,7 @@ impl std::fmt::Debug for Dialplan {
             .field("max_ring_time", &self.max_ring_time)
             .field("recording", &self.recording)
             .field("media", &self.media)
+            .field("caller_media_network", &self.caller_media_network)
             .field("max_call_duration", &self.max_call_duration)
             .field("rtp_timeout", &self.rtp_timeout)
             .field("enable_sipflow", &self.enable_sipflow)
@@ -1302,6 +1322,7 @@ impl Dialplan {
             recording: self.recording.clone(),
             recording_policy: self.recording_policy.clone(),
             media: self.media.clone(),
+            caller_media_network: self.caller_media_network.clone(),
             max_call_duration: self.max_call_duration,
             rtp_timeout: self.rtp_timeout,
             failure_action: self.failure_action.clone(),
@@ -1319,7 +1340,6 @@ impl Dialplan {
             audio_profile: self.audio_profile.clone(),
             busy_wait: self.busy_wait.clone(),
             diversion_policy: self.diversion_policy,
-            amd: self.amd.clone(),
             routed_headers: self.routed_headers.clone(),
             concurrency_holds: self.concurrency_holds.clone(),
             concurrent_call_lease: Default::default(),
@@ -1505,6 +1525,7 @@ impl Dialplan {
             recording: CallRecordingConfig::default(),
             recording_policy: None,
             media: MediaConfig::default(),
+            caller_media_network: MediaNetworkConfig::default(),
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
             rtp_timeout: None,
             failure_action: FailureAction::default(),
@@ -1522,7 +1543,6 @@ impl Dialplan {
             audio_profile: None,
             busy_wait: None,
             diversion_policy: None,
-            amd: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
             concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease::default(),
@@ -1564,6 +1584,7 @@ impl Dialplan {
     }
 
     pub fn with_media(mut self, media: MediaConfig) -> Self {
+        self.caller_media_network = MediaNetworkConfig::from(&media);
         self.media = media;
         self
     }

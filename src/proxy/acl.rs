@@ -651,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn trunk_context_ignores_outbound_dest_same_ip() {
-        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let source_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 33));
         let mut config = ProxyConfig::default();
 
         config.trunks.insert(
@@ -659,7 +659,7 @@ mod tests {
             TrunkConfig {
                 id: Some(147),
                 direction: Some(TrunkDirection::Outbound),
-                dest: "43.198.217.33:5396".to_string(),
+                dest: "203.0.113.33:5396".to_string(),
                 ..Default::default()
             },
         );
@@ -668,7 +668,7 @@ mod tests {
             TrunkConfig {
                 id: Some(144),
                 direction: Some(TrunkDirection::Inbound),
-                inbound_hosts: vec!["43.198.217.33".to_string()],
+                inbound_hosts: vec!["203.0.113.33".to_string()],
                 ..Default::default()
             },
         );
@@ -696,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn trunk_context_matches_inbound_dest_only() {
-        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let source_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 33));
         let mut config = ProxyConfig::default();
 
         config.trunks.insert(
@@ -704,7 +704,7 @@ mod tests {
             TrunkConfig {
                 id: Some(144),
                 direction: Some(TrunkDirection::Inbound),
-                dest: "43.198.217.33:5060".to_string(),
+                dest: "203.0.113.33:5060".to_string(),
                 ..Default::default()
             },
         );
@@ -732,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_trunk_index_matches_cidr_and_request_prefix() {
-        let source_ip = IpAddr::V4(Ipv4Addr::new(43, 198, 217, 33));
+        let source_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 33));
         let mut config = ProxyConfig::default();
         config.generated_dir = format!(
             "target/test-generated/acl-trunk-index-{}",
@@ -743,7 +743,7 @@ mod tests {
             TrunkConfig {
                 id: Some(143),
                 direction: Some(TrunkDirection::Inbound),
-                inbound_hosts: vec!["43.198.217.0/24".to_string()],
+                inbound_hosts: vec!["203.0.113.0/24".to_string()],
                 incoming_to_user_prefix: Some("44".to_string()),
                 ..Default::default()
             },
@@ -753,7 +753,7 @@ mod tests {
             TrunkConfig {
                 id: Some(142),
                 direction: Some(TrunkDirection::Inbound),
-                inbound_hosts: vec!["43.198.217.0/24".to_string()],
+                inbound_hosts: vec!["203.0.113.0/24".to_string()],
                 incoming_to_user_prefix: Some("861".to_string()),
                 ..Default::default()
             },
@@ -763,7 +763,7 @@ mod tests {
             TrunkConfig {
                 id: Some(144),
                 direction: Some(TrunkDirection::Inbound),
-                inbound_hosts: vec!["43.198.217.33:5060".to_string()],
+                inbound_hosts: vec!["203.0.113.33:5060".to_string()],
                 incoming_to_user_prefix: Some("8614".to_string()),
                 ..Default::default()
             },
@@ -773,7 +773,7 @@ mod tests {
             TrunkConfig {
                 id: Some(145),
                 direction: Some(TrunkDirection::Inbound),
-                inbound_hosts: vec!["43.198.217.33".to_string()],
+                inbound_hosts: vec!["203.0.113.33".to_string()],
                 incoming_to_user_prefix: Some("86155".to_string()),
                 ..Default::default()
             },

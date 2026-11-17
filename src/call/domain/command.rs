@@ -384,16 +384,10 @@ pub enum CallCommand {
         reply: oneshot::Sender<Option<(String, std::net::SocketAddr, String)>>,
     },
 
-    /// Start live transcription. Reference-counted: the transcription pump
-    /// starts on the first request and runs until the matching number of
-    /// `StopTranscription` commands (or call end).
-    StartTranscription {
-        /// Optional language override (provider-specific BCP-47 tag).
-        language: Option<String>,
-    },
-
-    /// Stop one live-transcription reference (see `StartTranscription`).
-    StopTranscription,
+    /// Explicitly start enabled quality inspection; idempotent when running.
+    StartQualityCheck,
+    /// Explicitly stop inspection. CC subtitle subscribers never issue this.
+    StopQualityCheck,
 
     /// Append an event to the session's call trace timeline.
     ///
@@ -897,7 +891,7 @@ impl CallCommand {
             self,
             CallCommand::Play { .. }
                 | CallCommand::StartRecording { .. }
-                | CallCommand::StartTranscription { .. }
+                | CallCommand::StartQualityCheck
                 | CallCommand::SupervisorListen { .. }
                 | CallCommand::SupervisorWhisper { .. }
                 | CallCommand::SupervisorBarge { .. }

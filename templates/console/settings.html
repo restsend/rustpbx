@@ -762,6 +762,22 @@
                         </div>
                     </div>
                     <form class="mt-6 space-y-8" @submit.prevent="saveProxySettings">
+                        <section class="space-y-4" id="realtime-quality-settings">
+                            <h3 class="text-sm font-semibold text-slate-900">Realtime quality inspection / 实时语音质检</h3>
+                            <p class="text-xs text-slate-500">Enable to start after answer. Each selected call leg opens a separate WebSocket. Saved settings apply to new calls.</p>
+                            <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="proxyDraft.quality.enabled"> Enable quality inspection / 启用质检</label>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <label class="text-sm">Service URL / 服务地址<input aria-label="Quality service URL" type="text" x-model="proxyDraft.quality.url" placeholder="ws://127.0.0.1:8095/v1/quality" class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm"></label>
+                                <label class="text-sm">Audio sides / 音频方向<select aria-label="Quality audio sides" x-model="proxyDraft.quality.sides" class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm"><option value="caller">Caller / 主叫</option><option value="callee">Callee / 被叫</option><option value="both">Both / 双方</option></select></label>
+                                <label class="text-sm">Receive timeout (seconds) / 接收超时<input aria-label="Quality receive timeout" type="number" min="1" x-model.number="proxyDraft.quality.receive_timeout_secs" class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm"></label>
+                                <label class="text-sm">Headers (JSON pairs) / 请求头<textarea aria-label="Quality headers" rows="2" x-model="proxyDraft.quality.headers" class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder='[["Authorization", "Bearer token"]]'></textarea></label>
+                                <label class="text-sm md:col-span-2">Service parameters (JSON object) / 服务参数<textarea aria-label="Quality parameters" rows="5" x-model="proxyDraft.quality.parameters" class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm font-mono"></textarea></label>
+                            </div>
+                            <p class="text-xs text-slate-500">Service disconnects and timeouts stop inspection only. A service hangup event ends the call. Wholesale tenant and route-item policies may override these defaults.</p>
+                            <button type="submit" :disabled="proxyProcessing" class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Save proxy settings / 保存代理配置</button>
+                        </section>
+                        <hr class="border-slate-100">
+
                         <!-- Realms Section -->
                         <div class="space-y-4">
                             <div>
@@ -3390,6 +3406,7 @@
             networkProfiles: [],
             selectedProfileId: '',
             proxyDraft: {
+                quality: { enabled: false, url: '', sides: 'both', receive_timeout_secs: 15, headers: '[]', parameters: '{}' },
                 realms: '',
                 locator_webhook: {
                     url: '',
@@ -5617,6 +5634,14 @@
             initProxyDraft() {
                 const proxy = this.proxyConfig || {};
                 this.proxyDraft = {
+                    quality: {
+                        enabled: proxy.quality?.enabled ?? false,
+                        url: proxy.quality?.url || '',
+                        sides: proxy.quality?.sides || 'both',
+                        receive_timeout_secs: proxy.quality?.receive_timeout_secs ?? 15,
+                        headers: JSON.stringify(proxy.quality?.headers || [], null, 2),
+                        parameters: JSON.stringify(proxy.quality?.parameters || {}, null, 2),
+                    },
                     realms: (proxy.realms || []).join('\n'),
                     locator_webhook: {
                         url: proxy.locator_webhook?.url || '',
@@ -5697,6 +5722,18 @@
                     user_backends: this.proxyDraft.user_backends,
                 };
 
+                try {
+                    const quality = this.proxyDraft.quality;
+                    const headers = JSON.parse(quality.headers || '[]');
+                    const parameters = JSON.parse(quality.parameters || '{}');
+                    if (!Array.isArray(headers) || headers.some(pair => !Array.isArray(pair) || pair.length !== 2 || pair.some(value => typeof value !== 'string'))) throw new Error('Quality headers must be an array of string pairs');
+                    if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object') throw new Error('Quality parameters must be a JSON object');
+                    body.quality = { ...quality, headers, parameters };
+                } catch (err) {
+                    this.$dispatch('toast', { title: 'Invalid quality settings', message: err.message });
+                    return;
+                }
+
                 body.locator_webhook = {
                     url: this.proxyDraft.locator_webhook.url,
                     timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.locator_webhook.timeout_ms),
@@ -5741,6 +5778,7 @@
                     const data = await response.json();
                     if (!response.ok) throw new Error(data?.message || 'Failed to update proxy settings');
                     this.$dispatch('toast', { title: 'Settings saved', message: data.message });
+                    this.proxyConfig.quality = body.quality;
                     this.proxyConfig.realms = body.realms;
                     this.proxyConfig.user_backends = body.user_backends;
                     this.proxyConfig.locator_webhook = body.locator_webhook;

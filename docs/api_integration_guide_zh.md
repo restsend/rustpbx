@@ -359,7 +359,7 @@ REST 端点挂载在控制台的 `api_prefix` 下（默认为 `/api`，通过 `[
 
 ### 2.1.1 实时通话转写（SSE）
 
-流式输出活动通话的实时转写文本。第一个订阅者连接时才启动转写，最后一个订阅者断开或通话结束时停止。需要配置 `[proxy.transcript.remote]`（流式 ASR，兼容 Deepgram）；未配置时返回 `503`。
+订阅外部质检服务返回的实时文字。有效的 `[proxy.quality] enabled = true` 或 wholesale 租户／路由策略会在接听后自动启动质检；SSE 连接和断开只订阅／取消订阅事件，不启停质检。服务返回的 `text` 转发、`calltrace` 记录、`hangup` 执行，无需额外开关。事件网关不可用时返回 `503`。
 
 **端点**：`GET /cc/calls/{call_id}/transcript`（SSE，仅包含文本事件：`started` / `segment` / `error` / `ended`）
 
@@ -496,3 +496,358 @@ auto_start = true
 ## 外呼（SSE）
 
 `POST {ami_path}/outbound/dial` 发起呼叫，并通过一个 SSE 连接流式输出该呼叫的每个 RWI 事件。完整请求/响应约定和 `[outbound]` 配置见 [外呼 SSE API](outbound_dial_api.md)。
+
+## 实时语音质检：部署、服务协议与结果查询
+
+本节描述外部质检接口 v1。PBX 负责 SIP、音频解码、调用服务和执行动作；服务负责识别。该接口不绑定 ASR 厂商。每条连接只承载一个方向的单声道音频。
+
+### 1. 在 RustPBX 配置服务
+
+控制台路径：**设置 → 代理配置 → Realtime quality inspection / 实时语音质检**。
+填写服务地址、音频方向、接收超时、请求头和参数，点击 **Save proxy settings / 保存代理配置**。请求头输入 JSON 二元数组，参数输入 JSON 对象。保存会写入当前启动配置文件并热更新 PBX，影响后续通话；已经建立的质检连接不切换配置。
+
+对应 TOML：
+
+```toml
+[proxy.quality]
+enabled = true
+url = "ws://127.0.0.1:8095/v1/quality"
+sides = "callee"                # caller | callee | both；默认 both
+receive_timeout_secs = 15        # 默认 15，必须大于 0
+headers = []                    # 可选 [["Authorization", "Bearer your-token"]]
+
+[proxy.quality.parameters]
+asr_enabled = true
+beep_enabled = true
+asr_languages = ["en", "id"]
+text_language = "en"
+hangup_on_asr = true
+hangup_on_beep = true
+frequencies_hz = [1309.0, 660.0]
+inspect_ms = 15000
+```
+
+`enabled` 表示接听后自动开始质检，没有独立的 `auto_start`。`both` 为双方分别建立 WebSocket，不混音。只检测被叫的语音信箱时选择 `callee`。主叫／被叫是 SIP 通话方向，不是 agent/customer 身份。PBX 需代理媒体才能获取音频；wholesale 启用质检的路由会强制媒体通过 PBX。录音仍由录音策略独立控制。
+
+`headers` 用于 WebSocket HTTP Upgrade，例如 Bearer 鉴权；`parameters` 放在首条 `start` 消息中，PBX 原样交给服务。上面的 ASR、beep、hangup 参数属于示例服务，不是 PBX 固定字段。PBX 收到有效 `hangup` 就执行挂断，不需要另一个 `allow_hangup` 开关。
+
+如果服务部署在另一台机器或容器，URL 必须使用 **PBX 所在环境可以访问的地址**；`127.0.0.1` 只指 PBX 自己所在的网络命名空间。局域网可以用 `ws://`；需要传输加密时使用 `wss://`。
+
+也可以通过已有的管理 API 保存：
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/api/settings/config/proxy \
+  -H 'Authorization: Bearer YOUR_CONSOLE_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  --data '{"quality":{"enabled":true,"url":"ws://127.0.0.1:8095/v1/quality","sides":"callee","receive_timeout_secs":15,"headers":[],"parameters":{"beep_enabled":true}}}'
+```
+
+`/api` 是默认 API 前缀。调用需要 `system:write` 权限。成功响应为 `status: "ok"`；`requires_restart: false` 表示热更新成功。保存后重新打开设置页，并核对当前 `--conf` 文件中的 `[proxy.quality]`，不要检查另一个工作目录下的同名文件。配置存储在 TOML，不在 `rustpbx_tenants` 或 CDR 数据库里。
+
+### 2. Wholesale 按租户与路由项配置
+
+下例中的 `3` 是租户 ID，`6`、`7` 是路由项 ID，必须换成部署中的真实 ID：
+
+```toml
+# PBX 默认不检查；只有显式启用的租户／路由项使用质检。
+[proxy.quality]
+enabled = false
+url = "ws://quality.internal:8095/v1/quality"
+sides = "callee"
+receive_timeout_secs = 15
+
+[proxy.quality.parameters]
+beep_enabled = true
+
+[addons.wholesale.quality.tenants."3"]
+enabled = true
+url = "ws://tenant-quality.internal:8095/v1/quality"
+sides = "callee"
+headers = []
+receive_timeout_secs = 15
+
+[addons.wholesale.quality.tenants."3".parameters]
+asr_enabled = true
+asr_languages = ["en", "id"]
+hangup_on_asr = true
+hangup_on_beep = true
+
+[addons.wholesale.quality.route_items]
+"6" = true
+"7" = false
+```
+
+合并规则：
+
+- 未配置的字段继承 PBX `[proxy.quality]`。
+- 租户显式配置覆盖 PBX 默认；`headers` 整组替换，`parameters` 按顶层 key 覆盖，不递归合并内部对象。
+- 路由项只覆盖 `enabled`，优先级高于租户。显式 `false` 同样覆盖。
+- 没有 wholesale defaults 或 routing profile 层。
+- 多目标重试使用实际选中路由项的策略；为了可能启用质检的后续目标，媒体可提前保持代理模式。
+
+**租户／路由项质检策略目前通过 TOML 配置，没有租户表单上的独立质检开关。** 修改 `[addons.wholesale.quality]` 后需重启 wholesale 进程；保存 PBX 代理配置不会重新初始化 addon 策略。
+
+### 3. 服务端 WebSocket 协议
+
+PBX 建立连接（连接超时 3 秒），首先发送 JSON 文本：
+
+```json
+{
+  "type": "start",
+  "version": 1,
+  "sample_rate": 8000,
+  "call_id": "call-example",
+  "session_id": "session-example",
+  "side": "callee",
+  "direction": "inbound",
+  "tenant_id": 3,
+  "inbound_trunk_id": 16,
+  "outbound_trunk_id": 15,
+  "parameters": {"asr_enabled": true, "beep_enabled": true}
+}
+```
+
+`version` 是接口版本，不是 RustPBX 软件版本。路由 ID 字段在不可用时省略。服务不要依赖 `call_id == session_id`。随后每个 binary 消息都是 **单声道 PCM16 little-endian**，没有 WAV 头，没有 base64，也没有 RTP 头。采样率取自当前方向解码器：PCMU/PCMA 通常 8000，G.722 解码后 16000，Opus 通常 48000。PBX 不统一重采样；每条连接采样率固定，服务按 `sample_rate` 转换到模型需要的采样率。不要把 WebSocket 消息边界当成句子边界。
+
+服务可以不返回识别结果。以下各类结果均独立，可返回零条或多条：
+
+**文字：**
+
+```json
+{"type":"text","text":"Please record your message after the tone","partial":false,"start_ms":0,"end_ms":3100,"lang":"en"}
+```
+
+`start_ms/end_ms` 为当前音频流内的毫秒偏移，`end_ms >= start_ms`。PBX 为结果补充连接对应的 side。partial 通过 `transcript_segment` 发布，final 只通过 `transcript_final` 发布一次；CC 的 SSE 消费者将两者统一展示。文字事件本身不会自动成为 CDR 的持久化转录记录。
+
+**标记检测结果（不挂断）：**
+
+```json
+{
+  "type":"calltrace",
+  "kind":"quality",
+  "code":"quality.voicemail_detected",
+  "severity":"info",
+  "message":"Voicemail detected",
+  "detail":{"method":"asr","language":"en","phrase":"please record your message after the tone"}
+}
+```
+
+`calltrace` 复用现有 TraceEvent 结构，至少提供 `kind` 和 `message`；`code`、`severity`、`detail` 为附加信息。PBX 生成实际 `ts` 并填写 side，服务不需要返回 side 或时间戳。beep 采用同一个 `code`，并使用 `detail.method = "beep"`；具体频率、持续时间等可放在 detail 中。
+
+**请求挂断：**
+
+```json
+{"type":"hangup","reason":"quality.voicemail_detected","detail":{"method":"beep","frequency_hz":1309}}
+```
+
+检测到语音信箱并决定挂断时，服务先发 `calltrace`，再发 `hangup`。前者记录观察，后者是动作。只发 `calltrace` 不会挂断。PBX 使用有界命令队列的 `try_send`；队列满时记录日志，不阻塞通话任务。协议没有挂断确认消息，终态以 CDR/通话事件为准。
+
+`{"type":"error","message":"recognizer unavailable"}` 会结束该质检连接并记录日志，电话继续运行。
+
+### 4. 连接寿命与服务实现
+
+服务每 **10 秒发送 WebSocket Ping 控制帧**。PBX 自动回复 Pong；默认 15 秒没有收到任何 WebSocket 消息就关闭质检连接，电话继续运行。不是发送 JSON `{"type":"ping"}`。PBX 不额外主动发 Ping；向服务持续发送音频不能代替服务向 PBX 的心跳。
+
+双方都可以正常发送 Close。服务主动关闭、网络断开、识别窗口结束或服务超时都只结束质检，**不代表挂断电话**。需要挂断必须发 `hangup`。PBX 通话结束时停止业务消息处理，并在独立的最多 1 秒窗口完成 Close 清理；服务不要假设关闭时一定有“最终判断”。
+
+一个仅验证协议和心跳的服务骨架（Python，依赖 `websockets` 的 asyncio API；不执行 ASR，不会自动标记／挂断）：
+
+```python
+import asyncio
+import json
+from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
+
+async def inspect(ws):
+    try:
+        first = await asyncio.wait_for(ws.recv(), timeout=5)
+        start = json.loads(first)
+        if start.get("type") != "start" or start.get("version") != 1:
+            await ws.close(code=1008, reason="unsupported start")
+            return
+        rate = start["sample_rate"]
+        print(start["call_id"], start["side"], rate)
+        async for message in ws:
+            if not isinstance(message, bytes):
+                continue
+            # message: PCM16LE. Feed your per-connection detector here.
+            # Offload CPU inference to a bounded worker queue.
+            # No observation means no result message.
+    except (ConnectionClosed, asyncio.TimeoutError):
+        pass
+
+async def main():
+    async with serve(inspect, "127.0.0.1", 8095,
+                     ping_interval=10, ping_timeout=10,
+                     max_size=1024 * 1024, max_queue=8):
+        await asyncio.Future()
+
+asyncio.run(main())
+```
+
+识别器产生真实观察后，在连接任务发送结果，例如：
+
+```python
+await ws.send(json.dumps({
+    "type": "calltrace", "kind": "quality",
+    "code": "quality.voicemail_detected", "severity": "info",
+    "message": "Voicemail detected",
+    "detail": {"method": "asr", "language": "id", "phrase": "layanan pesan suara"}
+}))
+# Only when your policy requires terminating the phone call:
+await ws.send(json.dumps({
+    "type": "hangup", "reason": "quality.voicemail_detected",
+    "detail": {"method": "asr", "language": "id"}
+}))
+```
+
+Rust 服务可直接使用 serde 的 tagged enum（`#[serde(tag = "type", rename_all = "lowercase")]`）表示上述消息，再序列化为 WebSocket Text。模型在进程启动时加载共享；每连接单独保留识别流、重采样器、关键词状态和 beep 状态。示例 `realtime-quality` 服务采用每语言一个 sherpa-onnx recognizer/worker、连接独立 stream、有界音频队列、Rubato 重采样到 16 kHz、100 ms ASR 输入块及轻量 beep 检测。不要在 WebSocket 事件循环中同步运行重型推理，以免心跳和关闭处理被阻塞。
+
+### 5. 在控制台查看结果
+
+1. 在 Wholesale CDR 列表按租户、号码或 Call-ID 找到通话，核对 duration、price、cost、profit。
+2. 打开关联的核心通话详情 `/console/call-records/{id}`，在 trace 时间线查看 **Quality** 事件及展开详情：`quality.voicemail_detected`、`method`、`language` 和 `side`。
+3. 查看最终 **End** 事件，确认 `detail.source = "realtime_quality"`、`detail.reason = "quality.voicemail_detected"`。检测结果和“谁要求挂断”分别记录。
+4. 使用详情页的录音和 SIPFlow，检查音频、INVITE/ACK/BYE/200。录音受独立录音策略控制，质检不会自动开启录音。
+
+当前没有 voicemail 顶层列或自动 `tags` 标记，也没有专门的语音信箱列表筛选器。正常服务挂断通常保留顶层 `hangup_reason = "autohangup"`；如还有媒体异常，终态消息可能显示媒体问题，来源仍应查 End 的 detail。
+
+### 6. 从数据库与 API 查询
+
+核心表为 `rustpbx_call_records`，`metadata.trace` 保存检测事件和挂断来源；`wholesale_cdrs` 保存金额，通过 `call_id` 关联。SQL 列名是 snake_case，下载 CDR JSON 的顶层字段是 camelCase。
+
+MySQL 8：
+
+```sql
+SELECT c.id, c.call_id, c.hangup_reason, c.recording_url,
+       q.method, q.language, q.side,
+       w.tenant_id, w.duration, w.price_total, w.cost_total, w.profit
+FROM rustpbx_call_records c
+JOIN JSON_TABLE(c.metadata, '$.trace[*]' COLUMNS (
+  code VARCHAR(100) PATH '$.code',
+  method VARCHAR(20) PATH '$.detail.method',
+  language VARCHAR(20) PATH '$.detail.language',
+  side VARCHAR(20) PATH '$.side'
+)) q ON q.code = 'quality.voicemail_detected'
+LEFT JOIN wholesale_cdrs w ON w.call_id = c.call_id
+ORDER BY c.id DESC;
+
+SELECT c.call_id, e.reason, e.side
+FROM rustpbx_call_records c
+JOIN JSON_TABLE(c.metadata, '$.trace[*]' COLUMNS (
+  kind VARCHAR(30) PATH '$.kind',
+  source VARCHAR(50) PATH '$.detail.source',
+  reason VARCHAR(100) PATH '$.detail.reason',
+  side VARCHAR(20) PATH '$.detail.side'
+)) e ON e.kind = 'end' AND e.source = 'realtime_quality'
+ORDER BY c.id DESC;
+```
+
+SQLite 的对应查询：
+
+```sql
+SELECT c.call_id, json_extract(e.value, '$.detail.method') AS method
+FROM rustpbx_call_records c, json_each(c.metadata, '$.trace') e
+WHERE json_extract(e.value, '$.code') = 'quality.voicemail_detected';
+```
+
+PostgreSQL 可使用 `jsonb_array_elements(c.metadata::jsonb->'trace')`，按 `e->>'code'` 过滤。
+
+管理 API：
+
+```text
+GET /api/call-records/{id}/cdr-json
+GET /api/call-records/{id}/sip-flow?detail=true
+GET /api/call-records/{id}/recording
+```
+
+这里 `{id}` 是核心表的数值主键，不是 SIP Call-ID；接口沿用通话记录访问权限。
+
+质检挂断不豁免正常计费。已接通的语音信箱仍按租户／供应商各自的费率、最低时长、计费步长计算。测试费率售价 0.10/分钟、成本 0.05/分钟、最低时长和步长均为 60 秒时，即使检测后几秒就挂断，每通仍计售价 0.10、成本 0.05。
+
+### 7. 验证范围（2026-11-11）
+
+完成了真实本地 SIP/PCMU/RTP → PBX → sherpa-onnx/beep 服务 → trace/hangup → 双方 BYE 的端到端测试。英语、印尼语和 1309 Hz beep 均能标记并挂断；核心测试核对连接清理、录音内容、SIPFlow 和唯一终态 CDR。wholesale 回归 113 项通过，另验证了实际通话的数据库 CDR、录音归档、计费及余额扣减。输入为合成语音／音调，不代表运营商实际样本的准确率评估，也未进行压测。
+
+配置保存、热更新和非法输入保护有自动化测试。控制台表单与时间线入口已提供，但本轮浏览器访问受站点权限阻止，**未完成登录后的视觉验证或截图**；不能把 API 验证视为浏览器操作验证。
+
+### 8. 独立质检服务部署
+
+服务源码和发布流水线位于 [miuda-ai/realtime-quality](https://github.com/miuda-ai/realtime-quality)，完整参数见该仓库 README。只支持英语（`en`）、印尼语（`id`）关键词匹配及可配置频率的 beep；可以分别启用，也可以组合。关键词来自配置，未配置关键词时不能启用 ASR。检测结果表示命中配置条件，不代表通用 AI 接听检测。
+
+发布目标为 Linux x86_64 和 macOS arm64。Linux 包以 Debian 12 / glibc 2.36 为基线；模型不随可执行文件打包。下载对应 tar.gz 和 `.sha256`，校验后解压到 `/opt/realtime-quality`。macOS 可以直接前台运行，Linux 推荐随包的 systemd 单元。
+
+```bash
+shasum -a 256 -c realtime-quality-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sudo mkdir -p /opt/realtime-quality /etc/realtime-quality
+sudo tar -xzf realtime-quality-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C /opt/realtime-quality
+sudo cp /opt/realtime-quality/config.example.toml /etc/realtime-quality/config.toml
+```
+
+默认示例只启用 beep，无需模型；修改 `frequencies_hz`、持续时间和能量阈值，并按需要设置 `hangup_on_beep`。ASR 则另外下载模型到项目目录之外：
+
+```bash
+sudo python3 /opt/realtime-quality/scripts/download_models.py --directory /var/lib/realtime-quality/models --language both
+```
+
+下载器仅获取固定版本的 encoder、decoder、joiner、tokens，并校验 SHA-256，不下载音频或样本合集。Python 需要 3.11+。在配置中启用 `[models.en]`、`[models.id]` 并填写绝对路径，设置 `detector.asr_enabled = true`、`asr_languages = ["en", "id"]`，通过 `[[detector.keywords]]` 配置每种语言的短语。`hangup_on_asr` 控制命中后是否请求挂断；关闭时仍可记录质检标记。`num_threads` 按语言配置，同语言连接共享 recognizer，连接状态独立。
+
+```bash
+sudo useradd --system --home-dir /var/lib/realtime-quality --shell /usr/sbin/nologin realtime-quality
+sudo mkdir -p /var/lib/realtime-quality
+sudo chown root:realtime-quality /etc/realtime-quality/config.toml
+sudo chmod 640 /etc/realtime-quality/config.toml
+# 确保 realtime-quality 账户可以读取模型目录及其父目录。
+sudo cp /opt/realtime-quality/deploy/realtime-quality.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now realtime-quality
+curl --fail http://127.0.0.1:8095/health
+journalctl -u realtime-quality -f
+```
+
+以上健康检查端口须与配置的 `listen` 一致。示例默认只监听回环；供其他机器的 PBX 访问时，将 `listen` 改为内网 IP 或 `0.0.0.0:8095`。PBX / wholesale 的 `quality.url` 填服务内网地址的 `/v1/quality`，例如 `ws://10.0.0.12:8095/v1/quality`；独立机器部署时不能填 PBX 自己的 `127.0.0.1`。服务若设置 `token`，PBX `quality.headers` 添加匹配的 `Authorization: Bearer ...`。租户及路由条目的配置覆盖规则见前文。每条连接的 `parameters` 可覆盖服务检测默认值，包括关键词列表（整体替换）。
+
+部署后先检查 `/health`，再发起测试通话，按前文在核心 CDR 的 `metadata.trace` 查 `quality.voicemail_detected`，并检查 End 事件的服务挂断来源；录音、SIPFlow、wholesale 计费仍走原流程。健康检查成功只表示服务启动，不能代替真实通话验证。
+
+`v*` 版本 tag 触发 GitHub Actions 双平台发布；两个构建成功且包与校验文件齐全后才发布 draft。使用 GitHub 托管 macOS 15 arm64 runner 和 Ubuntu 上的 Debian 12 构建容器，无需组织自托管 Mac。源码与发布包均不包含模型、录音或测试音频；不要把本机配置、凭据和评测输出提交到任一项目。
+
+### 9. 从上一轮 wholesale 镜像升级：数据库 schema（2026-11-11）
+
+本节对比本次质检镜像之前的最近一次成功构建，而不是把本地测试库缺失的所有历史迁移都当成本次新增：
+
+| 项目 | 上一轮 | 本次质检镜像 |
+| --- | --- | --- |
+| 构建 | [2026-11-08，cnb-24k-1k6t3hnuo](https://cnb.cool/miuda.ai/wholesale/-/build/logs/cnb-24k-1k6t3hnuo) | [2026-11-11，cnb-99e-1k73gkrdj](https://cnb.cool/miuda.ai/wholesale/-/build/logs/cnb-99e-1k73gkrdj) |
+| wholesale 提交 | `320f282e` | `e8592f24` |
+| 核心版本 | 构建时浅克隆 core main，日志未记录精确 SHA | 固定 `8fa31ffb` |
+| 本次镜像 | — | `docker.cnb.cool/miuda.ai/rustpbx:wholesale-quality-20261111` |
+
+上一轮核心未固定 SHA，不能仅靠 wholesale 提交号精确重建旧镜像。本节结合旧构建日志、构建时点前后的核心迁移历史与本次固定提交核对；实际数据库是否已经执行某迁移，以迁移表和列定义为准。
+
+| 范围 | schema 变化 | 旧数据与用途 |
+| --- | --- | --- |
+| 核心 `rustpbx_sip_trunks` | 新增 `register_username VARCHAR(160) NULL`；迁移名 `add_sip_trunk_register_username` | 分离 REGISTER 用户名和 Digest 鉴权用户名。已有行保持 NULL，不改写 `auth_username`；未填写时沿用 `auth_username`。 |
+| wholesale 表和索引 | 本轮没有新增、删除或修改 | 租户／路由条目的质检策略位于 TOML `addons.wholesale.quality`，不是新增数据库列。 |
+| 质检结果／挂断记录 | 沿用 `rustpbx_call_records.metadata` 中的 trace JSON | `quality.voicemail_detected`、`detail.method`、End 的服务来源属于 JSON 内容约定；没有新增 `voicemail` 或 `quality_result` 列。 |
+| 计费与 commerce | 本轮没有 schema 变化 | `wholesale_cdrs`、余额和计费关联方式不变；质检挂断仍正常计费。 |
+
+此字段来自同步的核心 SIP trunk 改动，不是质检必需的新表。`add_call_record_quality_columns` 等既有媒体质量／报告迁移也不是本次新增。移除旧 transcript 配置类型不等于删除数据库里的历史 transcript 报告字段。
+
+升级前备份数据库和 TOML；先让一个新版本实例完成启动迁移，再启动其他实例。核心启动会执行未应用的 migration，并记录在 `seaql_migrations`；wholesale 使用 `wholesale_migrations`。新增列迁移先检查列是否存在，不需要另行手写 ALTER 或批量回填。启动账号需要执行待应用 DDL 的权限；迁移失败时先处理启动日志中的具体错误。
+
+MySQL 升级后可只读核验：
+
+```sql
+SELECT version, applied_at FROM seaql_migrations
+WHERE version = 'add_sip_trunk_register_username';
+
+SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'rustpbx_sip_trunks'
+  AND COLUMN_NAME = 'register_username';
+
+SELECT id, register_username, auth_username FROM rustpbx_sip_trunks;
+```
+
+预期新列为可空的 `varchar(160)`，旧记录未配置时为 NULL。字段确认后仍需核验 trunk 注册及基本呼叫；质检标记的数据库查询见前面的结果章节。此迁移的 `down()` 不删除该列，不能把回退应用镜像当成数据库自动回滚；需要完整回退时使用升级前备份，并恢复相应旧配置。本次文档补充没有执行新的数据库变更。

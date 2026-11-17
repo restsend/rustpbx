@@ -369,10 +369,12 @@ object, `413` when the payload exceeds 16 KiB.
 object (empty object when nothing was set).
 
 ### 2.1.1 Live Call Transcription (SSE)
-Stream real-time transcription text for an active call. Transcription starts
-lazily on first subscriber and stops when the last one disconnects or the call
-ends. Requires `[proxy.transcript.remote]` (streaming ASR, Deepgram-compatible)
-in config; returns `503` when unconfigured.
+Subscribe to text emitted by an external quality service for an active call.
+Effective `[proxy.quality] enabled = true` (or a wholesale route/tenant policy)
+starts inspection automatically after answer. SSE subscriptions never start or
+stop inspection. `text`, `calltrace`, and `hangup` service responses are forwarded,
+recorded, and executed respectively; there are no separate ASR or action switches.
+The SSE endpoint returns `503` if the event gateway is unavailable.
 
 **Endpoint**: `GET /cc/calls/{call_id}/transcript` (SSE, text-only events:
 `started` / `segment` / `error` / `ended`)
@@ -520,3 +522,17 @@ auto_start = true
 `POST {ami_path}/outbound/dial` originates a call and streams every RWI
 event for it over one SSE connection. Full request/response contract and
 the `[outbound]` config: see [Outbound Dial SSE API](outbound_dial_api.md).
+
+## External realtime quality inspection
+
+For deployment, the v1 WebSocket wire protocol, an example service, wholesale policy precedence, and database queries, see [the realtime quality deployment guide](api_integration_guide_zh.md#实时语音质检部署服务协议与结果查询).
+
+The console exposes **Settings → Proxy settings → Realtime quality inspection**. It persists `[proxy.quality]` in the active TOML configuration and reloads it for new calls. Wholesale tenant and route-item policies live under `[addons.wholesale.quality]` and currently require a process restart when changed. They are not stored as tenant database columns.
+
+A connection carries one leg's decoded mono PCM16LE at the sample rate declared by its initial `start` JSON message. Services send WebSocket Ping every 10 seconds; the PBX defaults to closing inspection after 15 seconds without an incoming message. Closing inspection does not hang up the phone call. Use an explicit `hangup` event to terminate the call.
+
+Voicemail observations use `calltrace` with `kind: "quality"`, `code: "quality.voicemail_detected"`, and `detail.method: "asr"` or `"beep"`. These are stored in `rustpbx_call_records.metadata.trace`. Service-requested termination is attributed in the terminal End trace by `detail.source: "realtime_quality"` and `detail.reason`. Join `wholesale_cdrs` by `call_id` to inspect billing; there is no dedicated voicemail column or automatic tag.
+
+### Standalone quality service deployment
+
+The service is maintained in [miuda-ai/realtime-quality](https://github.com/miuda-ai/realtime-quality). Its README covers native Linux x86_64 / macOS arm64 packages, external checksum-verified English and Indonesian streaming models, configurable keywords and beep frequencies, systemd deployment, and release CI. See [the deployment section in the Chinese guide](api_integration_guide_zh.md#8-独立质检服务部署) for PBX connection setup. Models and audio are excluded from source and release packages. Both targets use GitHub-hosted runners: macOS 15 arm64 and Ubuntu with a Debian 12 build container. No self-hosted Mac runner is required.

@@ -5,7 +5,6 @@
 
 pub mod app_ingress;
 pub mod audio_source;
-pub mod amd;
 pub mod conference_mixer;
 pub mod dtmf;
 pub mod egress;
@@ -49,6 +48,7 @@ pub use conference_mixer::ConferenceAudioMixer;
 pub use leg_id::LegId;
 pub use leg::{CaptureRoute, LegConfig};
 pub use mixer::AudioMixer;
+pub use negotiate::MediaNegotiationError;
 pub use negotiate::{CodecInfo, MediaNegotiator, TransportMode};
 pub use rtc_track::RtcTrack;
 pub use rtp_track_builder::RtpTrackBuilder;

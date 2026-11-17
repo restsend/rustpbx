@@ -574,6 +574,7 @@ impl AppStateBuilder {
                     .collect();
 
                 let mut builder = SipServerBuilder::new(proxy_config.clone())
+                    .with_realtime_presets(config.realtime.clone())
                     .with_cluster_config(config.cluster.clone())
                     .with_cluster_peers(cluster_peers)
                     .with_rolling(self.rolling.clone())

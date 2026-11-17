@@ -50,6 +50,8 @@ pub struct CallMeta {
     /// BYE awaiting its reply, a late ACK), and that wait is not call time.
     pub hangup_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
+    /// Diagnostics from the command that ended this call, persisted only in End.detail.
+    pub hangup_trace_detail: Option<serde_json::Value>,
     /// Which dialog sent the FIRST BYE of the terminal hangup — attribution
     /// context for the RWI `call_hangup.hangup_by` normalization. `ByCallee`
     /// means different parties in different call shapes: on an inbound CC

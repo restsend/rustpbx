@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scenario name="Media network B-leg: check INVITE and answer with early media">
+  <recv request="INVITE" timeout="10000"><action>
+    <ereg regexp="c=IN IP4 @EXPECTED_IP@" search_in="body" check_it="true" assign_to="_"/>
+    <ereg regexp="m=audio 2[5-9][0-9]{3} RTP/AVP" search_in="body" check_it="true" assign_to="_"/>
+    <log message="B_INVITE_NETWORK_OK"/>
+  </action></recv>
+  <send><![CDATA[
+SIP/2.0 183 Session Progress
+[last_Via:]
+[last_From:]
+[last_To:];tag=callee-[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:callee@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=callee 1 1 IN IP4 127.0.0.1
+s=media network test
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18002 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]></send>
+  <pause milliseconds="150"/>
+  <send><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=callee-[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:callee@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=callee 1 1 IN IP4 127.0.0.1
+s=media network test
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18002 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]></send>
+  <recv request="ACK" timeout="10000"/>
+  <recv request="BYE" timeout="10000"/>
+  <send><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]></send>
+</scenario>

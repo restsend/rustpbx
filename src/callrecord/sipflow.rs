@@ -428,9 +428,9 @@ mod tests {
     fn outgoing_request_dst_never_wildcard_and_addr_param_wins() {
         let invalid_bye = rsipstack::sip::SipMessage::try_from(
             "BYE sip:i2bkchck@7i94k9e6mr86.invalid;transport=WS;ob SIP/2.0\r\n\
-             Via: SIP/2.0/UDP 116.62.250.247:15060;branch=z9hG4bKJRWrkRJNwtk7;rport\r\n\
-             From: <sip:+17746371298@58.246.19.74:6988>;tag=y2Ty717d\r\n\
-             To: <sip:xwork_5g_test@pbx.test.weixuntech-inc.com>;tag=tbjrt9l1te\r\n\
+             Via: SIP/2.0/UDP 192.0.2.10:15060;branch=z9hG4bKJRWrkRJNwtk7;rport\r\n\
+             From: <sip:+12025550198@198.51.100.74:6988>;tag=y2Ty717d\r\n\
+             To: <sip:xwork_5g_test@pbx.example.com>;tag=tbjrt9l1te\r\n\
              Call-ID: q6cb2m7hj1j6gpsb6oif\r\n\
              CSeq: 2631 BYE\r\n\
              Content-Length: 0\r\n\r\n",
@@ -445,7 +445,7 @@ mod tests {
             "unresolvable `.invalid` target must not become a wildcard dst"
         );
         assert_eq!(
-            src, "116.62.250.247:15060",
+            src, "192.0.2.10:15060",
             "src still comes from the Via sent-by"
         );
 
@@ -470,11 +470,11 @@ mod tests {
         let flow_addr = rsipstack::transport::SipAddr {
             r#type: Some(rsipstack::sip::transport::Transport::Wss),
             addr: rsipstack::sip::HostWithPort {
-                host: rsipstack::sip::Host::IpAddr("112.64.233.138".parse().unwrap()),
+                host: rsipstack::sip::Host::IpAddr("203.0.113.138".parse().unwrap()),
                 port: Some(7318.into()),
             },
         };
         let (_, dst) = SipFlow::extract_addrs_fast(true, Some(&flow_addr), &invalid_bye, &[]);
-        assert_eq!(dst, "112.64.233.138:7318");
+        assert_eq!(dst, "203.0.113.138:7318");
     }
 }

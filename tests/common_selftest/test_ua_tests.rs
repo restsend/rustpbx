@@ -55,8 +55,8 @@ pub async fn create_test_ua_webrtc(
 
     // WebRtc caller: MUST use the PeerConnection-backed constructor —
     // `TestUa::new` runs with MediaMode::None (no PC, no offer), so
-    // `make_call` would send an OFFERLESS INVITE and the proxy would fail
-    // codec negotiation with 500 "Media resource allocation failed"
+    // `make_call` would send an OFFERLESS INVITE and the proxy would reject
+    // anchored media setup with 488 "Media negotiation failed"
     // (this is exactly what the empty-SDP probe showed).
     let default_caps = vec![
         rustrtc::config::AudioCapability::pcmu(),

@@ -9,7 +9,7 @@
 //!   target).
 //! - [`openai::OpenAiRealtime`] — OpenAI Realtime API JSON event framing
 //!   (base64 PCM16 inside `input_audio_buffer.append` /
-//!   `response.audio.delta`), server VAD speech events for barge-in,
+//!   `response.output_audio.delta`), server VAD speech events for barge-in,
 //!   transcription deltas and function-call passthrough.
 //!
 //! The PBX is a **transport**: transcripts and function calls are surfaced
