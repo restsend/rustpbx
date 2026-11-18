@@ -5,7 +5,7 @@
 //! serialization behaviour, and the conversion into the runtime `BusyWaitPlan`
 //! carried on the dialplan.
 
-use rustpbx::call::{BusyWaitPlan, DEFAULT_QUEUE_HOLD_AUDIO};
+use rustpbx::call::BusyWaitPlan;
 use rustpbx::config::DialplanHints;
 use rustpbx::proxy::routing::{RouteAction, RouteBusyWaitConfig, RouteRule};
 
@@ -78,7 +78,9 @@ enabled = true
 #[test]
 fn busy_wait_to_plan_defaults_to_queue_hold_audio() {
     let plan = RouteBusyWaitConfig::default().to_plan();
-    assert_eq!(plan.hold_audio, DEFAULT_QUEUE_HOLD_AUDIO);
+    // Camp-on (busy wait) is a *waiting* phase — the built-in waiting music,
+    // not the agent ringback (see `BusyWaitPlan::default`).
+    assert_eq!(plan.hold_audio, "sounds/queue-waiting-8k.wav");
     assert_eq!(plan.retry_interval, std::time::Duration::from_secs(5));
     assert_eq!(plan.max_wait, Some(std::time::Duration::from_secs(60)));
 }
@@ -145,7 +147,7 @@ fn busy_wait_plan_default_matches_documented_defaults() {
     let plan = BusyWaitPlan::default();
     assert_eq!(plan.max_wait, Some(std::time::Duration::from_secs(60)));
     assert_eq!(plan.retry_interval, std::time::Duration::from_secs(5));
-    assert_eq!(plan.hold_audio, "sounds/phone-calling.wav");
+    assert_eq!(plan.hold_audio, "sounds/queue-waiting-8k.wav");
 }
 
 #[test]

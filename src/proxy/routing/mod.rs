@@ -154,8 +154,27 @@ pub struct TrunkConfig {
     /// Disabled when unset, independently of authentication credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_p_asserted_identity: Option<bool>,
+    /// Whether this trunk's UA executes REFER-with-Replaces (the standard
+    /// attended-transfer transferee role: receive REFER(Refer-To with
+    /// Replaces) → dial the Refer-To target with the Replaces header →
+    /// release the replaced dialog). Defaults to true (PSTN/SBC and modern
+    /// UA behaviour); set false for trunks that do not implement the
+    /// transferee role — their attended transfers fall back to the
+    /// server-side transfer room.
+    #[serde(default = "default_refer_replaces")]
+    pub refer_replaces: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id_mode: Option<CallIdMode>,
+    /// Session-id correlation header for THIS trunk, both directions.
+    /// Inbound: INVITEs from this trunk adopt the global session id from
+    /// this header (verbatim, top priority after cluster child-leg
+    /// adoption — outranks the standard `Session-ID` header and Call-ID
+    /// reuse). Outbound: INVITEs routed to this trunk stamp the header with
+    /// the current session id. Values follow `normalize_custom` rules
+    /// (non-empty, ≤120 chars, `A-Za-z0-9._@-`). Unset → the global
+    /// `[proxy].session_id_default_header` applies (if set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_header: Option<String>,
 
     // SBC Health Check
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -569,6 +588,10 @@ fn default_rewrite_hostport() -> bool {
     true
 }
 
+fn default_refer_replaces() -> bool {
+    true
+}
+
 impl Default for TrunkConfig {
     fn default() -> Self {
         Self {
@@ -580,6 +603,7 @@ impl Default for TrunkConfig {
             password: None,
             codec: Vec::new(),
             disabled: None,
+            refer_replaces: true,
             max_calls: None,
             concurrent_call_limiter: None,
             max_cps: None,
@@ -600,6 +624,7 @@ impl Default for TrunkConfig {
             rewrite_hostport: true,
             send_p_asserted_identity: None,
             call_id_mode: None,
+            session_id_header: None,
             health_check_enabled: None,
             health_check_per_ip: None,
             health_check_interval_secs: None,
@@ -984,7 +1009,7 @@ impl RouteBusyWaitConfig {
             hold_audio: self
                 .hold_audio
                 .clone()
-                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_WAIT_AUDIO.to_string()),
         }
     }
 }

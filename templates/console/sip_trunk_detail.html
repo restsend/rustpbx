@@ -451,6 +451,19 @@ default('RustPBX') }}{% endblock %}
                     </label>
                 </section>
 
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_advanced" | t }}</h2>
+                    <label class="mt-4 flex items-start gap-3 text-sm font-medium text-slate-700">
+                        <input type="checkbox" x-model="form.refer_replaces"
+                            class="mt-0.5 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                        <span>
+                            {{ "sip_trunk_detail.field_refer_replaces" | t }}
+                            <span class="block text-xs font-normal text-slate-400">{{
+                                "sip_trunk_detail.field_refer_replaces_hint" | t }}</span>
+                        </span>
+                    </label>
+                </section>
+
                 <template x-if="form.register_enabled && mode === 'edit' && regStatus">
                     <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_reg_status" | t }}
@@ -688,6 +701,7 @@ default('RustPBX') }}{% endblock %}
                 carrier: '',
                 description: '',
                 status: 'healthy',
+                refer_replaces: true,
                 direction: 'bidirectional',
                 sip_server: '',
                 sip_transport: 'udp',
@@ -774,7 +788,9 @@ default('RustPBX') }}{% endblock %}
                 // Reset to empty first to force reactivity (needed when value equals default)
                 this.form.status = '';
                 this.form.direction = '';
-                this.form.sip_transport = '';                this.form.status = (model.status || 'healthy').toLowerCase();
+                this.form.sip_transport = '';
+                this.form.status = (model.status || 'healthy').toLowerCase();
+                this.form.refer_replaces = model.refer_replaces !== false;
                 this.form.direction = (model.direction || 'bidirectional').toLowerCase();
                 this.form.sip_transport = (model.sip_transport || 'udp').toLowerCase();
                 this.form.sip_server = model.sip_server || '';
@@ -1038,6 +1054,7 @@ default('RustPBX') }}{% endblock %}
                 payload.description = this.form.description.trim();
                 payload.status = this.form.status.trim();
                 payload.direction = this.form.direction.trim();
+                payload.refer_replaces = this.form.refer_replaces === true;
                 payload.sip_transport = this.form.sip_transport.trim();
 
                 if (this.form.sip_server.trim()) payload.sip_server = this.form.sip_server.trim();

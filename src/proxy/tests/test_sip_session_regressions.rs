@@ -2922,10 +2922,20 @@ async fn skill_group_empty_preresolve_still_injects_dial_kick() {
 
 #[tokio::test]
 async fn queue_hold_music_real_ingress_respects_global_and_explicit_audio() {
-    for global in [None, Some("sounds/wait.wav".to_string())] {
+    // (queue_hold_music, hold_music) — the wait audio prefers the queue-level
+    // key and otherwise falls back to holding music, never the agent ringback
+    // (product 2026-11-14: queued vs agent-ringing must be two sounds).
+    let cases: [(Option<&str>, Option<&str>); 4] = [
+        (None, None),
+        (Some("sounds/wait.wav"), None),
+        (None, Some("sounds/hold.wav")),
+        (Some("sounds/wait.wav"), Some("sounds/hold.wav")),
+    ];
+    for (queue_global, hold_global) in cases {
         for ingress in ["app", "skill-group", "agent", "named"] {
             let mut config = ProxyConfig::default();
-            config.queue_hold_music = global.clone();
+            config.queue_hold_music = queue_global.map(str::to_string);
+            config.hold_music = hold_global.map(str::to_string);
             config.queues.insert(
                 "explicit".into(),
                 RouteQueueConfig {
@@ -2982,22 +2992,28 @@ async fn queue_hold_music_real_ingress_respects_global_and_explicit_audio() {
                     .unwrap();
             }
             let pending = ctx.pending_queue.lock();
-            let hold = pending.as_ref().unwrap().plan.hold.as_ref().unwrap();
-            let expected = if ingress == "named" {
-                crate::call::DEFAULT_QUEUE_HOLD_AUDIO
-            } else {
-                global
-                    .as_deref()
-                    .unwrap_or(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
-            };
+            let plan = &pending.as_ref().unwrap().plan;
+            if ingress == "named" {
+                // An explicit per-queue `[queues.<name>.hold]` always wins,
+                // even when its file is the built-in ringback.
+                let hold = plan.hold.as_ref().expect("named queue keeps its hold");
+                assert_eq!(
+                    hold.audio_file.as_deref(),
+                    Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
+                );
+                assert!(!hold.loop_playback);
+                continue;
+            }
+            // queue_hold_music > built-in waiting loop; `hold_music` is a
+            // separate knob (real holds) and no longer leaks into the queue.
+            let expected = Some(
+                queue_global.unwrap_or(crate::call::DEFAULT_QUEUE_WAIT_AUDIO),
+            );
             assert_eq!(
-                hold.audio_file.as_deref(),
-                Some(expected),
+                plan.hold.as_ref().and_then(|h| h.audio_file.as_deref()),
+                expected,
                 "ingress={ingress}"
             );
-            if ingress == "named" {
-                assert!(!hold.loop_playback);
-            }
         }
     }
 }
@@ -5744,8 +5760,8 @@ async fn test_resolve_hold_music_priority_chain() {
     let session = build_session(dialplan).await;
     assert_eq!(
         expect_hold_music_file(session.resolve_hold_music(&[])),
-        crate::call::DEFAULT_QUEUE_HOLD_AUDIO,
-        "empty chain must fall back to the built-in default hold audio"
+        crate::call::DEFAULT_HOLD_AUDIO,
+        "empty chain must fall back to the built-in hold music (not the agent ringback)"
     );
 
     // 3. [proxy].hold_music config.

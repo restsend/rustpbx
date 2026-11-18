@@ -78,10 +78,18 @@ mod tests {
             assert!(key.starts_with("db-"));
         }
         for queue in parsed.values() {
+            let expected = if queue.name.as_deref() == Some("support") {
+                // Explicit per-queue audio is preserved verbatim.
+                crate::call::DEFAULT_QUEUE_HOLD_AUDIO
+            } else {
+                // No audio of its own: the built-in queue waiting music.
+                crate::call::DEFAULT_QUEUE_WAIT_AUDIO
+            };
             assert_eq!(
                 queue.hold.as_ref().unwrap().audio_file.as_deref(),
-                Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
-                "without global music, preserve the original queue audio"
+                Some(expected),
+                "queue={:?}",
+                queue.name
             );
         }
 

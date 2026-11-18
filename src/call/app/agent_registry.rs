@@ -256,6 +256,23 @@ impl RoutingStrategy {
 // Agent Registry Trait
 // ===================================================================
 
+/// Extract the user part of a SIP URI string (`sip:1002@host` → `1002`).
+/// Tolerant of bare users and missing schemes — dial targets in configs and
+/// CTI payloads arrive in both shapes.
+fn dial_uri_user_part(uri: &str) -> Option<&str> {
+    let without_params = uri.split(['?', ';']).next().unwrap_or(uri);
+    let without_scheme = without_params
+        .strip_prefix("sips:")
+        .or_else(|| without_params.strip_prefix("sip:"))
+        .unwrap_or(without_params);
+    if without_scheme.is_empty() {
+        return None;
+    }
+    // No `@` (bare user dial target, e.g. "1002"): the whole remainder IS
+    // the user part.
+    Some(without_scheme.rsplit_once('@').map_or(without_scheme, |(user, _)| user))
+}
+
 /// Core trait for agent registry implementations.
 ///
 /// This trait abstracts over different storage backends (memory, database, HTTP API)
@@ -291,6 +308,35 @@ pub trait AgentRegistry: Send + Sync {
     /// `list_agents()`; backends with a URI index should override.
     async fn find_agent_by_uri(&self, uri: &str) -> Option<AgentRecord> {
         self.list_agents().await.into_iter().find(|a| a.uri == uri)
+    }
+
+    /// Resolve the agent record behind a **dialed target's user part**:
+    /// canonical agent ID first, then a URI user-part scan — the SIP
+    /// extension may differ from the agent ID (checklist-323:
+    /// `sip:charlie@…` registered as `agent-charlie`), so an ID-only
+    /// lookup silently misses those targets.
+    async fn resolve_dial_target_agent(&self, user_part: &str) -> Option<AgentRecord> {
+        if let Some(record) = self.get_agent(user_part).await {
+            return Some(record);
+        }
+        self.list_agents()
+            .await
+            .into_iter()
+            .find(|record| dial_uri_user_part(&record.uri) == Some(user_part))
+    }
+
+    /// dial-time exclusion (production 2026-11-16: consulted agents must not be dialed): transfer /
+    /// consult dials must not ring an agent in break (Away) or after-call work
+    /// (Wrapup) — the helpdesk requires the target to be dispatchable.
+    /// Returns `Some(agent_id)` when the dial must be refused; non-agent
+    /// targets and dispatchable targets return `None`.
+    async fn unavailable_transfer_target(&self, user_part: &str) -> Option<String> {
+        let record = self.resolve_dial_target_agent(user_part).await?;
+        matches!(
+            record.presence,
+            PresenceState::Away(_) | PresenceState::Wrapup { .. }
+        )
+        .then_some(record.agent_id)
     }
 
     /// Side-effect-free existence probe for a custom transfer target scheme
@@ -776,5 +822,136 @@ pub fn select_best_agent(
             // External system will make the decision
             candidates.into_iter().next()
         }
+    }
+}
+
+#[cfg(test)]
+mod dial_target_gate_tests {
+    //! dial-time exclusion gate primitives: dial-target resolution (canonical ID
+    //! first, then the URI user-part scan for extension≠ID setups) and the
+    //! Away/Wrapup refusal decision shared by the consult/REFER/transfer
+    //! gates (production 2026-11-16, consulted agents must not be dialed).
+
+    use super::*;
+    use crate::call::app::agent_registry::MemoryRegistry;
+
+    async fn registry_with_wrapup_away_and_idle() -> MemoryRegistry {
+        let registry = MemoryRegistry::new();
+        registry
+            .register(
+                "bob".into(),
+                "Bob".into(),
+                "sip:bob@127.0.0.1:5099".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence("bob", PresenceState::Wrapup { call_id: None })
+            .await
+            .unwrap();
+        registry
+            .register(
+                "agent-charlie".into(),
+                "Charlie".into(),
+                "sip:charlie@127.0.0.1:5098".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence("agent-charlie", PresenceState::Away("lunch".into()))
+            .await
+            .unwrap();
+        registry
+            .register(
+                "alice".into(),
+                "Alice".into(),
+                "sip:alice@127.0.0.1:5097".into(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence("alice", PresenceState::Idle)
+            .await
+            .unwrap();
+        registry
+    }
+
+    #[tokio::test]
+    async fn resolve_dial_target_prefers_the_canonical_id() {
+        let registry = registry_with_wrapup_away_and_idle().await;
+        let record = registry
+            .resolve_dial_target_agent("bob")
+            .await
+            .expect("canonical ID must resolve");
+        assert_eq!(record.agent_id, "bob");
+    }
+
+    #[tokio::test]
+    async fn resolve_dial_target_falls_back_to_the_uri_user_part() {
+        let registry = registry_with_wrapup_away_and_idle().await;
+        // checklist-323 shape: the dialed extension is NOT the agent ID —
+        // an ID-only lookup silently missed those targets.
+        let record = registry
+            .resolve_dial_target_agent("charlie")
+            .await
+            .expect("URI user part must resolve to the canonical record");
+        assert_eq!(record.agent_id, "agent-charlie");
+    }
+
+    #[tokio::test]
+    async fn resolve_dial_target_misses_unknown_users() {
+        let registry = registry_with_wrapup_away_and_idle().await;
+        assert!(registry.resolve_dial_target_agent("zoe").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unavailable_target_refuses_away_and_wrapup() {
+        let registry = registry_with_wrapup_away_and_idle().await;
+        assert_eq!(
+            registry.unavailable_transfer_target("bob").await,
+            Some("bob".to_string()),
+            "wrapup target must be refused"
+        );
+        assert_eq!(
+            registry.unavailable_transfer_target("charlie").await,
+            Some("agent-charlie".to_string()),
+            "away target must be refused via the URI user part (extension≠ID)"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_target_passes_dispatchable_and_non_agents() {
+        let registry = registry_with_wrapup_away_and_idle().await;
+        assert_eq!(
+            registry.unavailable_transfer_target("alice").await,
+            None,
+            "idle (dispatchable) targets pass"
+        );
+        assert_eq!(
+            registry.unavailable_transfer_target("zoe").await,
+            None,
+            "non-agent targets are not the gate's business"
+        );
+    }
+
+    #[test]
+    fn dial_uri_user_part_tolerates_config_shapes() {
+        assert_eq!(dial_uri_user_part("sip:1002@host"), Some("1002"));
+        assert_eq!(
+            dial_uri_user_part("sips:1002@host;transport=tls"),
+            Some("1002")
+        );
+        assert_eq!(dial_uri_user_part("1002@host"), Some("1002"));
+        assert_eq!(dial_uri_user_part("1002"), Some("1002"));
+        assert_eq!(
+            dial_uri_user_part("sip:1002@host?Replaces=abc%40host"),
+            Some("1002")
+        );
     }
 }

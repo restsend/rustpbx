@@ -99,6 +99,27 @@ pub(crate) struct PendingRefer {
     pub(crate) source: Option<crate::rwi::TransferSource>,
 }
 
+/// In-flight customer-anchored blind transfer awaiting the target leg's
+/// outcome. The transferring agent leg is NOT released at dial time: an
+/// immediate BYE races the target leg's setup on its home node (the cluster
+/// child teardown triggered by the agent-leg BYE cancels a sibling dial
+/// still in setup — production 2026-11-14: a cross-node blind transfer
+/// between two peer-homed agents died with 487 before the target rang).
+/// `LegConnected` on `target_leg` completes the hand-off (release + agent
+/// attribution + event); `LegFailed`/`LegEnded` restores the original
+/// customer↔agent bridge so a failed transfer keeps the call alive.
+#[derive(Clone)]
+pub(super) struct PendingCustomerTransferRelease {
+    pub agent_leg: LegId,
+    pub customer_leg: LegId,
+    pub target_leg: LegId,
+    pub target_display: String,
+    pub transfer_source: Option<crate::rwi::TransferSource>,
+    /// The attribution hand-over has run (answer events must enrich with the
+    /// TARGET from here on); only the release half remains.
+    pub attribution_handed_over: bool,
+}
+
 pub(super) struct ConferenceAttachment {
     pub leg_id: LegId,
     pub conference_id: crate::call::runtime::ConferenceId,
@@ -175,6 +196,32 @@ struct EventProgress {
     child_role_hangup_reported: std::sync::atomic::AtomicBool,
 }
 
+/// Cross-session hold path for the attended-transfer room. After the
+/// transferor departs, the in-session bridged peer is the retired consult
+/// dialog — the real peer leg lives in the partner session. Hold/unhold for
+/// the room peer routes to the partner, which applies its own proven
+/// propagate path (hold re-INVITE + hold music) on its leg.
+#[derive(Clone)]
+pub(crate) struct TransferPartnerBinding {
+    pub cmd_tx: crate::call::domain::CallCommandTx,
+    pub partner_session: String,
+    pub their_leg: LegId,
+}
+
+/// A REFER relayed to the transferee UA, awaiting the replacement outcome
+/// (see [`SipSession::pending_relayed_refer`]).
+#[derive(Clone)]
+pub(crate) struct PendingRelayedRefer {
+    /// The referrer's dialog — receives the deferred final NOTIFY.
+    pub source_dialog: rsipstack::dialog::DialogId,
+    /// The verbatim Refer-To (target URI + Replaces query).
+    pub refer_to: String,
+    /// The raw `Replaces` value (`call-id;to-tag=…;from-tag=…`) — the room
+    /// fallback parses the replaced dialog identity from it.
+    pub replaces: String,
+    pub started_at: std::time::Instant,
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -210,6 +257,9 @@ pub struct SipSession {
     /// Keyed by the dialing target leg; also holds app hand-offs, which have
     /// no transferor (see [`PendingRefer`]).
     pub(crate) pending_refers: HashMap<LegId, PendingRefer>,
+    /// Customer-anchored blind transfer waiting for the target leg's answer
+    /// before the transferor is released (see `PendingCustomerTransferRelease`).
+    pub(super) pending_customer_transfer_release: Option<PendingCustomerTransferRelease>,
     /// Outbound agent hand-off target: when a REFER/blind transfer originates
     /// from the **caller** leg (the agent on an agent-dialed call), the
     /// in-session successor app (IVR / queue / route point / …) must serve the
@@ -246,6 +296,26 @@ pub struct SipSession {
     pub extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions,
 
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
+
+    /// Attended-transfer room partner (see [`TransferPartnerBinding`]). Set
+    /// on both sessions during the Replaces handshake; drives the
+    /// cross-session hold/unhold routing.
+    pub(crate) transfer_partner: Option<TransferPartnerBinding>,
+
+    /// REFER-Replaces chain: a REFER relayed to the transferee UA whose
+    /// replacement outcome is still pending. While armed, the transferee's
+    /// REFER NOTIFY (RFC 3515 subscription on the source dialog) drives the
+    /// final NOTIFY to the referrer — success passes 200 through, failure
+    /// rolls the transfer into the room fallback. Replaces the premature
+    /// "relay accepted → final 200" that released the transferor before the
+    /// replacement ever answered.
+    pub(crate) pending_relayed_refer: Option<PendingRelayedRefer>,
+
+    /// This session instance's registry identity token (the handle's
+    /// instance uuid). Two sessions may share one registry key (the
+    /// REFER-Replaces replacement inherits the root id while the root lives)
+    /// — teardown must only remove the entry it owns.
+    pub(crate) registry_instance: uuid::Uuid,
 
     /// Sender used to forward DTMF digits (as JSON text frames) to the
     /// active bridge WebSocket. Set by `connect_bridge()`, cleared when the
@@ -323,8 +393,19 @@ pub struct SipSessionHandle {
     snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
     app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
     application_source: bool,
+    /// Unique per underlying session instance. Two sessions may share one
+    /// registry key (a REFER-Replaces replacement inherits the root session
+    /// id while the root session is still alive) — the token lets the
+    /// registry's removal tell them apart so the first session's teardown
+    /// cannot delete the second session's entry.
+    instance: uuid::Uuid,
 }
 impl SipSessionHandle {
+    /// Unique token of the underlying session instance (see [`Self::instance`]).
+    pub(crate) fn instance_token(&self) -> uuid::Uuid {
+        self.instance
+    }
+
     pub(crate) fn for_application(&self) -> Self {
         Self {
             application_source: true,
@@ -401,6 +482,13 @@ impl SipSessionHandle {
         &self.session_id.0
     }
 
+    /// Raw command sender for peer-session bindings (transfer-room hold
+    /// routing): the binding stores the sender directly so partner hold
+    /// commands bypass the application-source wrapper.
+    pub(crate) fn command_sender(&self) -> crate::call::domain::CallCommandTx {
+        self.cmd_tx.clone()
+    }
+
     pub fn snapshot(&self) -> Option<SessionSnapshot> {
         self.snapshot_cache.read().clone()
     }
@@ -429,6 +517,7 @@ impl SipSessionHandle {
             snapshot_cache: Arc::new(RwLock::new(None)),
             app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         }
     }
 }
@@ -527,6 +616,10 @@ impl SipSession {
                 routed.credential = option.credential.clone();
                 routed.headers = option.headers.clone();
                 routed.contact_raw = Some(option.callee.to_string());
+                routed.outbound_trunk = hints
+                    .as_ref()
+                    .and_then(|hints| hints.extensions.get::<OutboundTrunkContext>())
+                    .cloned();
                 Ok((routed, hints))
             }
             Some(crate::config::RouteResult::NotHandled(_, _))
@@ -844,6 +937,7 @@ impl SipSession {
             snapshot_cache,
             app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge::new(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         };
 
         (handle, cmd_rx)
@@ -1037,6 +1131,7 @@ impl SipSession {
             snapshot_cache: snapshot_cache.clone(),
             app_event_bridge: app_event_bridge.clone(),
             application_source: false,
+            instance: uuid::Uuid::new_v4(),
         };
 
         // Build ApplicationContext for call apps (IVR, voicemail, etc.).
@@ -1085,14 +1180,43 @@ impl SipSession {
             ConstructMode::Uas { server_dialog } => {
                 let request = server_dialog.initial_request();
                 let cc_uui = crate::call::uui::extract_cc_uui(&request.headers);
-                let inherited = crate::call::session_id::extract_inherited(&request);
-                let uui_root = cc_uui
-                    .as_ref()
-                    .filter(|uui| {
-                        uui.leg.is_none()
-                            || crate::call::session_id::normalize_inherited(&uui.session_id).is_some()
-                    })
-                    .map(|uui| uui.session_id.clone());
+                // Trunk-level correlation header outranks the standard
+                // channels for root linkage too: a trunk declaring
+                // `session_id_header` merges/roots its calls by THAT header —
+                // a standard `Session-ID` header riding the same INVITE
+                // (e.g. added by an intermediate SBC) must not re-root it.
+                // Registered clients (no `TrunkContext`) cannot plant it.
+                let trunk_root = context
+                    .cookie
+                    .get_extension::<TrunkContext>()
+                    .and_then(|trunk| server.data_context.session_id_header_for(Some(&trunk.name)))
+                    .and_then(|name| {
+                        crate::call::session_id::extract_from_source_header(&request, &name)
+                    });
+                let from_peer = Self::from_cluster_peer(&server, &context.cookie);
+                let (inherited, uui_root) = if trunk_root.is_some() {
+                    (None, None)
+                } else {
+                    let inherited = crate::call::session_id::extract_inherited(&request);
+                    // Peer-trusted seam: a peer may dispatch a child leg of a
+                    // call whose root is a CUSTOM correlation string — accept
+                    // it so the agent-home node keeps one id across the
+                    // logical call. Untrusted sources stay hex-only.
+                    let uui_root = cc_uui
+                        .as_ref()
+                        .filter(|uui| {
+                            uui.leg.is_none()
+                                || crate::call::session_id::normalize_inherited(&uui.session_id)
+                                    .is_some()
+                                || (from_peer
+                                    && crate::call::session_id::normalize_custom(
+                                        &uui.session_id,
+                                    )
+                                    .is_some())
+                        })
+                        .map(|uui| uui.session_id.clone());
+                    (inherited, uui_root)
+                };
                 let root = match (inherited, uui_root) {
                     (Some(header), Some(uui)) => {
                         // RFC wire padding changes the representation, not the root.
@@ -1110,7 +1234,6 @@ impl SipSession {
                     .and_then(|uui| uui.leg.as_deref())
                     .filter(|leg| crate::call::uui::is_known_leg_role(leg))
                     .map(str::to_string);
-                let from_peer = Self::from_cluster_peer(&server, &context.cookie);
                 let child = if from_peer { declared.clone() } else { None };
                 let dial = if from_peer { None } else { declared };
                 (root, child, dial)
@@ -1299,6 +1422,7 @@ impl SipSession {
             },
             pending_hangup: HashSet::new(),
             pending_refers: HashMap::new(),
+            pending_customer_transfer_release: None,
             app_media_leg: Arc::new(RwLock::new(None)),
             conference: None,
             context,
@@ -1324,6 +1448,9 @@ impl SipSession {
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
+            transfer_partner: None,
+            pending_relayed_refer: None,
+            registry_instance: sip_handle.instance_token(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             resumed_bridge_ctx: Arc::new(parking_lot::Mutex::new(None)),
@@ -2011,13 +2138,40 @@ impl SipSession {
                         // metadata, cross-session events) don't exact-match
                         // the locally tracked key — retry every local dialog
                         // on the same Call-ID.
+                        //
+                        // Sibling-leg guard: the `-r{n}` Call-ID scheme gives
+                        // every later leg of the logical call the same root
+                        // prefix, so an alias lookup must never BYE a dialog
+                        // that belongs to one of THIS session's tracked legs
+                        // (the transfer target died mid-setup exactly this
+                        // way — production 2026-11-14 cross-node blind
+                        // transfer). Only dialogs untracked by any leg
+                        // qualify as aliases.
+                        //
+                        // Pending customer transfer: the target dial's dialog
+                        // is in flight — its Call-ID shares this root and it
+                        // is NOT yet tracked in the legs map (the dialog slot
+                        // fills at answer), so the prefix alias would match
+                        // and CANCEL the ringing transfer dial (production
+                        // 2026-11-15: 发起即释放 released the transferor, a
+                        // second drain round's alias killed the target dial,
+                        // 487 before the answer; the ACW queue_e2e case).
+                        if self.pending_customer_transfer_release.is_some() {
+                            return None;
+                        }
                         let prefix = format!("{}-", dialog_id.call_id);
+                        let tracked: Vec<String> = self
+                            .legs
+                            .values()
+                            .filter_map(|leg| self.legs.get_dialog(&leg.id).map(|d| d.id().to_string()))
+                            .collect();
                         self.server
                             .dialog_layer
                             .all_dialog_ids()
                             .into_iter()
                             .filter(|key| key.starts_with(&prefix))
-                            .find_map(|key| {
+                            .find(|key| !tracked.contains(key))
+                            .and_then(|key| {
                                 self.server
                                     .dialog_layer
                                     .get_dialog_with(&key)
@@ -3091,6 +3245,20 @@ impl SipSession {
                 }
             }
         }
+        // REFER-Replaces chain: surface the replacement marker to session
+        // hooks (the cc hook admits the auto-answered replacement leg — the
+        // replaced dialog's release beat this connect into Wrapup).
+        if self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::ReferReplacesContext>()
+            .is_some()
+        {
+            self.extensions
+                .write()
+                .insert(crate::call::ReferReplacesMarker);
+        }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
             leg_generation: None,
@@ -3110,6 +3278,7 @@ impl SipSession {
             owns_statistics: self.owns_statistics,
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
+            leg_agent_id: None,
             extensions: self.extensions.clone(),
         }
     }
@@ -3118,11 +3287,20 @@ impl SipSession {
         &self,
         leg_id: &LegId,
     ) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
-        let ctx = self.session_hook_ctx();
-        match self.legs.get(leg_id) {
-            Some(leg) => ctx.with_leg(leg),
-            None => ctx,
+        let mut ctx = self.session_hook_ctx();
+        if let Some(leg) = self.legs.get(leg_id) {
+            ctx = ctx.with_leg(leg);
+            // The leg's own agent outranks the session attribution for this
+            // callback: a queue-dispatched leg stamps it at dial, a
+            // transfer-target leg keeps it while the SESSION attribution
+            // hands over to the target only at the answer edge, and the
+            // transferor's departure (resolved from its own leg) must bind
+            // to the departing agent — never to whoever owns the session
+            // attribution by then. Legs without an agent keep `None` and the
+            // session-level resolution applies.
+            ctx.leg_agent_id = leg.agent_id.clone();
         }
+        ctx
     }
 
     /// Fire `on_call_ringing` for the leg that produced the provisional response.
@@ -3239,6 +3417,22 @@ impl SipSession {
     /// - the leg-role surface (`meta.dial_leg_role` / `meta.child_leg_role`),
     /// - the RWI CallMeta `agent_id` / `agent_name` (event enrichment stops).
     pub(crate) fn clear_agent_attribution(&mut self) {
+        // Capture the SERVED agent before wiping the live surface: the agent
+        // who answered served the customer, so the end-of-call CDR must stay
+        // attributed to her even though the live pin moves to the transfer
+        // target. First writer wins for chained transfers. Fallback to the
+        // stamped legs when the pin is empty (direct-inbound sessions that
+        // answered before any pin was planted).
+        let served = self.pinned_agent_id().or_else(|| {
+            self.legs
+                .iter()
+                .filter_map(|(_, leg)| leg.agent_id.clone())
+                .find(|agent| !agent.is_empty())
+        });
+        if let Some(served) = served {
+            self.extensions
+                .set_served_agent_attribution(&served);
+        }
         {
             let mut ext = self.extensions.write();
             if let Some(existing) = ext.get_mut::<std::collections::HashMap<String, String>>() {
@@ -3681,14 +3875,6 @@ impl SipSession {
     }
 
 
-
-    /// RFC 7989 Session-ID local-uuid to stamp on outgoing legs.
-    ///
-    /// Prefers the inherited root session id (one stable id across the whole
-    /// logical call — cluster peers and downstream legs re-attach to it),
-    /// falling back to this session's own id when it is the root. `None` for
-    /// P2P flows (`session_id_enabled == false`) or non-UUID-shaped legacy
-    /// ids, which keep relying on the UUI (RFC 7433) correlation channel.
     fn session_id_for_outgoing_leg(&self) -> Option<String> {
         if !self.context.dialplan.session_id_enabled {
             return None;
@@ -3700,6 +3886,94 @@ impl SipSession {
             .or(self.context.dialplan.session_id.as_deref())
             .unwrap_or(&self.context.session_id);
         crate::call::session_id::normalize_inherited(candidate)
+    }
+
+    /// Raw (non-hex-gated) session id candidate for OUTGOING custom
+    /// correlation headers — same precedence as
+    /// [`session_id_for_outgoing_leg`], but the value may be any safe
+    /// string (the trunk header channel carries `normalize_custom` values
+    /// verbatim).
+    fn session_id_raw_candidate(&self) -> Option<String> {
+        if !self.context.dialplan.session_id_enabled {
+            return None;
+        }
+        Some(
+            self.meta
+                .root_session_id
+                .clone()
+                .or_else(|| self.context.dialplan.session_id.clone())
+                .unwrap_or_else(|| self.context.session_id.clone()),
+        )
+    }
+
+    /// Stamp the outbound trunk's session-id correlation header
+    /// (`session_id_header`, falling back to the global default) with the
+    /// logical-call ROOT id.
+    ///
+    /// `trunk` is the route-table-selected target trunk when known. Without
+    /// one, the destination host:port is matched against configured trunk
+    /// destinations (route-disabled / legacy direct dials). Internal targets
+    /// never match a trunk destination, so agent/registration legs stay
+    /// header-free. A header already forwarded from the original INVITE is
+    /// replaced when it differs — the peer must see the retained root, not a
+    /// stale value.
+    fn stamp_outbound_correlation_header(
+        &self,
+        headers: &mut Vec<rsipstack::sip::Header>,
+        trunk: Option<&str>,
+        target: &crate::call::Location,
+        callee_uri: &rsipstack::sip::Uri,
+    ) {
+        let Some(root) = self.session_id_raw_candidate() else {
+            return;
+        };
+        let Some(root) = crate::call::session_id::normalize_custom(&root) else {
+            tracing::warn!(
+                session_id = %self.id,
+                value = %root,
+                "outbound session-id correlation value is not wire-safe; skipping header"
+            );
+            return;
+        };
+        let header_name = match trunk {
+            Some(name) => self
+                .server
+                .data_context
+                .session_id_header_for(Some(name)),
+            None => {
+                let (host, port) = Self::outbound_destination_host_port(target, callee_uri);
+                self.server
+                    .data_context
+                    .session_id_header_for_destination(&host, port)
+            }
+        };
+        if let Some(name) = header_name {
+            crate::call::session_id::set_correlation_header(headers, &name, &root);
+        }
+    }
+
+    /// Destination the outbound INVITE will actually be sent to. The explicit
+    /// `Location.destination` (route trunk next-hop) wins over the Request-URI
+    /// host; both feed the trunk-destination fallback.
+    fn outbound_destination_host_port(
+        target: &crate::call::Location,
+        callee_uri: &rsipstack::sip::Uri,
+    ) -> (String, u16) {
+        if let Some(destination) = target.destination.as_ref() {
+            (
+                destination.addr.host.to_string(),
+                destination.addr.port.map(|port| port.0).unwrap_or(5060),
+            )
+        } else {
+            (
+                callee_uri.host().to_string(),
+                callee_uri
+                    .host_with_port
+                    .port
+                    .map(|port| port.0)
+                    .unwrap_or(5060),
+            )
+        }
     }
 
     /// True when the inbound request arrived from a configured cluster peer.
@@ -3798,12 +4072,81 @@ impl SipSession {
 
         let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
         let self_ident = self.self_ident_addr();
-        let route_via_home_proxy =
-            Self::route_via_home_proxy(target, cluster_enabled, self_ident.as_ref());
+        // REFER-Replaces replacement leg: NEVER route via the target's home
+        // proxy. The home-proxy hop terminates the INVITE on the peer node,
+        // whose Replaces gate keys sessions on ITS registry — the replaced
+        // session is homed HERE (the takeover node), so the peer gate 481s
+        // the replacement before the target UA ever sees it (that 481 is
+        // what forced the replacement into the conference-room fallback).
+        // Direct-to-registration routing carries the Replaces header to the
+        // target UA itself, whose own dialog matches (RFC 3891 auto-answer).
+        let refer_replaces_ctx = self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::ReferReplacesContext>()
+            .cloned()
+            // Delegated takeover: the gate rides the context on the
+            // transaction cookie before the dialplan exists.
+            .or_else(|| {
+                self.context
+                    .cookie
+                    .with_extensions(|ext| ext.get::<crate::call::ReferReplacesContext>().cloned())
+                    .flatten()
+            });
+        let refer_replaces_takeover = refer_replaces_ctx.is_some();
+        let delegate_hop = refer_replaces_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.delegate_via_home_proxy);
+        // Delegated takeover (replaced session homed on the peer): the
+        // home-proxy hop IS the delivery path — the peer's gate consumes the
+        // Replaces and runs the takeover locally.
+        let route_via_home_proxy = Self::route_via_home_proxy(target, cluster_enabled, self_ident.as_ref())
+            && (!refer_replaces_takeover || delegate_hop);
         let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
+
+        // REFER-Replaces chain: this session is the replacement call — stamp
+        // the verbatim Replaces header onto the outbound target-leg INVITE so
+        // the target UA auto-answers it as a replacement of its own dialog
+        // (no second ring, standard transferee behavior).
+        if let Some(replaces) = refer_replaces_ctx
+            .clone()
+            .or_else(|| {
+                self.context
+                    .dialplan
+                    .extensions
+                    .get::<crate::call::ReferReplacesContext>()
+                    .cloned()
+            })
+        {
+            // Cross-node target: with home-proxy routing a Replaces-bearing
+            // INVITE would be 481'd by the peer gate before reaching the
+            // target UA — but REFER-Replaces replacement legs SKIP home-proxy
+            // routing (above, direct-to-registration), so the header reaches
+            // the target UA and RFC 3891 auto-answer works cross-node too.
+            // (The drop branch remains as the safety net for any future path
+            // that still routes the hop.)
+            if route_via_home_proxy && !delegate_hop {
+                info!(
+                    session_id = %self.id,
+                    replaces = %replaces.header,
+                    "Outbound leg INVITE drops Replaces for the cross-node hop (target answers normally)"
+                );
+            } else {
+                headers.push(rsipstack::sip::Header::Other(
+                    "Replaces".into(),
+                    replaces.header.clone(),
+                ));
+                info!(
+                    session_id = %self.id,
+                    replaces = %replaces.header,
+                    "Outbound leg INVITE carries Replaces (REFER-Replaces takeover)"
+                );
+            }
+        }
 
         if route_via_home_proxy {
             debug!(session_id = %self.id,
@@ -3844,6 +4187,14 @@ impl SipSession {
                         }
 
                         let name = header.name();
+                        // Cross-node hop: the peer node keys the Replaces
+                        // dialog's session handle on THIS node and 481s a
+                        // Replaces-bearing INVITE before it reaches the UA.
+                        if route_via_home_proxy
+                            && name.eq_ignore_ascii_case("Replaces")
+                        {
+                            return false;
+                        }
                         let is_content_header = name
                             .get(..8)
                             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"));
@@ -3911,6 +4262,20 @@ impl SipSession {
                 rule,
             );
             headers.extend(selected);
+            // Cross-node hop: the INVITE(Replaces) being taken over rides in
+            // `original` — its Replaces header must not leak onto this leg.
+            // The peer node keys the replaced dialog's session handle on the
+            // takeover node and 481s a Replaces-bearing INVITE before the UA
+            // ever sees the call (production 2026-11-14: cross-node transfer
+            // dropped the whole call). EXCEPTION — the DELEGATED takeover:
+            // the stamped Replaces IS the delegation payload the peer's gate
+            // consumes; stripping it turned the hop into a plain INVITE, the
+            // busy target answered 486 and the transfer fell back to the
+            // conference room (production 2026-11-15: noise + seconds-long
+            // switch on every real cross-node transfer).
+            if route_via_home_proxy && !delegate_hop {
+                headers.retain(|header| !header.name().eq_ignore_ascii_case("Replaces"));
+            }
         }
         // The same rule governs the callee's 18x/2xx headers relayed back to
         // the caller.
@@ -3937,6 +4302,17 @@ impl SipSession {
         let id = LegId::from(leg_id);
         if !self.legs.contains_key(&id) {
             self.legs.insert(id.clone(), Leg::new(id.clone()));
+        }
+        // The dialed target URI is the leg's endpoint identity — the RFC 3891
+        // cross-node takeover resolves the transfer target's dialog by
+        // matching this user part (`QueryTransferTargetDialog`), and the peer
+        // acceptance rule refuses endpoint-less answers (a fallback answer
+        // from an unrelated session on the same logical root poisons the
+        // stamp).
+        if let Some(leg) = self.legs.get_mut(&id) {
+            if leg.endpoint.is_none() {
+                leg.endpoint = Some(target.aor.to_string());
+            }
         }
         // Record that this dial left for another node's registration — the
         // registration node owns the leg_role attribution for this dialog
@@ -4086,6 +4462,32 @@ impl SipSession {
                 ));
             }
         }
+
+        // Trunk-bound legs stamp the configured correlation header with the
+        // logical-call ROOT id (verbatim string channel) — closing the round
+        // trip for trunk-level `session_id_header` adopters: the value a
+        // trunk sent on ingress comes back on egress. The per-target trunk
+        // context wins over the session dialplan context (a transfer target
+        // may route out a different trunk than the one this session entered
+        // on). Without either, a destination matching a configured trunk's
+        // next-hop is used (route-disabled / legacy direct dials); internal
+        // and agent-bound legs carry no correlation header.
+        let target_trunk = target
+            .outbound_trunk
+            .as_ref()
+            .map(|trunk| trunk.name.clone());
+        let dialplan_trunk = self
+            .context
+            .dialplan
+            .extensions
+            .get::<OutboundTrunkContext>()
+            .map(|trunk| trunk.name.clone());
+        self.stamp_outbound_correlation_header(
+            &mut headers,
+            target_trunk.as_deref().or(dialplan_trunk.as_deref()),
+            target,
+            &callee_uri,
+        );
 
         // CTI uses the agent leg's SIP Call-ID, including while it is ringing.
         // Register it before either sequential or parallel dialing sends INVITE.
@@ -4311,18 +4713,75 @@ impl SipSession {
             };
             info!(session_id = %self.id, %phase, side = ?side, ?target_side, %leg_id,
                 "consult_state UPDATE — relaying marker to opposite side");
-            let response = self
+            let marker_headers = vec![rsipstack::sip::Header::Other(
+                "User-to-User".into(),
+                format!("consult-state={phase}").into(),
+            )];
+            // App-driven sessions (queue / IVR in-session hand-off) never
+            // register a classic callee side: the dispatched agent legs live
+            // in the leg registry under dynamic ids. When the opposite side
+            // has no dialog, fall back to every CONNECTED dynamic leg so the
+            // consulted agent still receives the merge / transfer edge
+            // (prd 2026-11-10 b3w P1b: "No dialog found for leg callee"
+            // swallowed the marker and the agent stayed on the pre-merge
+            // label although the P2P consult path relays fine).
+            use crate::call::domain::LegState;
+            let response: Option<rsipstack::sip::Response> = match self
                 .send_mid_dialog_request_to_side(
                     target_side,
                     rsipstack::sip::Method::Update,
-                    vec![rsipstack::sip::Header::Other(
-                        "User-to-User".into(),
-                        format!("consult-state={phase}").into(),
-                    )],
+                    marker_headers.clone(),
                     None,
                 )
-                .await?
-                .ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(side_err) => {
+                    let targets: Vec<crate::call::domain::LegId> = self
+                        .legs
+                        .iter()
+                        .filter(|(id, leg)| {
+                            id.as_str() != "caller"
+                                && matches!(leg.state, LegState::Connected | LegState::Hold)
+                                && self.legs.get_dialog(id).is_some()
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    if targets.is_empty() {
+                        return Err(side_err);
+                    }
+                    info!(session_id = %self.id, legs = ?targets,
+                        "consult_state UPDATE — no classic opposite side, relaying to dynamic legs");
+                    let mut delivered: Option<rsipstack::sip::Response> = None;
+                    for id in &targets {
+                        match self
+                            .send_mid_dialog_request_to_leg(
+                                id,
+                                rsipstack::sip::Method::Update,
+                                marker_headers.clone(),
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(resp) => {
+                                delivered = resp;
+                                if delivered.is_some() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id = %self.id, %e, leg_id = %id,
+                                    "consult_state UPDATE — dynamic leg relay failed");
+                            }
+                        }
+                    }
+                    Some(delivered.ok_or_else(|| {
+                        anyhow!("consult_state UPDATE relay to dynamic legs failed")
+                    })?)
+                }
+            };
+            let response =
+                response.ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
             tx_handle
                 .respond(response.status_code.clone(), None, None)
                 .await
@@ -4401,13 +4860,47 @@ impl SipSession {
                         self.legs.set_transport(leg_id.clone(), mode);
                         peer
                     };
+                    // Codec the anchored media path is armed with BEFORE this
+                    // re-INVITE re-negotiation (see the pin below).
+                    let previous_codec = peer
+                        .negotiated()
+                        .and_then(|profile| profile.audio)
+                        .map(|audio| audio.codec);
                     peer.apply_remote_sdp(&offer_sdp, rustrtc::SdpType::Offer).await?;
                     let draft = peer.prepare_answer().await?;
                     let answer = MediaNegotiator::align_answer_direction_with_offer(&offer_sdp, &draft.to_sdp_string());
                     let answer = peer.commit_local_answer(&answer, rustrtc::SdpType::Answer).await?;
+                    // Pin the answer to the codec this leg already negotiated
+                    // with the anchored media path (conference-room bridge /
+                    // transcoder). Echoing the offer's whole codec list let
+                    // the leg's sender negotiate a codec different from the
+                    // one the room encoder produces; the sender then stamps
+                    // the new payload type on the old codec's bytes and both
+                    // parties hear wideband buzz right after hold/resume
+                    // (production 2026-11-14, transfer-room calls).
+                    let pinned = self.rewrite_answer_to_selected_audio_codecs(
+                        &answer,
+                        &offer_sdp,
+                        None,
+                        previous_codec,
+                        "unpaired leg re-INVITE answer",
+                    );
                     peer.accept();
-                    self.legs.set_answer(leg_id.clone(), answer.clone());
-                    Ok::<_, anyhow::Error>(answer)
+                    // Keep the leg's sender / egress codec aligned with the
+                    // pinned answer (the room's encoder stays on the same
+                    // codec, so PT and payload cannot diverge).
+                    if let Err(error) = peer.apply_profile_from_sdp(&pinned).await {
+                        debug!(
+                            session_id = %self.id,
+                            %leg_id,
+                            %error,
+                            "Failed to align unpaired leg profile after re-INVITE"
+                        );
+                    }
+                    self.legs.set_answer(leg_id.clone(), pinned.clone());
+                    Ok::<_, anyhow::Error>(MediaNegotiator::align_answer_direction_with_offer(
+                        &offer_sdp, &pinned,
+                    ))
                 }
                 .await;
                 answer
@@ -4498,7 +4991,14 @@ impl SipSession {
                                 } else {
                                     LegState::Connected
                                 };
+                                let prev = self.leg_prev_state(&leg_id);
                                 self.update_leg_state(&leg_id, state);
+                                // Conference-attached leg (attended-transfer
+                                // room): the hold/unhold must reach the
+                                // partner session — the in-session bridged
+                                // peer is the retired consult dialog.
+                                self.route_transfer_room_hold(&leg_id, prev, state)
+                                    .await;
                             }
                         }
                         // Negotiation updates the peers; only the session decides
@@ -4609,7 +5109,35 @@ impl SipSession {
                     self.release_transferor_caller_leg(&dialog_id).await;
                     return Ok(());
                 }
+if self.meta.transferred
+                    && !self.legs.contains_key(&LegId::from("caller"))
+                    && self.legs.len() >= 2
+                {
+                    self.session_timers.remove_dialog(&dialog_id);
+                    self.unregister_dialog_owner(&dialog_id).await;
+                    self.server.dialog_layer.remove_dialog(&dialog_id);
+                    self.update_snapshot_cache();
+                    info!(session_id = %self.id,
+                        "Late BYE for the released transferor leg — transferred bridge preserved");
+                    return Ok(());
+                }
+// A pending customer-anchored transfer: the transferor's own
+                // BYE is the "already handed off" hangup — retire only its leg
+                // and let the pending hand-off complete (the target answer
+                // bridges the customer).
                 if self
+                    .pending_customer_transfer_release
+                    .as_ref()
+                    .is_some_and(|pending| pending.agent_leg == LegId::from("caller"))
+                    && self
+                        .legs
+                        .get(&LegId::from("callee"))
+                        .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+                {
+                    self.release_transferor_caller_leg(&dialog_id).await;
+                    return Ok(());
+                }
+if self
                     .detach_ended_conference_leg(&LegId::from("caller"))
                     .await
                 {
@@ -4723,6 +5251,17 @@ impl SipSession {
             %dialog_id,
             "Transferor caller leg released; in-session app continues on the customer leg"
         );
+        // The transferor of a pending customer-anchored blind transfer hung up
+        // after initiating it (RFC 5589: the transfer proceeds). The transfer
+        // is real — mark it so CDR/RWI keep the transferred semantics while
+        // the pending hand-off completes at the target's answer edge.
+        let transfer_initiated = self
+            .pending_customer_transfer_release
+            .as_ref()
+            .is_some_and(|pending| pending.agent_leg == LegId::from("caller"));
+        if transfer_initiated {
+            self.mark_transferred_with(None);
+        }
         self.update_leg_state(&LegId::from("caller"), LegState::Ended);
         self.pending_hangup.remove(dialog_id);
         self.unregister_dialog_owner(dialog_id).await;
@@ -4757,7 +5296,11 @@ impl SipSession {
         if !self.legs.contains_key(agent_leg) {
             return;
         }
-        let mut ctx = self.session_hook_ctx();
+        // Leg-scoped hook context: the departing agent resolves from THE
+        // LEG, not from the session attribution — the caller may have already
+        // handed the session attribution to the transfer target (deferred
+        // release, `PendingCustomerTransferRelease`).
+        let mut ctx = self.session_hook_ctx_for_leg(agent_leg);
         if let Err(error) = self
             .handle_remove_leg(agent_leg.clone(), Some("api_transfer".to_string()))
             .await
@@ -5313,6 +5856,78 @@ impl SipSession {
                     body = %body.trim(),
                     "Received REFER NOTIFY"
                 );
+                // REFER-Replaces chain: a relayed REFER's outcome comes from
+                // the transferee's own subscription NOTIFY. Success passes a
+                // final 200 to the referrer (the generic 2xx teardown below
+                // releases the replaced dialog); failure rolls the transfer
+                // into the room fallback — both original dialogs are still
+                // alive, so the customer is bridged to the consult target.
+                if let Some(pending) = self.pending_relayed_refer.clone() {
+                    if sip_status < 200 {
+                        // Provisional (100 Trying) — keep waiting.
+                        let event = crate::call::domain::ReferNotifyEvent {
+                            call_id: self.id.0.clone(),
+                            sip_status,
+                            reason: None,
+                            event_type: crate::call::domain::ReferNotifyEventType::Notify,
+                        };
+                        let subscribers = self.server.transfer_notify_subscribers.lock().await;
+                        for tx in subscribers.iter() {
+                            let _ = tx.send(event.clone());
+                        }
+                        return Ok(());
+                    }
+                    if (200..300).contains(&sip_status) {
+                        info!(session_id = %self.id,
+                            sip_status,
+                            "Relayed REFER replacement answered — completing the transfer"
+                        );
+                        // Stays armed: the generic 2xx handling below
+                        // delivers the deferred referrer NOTIFY and clears it.
+                    } else {
+                        self.pending_relayed_refer = None;
+                        warn!(session_id = %self.id,
+                            sip_status,
+                            "Relayed REFER replacement failed — falling back to the transfer room"
+                        );
+                        let fallback = self
+                            .run_transfer_room_fallback(
+                                &pending.source_dialog,
+                                &pending.replaces,
+                            )
+                            .await;
+                        let status = match &fallback {
+                            Ok(()) => 200,
+                            Err((status, reason)) => {
+                                warn!(session_id = %self.id, %reason, status, "Transfer room fallback failed");
+                                *status
+                            }
+                        };
+                        if status == 200 {
+                            let target_uri = pending.refer_to.split('?').next().unwrap_or(&pending.refer_to).to_string();
+                            self.stash_transfer_source(None);
+                            self.mark_transferred_with(Some(serde_json::json!({"target": target_uri, "kind": "sip"})));
+                            self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                                call_id: self.context.session_id.clone(), transfer_target: Some(target_uri),
+                                transfer_target_type: Some("sip".into()), transfer_source: None,
+                            });
+                        }
+                        if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(&pending.source_dialog) {
+                            if let Err(error) = SipSession::notify_refer_bounded(
+                                &dialog,
+                                rsipstack::sip::StatusCode::from(status),
+                                "terminated;reason=noresource",
+                            )
+                            .await
+                            {
+                                warn!(session_id = %self.id, %error, "Failed to send deferred REFER NOTIFY");
+                            } else {
+                                info!(session_id = %self.id, status, "Sent deferred REFER NOTIFY after fallback");
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 let event = crate::call::domain::ReferNotifyEvent {
                     call_id: self.id.0.clone(),
                     sip_status,
@@ -5334,6 +5949,25 @@ impl SipSession {
                         sip_status = %sip_status,
                         "REFER completed successfully, hanging up original dialog"
                     );
+                    // REFER-Replaces chain: the referrer's final NOTIFY was
+                    // deferred until this outcome — deliver it now.
+                    if let Some(pending) = self.pending_relayed_refer.take() {
+                        if let Some(Dialog::Invite(dialog)) =
+                            self.server.dialog_layer.get_dialog(&pending.source_dialog)
+                        {
+                            if let Err(error) = SipSession::notify_refer_bounded(
+                                &dialog,
+                                rsipstack::sip::StatusCode::OK,
+                                "terminated;reason=noresource",
+                            )
+                            .await
+                            {
+                                warn!(session_id = %self.id, %error, "Failed to send deferred REFER NOTIFY");
+                            } else {
+                                info!(session_id = %self.id, "Sent deferred final REFER NOTIFY (200)");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5448,6 +6082,15 @@ impl SipSession {
                 // child leg of this logical call. A plain extension /
                 // trunk target keeps no marker (CTI parity — the agent-leg
                 // scheme must not leak onto it).
+                let target_is_agent = match (
+                    Self::uri_user_part(uri.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    (Some(user), Some(registry)) => registry.get_agent(&user).await.is_some(),
+                    _ => false,
+                };
+                let refer_purpose =
+                    target_is_agent.then_some(crate::call::domain::LegPurpose::Agent);
                 self.pending_refers.insert(
                     target_leg.clone(),
                     PendingRefer {
@@ -5467,7 +6110,7 @@ impl SipSession {
                         Some(target_leg.clone()),
                         vec![],
                         Some(LegId::from("caller")),
-                        None,
+                        refer_purpose,
                     )
                     .await
                 {
@@ -5853,10 +6496,55 @@ impl SipSession {
                         .register_dialog_identity(&dialog_id, handle);
                 }
                 if let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string()) {
+                    // Customer-anchored blind transfer: the confirmed dialog
+                    // may beat the queued LegConnected command (separate
+                    // channels). Hand the attribution over HERE so the leg's
+                    // answer event and the CC attribution below carry the
+                    // TARGET agent. The pending goes BACK into the slot with
+                    // `attribution_handed_over` set: the release half must
+                    // wait for the LegConnected command, whose arm accepts
+                    // the answer SDP and settles the customer↔target bridge
+                    // BEFORE the transferor removal re-runs the media path
+                    // (an un-negotiated target would be dropped as the
+                    // unpaired leg). `take_..` is idempotent.
+                    let mut pending_customer_transfer =
+                        self.take_pending_customer_transfer_for(&leg_id);
+                    if let Some(pending) = pending_customer_transfer.take() {
+                        pending_customer_transfer =
+                            Some(self.begin_pending_customer_transfer(pending));
+                    }
+                    if let Some(pending) = pending_customer_transfer.take() {
+                        self.pending_customer_transfer_release = Some(pending);
+                    }
                     // Confirmation belongs to this dialog, including a retained
                     // unbridged participant. Do not undo its negotiated hold.
                     if self.leg_prev_state(&leg_id) != Some(LegState::Hold) {
                         self.update_leg_state(&leg_id, LegState::Connected);
+                    }
+                    // Stamp agent identity when the confirmed leg is a
+                    // registered agent (transfer B-leg / app hand-off dial).
+                    // Without this the CC hook's end-of-call attribution falls
+                    // back to the session parties, which after an IVR B-leg
+                    // hand-off still point at the app URI — the answered
+                    // agent lost their cc_calls row entirely and, once a
+                    // later transfer replaced the parties, the row drifted
+                    // to the transfer target (prd 2026-11-10).
+                    let endpoint = self.legs.get(&leg_id).and_then(|leg| leg.endpoint.clone());
+                    if let Some(agent) = self.leg_agent_id(&leg_id, endpoint.as_deref()).await
+                        && self.pinned_agent_id().is_none()
+                    {
+                        if let Some(leg) = self.legs.get_mut(&leg_id)
+                            && leg.agent_id.is_none()
+                        {
+                            leg.agent_id = Some(agent.clone());
+                        }
+                        Self::set_pinned_agent_id(&self.extensions, &agent);
+                        info!(
+                            session_id = %self.id,
+                            leg_id = %leg_id,
+                            agent = %agent,
+                            "confirmed leg stamped with agent identity"
+                        );
                     }
                 }
                 info!(session_id = %self.id,
@@ -5875,6 +6563,49 @@ impl SipSession {
                     self.callee_dialogs.contains_key(&terminated_dialog_id);
 
                 let terminated_leg = self.leg_id_for_dialog(&terminated_dialog_id.to_string());
+                // Customer BYE while a customer-anchored transfer is pending:
+                // nobody is left to serve — abort the pending hand-off and end
+                // the session (teardown BYEs the still-dialing target leg).
+                if self
+                    .pending_customer_transfer_release
+                    .as_ref()
+                    .is_some_and(|pending| terminated_leg.as_ref() == Some(&pending.customer_leg))
+                {
+                    self.pending_customer_transfer_release = None;
+                    self.handle_hangup(&HangupCommand::all(
+                        self.meta.hangup_reason.clone(),
+                        None,
+                    ))
+                    .await;
+                    return Ok(());
+                }
+                // 发起即释放 echo: the transferor was already released
+                // server-side (dial-time release — its leg and dialog
+                // bookkeeping are gone, hence no terminated_leg / tracking).
+                // The released device's own BYE races in afterwards; retire
+                // the dialog and keep the customer↔target bridge alive — the
+                // generic cascade below would CANCEL the still-ringing
+                // transfer target (production 2026-11-15: the whole
+                // transferred call dropped; the queue_e2e ACW case: 487 at
+                // the target).
+                if self.meta.transferred
+                    && terminated_leg.is_none()
+                    && !tracked_callee_terminated
+                    && !connected_callee_terminated
+                {
+                    self.pending_hangup.remove(&terminated_dialog_id);
+                    self.unschedule_timer(&terminated_dialog_id);
+                    self.session_timers.remove_dialog(&terminated_dialog_id);
+                    self.unregister_dialog_owner(&terminated_dialog_id).await;
+                    self.server
+                        .dialog_layer
+                        .remove_dialog(&terminated_dialog_id);
+                    self.update_snapshot_cache();
+                    info!(session_id = %self.id,
+                        dialog_id = %terminated_dialog_id,
+                        "Released transferor's late BYE — transferred bridge preserved");
+                    return Ok(());
+                }
                 let application_peer_terminated = self
                     .app_media_leg
                     .read()
@@ -8236,6 +8967,18 @@ impl SipSession {
             );
             leg.agent_id = Some(agent);
         }
+        // Pin the session attribution too (not just the leg): the CC hook's
+        // priority-1 read drives the end-of-call CDR. Direct inbound calls
+        // used to lean on the parties-based fallback, which breaks once a
+        // later transfer replaces the parties (prd 2026-11-10).
+        if let Some(ref callee_uri) = callee
+            && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
+            && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+            && let Some(agent) = self.leg_agent_id(&leg_id, Some(callee_uri)).await
+            && self.pinned_agent_id().is_none()
+        {
+            Self::set_pinned_agent_id(&self.extensions, &agent);
+        }
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
         // "hung up while still waiting" even after this leg terminates.
@@ -8949,7 +9692,7 @@ impl SipSession {
         // lets recovery mistake normal teardown for a dead call.
         self.server
             .active_call_registry
-            .remove(&self.context.session_id);
+            .remove_if_current(&self.context.session_id, self.registry_instance);
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
@@ -10728,6 +11471,8 @@ impl SipSession {
                 target,
                 headers,
                 application_only,
+                operator_agent,
+                operator_leg_hint,
                 ..
             } => {
                 let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
@@ -10735,7 +11480,9 @@ impl SipSession {
                         "No callee state receiver available for transfer".to_string(),
                     );
                 };
-                let Some(agent_leg) = self.resolve_cc_agent_leg() else {
+                let Some(agent_leg) =
+                    self.resolve_cc_agent_leg(operator_agent.as_deref(), operator_leg_hint.as_deref())
+                else {
                     return CommandResult::failure(
                         "No agent leg for a customer-anchored transfer".to_string(),
                     );
@@ -10903,6 +11650,182 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::BindTransferPartner {
+                cmd_tx,
+                partner_session,
+                their_leg,
+            } => {
+                info!(
+                    session_id = %self.id,
+                    partner_session = %partner_session,
+                    %their_leg,
+                    "Transfer partner bound — hold/unhold routes cross-session"
+                );
+                self.transfer_partner = Some(TransferPartnerBinding {
+                    cmd_tx,
+                    partner_session,
+                    their_leg,
+                });
+                CommandResult::success()
+            }
+
+            CallCommand::SuppressCallRecord => {
+                // REFER-Replaces chain: the replaced (consult) session must
+                // not produce its own CDR row — the replacement session
+                // inherits the root session id and carries the transferred
+                // call's record. cdr_sent=true gates BOTH the cleanup CDR
+                // publication and the Drop safety net; the extension marker
+                // gates the CC call-session hook's cc_calls persist. The
+                // leg teardown / BYE / RWI hangup events stay intact.
+                self.event_progress
+                    .cdr_sent
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.extensions
+                    .write()
+                    .insert(crate::call::CdrSuppressedMarker);
+                info!(
+                    session_id = %self.id,
+                    "Call record suppressed (replaced by REFER-Replaces takeover)"
+                );
+                CommandResult::success()
+            }
+
+            CallCommand::RelayedReferTimeout => {
+                // The relayed replacement never reported an outcome within
+                // the watchdog window: fail the transfer with the referrer
+                // kept intact (both dialogs alive — a retry / retrieve is
+                // still possible).
+                let Some(pending) = self.pending_relayed_refer.take() else {
+                    return CommandResult::success();
+                };
+                if pending.started_at.elapsed() < std::time::Duration::from_secs(super::refer::RELAYED_REFER_TIMEOUT_SECS - 2) {
+                    // A stale watchdog from an earlier REFER — the pending
+                    // state was rearmed since. Ignore.
+                    return CommandResult::success();
+                }
+                warn!(
+                    session_id = %self.id,
+                    refer_to = %pending.refer_to,
+                    "Relayed REFER replacement timed out — failing the transfer"
+                );
+                if let Some(Dialog::Invite(dialog)) =
+                    self.server.dialog_layer.get_dialog(&pending.source_dialog)
+                {
+                    if let Err(error) = SipSession::notify_refer_bounded(
+                        &dialog,
+                        rsipstack::sip::StatusCode::RequestTimeout,
+                        "terminated;reason=noresource",
+                    )
+                    .await
+                    {
+                        warn!(session_id = %self.id, %error, "Failed to send REFER timeout NOTIFY");
+                    }
+                }
+                CommandResult::success()
+            }
+
+            CallCommand::QueryTransferTargetDialog { target_user, reply } => {
+                // REFER-Replaces takeover: the replaced session's leg toward
+                // the transfer target — the dialog the target UA will match
+                // the RFC 3891 Replaces header against. Prefer the leg whose
+                // endpoint user matches the dialed target; fall back to the
+                // callee leg (classic consult shape). `remote_registered`
+                // marks a cluster hop: the dialog the TARGET UA holds lives
+                // on the peer node, so this value can only be used for the
+                // cross-node query, never stamped verbatim.
+                let mut fallback = None;
+                let mut resolved = None;
+                for (leg_id, leg) in self.legs.iter() {
+                    if *leg_id == LegId::from("caller") {
+                        continue;
+                    }
+                    if !matches!(leg.state, LegState::Connected | LegState::Hold) {
+                        continue;
+                    }
+                    let Some(dialog) = self.legs.get_dialog(leg_id) else {
+                        continue;
+                    };
+                    let id = dialog.id();
+                    if let Some(endpoint) = leg.endpoint.as_deref() {
+                        let user = endpoint
+                            .split('@')
+                            .next()
+                            .unwrap_or(endpoint)
+                            .trim_start_matches("sip:")
+                            .trim_start_matches("sips:");
+                        if user == target_user {
+                            resolved = Some(crate::call::domain::TransferTargetDialog::from_dialog_id(
+                                &id,
+                                leg.remote_registered,
+                                self.root_session_id_str(),
+                            )
+                            .endpoint_matched());
+                            break;
+                        }
+                    }
+                    if fallback.is_none() && *leg_id == LegId::from("callee") {
+                        fallback = Some(crate::call::domain::TransferTargetDialog::from_dialog_id(
+                            &id,
+                            leg.remote_registered,
+                            self.root_session_id_str(),
+                        ));
+                    }
+                }
+                let answer = resolved.or(fallback);
+                let _ = reply.send(answer.clone());
+                debug!(
+                    session_id = %self.id,
+                    %target_user,
+                    resolved = ?answer.as_ref().map(|i| (&i.call_id, i.remote_registered, i.endpoint_matched)),
+                    legs = ?self.legs.iter().map(|(id, leg)| (
+                        id.to_string(),
+                        leg.endpoint.clone(),
+                        matches!(leg.state, LegState::Connected | LegState::Hold),
+                    )).collect::<Vec<_>>(),
+                    "QueryTransferTargetDialog resolved"
+                );
+                CommandResult::success()
+            }
+
+            CallCommand::QueryAnsweredConsultTarget { reply } => {
+                // Attended-REFER gate: the party that already ANSWERED this
+                // (consult) session — the first CONNECTED|HOLD leg that is
+                // not the transferor's own caller leg. Classic consults keep
+                // it in the `callee` slot; queue/IVR dispatched legs hang off
+                // dynamic leg ids with the dialed party as `endpoint`.
+                // Application-target consults (IVR prompt playing) surface
+                // the app leg's endpoint — the caller discriminates via the
+                // agent registry.
+                let mut candidates: Vec<_> = self
+                    .legs
+                    .iter()
+                    .filter(|(id, leg)| {
+                        id.as_str() != "caller"
+                            && matches!(leg.state, LegState::Connected | LegState::Hold)
+                    })
+                    .collect();
+                // Classic callee shape first, then dynamic legs in leg order.
+                candidates.sort_by_key(|(id, _)| if id.as_str() == "callee" { 0 } else { 1 });
+                let answer = candidates.into_iter().find_map(|(_, leg)| {
+                    let endpoint = leg.endpoint.as_deref().unwrap_or_default();
+                    if endpoint.is_empty() {
+                        return None;
+                    }
+                    let user = endpoint
+                        .split('@')
+                        .next()
+                        .unwrap_or(endpoint)
+                        .trim_start_matches("sip:")
+                        .trim_start_matches("sips:");
+                    Some(crate::call::domain::AnsweredConsultTarget {
+                        endpoint_user: user.to_string(),
+                        endpoint: endpoint.to_string(),
+                    })
+                });
+                let _ = reply.send(answer);
+                CommandResult::success()
+            }
+
             CallCommand::ConferenceEnded { conference_id } => {
                 if self
                     .conference
@@ -11000,9 +11923,17 @@ impl SipSession {
                     .legs
                     .get(&leg_id)
                     .and_then(|leg| leg.source_leg.clone());
+                // Customer-anchored blind-transfer targets (`transfer-*`,
+                // anchored on the customer leg) MUST reach the ring hook: an
+                // ACW/wrapup agent's RINGING-phase admission happens there
+                // (`Wrapup → Ringing{this}`), and a connect that arrives
+                // without that ring binding is deliberately dropped by the
+                // connect-time gating ("Wrapup is not admitted at connect").
+                // Consult legs (dial source = the main leg) stay excluded.
+                let is_transfer_target = leg_id.0.starts_with("transfer-");
                 if self.legs.contains_key(&leg_id)
                     && !self.pending_refers.contains_key(&leg_id)
-                    && dial_source.is_none()
+                    && (dial_source.is_none() || is_transfer_target)
                     && leg_id.as_str() != "consult"
                 {
                     let ctx = self.session_hook_ctx_for_leg(&leg_id);
@@ -11097,6 +12028,7 @@ impl SipSession {
                 }
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
                 if !self.legs.contains_key(&leg_id) {
+                    eprintln!("DEBUG legconnected-orphan leg={leg_id} dialog={dialog_id:?}");
                     // The dial task can receive 200 OK and queue LegConnected
                     // behind a Cancel/LegRemove command. That command removes
                     // the leg before this notification is handled, but the
@@ -11261,8 +12193,27 @@ impl SipSession {
                     //（`freeze_served_agent_attribution`）按腿自身身份定归属。
                     // 会话 pin 写入仍门控 queue 语境（直拨归因由 Priority 3
                     // 兜底，保持既有语义）。
+                    //
+                    // BUT the stamp keys to the leg's OWN endpoint only:
+                    // `leg_agent_id` falls back to the session-level pin for
+                    // non-agent endpoints (the dispatch signal below needs
+                    // that), and stamping a consult/dynamic leg whose
+                    // endpoint is a plain extension with the pinned agent
+                    // leaked leg_role=agent onto non-agent legs (prd
+                    // 2026-11-10: the consult-1 answered event claimed the
+                    // main call's agent). Resolve the own-endpoint identity
+                    // for the stamp; keep the fallback for the signal.
+                    let own_agent = {
+                        let user = Self::uri_user_part(agent_uri.as_str());
+                        match (user, &self.server.agent_registry) {
+                            (Some(user), Some(registry)) => {
+                                registry.get_agent(&user).await.map(|_| user)
+                            }
+                            _ => None,
+                        }
+                    };
                     if let Some(leg) = self.legs.get_mut(&leg_id) {
-                        leg.agent_id = leg_agent_id.clone();
+                        leg.agent_id = own_agent.clone();
                     }
                     if let Some(ref id) = leg_agent_id
                         && Some(id.as_str()) != self.pinned_agent_id().as_deref()
@@ -11344,8 +12295,20 @@ impl SipSession {
                     self.refresh_rwi_meta();
                 }
 
-                self.mark_leg_connected_if_not_held(&leg_id);
-                // Queue-agent legs: an ANSWERED dynamic leg must never be
+                // Customer-anchored blind transfer: hand the session
+                // attribution to the target BEFORE the leg's answer events
+                // fire — the per-leg `call_answered` (emitted by the state
+                // update below) must carry the TARGET's identity, not the
+                // departing agent's (the old dial-time release had already
+                // re-pinned by this point). The release itself runs at the
+                // end of the arm, after the bridge is settled.
+                let mut pending_customer_transfer =
+                    self.take_pending_customer_transfer_for(&leg_id);
+                if let Some(pending) = pending_customer_transfer.take() {
+                    pending_customer_transfer = Some(self.begin_pending_customer_transfer(pending));
+                }
+
+                self.mark_leg_connected_if_not_held(&leg_id);                // Queue-agent legs: an ANSWERED dynamic leg must never be
                 // left unbridged (caller and agent both Connected with zero
                 // RTP). The queue app normally sends the explicit Bridge
                 // command; this covers every dispatcher that does not. Gated
@@ -11393,6 +12356,13 @@ impl SipSession {
                     }
                 }
                 self.update_media_path().await;
+                // Customer-anchored blind transfer: the target leg is
+                // Connected and the bridge is settled — release the
+                // transferor now (removing it re-runs the media path, which
+                // must see the target leg established).
+                if let Some(pending) = pending_customer_transfer.take() {
+                    self.finish_pending_customer_transfer(pending).await;
+                }
                 CommandResult::success()
             }
 
@@ -11511,6 +12481,21 @@ impl SipSession {
                 }
                 if !self.legs.contains_key(&leg_id) {
                     return CommandResult::success();
+                }
+                // Customer-anchored blind transfer: the target leg failed or
+                // ended BEFORE answering. The transferor was not released, so
+                // restore the customer↔agent bridge instead of cascading the
+                // teardown — a failed transfer keeps the call alive (and the
+                // `call_transferred` event is never emitted).
+                if let Some(pending) = self.take_pending_customer_transfer_for(&leg_id) {
+                    self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
+                    self.update_leg_state(&leg_id, LegState::Ended);
+                    if let Err(error) = self.handle_remove_leg(leg_id.clone(), None).await {
+                        warn!(session_id = %self.id, %error,
+                            "Failed to remove the failed customer-transfer target leg");
+                    }
+                    self.abort_pending_customer_transfer(pending, &reason).await;
+                    return CommandResult::failure(reason);
                 }
                 self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                 let result = {
@@ -12600,9 +13585,21 @@ impl SipSession {
         if self.app_runtime.current_app().as_deref() == Some("queue")
             && self.media_leg(&LegId::from("caller")).is_none()
         {
-            self.prepare_app_caller_media_bridge()
-                .await
-                .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
+            // Outbound hand-off into the queue (blind transfer whose
+            // transferor WAS the caller leg): the caller leg was retired on
+            // purpose and the customer survives as the CALLEE media leg —
+            // the app's media is already anchored there (waiting music plays
+            // to the callee). The caller-leg repair must not abort the agent
+            // dispatch (production 2026-11-17: the dispatch died before the
+            // INVITE, the agent never rang, and the 30s no-answer pushed the
+            // client into a break).
+            let caller_retired_by_handoff =
+                self.meta.transferred && !self.legs.contains_key(&LegId::from("caller"));
+            if !caller_retired_by_handoff {
+                self.prepare_app_caller_media_bridge()
+                    .await
+                    .ok_or_else(|| anyhow!("Queue could not prepare caller media before dialing"))?;
+            }
         }
 
         let mut leg =
@@ -12643,15 +13640,37 @@ impl SipSession {
                 // own identity against the agent registry only: a registered
                 // agent target yields `leg_role: "agent"`, anything else
                 // stays `leg_role: "consult"`.
+                // dial-time exclusion (production 2026-11-16: 1001 consulted 1002 in
+                // wrapup and the wrapup agent got rung): the FIRST dial of a
+                // multi-step transfer is the consult — refusing here keeps
+                // the break/after-call work agent unrung; the LegAdd failure surfaces
+                // to the transferring agent via the CTI API. Non-agent and
+                // dispatchable targets pass.
+                if let (Some(user), Some(registry)) = (
+                    Self::uri_user_part(target.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    if let Some(target_agent_id) = registry.unavailable_transfer_target(&user).await
+                    {
+                        warn!(
+                            session_id = %self.id,
+                            target_agent = %target_agent_id,
+                            target = %target,
+                            "consult target is on break/after-call work — consult refused (consulted agents must not be dialed)"
+                        );
+                        return Err(anyhow!(
+                            "consult target {target_agent_id} is on break or after-call work"
+                        ));
+                    }
+                }
                 let target_agent = match (
                     Self::uri_user_part(target.as_str()),
                     self.server.agent_registry.as_ref(),
                 ) {
                     (Some(user), Some(registry)) => registry
-                        .get_agent(&user)
+                        .resolve_dial_target_agent(&user)
                         .await
-                        .is_some()
-                        .then(|| user.to_string()),
+                        .map(|record| record.agent_id),
                     _ => None,
                 };
                 leg.agent_id = target_agent;
@@ -13128,6 +14147,21 @@ impl SipSession {
         };
         self.meta.callee_call_ids.insert(bleg_call_id.clone());
         // Worker mode: same cross-gen delivery guarantee as dispatched legs —
+        // Dynamic legs (leg_add / consult / customer transfer / queue
+        // dispatch) rebuild their INVITE here instead of going through
+        // `build_target_invite_option`: stamp the route-selected trunk's
+        // session-id correlation header with the logical-call root. The
+        // destination fallback covers direct dials when routing is disabled.
+        let dynamic_trunk = location
+            .outbound_trunk
+            .as_ref()
+            .map(|trunk| trunk.name.clone());
+        self.stamp_outbound_correlation_header(
+            &mut headers,
+            dynamic_trunk.as_deref(),
+            &location,
+            &callee_uri,
+        );
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),
@@ -14170,6 +15204,7 @@ impl SipSession {
 
 }
 
+
 impl Drop for SipSession {
     fn drop(&mut self) {
         self.cancel_token.cancel();
@@ -14238,7 +15273,7 @@ impl Drop for SipSession {
         // cleanup() was never called (e.g. tokio task cancellation).
         self.server
             .active_call_registry
-            .remove(&self.context.session_id);
+            .remove_if_current(&self.context.session_id, self.registry_instance);
 
         // Safety net: release any concurrency slots still held (cleanup() takes
         // them on the happy path, so this is empty in that case). Drop can't

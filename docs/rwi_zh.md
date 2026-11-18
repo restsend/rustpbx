@@ -227,12 +227,18 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
     "destination": "sip:bob@local",
     "caller_id": "4000",
     "timeout_secs": 30,
+    "session_id": "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
     "extra_headers": {
       "X-Campaign-ID": "camp_001"
     }
   }
 }
 ```
+
+`session_id`(可选)显式指定全局 session id(逻辑呼叫关联键):任意安全字符串
+—— 非空、≤120 字符、仅限 `A-Za-z0-9._@-`,按原样采纳,非法值命令直接失败而
+非静默生成;不传则按 `call_id` 派生。非 hex 形态走事件/CDR 关联,不带
+`Session-ID` 头/UUI 下发(关联模型见 `session_id_correlation.md`)。
 
 **桥接两通通话：**
 

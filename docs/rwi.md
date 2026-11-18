@@ -223,12 +223,21 @@ Some commands support aliases for convenience:
     "destination": "sip:bob@local",
     "caller_id": "4000",
     "timeout_secs": 30,
+    "session_id": "0b9e6c1e1b404e8f9c212f5a8d3e7b61",
     "extra_headers": {
       "X-Campaign-ID": "camp_001"
     }
   }
 }
 ```
+
+`session_id` (optional) explicitly sets the global session id (the logical-call
+correlation key). It accepts any safe caller-chosen string: non-empty, at most
+120 characters, drawn from `A-Za-z0-9._@-`; it is adopted verbatim, and an
+invalid value fails the command instead of silently generating a fresh id.
+When omitted, the id is derived from `call_id`. Non-hex values correlate
+through events / CDR only — they are not stamped on the wire via the
+`Session-ID` header / UUI (see `session_id_correlation.md`).
 
 **Bridge two calls:**
 

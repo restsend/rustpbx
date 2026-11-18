@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::negotiate::TransportMode;
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
 use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
@@ -34,7 +35,7 @@ use tracing::{debug, info, warn};
 use crate::egress::EgressSource;
 use crate::ingress_tap::{DtmfEvent, PacketDirection};
 use crate::leg::Leg;
-use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec, TransportMode};
+use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
 
 /// Which side of the 2-party bridge a leg occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

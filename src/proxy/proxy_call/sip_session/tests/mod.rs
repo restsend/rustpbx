@@ -350,6 +350,7 @@ async fn routed_attempts_keep_call_media_path_and_recording() {
 mod child_event_tests;
 mod outbound_failure_tests;
 mod session_id_tests;
+mod transfer_target_dialog_tests;
 
 #[tokio::test]
 async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
@@ -4437,6 +4438,8 @@ async fn test_customer_blind_transfer_route_to_queue() {
                 target: "8000".to_string(),
                 headers: Default::default(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -4602,6 +4605,8 @@ async fn outbound_transfer_fixture_with(
                         target: "sip:target@127.0.0.1:5099".into(),
                         headers: HashMap::new(),
                         application_only: false,
+                        operator_agent: None,
+                        operator_leg_hint: None,
                         completion: None,
                     },
                     Some(&mut callee_states),
@@ -4746,18 +4751,17 @@ async fn customer_blind_transfer_outbound_customer_bye_before_agent_reply() {
 }
 
 #[tokio::test]
-async fn customer_blind_transfer_outbound_survives_agent_bye() {
+async fn customer_blind_transfer_outbound_released_at_dispatch() {
     use crate::media::leg::{LegConfig, LegInner};
     use crate::proxy::tests::common::{create_test_request, create_transaction};
     use rsipstack::dialog::dialog::TerminatedReason;
 
-    for outcome in [
-        "target_bye",
-        "answer",
-        "reject",
-        "reject_before_agent_bye",
-        "customer_bye",
-    ] {
+    // 发起即释放 (dial-time release, production 2026-11-15): the transferor
+    // (an agent-dialed call's CALLER leg) is released when the transfer is
+    // initiated — before the target answers. The customer stays anchored;
+    // the target dial completes the hand-off; failures end the call cleanly
+    // (no take-back).
+    for outcome in ["answer", "target_bye", "reject", "customer_bye"] {
         let OutboundTransferFixture {
             mut session,
             target,
@@ -4770,36 +4774,20 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
         let customer = LegId::from("callee");
         let agent_dialog = session.caller_dialog_id();
         let customer_peer = session.media_leg(&customer).unwrap();
-        assert!(!session.legs.contains_key(&caller));
-        assert!(session.pending_hangup.contains(&agent_dialog));
-        assert!(session.app_media_leg.read().is_none());
 
-        // The server's BYE completion arrives after the transfer command retires the agent.
-        if outcome != "reject_before_agent_bye" {
-            session
-                .handle_dialog_state(DialogState::Terminated(
-                    agent_dialog.clone(),
-                    TerminatedReason::UasBye,
-                ))
-                .await
-                .unwrap();
-        }
+        // 发起即释放: the transferor leg is GONE at dispatch; the release
+        // BYE to its dialog is queued.
         assert!(
-            !session.cancel_token.is_cancelled(),
-            "agent BYE must not end the customer call"
+            !session.legs.contains_key(&caller),
+            "the transferor must be released at dial time"
         );
+        assert!(session.pending_customer_transfer_release.is_some());
         assert!(
-            !session.pending_hangup.contains(&customer_dialog),
-            "customer must not receive a cascading BYE"
+            session.pending_hangup.contains(&agent_dialog),
+            "the release BYE to the transferor dialog is queued"
         );
-        assert!(session.meta.hangup_reason.is_none());
-        assert!(session.legs.contains_key(&target));
-        assert!(Arc::ptr_eq(
-            &customer_peer,
-            &session.media_leg(&customer).unwrap()
-        ));
 
-        if matches!(outcome, "reject" | "reject_before_agent_bye") {
+        if matches!(outcome, "reject") {
             let result = session
                 .execute_command(
                     CallCommand::LegFailed {
@@ -4809,101 +4797,124 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
                     None,
                 )
                 .await;
-            assert!(!result.success);
+            // 发起即释放: a failed target cannot be taken back — the
+            // customer is released cleanly (Canceled) instead of being
+            // stranded in an unbridged session.
+            assert!(session.pending_hangup.contains(&customer_dialog),
+                "a failed transfer releases the customer cleanly");
             assert!(
-                session.pending_hangup.contains(&customer_dialog),
-                "failed transfer must release the customer"
+                session.cancel_token.is_cancelled(),
+                "the failed transfer ends the call cleanly for the customer"
             );
-            if outcome == "reject_before_agent_bye" {
+            let _ = result;
+        } else {
+            if matches!(outcome, "target_bye") {
+                // The target answers first (the bridge completes); only then
+                // does its BYE release the customer.
+                let target_peer = session.media_leg(&target).unwrap();
+                let target_remote = LegInner::new("target", &LegConfig::rtp_pcmu(), None).unwrap();
+                let offer = target_peer
+                    .pc()
+                    .local_description()
+                    .unwrap()
+                    .to_sdp_string();
+                let answer = target_remote
+                    .answer(&offer)
+                    .await
+                    .unwrap();
+                target_remote.accept();
+                let result = session
+                    .execute_command(
+                        CallCommand::LegConnected {
+                            leg_id: target.clone(),
+                            answer_sdp: Some(answer),
+                            dialog_id: None,
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(result.success, "{:?}", result.message);
+                let request = create_test_request(
+                    rsipstack::sip::Method::Invite,
+                    "target",
+                    None,
+                    "example.com",
+                    None,
+                );
+                let (tx, _) = create_transaction(request).await;
+                let (state_tx, _state_rx) = mpsc::unbounded_channel();
+                let dialog = session
+                    .server
+                    .dialog_layer
+                    .get_or_create_server_invite(&tx, state_tx, None, None)
+                    .unwrap();
                 session
-                    .handle_dialog_state(DialogState::Terminated(
-                        agent_dialog,
+                    .legs
+                    .set_dialog(target.clone(), Dialog::Invite(dialog));
+            } else {
+                let target_peer = session.media_leg(&target).unwrap();
+                let target_remote = LegInner::new("target", &LegConfig::rtp_pcmu(), None).unwrap();
+                let offer = target_peer
+                    .pc()
+                    .local_description()
+                    .unwrap()
+                    .to_sdp_string();
+                let answer = target_remote
+                    .answer(&offer)
+                    .await
+                    .unwrap();
+                target_remote.accept();
+                let result = session
+                    .execute_command(
+                        CallCommand::LegConnected {
+                            leg_id: target.clone(),
+                            answer_sdp: Some(answer),
+                            dialog_id: None,
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(result.success, "{:?}", result.message);
+                assert!(
+                    session.bridge().unwrap().is_bridged(),
+                    "customer and target media must connect"
+                );
+                assert!(!session.cancel_token.is_cancelled());
+            }
+
+            if outcome == "target_bye" {
+                let result = session
+                    .execute_command(
+                        CallCommand::LegEnded {
+                            leg_id: target.clone(),
+                            reason: "Remote BYE".into(),
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(result.success, "{:?}", result.message);
+                assert!(
+                    session.pending_hangup.contains(&customer_dialog),
+                    "answered target BYE must release the customer"
+                );
+            } else if outcome == "customer_bye" {
+                session
+                    .handle_callee_state(DialogState::Terminated(
+                        customer_dialog,
                         TerminatedReason::UasBye,
                     ))
                     .await
                     .unwrap();
-                assert!(session.pending_hangup.contains(&customer_dialog));
+                assert!(
+                    session.cancel_token.is_cancelled(),
+                    "customer BYE must end the session"
+                );
             }
-        } else if matches!(outcome, "answer" | "target_bye") {
-            let target_peer = session.media_leg(&target).unwrap();
-            let target_remote = LegInner::new("target", &LegConfig::rtp_pcmu(), None).unwrap();
-            let offer = target_peer
-                .pc()
-                .local_description()
-                .unwrap()
-                .to_sdp_string();
-            let answer = target_remote
-                .answer(&offer)
-                .await
-                .unwrap();
-            target_remote.accept();
-            let result = session
-                .execute_command(
-                    CallCommand::LegConnected {
-                        leg_id: target.clone(),
-                        answer_sdp: Some(answer),
-                        dialog_id: None,
-                    },
-                    None,
-                )
-                .await;
-            assert!(result.success, "{:?}", result.message);
-            assert!(
-                session.bridge().unwrap().is_bridged(),
-                "customer and target media must connect"
-            );
-            assert!(!session.cancel_token.is_cancelled());
         }
-
-        if outcome == "target_bye" {
-            let request = create_test_request(
-                rsipstack::sip::Method::Invite,
-                "target",
-                None,
-                "example.com",
-                None,
-            );
-            let (tx, _) = create_transaction(request).await;
-            let (state_tx, _state_rx) = mpsc::unbounded_channel();
-            let dialog = session
-                .server
-                .dialog_layer
-                .get_or_create_server_invite(&tx, state_tx, None, None)
-                .unwrap();
-            session
-                .legs
-                .set_dialog(target.clone(), Dialog::Invite(dialog));
-            let result = session
-                .execute_command(
-                    CallCommand::LegEnded {
-                        leg_id: target.clone(),
-                        reason: "Remote BYE".into(),
-                    },
-                    None,
-                )
-                .await;
-            assert!(result.success, "{:?}", result.message);
-            assert!(
-                session.pending_hangup.contains(&customer_dialog),
-                "answered target BYE must release the customer"
-            );
-        } else if !matches!(outcome, "reject" | "reject_before_agent_bye") {
-            session
-                .handle_callee_state(DialogState::Terminated(
-                    customer_dialog,
-                    TerminatedReason::UasBye,
-                ))
-                .await
-                .unwrap();
-            assert!(
-                session.cancel_token.is_cancelled(),
-                "customer BYE must end the transferred session"
-            );
-            assert_eq!(session.legs.get(&target).unwrap().state, LegState::Ended);
-        }
+        let _ = customer_peer;
+        let _ = agent_dialog;
     }
 }
-
 /// RWI `call.transfer` hard-codes the positional hint `leg_id = "caller"`.
 /// On an agent-DIALED call the caller IS the agent (the transferor), so the
 /// legacy slot-anchored B2BUA path used to hang up the CUSTOMER and
@@ -4913,7 +4924,7 @@ async fn customer_blind_transfer_outbound_survives_agent_bye() {
 #[tokio::test]
 async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
     let OutboundTransferFixture {
-        session,
+        mut session,
         target,
         customer_dialog,
         agent_states: _agent_states,
@@ -4922,6 +4933,18 @@ async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
     let _guard = session.cancel_token.clone().drop_guard();
     let caller = LegId::from("caller");
     let customer = LegId::from("callee");
+    // Deferred release (production 2026-11-14): the transferor stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target.clone(),
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
     assert!(
         !session.legs.contains_key(&caller),
         "transferor (agent on the caller leg) must be released"
@@ -4951,7 +4974,7 @@ async fn outbound_transfer_rwi_caller_hint_hands_peer_not_transferor() {
 #[tokio::test]
 async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
     let OutboundTransferFixture {
-        session,
+        mut session,
         target,
         customer_dialog,
         agent_states: _agent_states,
@@ -4960,6 +4983,18 @@ async fn outbound_transfer_console_callee_hint_hands_peer_not_transferor() {
     let _guard = session.cancel_token.clone().drop_guard();
     let caller = LegId::from("caller");
     let customer = LegId::from("callee");
+    // Deferred release (production 2026-11-14): the transferor stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target.clone(),
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
     assert!(
         !session.legs.contains_key(&caller),
         "transferor (agent on the caller leg) must be released"
@@ -5174,6 +5209,8 @@ async fn test_customer_blind_transfer_dynamic_agent_leg_resolves_customer() {
                 target: "8000".to_string(),
                 headers: Default::default(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -5413,6 +5450,8 @@ async fn assert_customer_blind_transfer_route(
                 target: target.to_string(),
                 headers: Default::default(),
                 application_only: restricted,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             Some(&mut callee_rx),
@@ -5456,9 +5495,27 @@ async fn assert_customer_blind_transfer_route(
         "dial-as-is dispatch must succeed: {:?}",
         result.message
     );
+    // Deferred release (production 2026-11-14): the agent leg stays until the
+    // target answers — drive the answer edge to complete the hand-off.
+    let target_leg = session
+        .legs
+        .iter()
+        .find(|(_, leg)| leg.source_leg.as_ref() == Some(&LegId::from("caller")))
+        .map(|(id, _)| id.clone())
+        .expect("transfer target must be customer-anchored");
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: target_leg,
+                answer_sdp: None,
+                dialog_id: None,
+            },
+            Some(&mut callee_rx),
+        )
+        .await;
     assert!(
         session.legs.get(&LegId::from("callee")).is_none(),
-        "agent leg must be released once the hand-off is dispatched"
+        "agent leg must be released once the hand-off completes"
     );
     assert!(
         session.legs.get(&LegId::from("caller")).is_some(),
@@ -5831,6 +5888,7 @@ s=-\r\n\
 t=0 0\r\n\
 m=video 4000 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 VP8/90000\r\n\
 a=rtpmap:102 H264/90000\r\n\
@@ -5846,6 +5904,7 @@ m=video 9 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=ice-ufrag:caller-ice\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 VP8/90000\r\n\
 a=rtpmap:102 H264/90000\r\n\
@@ -6157,6 +6216,7 @@ a=group:BUNDLE 0 1\r\n\
 m=audio 4000 UDP/TLS/RTP/SAVPF 111 101\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:0\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtcp-mux\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
@@ -6168,6 +6228,7 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 m=video 4001 UDP/TLS/RTP/SAVPF 96 98\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtcp-mux\r\n\
 a=rtpmap:96 H264/90000\r\n\
@@ -6442,6 +6503,8 @@ s=-\r\n\
 t=0 0\r\n\
 m=audio 4000 UDP/TLS/RTP/SAVPF 111\r\n\
 c=IN IP4 0.0.0.0\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtcp-mux\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
@@ -6451,6 +6514,8 @@ a=ice-pwd:ib8b\r\n\
 a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
 m=video 4001 UDP/TLS/RTP/SAVPF 96\r\n\
 c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=rtcp-mux\r\n\
 a=sendrecv\r\n\
 a=rtcp-mux\r\n\
 a=rtpmap:96 H264/90000\r\n\
@@ -7274,6 +7339,71 @@ async fn test_hold_sdp_contains_sendonly() {
     );
 }
 
+// ── Layer 3b: hold/resume offers never re-open codec negotiation ──
+
+/// Production regression (2026-11-14, transfer-room cross-platform call over
+/// TURN): the hold/resume re-INVITE re-offered the whole codec list; the peer
+/// answered with a different codec than the one the anchored media path had
+/// armed, so the egress sender stamped the new payload type on the old
+/// codec's bytes and the peer played wideband noise right after resuming.
+/// `pin_sdp_codec` keeps the already-negotiated codec in the offer.
+#[test]
+fn hold_offer_pins_the_negotiated_codec() {
+    let sdp = concat!(
+        "v=0\r\n",
+        "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+        "s=Talk\r\n",
+        "c=IN IP4 192.0.2.10\r\n",
+        "t=0 0\r\n",
+        "m=audio 40000 RTP/AVP 18 8 0 111 101\r\n",
+        "a=rtpmap:18 G729/8000\r\n",
+        "a=rtpmap:8 PCMA/8000\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+        "a=rtpmap:111 opus/48000/2\r\n",
+        "a=rtpmap:101 telephone-event/8000\r\n",
+        "a=sendonly\r\n",
+    )
+    .to_string();
+
+    let pinned = crate::proxy::proxy_call::sip_session::session_media::pin_sdp_codec(
+        sdp.clone(),
+        Some(audio_codec::CodecType::PCMA),
+    );
+    assert!(
+        pinned.contains("a=rtpmap:8 PCMA/8000"),
+        "pinned offer must keep the negotiated codec: {pinned}"
+    );
+    assert!(
+        pinned.contains("a=rtpmap:101 telephone-event/8000"),
+        "telephone-event must survive the pin: {pinned}"
+    );
+    for foreign in [
+        "a=rtpmap:18 G729/8000",
+        "a=rtpmap:0 PCMU/8000",
+        "a=rtpmap:111 opus/48000/2",
+    ] {
+        assert!(
+            !pinned.contains(foreign),
+            "{foreign} must be dropped from the hold offer: {pinned}"
+        );
+    }
+    assert!(
+        pinned.contains("a=sendonly"),
+        "direction must be preserved: {pinned}"
+    );
+    let mline = pinned
+        .lines()
+        .find(|l| l.starts_with("m=audio"))
+        .expect("audio m-line");
+    assert!(
+        !mline.contains(" 18 ") && !mline.contains(" 111 "),
+        "m-line payload list must be narrowed: {mline}"
+    );
+
+    // No live profile → untouched (legacy/unknown path).
+    assert_eq!(crate::proxy::proxy_call::sip_session::session_media::pin_sdp_codec(sdp.clone(), None), sdp);
+}
+
 // ── Layer 1: parse_info_command dispatch (pure function, no session needed) ──
 
 #[test]
@@ -7868,7 +7998,9 @@ async fn test_default_queue_prompts_resolve_and_are_playable() {
     use crate::media::audio_source::{AudioSource, FileAudioSource};
 
     let cases = [
-        ("hold", crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+        ("ringback", crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+        ("queue-waiting", crate::call::DEFAULT_QUEUE_WAIT_AUDIO),
+        ("hold-music", crate::call::DEFAULT_HOLD_AUDIO),
         ("failure", crate::call::DEFAULT_QUEUE_FAILURE_AUDIO),
         ("transfer-zh", crate::call::DEFAULT_QUEUE_TRANSFER_PROMPT_ZH),
         ("busy-zh", crate::call::DEFAULT_QUEUE_BUSY_PROMPT_ZH),
@@ -15260,6 +15392,8 @@ async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
                 target: target_uri,
                 headers: HashMap::new(),
                 application_only: false,
+                operator_agent: None,
+                operator_leg_hint: None,
                 completion: None,
             },
             OutboundTransferCommand::RwiCallerLeg => CallCommand::Transfer {

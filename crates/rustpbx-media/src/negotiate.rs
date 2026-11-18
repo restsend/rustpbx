@@ -48,23 +48,19 @@ impl TransportMode {
     /// The rustrtc configuration for a peer of this kind. `ice_lite` makes
     /// RTP and SRTP legs ICE-lite agents; WebRTC legs always run full ICE.
     pub fn rtc_configuration(&self, ice_lite: bool) -> RtcConfiguration {
-        let connectivity = if ice_lite {
-            Connectivity::IceLite
-        } else {
-            Connectivity::Sdp
-        };
-        match self {
+        let mut config = match self {
             TransportMode::WebRtc => RtcConfiguration::webrtc(),
-            TransportMode::Srtp => RtcConfiguration {
-                connectivity,
-                keying: Keying::Sdes,
-                ..RtcConfiguration::sip()
-            },
-            TransportMode::Rtp => RtcConfiguration {
-                connectivity,
-                ..RtcConfiguration::sip()
-            },
+            TransportMode::Srtp => {
+                let mut c = RtcConfiguration::sip();
+                c.keying = Keying::Sdes;
+                c
+            }
+            TransportMode::Rtp => RtcConfiguration::sip(),
+        };
+        if !matches!(self, TransportMode::WebRtc) && ice_lite {
+            config.connectivity = Connectivity::IceLite;
         }
+        config
     }
 }
 
@@ -84,6 +80,45 @@ pub fn detect_transport(sdp: &str) -> TransportMode {
     } else {
         TransportMode::Rtp
     }
+}
+
+/// RFC 9429 §9.3 strict-validation shim for legacy full-ICE offers.
+///
+/// Upstream 0.6.x rejects a remote description whose audio/video m-sections
+/// lack the explicit `a=rtcp-mux` attribute when the leg runs full ICE
+/// (rtcp_mux is required under ICE). Legacy peers (older browsers, sipbot
+/// builds, SBCs) omit the attribute while still multiplexing — full-ICE
+/// endpoints MUST mux anyway (RFC 5761 §5.1.1 mandates it under ICE), so
+/// injecting the attribute into every ICE-transport audio/video m-section
+/// that lacks it is semantically correct and restores the 0.4.x tolerance.
+///
+/// Plain-RTP (non-ICE) offers pass through untouched — their mux negotiation
+/// is governed by `rtcp_mux_policy`, not the validator.
+pub fn normalize_mux_for_full_ice(sdp: &str) -> String {
+    let is_full_ice = sdp.contains("a=ice-ufrag");
+    if !is_full_ice || sdp.contains("a=rtcp-mux") {
+        // Not full ICE (mux governed by rtcp_mux_policy), or the offer
+        // already carries explicit mux — byte-for-byte passthrough.
+        return sdp.to_string();
+    }
+    let lines: Vec<&str> = sdp.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    for line in lines {
+        out.push(line.to_string());
+        if line.starts_with("m=") {
+            let kind = line[2..].split_whitespace().next().unwrap_or("");
+            if kind == "audio" || kind == "video" {
+                // Inject right after the m= line — RFC 9429 §5.1.1: a
+                // full-ICE endpoint multiplexes regardless of the attribute.
+                out.push("a=rtcp-mux".to_string());
+            }
+        }
+    }
+    let mut joined = out.join("\r\n");
+    if sdp.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push_str("\r\n");
+    }
+    joined
 }
 
 /// Parsed RTP codec information from SDP, including payload-specific parameters.

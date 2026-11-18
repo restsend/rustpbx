@@ -660,6 +660,24 @@ impl SipSession {
             &mut plan,
             self.server.proxy_config.load().queue_hold_music.clone(),
         );
+        // Still no audio file: the built-in queue WAITING loop — deliberately
+        // distinct from the agent ringback, so a queued caller can tell
+        // "waiting for an agent" from "an agent's phone is ringing"
+        // (product 2026-11-14; `hold_music` never leaks into the queue).
+        let needs_wait_file = match plan.hold.as_ref() {
+            None => true,
+            Some(hold) => hold.audio_file.is_none(),
+        };
+        if needs_wait_file {
+            let file = self
+                .server
+                .proxy_config
+                .load()
+                .queue_wait_music()
+                .expect("queue_wait_music always resolves to the built-in loop");
+            let base = plan.hold.take().unwrap_or_default();
+            plan.hold = Some(base.with_audio_file(file));
+        }
 
         // A skill-group target enables skill routing in the queue app, which
         // re-resolves the group in `on_enter` — so the app may dial agents the
@@ -1059,7 +1077,15 @@ impl SipSession {
                 .as_ref()
                 .is_none_or(|d| d.state().is_terminated());
 
-        if !caller_alive {
+        // An outbound hand-off retires the TRANSFEROR's caller leg while the
+        // customer (callee) survives. A bridge step that carries a return app
+        // (the facade step-IVR's `return_ivr_resume`) must CONTINUE the tree
+        // on the surviving leg — only a bare bridge with no return app ends
+        // the call here (production 2026-11-16: the announcement bridge close
+        // hung up the transferred customer because the retired caller leg was
+        // mistaken for "the caller died while suspended").
+        let has_return_app = self.meta.transfer_return_app.is_some();
+        if !caller_alive && !has_return_app {
             // An outbound transfer retired the caller/agent, not the customer;
             // the surviving primary dialog still needs the target's hangup.
             if self.meta.transferred && !self.legs.contains_key(&LegId::from("caller")) {
@@ -1185,8 +1211,17 @@ impl SipSession {
             }
         }
 
-        // 3. Neither hook nor return app — hang up the caller.
-        self.pending_hangup.insert(self.caller_dialog_id());
+        // 3. Neither hook nor return app — hang up the surviving primary
+        // dialog (the caller when alive; the transferred customer otherwise).
+        let hangup_dialog = if caller_alive {
+            self.caller_dialog_id()
+        } else {
+            self.meta
+                .connected_callee_dialog_id
+                .clone()
+                .unwrap_or_else(|| self.caller_dialog_id())
+        };
+        self.pending_hangup.insert(hangup_dialog);
         CommandResult::success()
     }
 }
