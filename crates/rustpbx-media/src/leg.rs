@@ -15,7 +15,9 @@
 //! PC's rewrite bridge (transport-level, ICE exclusively owned) and all other
 //! sources to the always-alive [`EgressPipeline`].
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -276,6 +278,12 @@ pub struct LegInner {
     /// switch) rebuilds the egress codec with the same CNG behaviour.
     comfort_noise: bool,
     comfort_noise_level_db: f32,
+    /// RTCP endpoint sync state: the `a=rtcp:` endpoints declared by the
+    /// remote SDP (non-rtcp-mux legs) plus the media transports they apply
+    /// to. Shared with the `RtcpAddrSyncObserver` registered on the PC, which
+    /// re-derives the RTCP destination when the RTP latch commits to a new
+    /// source (NAT rebinding). See `apply_remote_sdp`.
+    rtcp_sync: Arc<RtcpEndpointSync>,
 }
 
 /// DTMF sink bookkeeping on the shared analysis tap.
@@ -535,6 +543,16 @@ impl LegInner {
             relay_active: was_relay.clone(),
         }));
 
+        // RTCP endpoint sync for non-rtcp-mux peers: the observer fires when
+        // the RTP latch commits (initial latch / NAT rebinding) and re-derives
+        // the RTCP destination from the latched source IP + the SDP-declared
+        // RTCP port. The declared endpoints arrive later, via
+        // `apply_remote_sdp`.
+        let rtcp_sync = Arc::new(RtcpEndpointSync::default());
+        pc.add_observer(Arc::new(RtcpAddrSyncObserver {
+            sync: Arc::clone(&rtcp_sync),
+        }));
+
         Ok(Arc::new(LegInner {
             id: LegId::from(label),
             pc,
@@ -564,6 +582,7 @@ impl LegInner {
             analysis: parking_lot::Mutex::new(AnalysisState::default()),
             comfort_noise,
             comfort_noise_level_db,
+            rtcp_sync,
         }))
     }
 
@@ -873,6 +892,32 @@ impl LegInner {
         if let Some(addr) = advertised_audio_addr(&desc) {
             *self.peer_advertised_addr.lock() = Some(addr);
         }
+        // RFC 3605 RTCP endpoints, extracted before `desc` moves into
+        // set_remote_description. Only plain-RTP/SRTP legs need this: WebRTC
+        // resolves its RTCP destination via ICE, and rtcp-mux legs share the
+        // RTP port. Strict stacks like pjmedia demux by port — RTCP landing
+        // on the RTP port (rustrtc's fallback destination) is discarded,
+        // silently breaking PLI/FIR keyframe recovery and one-way video.
+        let rtcp_endpoints: Vec<(MediaKind, SocketAddr)> =
+            if TransportMode::of(self.pc.config()) != TransportMode::WebRtc {
+                desc.media_sections
+                    .iter()
+                    .filter(|section| {
+                        matches!(section.kind, MediaKind::Audio | MediaKind::Video)
+                            && !section.attributes.iter().any(|a| a.key == "rtcp-mux")
+                    })
+                    .filter_map(|section| {
+                        let value = section
+                            .attributes
+                            .iter()
+                            .find(|a| a.key == "rtcp")
+                            .and_then(|a| a.value.as_deref())?;
+                        parse_rtcp_attr(value).map(|addr| (section.kind, addr))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         // Keep rustrtc's large negotiation future off the nested SIP call stack.
         Box::pin(self.pc.set_remote_description(desc)).await?;
         // Direct RTP has a transport now; WebRTC may still be waiting for ICE.
@@ -895,6 +940,30 @@ impl LegInner {
                 {
                     transport.ice_conn().enable_latch_on_rtp();
                 }
+            }
+        }
+
+        // Apply the declared RTCP endpoints now that the transports exist
+        // (plain RTP attaches during set_remote_description — see the latch
+        // loop above). Registering the transports with the sync state also
+        // lets the source-change observer re-derive these addresses from the
+        // latched source IP after a NAT rebinding.
+        for (kind, addr) in rtcp_endpoints {
+            let Some(transport) = rtp_transport_for_kind(&self.pc, kind) else {
+                continue;
+            };
+            let conn = transport.ice_conn();
+            self.rtcp_sync.record_declared(kind, addr);
+            self.rtcp_sync.register_transport(kind, &conn);
+            if *conn.remote_rtcp_addr.read() != Some(addr) {
+                conn.set_remote_rtcp_addr(Some(addr));
+                debug!(
+                    session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
+                    leg = %self.id,
+                    ?kind,
+                    rtcp = %addr,
+                    "leg RTCP remote address set from SDP",
+                );
             }
         }
 
@@ -1263,6 +1332,7 @@ impl LegInner {
                     let video_payload_types = video_payload_types.clone();
                     let on_arm_failed = on_arm_failed.clone();
                     let leg_id = self.id.clone();
+                    let tap = Arc::clone(&self.tap);
                     let handle = tokio::spawn(async move {
                         if let Err(error) = wait_and_arm_rewrite_relay(
                             &leg_id,
@@ -1272,6 +1342,7 @@ impl LegInner {
                             options,
                             &rules,
                             &video_payload_types,
+                            &tap,
                         )
                         .await
                         {
@@ -1294,6 +1365,7 @@ impl LegInner {
                         *options,
                         rules,
                         video_payload_types,
+                        &self.tap,
                     )
                     .await?;
                 }
@@ -1664,6 +1736,105 @@ impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
     }
 }
 
+/// The `a=rtcp:` endpoints a non-rtcp-mux peer declared in its SDP, per media
+/// kind (RFC 3605). pjmedia-style stacks demux strictly by port and discard
+/// RTCP arriving on the RTP port, so the declared RTCP address must be used
+/// for PLI/FIR/NACK (keyframe recovery) — without it rustrtc falls back to the
+/// RTP remote and one-way video never recovers.
+#[derive(Default, Clone, Copy)]
+struct DeclaredRtcpEndpoints {
+    audio: Option<SocketAddr>,
+    video: Option<SocketAddr>,
+}
+
+/// RTCP endpoint sync state shared between [`LegInner`] and the
+/// [`RtcpAddrSyncObserver`] registered on the PC: the SDP-declared RTCP
+/// endpoints plus the media transports they apply to.
+#[derive(Default)]
+struct RtcpEndpointSync {
+    declared: Mutex<DeclaredRtcpEndpoints>,
+    /// Weak handles on purpose: the PeerConnection holds observers for its
+    /// lifetime, so strong references here would form a cycle that keeps a
+    /// closed leg's transports alive.
+    transports: Mutex<Vec<(MediaKind, Weak<rustrtc::transports::ice::conn::IceConn>)>>,
+}
+
+impl RtcpEndpointSync {
+    /// Remember the RTCP endpoint the remote SDP declared for `kind`.
+    fn record_declared(&self, kind: MediaKind, addr: SocketAddr) {
+        let mut declared = self.declared.lock();
+        match kind {
+            MediaKind::Audio => declared.audio = Some(addr),
+            MediaKind::Video => declared.video = Some(addr),
+            _ => {}
+        }
+    }
+
+    /// Track `conn` as the transport `kind`'s declared endpoint applies to.
+    /// Registered when the transport appears during SDP application; the same
+    /// transport is updated in place across re-INVITEs.
+    fn register_transport(&self, kind: MediaKind, conn: &Arc<rustrtc::transports::ice::conn::IceConn>) {
+        let mut transports = self.transports.lock();
+        match transports.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, weak)) => *weak = Arc::downgrade(conn),
+            None => transports.push((kind, Arc::downgrade(conn))),
+        }
+    }
+
+    /// Re-derive the RTCP destination for every known transport from a newly
+    /// latched source IP and each kind's declared RTCP port. A peer behind NAT
+    /// declares addresses its SDP cannot be reached on; once the RTP latch
+    /// commits to the peer's real source, RTCP must follow that IP or strict
+    /// stacks silently discard the feedback.
+    fn resync_to_source(&self, source_ip: std::net::IpAddr) {
+        let declared = *self.declared.lock();
+        let transports = self.transports.lock();
+        for (kind, conn) in transports.iter() {
+            let declared = match kind {
+                MediaKind::Audio => declared.audio,
+                MediaKind::Video => declared.video,
+                _ => None,
+            };
+            let Some(declared) = declared else { continue };
+            let Some(conn) = conn.upgrade() else { continue };
+            let target = SocketAddr::new(source_ip, declared.port());
+            if *conn.remote_rtcp_addr.read() != Some(target) {
+                conn.set_remote_rtcp_addr(Some(target));
+                debug!(
+                    rtcp = %target,
+                    ?kind,
+                    "leg RTCP remote re-synced to the latched source"
+                );
+            }
+        }
+    }
+}
+
+/// Re-derive the RTCP destination when the RTP latch commits to a source:
+/// keep each media kind's SDP-declared RTCP port, take the latched IP. Rare
+/// — the initial latch plus at most a handful of NAT rebindings per session.
+struct RtcpAddrSyncObserver {
+    sync: Arc<RtcpEndpointSync>,
+}
+
+impl rustrtc::peer_connection::RtpObserver for RtcpAddrSyncObserver {
+    fn on_source_change(&self, change: &rustrtc::transports::ice::SourceChange) {
+        self.sync.resync_to_source(change.to.ip());
+    }
+}
+
+/// Parse an RFC 3605 `a=rtcp:<port> [nettype addrtype] <addr>` attribute
+/// value ("4005 IN IP4 192.168.108.201", or the minimal "4005 192.168.108.201"
+/// some stacks send) into a socket address. The address is the last token;
+/// anything unparseable (e.g. a hostname) yields `None`.
+fn parse_rtcp_attr(value: &str) -> Option<SocketAddr> {
+    let mut parts = value.split_whitespace();
+    let port: u16 = parts.next()?.parse().ok()?;
+    let addr = parts.next_back()?;
+    let ip: std::net::IpAddr = addr.parse().ok()?;
+    Some(SocketAddr::new(ip, port))
+}
+
 /// Default max wait for a WebRTC peer's ICE+DTLS before degrading the fast-path
 /// relay to transcoding. Overridable per-call via `[media]
 /// relay_ready_timeout_secs` (`RtpConfig::relay_ready_timeout_secs`).
@@ -1703,6 +1874,7 @@ async fn wait_and_arm_rewrite_relay(
     options: rustrtc::RtpRewriteBridgeOptions,
     rules: &[rustrtc::RtpRewriteRule],
     video_payload_types: &[u8],
+    tap: &Arc<IngressTap>,
 ) -> Result<()> {
     let arm_started = std::time::Instant::now();
     let webrtc_pc = if TransportMode::of(source_pc.config()) == TransportMode::WebRtc {
@@ -1808,6 +1980,23 @@ async fn wait_and_arm_rewrite_relay(
         arm_ms = arm_started.elapsed().as_millis() as u64,
         "fast-path relay armed"
     );
+
+    // A receiver cannot start decoding until its first keyframe arrives, and
+    // the stream's opening packets (SPS/PPS + IDR) that landed before the
+    // bridge armed were dropped silently (no bridge, no listener yet). This
+    // is the NORM for an arming window measured in tens of milliseconds, so
+    // it stays informational — the breadcrumb that matters when a one-way
+    // black screen is investigated: recovery depends entirely on RTCP
+    // feedback (PLI/FIR) reaching the sender.
+    if let Some(ssrc) = tap.ingress_ssrc_for_pts(video_payload_types) {
+        info!(
+            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
+            leg = %leg,
+            ssrc,
+            packets_before_arm = tap.ingress_packet_count(),
+            "video stream started before the relay bridge armed; the initial keyframe window was forwarded late or dropped — keyframe recovery depends on RTCP feedback"
+        );
+    }
     Ok(())
 }
 
@@ -2168,6 +2357,7 @@ mod tests {
             Default::default(),
             &[],
             &[96],
+            source.ingress_tap(),
         )
         .await;
         assert!(missing_video.is_err(), "video transports must be required");
@@ -2183,6 +2373,7 @@ mod tests {
             Default::default(),
             &[],
             &[96],
+            source.ingress_tap(),
         )
         .await;
         assert!(
@@ -2201,6 +2392,7 @@ mod tests {
             Default::default(),
             &[],
             &[96],
+            source.ingress_tap(),
         )
         .await
         .expect("relay should arm once all transports are ready");
@@ -2229,6 +2421,75 @@ mod tests {
         assert_eq!(rtc.bind_ips, ips(&["127.0.0.1", "::1"]));
         assert!(rtc.prefer_ipv6);
         assert_eq!(rtc.cname.as_deref(), Some("configured-cname"));
+        leg.stop();
+    }
+
+    /// RFC 3605 `a=rtcp:` attribute parsing: full form, minimal form, and
+    /// unparseable values.
+    #[test]
+    fn parse_rtcp_attr_forms() {
+        let parse = |v: &str| parse_rtcp_attr(v);
+        assert_eq!(
+            parse("4005 IN IP4 192.168.108.201"),
+            Some("192.168.108.201:4005".parse().unwrap())
+        );
+        assert_eq!(
+            parse("4005 192.168.108.201"),
+            Some("192.168.108.201:4005".parse().unwrap())
+        );
+        assert_eq!(
+            parse("4003 IN IP4 [2001:db8::8]"),
+            None,
+            "bracketed IPv6 (not produced by SIP stacks in practice) is not parsed"
+        );
+        assert_eq!(parse("4005 example.com"), None, "hostnames are not parsed");
+        assert_eq!(parse("abc IN IP4 1.2.3.4"), None, "bad port");
+        assert_eq!(parse("4005 IN IP4"), None, "missing address");
+        assert_eq!(parse(""), None, "empty value");
+    }
+
+    /// A plain-RTP peer declaring `a=rtcp:` (pjmedia-style, non-mux) must get
+    /// that endpoint installed on its transport — rustrtc's fallback sends
+    /// RTCP to the RTP remote, which such peers discard, silently breaking
+    /// keyframe recovery (one-way video). mux sections and unparseable values
+    /// must leave the fallback untouched.
+    #[tokio::test]
+    async fn apply_remote_sdp_installs_declared_rtcp_endpoint() {
+        let leg = LegInner::new("rtcp-sync-leg", &LegConfig::rtp_pcmu(), None).expect("leg");
+        let offer = "\
+v=0\r\n\
+o=- 123 456 IN IP4 10.0.0.8\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.8\r\n\
+t=0 0\r\n\
+m=audio 4000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtcp:4001 IN IP4 10.0.0.8\r\n\
+a=sendrecv\r\n\
+m=video 4002 RTP/AVP 102\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=rtcp:4003 IN IP4 10.0.0.8\r\n\
+a=rtcp-mux\r\n\
+a=sendrecv\r\n";
+        leg.apply_remote_sdp(offer, SdpType::Offer)
+            .await
+            .expect("apply offer");
+
+        let audio = rtp_transport_for_kind(leg.pc(), MediaKind::Audio).expect("audio transport");
+        assert_eq!(
+            *audio.ice_conn().remote_rtcp_addr.read(),
+            Some("10.0.0.8:4001".parse().unwrap()),
+            "non-mux audio section must install the declared RTCP endpoint"
+        );
+        // The video section is rtcp-mux — its (also-declared) endpoint must
+        // NOT be installed; RTCP shares the RTP port there.
+        if let Some(video) = rtp_transport_for_kind(leg.pc(), MediaKind::Video) {
+            assert_eq!(
+                *video.ice_conn().remote_rtcp_addr.read(),
+                None,
+                "rtcp-mux section must keep the fallback RTCP destination"
+            );
+        }
         leg.stop();
     }
 

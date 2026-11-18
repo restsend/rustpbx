@@ -2048,6 +2048,15 @@ fn wire_rtcp_relay(
     let a_audio_pt = pa.audio.as_ref().map(|c| c.payload_type);
     let b_audio_pt = pb.audio.as_ref().map(|c| c.payload_type);
 
+    // One-shot keyframe requests both ways: the opening packets of a video
+    // stream (SPS/PPS + IDR) can land before the relay bridge arms and be
+    // dropped, and plain RTP peers may not resend keyframes unprompted. A
+    // single PLI per direction gets the sender to re-emit a keyframe right
+    // away; peers that ignore RTCP feedback just discard it. Spawned here so
+    // the point lists are snapshotted before the forwarders consume them.
+    spawn_initial_keyframe_request(a.clone(), a_video_pts.clone(), cancel.child_token());
+    spawn_initial_keyframe_request(b.clone(), b_video_pts.clone(), cancel.child_token());
+
     // Bob's feedback (leg A senders) → forward to alice (leg B transport).
     wire_rtcp_sender_forward(
         a.clone(),
@@ -2085,6 +2094,57 @@ fn wire_rtcp_relay(
         cancel,
         forwarder_count,
     );
+}
+
+/// Ask the peer behind `src_leg` (the video sender) for one keyframe once it
+/// starts sending video on the negotiated payload types. See the caller in
+/// [`wire_rtcp_relay`] for the rationale.
+fn spawn_initial_keyframe_request(
+    src_leg: Leg,
+    src_video_pts: Vec<u8>,
+    cancel: CancellationToken,
+) {
+    if src_video_pts.is_empty() {
+        return;
+    }
+    // Our sender SSRC on this leg — the PLI's sender field. Peers act on
+    // `media_ssrc`; the sender field is advisory.
+    let sender_ssrc = crate::leg::sender_ssrc_for_kind(src_leg.pc(), MediaKind::Video);
+    let tap = src_leg.ingress_tap().clone();
+    tokio::spawn(async move {
+        // Wait until the peer actually sends video (its SSRC appears on this
+        // leg's ingress) — up to 10s, then give up quietly.
+        let mut media_ssrc = None;
+        for _ in 0..100 {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            }
+            if let Some(ssrc) = tap.ingress_ssrc_for_pts(&src_video_pts) {
+                media_ssrc = Some(ssrc);
+                break;
+            }
+        }
+        let Some(media_ssrc) = media_ssrc else { return };
+        let Some(tx) = leg_send_transport(&src_leg, MediaKind::Video)
+            .or_else(|| leg_send_transport(&src_leg, MediaKind::Audio))
+        else {
+            return;
+        };
+        let pli = rustrtc::rtp::RtcpPacket::PictureLossIndication(
+            rustrtc::rtp::PictureLossIndication {
+                sender_ssrc,
+                media_ssrc,
+            },
+        );
+        if tx.send_rtcp(&[pli]).await.is_ok() {
+            info!(
+                session_id = %src_leg.pc().config().label.as_deref().unwrap_or_default(),
+                media_ssrc,
+                "initial keyframe request (PLI) sent to the video sender"
+            );
+        }
+    });
 }
 
 /// Spawn one RTCP-forwarding task: feedback (PLI/FIR/NACK) targeting a sender of
@@ -2145,6 +2205,7 @@ fn wire_rtcp_sender_forward(
             return;
         };
 
+        let mut forwarded_count: u64 = 0;
         loop {
             tokio::select! {
                 biased;
@@ -2195,6 +2256,19 @@ fn wire_rtcp_sender_forward(
                     };
                     if dst_tx.send_rtcp(&[forwarded]).await.is_err() {
                         break;
+                    }
+                    forwarded_count += 1;
+                    // Surface the feedback path: while diagnosing one-way
+                    // video, a silently-relaying forwarder was
+                    // indistinguishable from a dead one.
+                    if forwarded_count == 1 || forwarded_count.is_multiple_of(100) {
+                        info!(
+                            session_id = %src_leg.pc().config().label.as_deref().unwrap_or_default(),
+                            media = ?kind,
+                            target_ssrc = target,
+                            forwarded = forwarded_count,
+                            "RTCP feedback forwarded to peer leg"
+                        );
                     }
                 }
             }
