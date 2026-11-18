@@ -1619,6 +1619,8 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
         let injected_at = Instant::now();
         peers[1].set_egress_source(rustpbx_media::egress::EgressSource::Inject {
             rx: parking_lot::Mutex::new(rx),
+            timestamp_offset: None,
+            behind_frames: 0,
         }).await.unwrap();
         let mut encoder = audio_codec::create_encoder(codec);
         for index in 0..3 {

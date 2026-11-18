@@ -217,6 +217,15 @@ impl ParticipantChannels {
     }
 }
 
+/// Sample rate of the conference mix bus.
+///
+/// 16 kHz is the common denominator for the codecs a room can carry: G.722
+/// is native (no conversion), PCMU/PCMA are filtered upsamples, and Opus
+/// (48 kHz) is filtered down once on ingress and once on egress. Mixing at
+/// 8 kHz threw away G.722's wideband half and forced an unfiltered
+/// decimation that folded 4-8 kHz energy back into the voice band.
+pub const CONFERENCE_MIXER_SAMPLE_RATE: u32 = 16_000;
+
 /// Everything owned by one live conference. Room state, audio mixer, and
 /// the max-duration watchdog token share a lifecycle (create → destroy);
 /// folding them into one entry replaces three parallel conference-keyed
@@ -305,7 +314,10 @@ impl ConferenceManager {
         // overwriting a room whose mixer may already be running (a leaked
         // permanently-running task).
         use dashmap::mapref::entry::Entry;
-        let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
+        let mixer = Arc::new(ConferenceAudioMixer::new(
+            conf_id.0.clone(),
+            CONFERENCE_MIXER_SAMPLE_RATE,
+        ));
         match self.conferences.entry(conf_id.clone()) {
             Entry::Vacant(e) => {
                 e.insert(ConferenceState {
@@ -624,6 +636,14 @@ impl ConferenceManager {
         self.leg_attachments
             .get(leg_id)
             .map(|a| ParticipantChannels::new(a.input_tx.clone()))
+    }
+
+    /// Sample rate of a room's mix bus, `None` when the room does not exist.
+    /// The DashMap shard guard is dropped before returning (no await here).
+    pub fn conference_sample_rate(&self, conf_id: &ConferenceId) -> Option<u32> {
+        self.conferences
+            .get(conf_id)
+            .map(|state| state.mixer.sample_rate())
     }
 
     /// Get participant output receiver for mixed audio (to participant)

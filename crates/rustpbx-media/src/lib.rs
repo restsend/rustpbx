@@ -42,8 +42,10 @@ mod mixer_tests;
 #[cfg(test)]
 mod recorder_tests;
 // ── Re-exports ──────────────────────────────────────────────────────
+pub use app_ingress::IngressStats;
 pub use audio_codec::CodecType;
 pub use conference_mixer::ConferenceAudioMixer;
+pub use conference_mixer::MixerStats;
 
 pub use leg_id::LegId;
 pub use leg::{CaptureRoute, LegConfig};
@@ -83,7 +85,10 @@ pub struct AudioFrame {
     pub samples: Vec<i16>,
     /// Sample rate
     pub sample_rate: u32,
-    /// Timestamp
+    /// Position of the first sample in `samples`, counted at `sample_rate`.
+    /// Producers set it so downstream mixers can place frames by time instead
+    /// of by arrival; consumers must NOT interpret it as an RTP timestamp
+    /// (codec clock rates differ from the decoded PCM rate, e.g. G.722).
     pub timestamp: u64,
 }
 

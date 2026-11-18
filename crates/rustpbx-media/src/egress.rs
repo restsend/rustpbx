@@ -78,6 +78,12 @@ const MAX_CATCHUP_FRAMES: u32 = 5;
 /// clipping its last syllable (observed with TTS prompts).
 const PLAYBACK_EOF_TAIL_MS: u32 = 300;
 
+/// Inject-source re-anchor threshold: after this many consecutive producer
+/// frames arrived behind the leg's timeline (~1 s at 20 ms ptime), the
+/// timestamp offset is re-established once. A single late frame never
+/// triggers it; only a rebuilt producer (new random timestamp base) does.
+const INJECT_REANCHOR_FRAMES: u32 = 50;
+
 /// Callback fired when a [`EgressSource::Media`] source stops producing audio:
 /// natural EOF (`false`) or interrupted by switching away from Media / stop
 /// (`true`). Use to signal playback completion to the app/IVR layer.
@@ -122,11 +128,22 @@ pub enum EgressSource {
         loop_playback: bool,
         on_end: Option<EgressEndCallback>,
     },
-    /// External app pushes one ptime of audio encoded for this leg per frame.
-    /// The pipeline stamps it on the leg's RTP timeline; producer timestamps
-    /// and sequence numbers are ignored. An empty channel emits silence.
+    /// External app pushes one ptime of audio encoded for this leg per frame
+    /// (MCU conference mix). The producer's RTP timestamp is followed on the
+    /// leg's timeline (offset-mapped), so the mixer's cadence — not the
+    /// egress ticker — owns packet timing; sequence numbers stay local. An
+    /// empty channel still emits digital silence to keep the stream alive.
     Inject {
         rx: Mutex<mpsc::Receiver<MediaSample>>,
+        /// Maps producer RTP timestamps onto this leg's ongoing timeline.
+        /// Established on the first frame (no discontinuity when the source
+        /// is switched in) and reset on every source switch / codec change.
+        timestamp_offset: Option<u32>,
+        /// Consecutive producer frames that arrived behind the leg's
+        /// timeline. After [`INJECT_REANCHOR_FRAMES`] the offset is
+        /// re-established once — the producer's timeline was rebuilt (new
+        /// random base) and would otherwise stay locked behind forever.
+        behind_frames: u32,
     },
     /// **Transcoding**: pull a frame from the peer's receiver track, decode it
     /// to PCM, auto-resample to this leg's codec sample rate, re-encode, and
@@ -618,6 +635,14 @@ impl EgressTask {
                         self.resampler = None;
                         self.marker_pending = true;
                         self.dtmf_event_timestamp = None;
+                        // The Inject timestamp offset is expressed in the old
+                        // codec's RTP ticks; re-anchor on the next frame.
+                        if let EgressSource::Inject {
+                            timestamp_offset, ..
+                        } = &mut self.source
+                        {
+                            *timestamp_offset = None;
+                        }
                         // Pending PCM was decoded for the old codec rate.
                         self.transcode_pending.clear();
                     }
@@ -738,15 +763,50 @@ impl EgressTask {
                 };
                 self.build_frame(encoded)
             }
-            EgressSource::Inject { rx } => {
+            EgressSource::Inject { rx, timestamp_offset, behind_frames } => {
                 let passed = rx.lock().try_recv().ok().and_then(|sample| match sample {
                     MediaSample::Audio(frame) => Some(frame),
                     MediaSample::Video(_) => None,
                 });
                 match passed {
                     Some(frame) => {
-                        // Mixed audio and underrun silence share the leg's
-                        // timeline, including the timestamp adopted from relay.
+                        // Follow the producer's timeline (the mixer/forward
+                        // loop), not the egress ticker: that removes the
+                        // clock drift that used to punch periodic silence
+                        // into a conference stream. The first frame only
+                        // establishes an offset, so switching an existing
+                        // leg onto Inject does not jump its SSRC timeline.
+                        let target = match *timestamp_offset {
+                            Some(offset) => frame.rtp_timestamp.wrapping_add(offset),
+                            None => {
+                                *timestamp_offset = Some(
+                                    self.next_rtp_timestamp
+                                        .wrapping_sub(frame.rtp_timestamp),
+                                );
+                                self.next_rtp_timestamp
+                            }
+                        };
+                        // Never rewind; when the producer has fallen behind
+                        // (underrun already advanced the timeline) the frame
+                        // is played at the current position instead. If that
+                        // keeps happening, the producer's timeline was
+                        // rebuilt: re-anchor the offset once at the current
+                        // position so later producer jumps are followed
+                        // again, without ever moving the wire backwards.
+                        let delta = target.wrapping_sub(self.next_rtp_timestamp) as i32;
+                        if delta >= 0 {
+                            self.next_rtp_timestamp = target;
+                            *behind_frames = 0;
+                        } else {
+                            *behind_frames = behind_frames.saturating_add(1);
+                            if *behind_frames >= INJECT_REANCHOR_FRAMES {
+                                *timestamp_offset = Some(
+                                    self.next_rtp_timestamp
+                                        .wrapping_sub(frame.rtp_timestamp),
+                                );
+                                *behind_frames = 0;
+                            }
+                        }
                         let mut output = self.build_frame(frame.data);
                         output.marker |= frame.marker;
                         output
@@ -1455,6 +1515,8 @@ mod tests {
             encoder: create_encoder(CodecType::PCMU),
             source: EgressSource::Inject {
                 rx: parking_lot::Mutex::new(inj_rx),
+                timestamp_offset: None,
+                behind_frames: 0,
             },
             resampler: None,
             ptime: Duration::from_millis(20),
@@ -1522,6 +1584,146 @@ mod tests {
         let after = task.next_frame().await.unwrap();
         assert_eq!(after.rtp_timestamp, resumed.rtp_timestamp.wrapping_add(160));
         assert_eq!(after.sequence_number, Some(4));
+    }
+
+    fn inject_task() -> (EgressTask, mpsc::Sender<MediaSample>) {
+        let (tx, rx) = mpsc::channel::<MediaSample>(8);
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: true,
+            comfort_noise_level_db: -20.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Inject {
+                rx: parking_lot::Mutex::new(rx),
+                timestamp_offset: None,
+                behind_frames: 0,
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 0,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_probe_tick: 0,
+        };
+        (task, tx)
+    }
+
+    fn injected_audio(rtp_timestamp: u32) -> MediaSample {
+        MediaSample::Audio(AudioFrame {
+            rtp_timestamp,
+            clock_rate: 8000,
+            data: Bytes::from_static(&[0x55u8; 160]),
+            sequence_number: None,
+            payload_type: Some(0),
+            marker: false,
+            header_extension: None,
+            raw_packet: None,
+            source_addr: None,
+        })
+    }
+
+    /// R5 regression: the injected stream follows the producer's (mixer's)
+    /// timestamps instead of the egress ticker, including forward jumps when
+    /// the producer skips a frame.
+    #[tokio::test]
+    async fn inject_follows_producer_timeline() {
+        let (mut task, tx) = inject_task();
+
+        tx.try_send(injected_audio(5_000)).unwrap();
+        let first = task.next_frame().await.unwrap();
+        assert_eq!(first.rtp_timestamp, 0, "first frame anchors the timeline");
+
+        tx.try_send(injected_audio(5_320)).unwrap();
+        let second = task.next_frame().await.unwrap();
+        assert_eq!(
+            second.rtp_timestamp, 320,
+            "a producer gap must advance the wire timestamp, not be ignored"
+        );
+
+        tx.try_send(injected_audio(5_480)).unwrap();
+        let third = task.next_frame().await.unwrap();
+        assert_eq!(third.rtp_timestamp, 480);
+        assert_eq!(third.sequence_number, Some(2));
+    }
+
+    /// An underrun advances the timeline; a producer frame that is now behind
+    /// it must play at the current position and never rewind the SSRC.
+    #[tokio::test]
+    async fn inject_never_rewinds_timeline_after_underrun() {
+        let (mut task, tx) = inject_task();
+
+        tx.try_send(injected_audio(7_000)).unwrap();
+        assert_eq!(task.next_frame().await.unwrap().rtp_timestamp, 0);
+
+        let silence = task.next_frame().await.unwrap();
+        assert_eq!(silence.rtp_timestamp, 160, "underrun keeps the cadence");
+
+        tx.try_send(injected_audio(7_160)).unwrap();
+        let late = task.next_frame().await.unwrap();
+        assert_eq!(
+            late.rtp_timestamp, 320,
+            "a late producer frame must not move the wire timeline backwards"
+        );
+    }
+
+    /// After the producer's timeline is rebuilt (a new base far behind the
+    /// leg's timeline), `INJECT_REANCHOR_FRAMES` behind-frames re-establish
+    /// the offset once so later producer jumps are followed again — without
+    /// ever moving the wire timeline backwards.
+    #[tokio::test]
+    async fn inject_reanchors_after_producer_timeline_restart() {
+        let (mut task, tx) = inject_task();
+
+        tx.try_send(injected_audio(1_000_000)).unwrap();
+        let first = task.next_frame().await.unwrap();
+        assert_eq!(first.rtp_timestamp, 0);
+
+        // Producer restarts at a much lower base: every frame arrives behind,
+        // and the wire keeps its own 20 ms cadence without rewinding.
+        let mut last = first.rtp_timestamp;
+        for i in 0..INJECT_REANCHOR_FRAMES {
+            tx.try_send(injected_audio(100 + u32::from(i) * 160)).unwrap();
+            let frame = task.next_frame().await.unwrap();
+            assert_eq!(
+                frame.rtp_timestamp,
+                last.wrapping_add(160),
+                "behind frames must play on the leg's own cadence"
+            );
+            last = frame.rtp_timestamp;
+        }
+        assert_eq!(last, 160 * INJECT_REANCHOR_FRAMES);
+
+        // Offset was re-anchored at the last frame (mapped 7940 onto its
+        // play position 8000). The producer's +320 jump is followed exactly.
+        tx.try_send(injected_audio(100 + INJECT_REANCHOR_FRAMES * 160 + 160)).unwrap();
+        let jumped = task.next_frame().await.unwrap();
+        assert_eq!(
+            jumped.rtp_timestamp,
+            last.wrapping_add(320),
+            "re-anchor must restore adoption of producer jumps"
+        );
     }
 
     /// Partial app chunks must not be zero-padded into a frame (that click

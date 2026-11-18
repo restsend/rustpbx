@@ -6,6 +6,20 @@ use rustpbx::call::domain::LegId;
 use rustpbx::call::runtime::ConferenceManager;
 use rustpbx::media::conference_mixer::AudioFrame;
 
+/// Once a room is live the mixer keeps emitting at the 20 ms cadence, so an
+/// output channel can hold silence frames ahead of the audio. Drain until an
+/// audible frame arrives (bounded) before asserting on content.
+fn recv_audible(rx: &mut tokio::sync::mpsc::Receiver<AudioFrame>) -> AudioFrame {
+    for _ in 0..16 {
+        match rx.try_recv() {
+            Ok(frame) if frame.samples.iter().any(|&s| s != 0) => return frame,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    panic!("expected an audible mixed frame");
+}
+
 #[tokio::test]
 async fn test_three_way_conference_audio_flow() {
     // 1. Create conference
@@ -54,11 +68,17 @@ async fn test_three_way_conference_audio_flow() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // 4. B and C should receive A's audio
-    assert!(rx_b.try_recv().is_ok(), "B should hear A");
-    assert!(rx_c.try_recv().is_ok(), "C should hear A");
+    let _ = recv_audible(&mut rx_b);
+    let _ = recv_audible(&mut rx_c);
 
-    // 5. A should not receive its own audio
-    assert!(rx_a.try_recv().is_err(), "A should not hear self");
+    // 5. A should not receive its own audio (the mixer may emit a silence
+    // frame once the room is live — cadence must not starve the egress).
+    if let Ok(frame) = rx_a.try_recv() {
+        assert!(
+            frame.samples.iter().all(|&s| s == 0),
+            "A should not hear self"
+        );
+    }
 
     // 6. All three speak simultaneously
     tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
@@ -73,18 +93,65 @@ async fn test_three_way_conference_audio_flow() {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // 7. Each should hear the other two
-    let frame_a = rx_a.try_recv().expect("A should hear B+C");
-    let frame_b = rx_b.try_recv().expect("B should hear A+C");
-    let frame_c = rx_c.try_recv().expect("C should hear A+B");
-
-    // Verify mixed audio is non-zero
+    // 7. Each should hear the other two (non-zero mixed audio).
+    let frame_a = recv_audible(&mut rx_a);
+    let frame_b = recv_audible(&mut rx_b);
+    let frame_c = recv_audible(&mut rx_c);
     assert!(frame_a.samples.iter().any(|&s| s != 0));
     assert!(frame_b.samples.iter().any(|&s| s != 0));
     assert!(frame_c.samples.iter().any(|&s| s != 0));
 
     // 8. Cleanup
     manager.destroy_conference(&"conf1".into()).await.unwrap();
+}
+
+/// The room mix bus must stay wideband: mixing at 8 kHz discarded G.722's
+/// 4-8 kHz half and forced an unfiltered decimation of every leg.
+#[tokio::test]
+async fn test_conference_mix_bus_is_wideband() {
+    let manager = ConferenceManager::new();
+    manager
+        .create_conference("conf-wide".into(), None)
+        .await
+        .unwrap();
+
+    let channels_a = manager
+        .add_participant(&"conf-wide".into(), LegId::new("a"))
+        .await
+        .unwrap();
+    let _channels_b = manager
+        .add_participant(&"conf-wide".into(), LegId::new("b"))
+        .await
+        .unwrap();
+    let mut rx_b = manager
+        .take_participant_output_rx(&LegId::new("b"))
+        .await
+        .unwrap();
+
+    // A G.722 leg delivers natively decoded 16 kHz PCM.
+    channels_a
+        .input_tx
+        .send(AudioFrame::new(
+            vec![1000i16; 320],
+            rustpbx::call::runtime::CONFERENCE_MIXER_SAMPLE_RATE,
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    let frame = recv_audible(&mut rx_b);
+    assert_eq!(
+        frame.sample_rate,
+        rustpbx::call::runtime::CONFERENCE_MIXER_SAMPLE_RATE,
+        "the mix bus must not down-convert wideband legs to 8 kHz"
+    );
+    assert_eq!(frame.samples.len(), 320, "20 ms at 16 kHz");
+    assert!(frame.samples.iter().any(|&s| s != 0));
+
+    manager
+        .destroy_conference(&"conf-wide".into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -118,7 +185,7 @@ async fn test_conference_participant_join_leave() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // B should hear A
-    assert!(rx_b.try_recv().is_ok(), "B should hear A");
+    let _ = recv_audible(&mut rx_b);
 
     // Add third participant C
     let channels_c = manager
@@ -142,8 +209,8 @@ async fn test_conference_participant_join_leave() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // A and B should hear C
-    assert!(rx_a.try_recv().is_ok(), "A should hear C");
-    assert!(rx_b.try_recv().is_ok(), "B should hear C");
+    let _ = recv_audible(&mut rx_a);
+    let _ = recv_audible(&mut rx_b);
 
     // Remove B
     manager
@@ -158,7 +225,7 @@ async fn test_conference_participant_join_leave() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // C should still hear A
-    assert!(rx_c.try_recv().is_ok(), "C should hear A after B leaves");
+    let _ = recv_audible(&mut rx_c);
 
     // Cleanup
     manager.destroy_conference(&"conf2".into()).await.unwrap();
@@ -217,7 +284,7 @@ async fn test_conference_mute_unmute() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // B should now hear A
-    assert!(rx_b.try_recv().is_ok(), "B should hear A after unmute");
+    let _ = recv_audible(&mut rx_b);
 
     // Cleanup
     manager.destroy_conference(&"conf3".into()).await.unwrap();
