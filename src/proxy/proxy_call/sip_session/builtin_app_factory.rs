@@ -445,6 +445,8 @@ impl BuiltinAppFactory {
                 config.ring_timeout = plan.ring_timeout;
                 // Per-call ACD priority from app params / plan (0 = default).
                 config.priority = plan.priority;
+                // Wait-for-callback option (default disabled).
+                config.callback = plan.callback.clone().unwrap_or_default();
                 // Build agent locations from resolved URIs
                 let agents: Vec<crate::call::Location> = pending
                     .agent_uris

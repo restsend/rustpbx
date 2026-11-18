@@ -174,6 +174,21 @@ fallback_code_placeholder = "480"
 fallback_reason_label = "失败原因（可选）"
 fallback_reason_placeholder = "所有坐席忙"
 
+# 排队回呼选项（默认关闭）
+cb_enable = "启用排队回呼选项"
+cb_enable_desc = "排队等待超过设定时长后，向 caller 播报回呼选项；caller 按键确认后登记回呼请求并挂机（不进入回落）。默认关闭。"
+cb_offer_after = "等待多久后提供回呼选项（秒）"
+cb_offer_after_placeholder = "30"
+cb_offer_after_hint = "从进入队列起算的总等待时长；溢出/升级的分段计时不会重置该时长。"
+cb_key = "回呼确认按键"
+cb_key_placeholder = "2"
+cb_key_hint = "caller 在排队等待中按下该键即申请回呼。"
+cb_offer_prompt = "回呼选项提示音（可选）"
+cb_prompt_placeholder = "sounds/callback-offer-zh.wav 或 https://example.com/tts.wav"
+cb_offer_prompt_hint = "到点播报\"按 X 等待回拨\"；留空则到点不播报，按键仍有效。"
+cb_confirm_prompt = "回呼登记确认提示音（可选）"
+cb_confirm_prompt_hint = "按键后播报\"已登记，稍后回拨\"，播毕挂机；留空则按键后直接登记挂机。"
+
 # 语音提示
 section_voice_prompts = "语音提示"
 section_voice_prompts_desc = "配置队列事件（转接、坐席忙、无人应答、非工作时间）中播放的内置语音提示。"

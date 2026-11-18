@@ -122,6 +122,56 @@ pub struct VoicePrompts {
     /// the answering agent's display name (percent-encoded inside URLs).
     #[serde(default)]
     pub service_prompt: Option<String>,
+    /// Prompt announcing the wait-for-callback option once
+    /// `QueueCallbackConfig::offer_after_secs` of queue wait elapsed
+    /// (e.g. "Press 2 if you'd like us to call you back"). Absent = the
+    /// option is offered silently (the DTMF key still works past the
+    /// threshold) — deployments without the recording keep the feature usable.
+    #[serde(default)]
+    pub callback_offer_prompt: Option<String>,
+    /// Prompt played after the caller pressed the callback key, confirming
+    /// the request was registered (e.g. "Your callback has been scheduled,
+    /// goodbye"). The queue hangs up (BySystem) when this prompt completes.
+    #[serde(default)]
+    pub callback_confirm_prompt: Option<String>,
+}
+
+/// Wait-for-callback option offered to a queued caller after a configured
+/// wait duration. **Disabled by default** — absent route-queue spec sections
+/// and default-constructed configs never offer the option, so existing
+/// deployments see no behavior change until an operator turns it on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueCallbackConfig {
+    /// Master switch. `false` (the default everywhere) = the queue behaves
+    /// exactly as before the feature existed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Queue wait (seconds, measured from this queue entry's enqueue instant)
+    /// after which the callback option becomes available: the offer prompt
+    /// plays once (when configured) and the DTMF key starts being accepted.
+    #[serde(default = "default_callback_offer_after_secs")]
+    pub offer_after_secs: u64,
+    /// DTMF key the caller presses to request the callback (default `"2"`).
+    #[serde(default = "default_callback_dtmf_key")]
+    pub dtmf_key: String,
+}
+
+fn default_callback_offer_after_secs() -> u64 {
+    30
+}
+
+fn default_callback_dtmf_key() -> String {
+    "2".to_string()
+}
+
+impl Default for QueueCallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            offer_after_secs: default_callback_offer_after_secs(),
+            dtmf_key: default_callback_dtmf_key(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,6 +197,8 @@ impl VoicePrompts {
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
             service_prompt: None,
+            callback_offer_prompt: None,
+            callback_confirm_prompt: None,
         }
     }
 
@@ -682,6 +734,10 @@ pub struct QueuePlan {
     /// default). Carried from app params (`StartApp("queue", …)` / outbound
     /// `on_answer: enqueue`) through `queue_joined` and the shared-queue row.
     pub priority: u32,
+    /// Wait-for-callback option resolved from the route-queue spec
+    /// (`None` = not enabled — the overwhelming default; existing specs have
+    /// no callback section at all).
+    pub callback: Option<QueueCallbackConfig>,
 }
 
 impl Default for QueuePlan {
@@ -709,6 +765,7 @@ impl Default for QueuePlan {
             voice_prompts: None,
             queue_name: String::new(),
             priority: 0,
+            callback: None,
         }
     }
 }

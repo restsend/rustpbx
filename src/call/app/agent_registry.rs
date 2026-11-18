@@ -683,6 +683,24 @@ pub trait AgentRegistry: Send + Sync {
     /// (dequeue `from_group`, enqueue `to_group`). Default no-op.
     async fn notify_group_switch(&self, _call_id: &str, _from_group: &str, _to_group: &str) {}
 
+    /// Notify the dispatcher that the caller requested a wait-for-callback
+    /// (the queue's callback DTMF key was accepted after
+    /// `QueueCallbackConfig::offer_after_secs` of waiting). The queue hangup
+    /// follows immediately — implementations must release the call's
+    /// waiting-depth bookkeeping (same discipline as
+    /// [`AgentRegistry::notify_call_abandoned`]) and record the callback
+    /// request. `caller` is the identity a callback task should dial.
+    /// Default no-op.
+    async fn notify_callback_requested(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _caller: &str,
+        _waited_secs: u64,
+        _dtmf_key: &str,
+    ) {
+    }
+
     /// Notify the dispatcher that a queued call exceeded its max wait time.
     /// Addon implementations use it to emit `skill_group_service_unavailable`.
     async fn notify_call_timeout(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}

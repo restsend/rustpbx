@@ -24,8 +24,8 @@ use super::agent_registry::{
 };
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
-    DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
-    VoicePrompts,
+    DialStrategy, FailureAction, Location, QueueCallbackConfig, QueueFallbackAction,
+    QueueHoldConfig, QueuePlan, VoicePrompts,
 };
 use crate::callrecord::CallRecordHangupReason;
 use crate::models::call_record::extract_sip_username;
@@ -39,6 +39,12 @@ use tracing::{debug, info, warn};
 #[path = "queue_diagnostics.rs"]
 mod diagnostics;
 pub use diagnostics::{QueueDiagnosticRequest, QueueDispatchDiagnostic};
+
+/// Wait-for-callback offer / confirm / finalize chain (see
+/// [`crate::call::QueueCallbackConfig`]). Kept in a sibling file like the
+/// diagnostics submodule — queue.rs is large and this flow is self-contained.
+#[path = "queue_callback.rs"]
+mod callback;
 
 // ===================================================================
 // Queue Statistics (built-in)
@@ -131,6 +137,9 @@ pub struct QueueConfig {
     /// factory; feeds `fifo_register_wait`, inline-ACD enqueue and the
     /// `queue_joined` / `queue_overflow_joined` event payloads.
     pub priority: u32,
+    /// Wait-for-callback option. Default-constructed = disabled; only a
+    /// route-queue spec with `callback.enabled = true` turns it on.
+    pub callback: QueueCallbackConfig,
 }
 
 /// Escalation mode for overflow/skill-group escalation.
@@ -222,6 +231,7 @@ impl Default for QueueConfig {
             escalation_timeline: Vec::new(),
             skill_group: None,
             priority: 0,
+            callback: QueueCallbackConfig::default(),
         }
     }
 }
@@ -240,6 +250,11 @@ impl QueueConfig {
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone(),
             priority: self.priority,
+            callback: if self.callback.enabled {
+                Some(self.callback.clone())
+            } else {
+                None
+            },
         }
     }
 }
@@ -277,6 +292,14 @@ pub enum QueueState {
     ExecutingFallback,
     /// Playing comfort/reassurance prompt during hold.
     PlayingComfortPrompt,
+    /// Playing the wait-for-callback offer prompt (once, after
+    /// `QueueCallbackConfig::offer_after_secs` of wait). Completion returns
+    /// to hold music; the DTMF callback key stays accepted.
+    PlayingCallbackOffer,
+    /// Playing the callback confirmation prompt after the caller pressed the
+    /// callback key. Completion finalizes the request and hangs up
+    /// (BySystem) — no agent is dialed from here on.
+    PlayingCallbackConfirm,
     /// Playing final-destination prompt before fallback.
     PlayingFinalPrompt,
     /// Terminal state.
@@ -573,6 +596,25 @@ pub struct QueueApp {
     join_attempt: u32,
     targeted_recovery: bool,
     recovery_requests: std::collections::VecDeque<(String, Vec<String>)>,
+    // ── Wait-for-callback (inert unless config.callback.enabled) ──
+    /// The caller pressed the callback key and the request was accepted.
+    /// Short-circuits agent-unavailable / max-wait fallback paths — the
+    /// confirm chain now owns the call. Cleared when an agent CONNECTS (the
+    /// real connection overtakes the pending callback).
+    callback_requested: bool,
+    /// The full chain completed: dispatcher notified, RWI events emitted, CDR
+    /// trace written. Reuses the `abandoned_recorded` guard semantics — the
+    /// on_exit abandon classification must not double-count this exit.
+    callback_finalized: bool,
+    /// The offer threshold elapsed while the caller was NOT in an offerable
+    /// state (agent ringing / prompt in flight) — the offer prompt plays on
+    /// the next return to a hold-phase state. One-shot.
+    callback_offer_pending: bool,
+    /// The offer prompt already played (one-shot; the DTMF key stays
+    /// accepted past the threshold regardless).
+    callback_offered: bool,
+    callback_offer_token: Option<PlaybackToken>,
+    callback_confirm_token: Option<PlaybackToken>,
 }
 
 impl QueueApp {
@@ -632,6 +674,12 @@ impl QueueApp {
             join_attempt: 1,
             targeted_recovery: false,
             recovery_requests: std::collections::VecDeque::new(),
+            callback_requested: false,
+            callback_finalized: false,
+            callback_offer_pending: false,
+            callback_offered: false,
+            callback_offer_token: None,
+            callback_confirm_token: None,
         }
     }
 
@@ -1430,6 +1478,11 @@ impl QueueApp {
 
     /// Start or restart hold music.
     async fn start_hold_music(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        // A deferred wait-for-callback offer plays INSTEAD of this hold start
+        // (music resumes when the prompt completes).
+        if self.maybe_resume_pending_callback_offer(ctrl).await {
+            return Ok(());
+        }
         if let Some(ref hold) = self.plan.hold
             && let Some(ref audio_file) = hold.audio_file
         {
@@ -1967,6 +2020,17 @@ impl QueueApp {
         ctrl: &mut CallController,
         reason: AgentUnavailableReason,
     ) -> anyhow::Result<AppAction> {
+        // The wait-for-callback confirm chain owns the call — skip the
+        // abandon bookkeeping AND the fallback prompts entirely (the caller
+        // asked to be called back; playing "all agents busy" and hanging up
+        // would contradict the just-accepted request).
+        if self.callback_owns_call() {
+            debug!(
+                queue = %self.config.name,
+                "Queue: callback requested — skipping agent-unavailable fallback"
+            );
+            return Ok(AppAction::Continue);
+        }
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let abandon_log = match reason {
@@ -2837,6 +2901,10 @@ impl CallApp for QueueApp {
             }
         }
 
+        // Arm the one-shot wait-for-callback offer timer (feature default
+        // OFF; see `queue_callback.rs` for the chain).
+        self.arm_callback_offer_timer(ctrl);
+
         // Notify external systems that the call entered the queue. Skipped
         // when `SipSession::start_queue_app` already broadcast `queue_joined`
         // before agent resolution (strict "joined first" ordering); the app
@@ -3123,12 +3191,13 @@ impl CallApp for QueueApp {
 
     async fn on_dtmf(
         &mut self,
-        _digit: String,
-        _ctrl: &mut CallController,
+        digit: String,
+        ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        // DTMF during queue hold is ignored (callback feature removed).
-        Ok(AppAction::Continue)
+        // Queue hold DTMF: only the wait-for-callback key is consumed
+        // (default-off feature — everything is ignored unless enabled).
+        self.handle_callback_dtmf(&digit, ctrl).await
     }
 
     async fn on_audio_complete(
@@ -3232,6 +3301,11 @@ impl CallApp for QueueApp {
                 }
                 return self.execute_fallback(ctrl).await;
             }
+            QueueState::PlayingCallbackOffer | QueueState::PlayingCallbackConfirm => {
+                // The chain owns the continuation (hold resume, or the
+                // finalize action — BySystem hangup).
+                return self.handle_callback_audio_complete(ctrl, &track_id).await;
+            }
             _ => {}
         }
 
@@ -3259,6 +3333,9 @@ impl CallApp for QueueApp {
                     if self.call_already_connected() {
                         return Ok(AppAction::Continue);
                     }
+                    // A real connection overtakes any pending wait-for-callback
+                    // request (task must not be created for a served call).
+                    self.callback_reset_on_connect();
                     {
                         let agent_leg = leg_id.clone().or_else(|| {
                             self.pending_agents
@@ -3803,6 +3880,17 @@ impl CallApp for QueueApp {
                     .await
             }
             "max_wait_timeout" => {
+                // Wait-for-callback confirm chain owns the call — the
+                // fallback must not run while a request is pending (defer
+                // one re-check tick at a time). After the chain finalizes the
+                // session is already exiting via the BySystem hangup.
+                if self.callback_requested && !self.callback_finalized {
+                    ctrl.set_timeout("max_wait_timeout", Duration::from_secs(2));
+                    return Ok(AppAction::Continue);
+                }
+                if self.callback_finalized {
+                    return Ok(AppAction::Continue);
+                }
                 // Escalation (overflow) steps still pending? The wall-clock
                 // max_wait doubles as the escalation threshold when the plan
                 // is synthesized from a skill group's `max_wait_secs`, so the
@@ -3889,6 +3977,10 @@ impl CallApp for QueueApp {
                 }
                 Ok(AppAction::Continue)
             }
+            id if id == callback::CALLBACK_OFFER_TIMER => {
+                self.on_callback_offer_timeout(ctrl).await;
+                Ok(AppAction::Continue)
+            }
             _ => Ok(AppAction::Continue),
         }
     }
@@ -3919,7 +4011,7 @@ impl CallApp for QueueApp {
                 connected_agent: Some(_)
             }
         );
-        if !was_connected && !self.abandoned_recorded {
+        if !was_connected && !self.abandoned_recorded && !self.callback_finalized {
             self.abandoned_recorded = true;
             let queue_id = self.config.name.clone();
             // Notify the skill-group dispatcher that the call was abandoned

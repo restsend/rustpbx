@@ -1081,8 +1081,41 @@ pub struct RouteQueueConfig {
     pub strategy: RouteQueueStrategyConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_prompts: Option<crate::call::VoicePrompts>,
+    /// Wait-for-callback option. Absent (the default for every existing
+    /// spec) = disabled — the queue behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<RouteQueueCallbackConfig>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
+}
+
+/// Route-queue spec section for the wait-for-callback option. Only a spec
+/// with `callback.enabled = true` produces a [`crate::call::QueueCallbackConfig`]
+/// on the plan; partial sections fall back to per-field defaults.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+pub struct RouteQueueCallbackConfig {
+    /// Master switch — `false` / absent = feature off.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Queue wait seconds before the option becomes available (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_after_secs: Option<u64>,
+    /// DTMF key that requests the callback (default `"2"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dtmf_key: Option<String>,
+}
+
+impl RouteQueueCallbackConfig {
+    fn to_callback_config(&self) -> crate::call::QueueCallbackConfig {
+        crate::call::QueueCallbackConfig {
+            enabled: true,
+            offer_after_secs: self.offer_after_secs.unwrap_or(30),
+            dtmf_key: self
+                .dtmf_key
+                .clone()
+                .unwrap_or_else(|| "2".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -1165,6 +1198,11 @@ impl RouteQueueConfig {
         }
         plan.voice_prompts = self.voice_prompts.clone();
         plan.queue_name = self.name.clone().unwrap_or_default();
+        plan.callback = self
+            .callback
+            .as_ref()
+            .filter(|cb| cb.enabled)
+            .map(RouteQueueCallbackConfig::to_callback_config);
         Ok(plan)
     }
 

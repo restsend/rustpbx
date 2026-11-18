@@ -174,6 +174,21 @@ fallback_code_placeholder = "480"
 fallback_reason_label = "Failure reason (optional)"
 fallback_reason_placeholder = "All agents busy"
 
+# Wait-for-callback option (default OFF)
+cb_enable = "Offer wait-for-callback"
+cb_enable_desc = "After the configured wait, announce the callback option to the caller; a key press registers the callback request and ends the queue wait (no fallback). Off by default."
+cb_offer_after = "Offer the option after (seconds)"
+cb_offer_after_placeholder = "30"
+cb_offer_after_hint = "Total wait since entering the queue; overflow/escalation stage switches never reset it."
+cb_key = "Callback confirmation key"
+cb_key_placeholder = "2"
+cb_key_hint = "The caller presses this key while waiting to request the callback."
+cb_offer_prompt = "Callback offer prompt (optional)"
+cb_prompt_placeholder = "sounds/callback-offer-en.wav or https://example.com/tts.wav"
+cb_offer_prompt_hint = "Announces \"press X to be called back\"; leave empty to offer key-only (no announcement)."
+cb_confirm_prompt = "Callback confirmation prompt (optional)"
+cb_confirm_prompt_hint = "Played after the key press (\"your callback is registered\"), the queue hangs up when it completes; leave empty to register and hang up immediately."
+
 # Voice Prompts
 section_voice_prompts = "Voice Prompts"
 section_voice_prompts_desc = "Configure built-in voice prompts that are played during queue events (transfer, busy, no-answer, off-hours)."

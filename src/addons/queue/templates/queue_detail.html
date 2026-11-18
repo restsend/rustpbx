@@ -331,6 +331,47 @@ endblock %}
                             {% include "console/_destination_selector.html" %}
                         </label>
                     </div>
+
+                    <!-- Wait-for-callback option (default OFF) -->
+                    <div class="rounded-lg border border-slate-200 p-4" x-cloak>
+                        <label class="flex items-center gap-3">
+                            <input type="checkbox" x-model="cbEnabled"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400">
+                            <span class="text-sm font-semibold text-slate-800"
+                                x-text="tt('queue.cb_enable')"></span>
+                        </label>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.cb_enable_desc')"></p>
+                        <div class="mt-3 grid gap-4 md:grid-cols-2" x-show="cbEnabled">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                <span x-text="tt('queue.cb_offer_after')"></span>
+                                <input type="number" min="1" x-model.number="cbOfferAfter"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.cb_offer_after_placeholder')">
+                                <span class="text-xs text-slate-400" x-text="tt('queue.cb_offer_after_hint')"></span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                <span x-text="tt('queue.cb_key')"></span>
+                                <input type="text" maxlength="1" x-model.trim="cbKey"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.cb_key_placeholder')">
+                                <span class="text-xs text-slate-400" x-text="tt('queue.cb_key_hint')"></span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                <span x-text="tt('queue.cb_offer_prompt')"></span>
+                                <input type="text" x-model.trim="cbOfferPrompt"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.cb_prompt_placeholder')">
+                                <span class="text-xs text-slate-400" x-text="tt('queue.cb_offer_prompt_hint')"></span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                <span x-text="tt('queue.cb_confirm_prompt')"></span>
+                                <input type="text" x-model.trim="cbConfirmPrompt"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.cb_prompt_placeholder')">
+                                <span class="text-xs text-slate-400" x-text="tt('queue.cb_confirm_prompt_hint')"></span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -677,6 +718,13 @@ endblock %}
             // Final destination prompt type
             vpFinalDestType: 'none',
             vpFinalDestCustom: '',
+            // Wait-for-callback option (default OFF — the queue behaves as
+            // before unless the operator explicitly enables it).
+            cbEnabled: false,
+            cbOfferAfter: 30,
+            cbKey: '2',
+            cbOfferPrompt: '',
+            cbConfirmPrompt: '',
             saving: false,
             success: null,
             error: null,
@@ -1085,6 +1133,14 @@ endblock %}
                 this.fallbackMode = this.detectFallbackMode(spec.fallback);
                 // Parse voice prompts from spec
                 this.loadVoicePrompts(spec.voice_prompts);
+                // Load the wait-for-callback option (default OFF).
+                this.cbEnabled = Boolean(spec.callback?.enabled);
+                this.cbOfferAfter = Number.isFinite(Number(spec.callback?.offer_after_secs))
+                    && Number(spec.callback.offer_after_secs) > 0
+                    ? Number(spec.callback.offer_after_secs) : 30;
+                this.cbKey = (spec.callback?.dtmf_key || '2').trim() || '2';
+                this.cbOfferPrompt = spec.voice_prompts?.callback_offer_prompt || '';
+                this.cbConfirmPrompt = spec.voice_prompts?.callback_confirm_prompt || '';
                 this.pageTitle = this.mode === 'edit'
                     ? (model.name ? `${this.tt('queue.detail_subtitle_edit')} - ${model.name}` : this.tt('queue.detail_subtitle_edit'))
                     : this.tt('queue.new_queue');
@@ -1154,7 +1210,14 @@ endblock %}
                         })(),
                     },
                     voice_prompts: raw?.voice_prompts || null,
-                    // Callback
+                    // Wait-for-callback option (absent = disabled).
+                    callback: {
+                        enabled: Boolean(raw?.callback?.enabled),
+                        offer_after_secs: Number.isFinite(Number(raw?.callback?.offer_after_secs))
+                            ? Number(raw.callback.offer_after_secs)
+                            : 30,
+                        dtmf_key: (raw?.callback?.dtmf_key || '2').trim() || '2',
+                    },
                     // Comfort prompts
                     announcements: {
                         comfort_prompts: Array.isArray(raw?.announcements?.comfort_prompts) ? raw.announcements.comfort_prompts.map(function(p, idx) { return { audio_file: p.audio_file || '', interval_secs: p.interval_secs || 30, order: p.order || idx }; }) : [],
@@ -1270,6 +1333,31 @@ endblock %}
                 }
                 // Voice prompts
                 spec.voice_prompts = this.buildVoicePrompts();
+                // Wait-for-callback option — the section is OMITTED entirely
+                // when disabled (absent = off on the routing side), and the
+                // callback prompt keys are stripped from voice_prompts so a
+                // later disable leaves no residue.
+                if (this.cbEnabled) {
+                    const offerAfter = Number(this.cbOfferAfter);
+                    spec.callback = {
+                        enabled: true,
+                        offer_after_secs: Number.isFinite(offerAfter) && offerAfter > 0
+                            ? Math.trunc(offerAfter) : 30,
+                        dtmf_key: (this.cbKey || '').trim() || '2',
+                    };
+                    spec.voice_prompts = spec.voice_prompts || {};
+                    const offerPrompt = (this.cbOfferPrompt || '').trim();
+                    const confirmPrompt = (this.cbConfirmPrompt || '').trim();
+                    if (offerPrompt) spec.voice_prompts.callback_offer_prompt = offerPrompt;
+                    if (confirmPrompt) spec.voice_prompts.callback_confirm_prompt = confirmPrompt;
+                } else {
+                    delete spec.callback;
+                    if (spec.voice_prompts) {
+                        delete spec.voice_prompts.callback_offer_prompt;
+                        delete spec.voice_prompts.callback_confirm_prompt;
+                        if (!Object.keys(spec.voice_prompts).length) spec.voice_prompts = null;
+                    }
+                }
                 // Comfort prompts
                 if ((this.form.spec.announcements?.comfort_prompts || []).length > 0) {
                     const comfortPrompts = (this.form.spec.announcements?.comfort_prompts || [])
