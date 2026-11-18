@@ -1768,6 +1768,8 @@ impl RtcpEndpointSync {
         match kind {
             rustrtc::MediaKind::Audio => declared.audio = Some(addr),
             rustrtc::MediaKind::Video => declared.video = Some(addr),
+            // T.38 (image) / SCTP-style sections carry no RTCP endpoint.
+            _ => {}
         }
     }
 
@@ -1798,6 +1800,7 @@ impl RtcpEndpointSync {
             let declared = match kind {
                 rustrtc::MediaKind::Audio => declared.audio,
                 rustrtc::MediaKind::Video => declared.video,
+                _ => None,
             };
             let Some(declared) = declared else { continue };
             let Some(conn) = conn.upgrade() else { continue };
