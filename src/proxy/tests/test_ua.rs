@@ -153,6 +153,8 @@ pub enum TestUaEvent {
     CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
     /// Refer received with target URI
     Referred(DialogId, String),
+    /// In-dialog REFER subscription NOTIFY received: (dialog, sipfrag status)
+    ReferNotify(DialogId, u16),
     /// SIP INFO with DTMF (application/dtmf-relay) received on this dialog
     DtmfInfo(DialogId, String),
     /// SIP INFO (non-DTMF) received: (dialog_id, content_type, body)
@@ -815,6 +817,37 @@ impl TestUa {
         Ok(())
     }
 
+    /// Send an in-dialog REFER subscription NOTIFY (RFC 3515) with a custom
+    /// Event header value — baresip stamps `refer;id=<cseq>`, the optional
+    /// parameter form the server must accept.
+    pub async fn send_refer_notify(
+        &self,
+        dialog_id: &DialogId,
+        status: u16,
+        event_value: &str,
+    ) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+        let headers = vec![
+            rsipstack::sip::Header::Event(event_value.into()),
+            rsipstack::sip::Header::SubscriptionState("terminated;reason=noresource".into()),
+            rsipstack::sip::Header::ContentType("message/sipfrag".into()),
+        ];
+        let body = format!("SIP/2.0 {status} OK\r\n").into_bytes();
+        match dialog_layer.get_dialog(dialog_id) {
+            Some(Dialog::Invite(dialog)) => {
+                dialog
+                    .notify(Some(headers), Some(body))
+                    .await
+                    .map_err(|e| e.into_anyhow())?;
+            }
+            _ => return Err(anyhow!("Dialog does not support NOTIFY")),
+        }
+        Ok(())
+    }
+
     /// Send a SIP INFO with an arbitrary content type and body.
     /// Returns instantly (fire-and-forget on the dialog).
     pub async fn send_info(
@@ -1094,8 +1127,38 @@ impl TestUa {
                             tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                         }
                     }
-                    DialogState::Notify(id, _request, tx_handle) => {
+                    DialogState::Notify(id, request, tx_handle) => {
                         debug!("TestUa: Received Notify state for {}", id);
+                        // Report REFER progress NOTIFY (RFC 3515 implicit
+                        // subscription). The Event header may carry an `id`
+                        // parameter (`refer;id=40999`) — compare the package
+                        // token only.
+                        let is_refer = request.headers.iter().any(|h| {
+                            if let rsipstack::sip::Header::Event(event) = h {
+                                event
+                                    .value()
+                                    .split(';')
+                                    .next()
+                                    .map(|token| token.trim().eq_ignore_ascii_case("refer"))
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            }
+                        });
+                        if is_refer {
+                            let body = String::from_utf8_lossy(request.body());
+                            let status = body
+                                .lines()
+                                .next()
+                                .and_then(|line| {
+                                    let mut parts = line.split_whitespace();
+                                    (parts.next() == Some("SIP/2.0"))
+                                        .then(|| parts.next()?.parse::<u16>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            events.push(TestUaEvent::ReferNotify(id.clone(), status));
+                        }
                         // Reply 200 OK to NOTIFY so the sender can proceed
                         tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                     }
