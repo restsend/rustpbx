@@ -47,9 +47,12 @@ async fn test_three_way_conference_audio_flow() {
         .await
         .unwrap();
 
-    // 3. A sends audio
-    let samples = vec![1000i16; 160];
-    tx_a.send(AudioFrame::new(samples, 8000)).await.unwrap();
+    // 3. A sends audio (the mix bus runs at CONFERENCE_MIXER_SAMPLE_RATE:
+    // 20ms = 320 samples at 16 kHz — what a bridge's reverse loop delivers).
+    const MIX_RATE: u32 = 16_000;
+    const MIX_FRAME: usize = 320;
+    let samples = vec![1000i16; MIX_FRAME];
+    tx_a.send(AudioFrame::new(samples, MIX_RATE)).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -57,17 +60,24 @@ async fn test_three_way_conference_audio_flow() {
     assert!(rx_b.try_recv().is_ok(), "B should hear A");
     assert!(rx_c.try_recv().is_ok(), "C should hear A");
 
-    // 5. A should not receive its own audio
-    assert!(rx_a.try_recv().is_err(), "A should not hear self");
+    // 5. A must not hear itself: it still gets a per-tick frame, but a
+    // silent one (the mixer keeps every output on a steady frame cadence).
+    let self_frame = rx_a
+        .try_recv()
+        .expect("steady per-tick output for every participant");
+    assert!(
+        self_frame.samples.iter().all(|&s| s == 0),
+        "A should not hear self (silence only)"
+    );
 
     // 6. All three speak simultaneously
-    tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
+    tx_a.send(AudioFrame::new(vec![1000i16; MIX_FRAME], MIX_RATE))
         .await
         .unwrap();
-    tx_b.send(AudioFrame::new(vec![2000i16; 160], 8000))
+    tx_b.send(AudioFrame::new(vec![2000i16; MIX_FRAME], MIX_RATE))
         .await
         .unwrap();
-    tx_c.send(AudioFrame::new(vec![3000i16; 160], 8000))
+    tx_c.send(AudioFrame::new(vec![3000i16; MIX_FRAME], MIX_RATE))
         .await
         .unwrap();
 
@@ -112,7 +122,7 @@ async fn test_conference_participant_join_leave() {
         .unwrap();
 
     // A speaks
-    tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
+    tx_a.send(AudioFrame::new(vec![1000i16; 320], 16000))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -136,7 +146,7 @@ async fn test_conference_participant_join_leave() {
         .unwrap();
 
     // C speaks
-    tx_c.send(AudioFrame::new(vec![2000i16; 160], 8000))
+    tx_c.send(AudioFrame::new(vec![2000i16; 320], 16000))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -152,7 +162,7 @@ async fn test_conference_participant_join_leave() {
         .unwrap();
 
     // A speaks again
-    tx_a.send(AudioFrame::new(vec![1500i16; 160], 8000))
+    tx_a.send(AudioFrame::new(vec![1500i16; 320], 16000))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -194,7 +204,7 @@ async fn test_conference_mute_unmute() {
         .unwrap();
 
     // A speaks while muted
-    tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
+    tx_a.send(AudioFrame::new(vec![1000i16; 320], 16000))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -211,7 +221,7 @@ async fn test_conference_mute_unmute() {
         .unwrap();
 
     // A speaks again
-    tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
+    tx_a.send(AudioFrame::new(vec![1000i16; 320], 16000))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -15,6 +15,11 @@ use tracing::{debug, info};
 
 pub use crate::AudioFrame;
 
+/// Mix-bus sample rate for conferences. 16 kHz carries wideband G.722
+/// losslessly; 8 kHz PCMU and 48 kHz Opus legs are FIR-resampled to/from it
+/// by the media bridge in both directions.
+pub const CONFERENCE_MIXER_SAMPLE_RATE: u32 = 16_000;
+
 const INPUT_BUFFER_FRAMES: usize = 5;
 
 /// Owned only by the mixing task; no shared participant or audio state.
@@ -84,6 +89,14 @@ impl ConferenceAudioMixer {
             command_rx: ParkMutex::new(Some(command_rx)),
             mixing_task: ParkMutex::new(None),
         }
+    }
+
+    /// Mix-bus sample rate. Media bridges resample every leg's decoded PCM to
+    /// this rate before feeding the mixer, and resample the mixed output to
+    /// each leg's encoder rate — read it when wiring a bridge
+    /// ([`crate::mixer`] consumers must not assume 8 kHz).
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     // Adding before start() is supported: receive into the rings immediately,
@@ -237,8 +250,12 @@ impl ConferenceAudioMixer {
                     }
                 }
                 _ = ticker.tick(), if started => {
-                    // Exactly one queued frame per leg, independent of reception.
-                    let frames: Vec<_> = participants.iter_mut().map(|participant| {
+                    // Exactly one frame per leg per tick, independent of reception.
+                    // A leg with no buffered audio contributes silence instead of
+                    // being silently excluded: exclusion made the mix jump in level
+                    // and left outputs starved whenever a peer's clock ran slow.
+                    let silent_frame = vec![0i16; frame_size];
+                    let frames: Vec<Option<Vec<i16>>> = participants.iter_mut().map(|participant| {
                         let frame = participant.input.pop_front();
                         let frame = if participant.muted { None } else { frame };
                         frame.map(|mut frame| {
@@ -250,18 +267,24 @@ impl ConferenceAudioMixer {
                         let mut input_frames = Vec::new();
                         let mut gains = Vec::new();
                         for (input_index, input) in participants.iter().enumerate() {
-                            if input_index == output_index {
+                            if input_index == output_index || input.muted {
                                 continue;
                             }
-                            let Some(samples) = &frames[input_index] else { continue; };
                             let gain = route_gains.get(&(input.leg_id.clone(), output.leg_id.clone()))
                                 .copied().unwrap_or(1.0);
                             if gain > 0.0 {
-                                input_frames.push(samples.clone());
+                                let samples = frames[input_index].as_deref()
+                                    .unwrap_or(&silent_frame);
+                                input_frames.push(samples.to_vec());
                                 gains.push(gain);
                             }
                         }
                         if !input_frames.is_empty() {
+                            // Loudness normalization: with n concurrent sources each
+                            // gains 1/sqrt(n), so the summed peak does not grow with
+                            // participant count (a lone speaker stays at unity gain).
+                            let norm = 1.0 / (input_frames.len() as f32).sqrt();
+                            let gains: Vec<f32> = gains.iter().map(|g| g * norm).collect();
                             let mixed = AudioMixer::mix(input_frames, &gains);
                             let _ = output.output_tx.try_send(AudioFrame::new(mixed, sample_rate));
                         }
@@ -273,6 +296,11 @@ impl ConferenceAudioMixer {
                             if !participant.muted {
                                 if participant.input.len() == INPUT_BUFFER_FRAMES {
                                     participant.input.pop_front();
+                                    // Sign of a producer clock running fast against
+                                    // the fixed mixing tick — audible as periodic
+                                    // clicks, so surface it.
+                                    debug!(%conf_id, %leg_id,
+                                        "conference input ring full, dropped oldest frame");
                                 }
                                 participant.input.push_back(frame);
                             }
@@ -324,10 +352,23 @@ mod tests {
         advance(Duration::from_millis(15)).await;
         tokio::task::yield_now().await;
         assert_eq!(rx.try_recv().unwrap().samples, vec![300; 160]);
-        assert!(self_rx.try_recv().is_err(), "N-1 mixing must exclude self audio");
+        // Self audio must never be mixed back: the source leg still receives
+        // one frame per tick (the listener is silent), but it is pure silence.
+        let self_frame = self_rx
+            .try_recv()
+            .expect("steady per-tick output for every participant");
+        assert!(
+            self_frame.samples.iter().all(|&s| s == 0),
+            "N-1 mixing must exclude self audio (silence only)"
+        );
         advance(Duration::from_millis(20)).await;
         tokio::task::yield_now().await;
-        assert!(rx.try_recv().is_err(), "empty slots must not replay old audio");
+        // Queue drained: the tick emits a silence frame, never replays audio.
+        let idle_frame = rx.try_recv().expect("steady per-tick output");
+        assert!(
+            idle_frame.samples.iter().all(|&s| s == 0),
+            "empty slots must contribute silence, not replay old audio"
+        );
 
         for value in [400, 500, 600] {
             tx.send(AudioFrame::new(vec![value; 160], 8000)).await.unwrap();
@@ -455,9 +496,13 @@ mod tests {
         let frame = rx2.try_recv();
         assert!(frame.is_ok(), "Leg2 should receive audio from leg1");
 
-        // Leg1 should not receive its own audio
-        let frame = rx1.try_recv();
-        assert!(frame.is_err(), "Leg1 should not receive its own audio");
+        // Leg1 should not hear itself: it still gets a per-tick frame, but a
+        // silent one (leg2 contributed nothing this tick).
+        let frame = rx1.try_recv().expect("steady per-tick output");
+        assert!(
+            frame.samples.iter().all(|&s| s == 0),
+            "Leg1 should not receive its own audio (silence only)"
+        );
 
         mixer.stop().await;
     }
@@ -534,9 +579,12 @@ mod tests {
         let frame3 = rx3.try_recv();
         assert!(frame3.is_ok(), "Leg3 should receive audio from leg1");
 
-        // Leg1 should not receive its own audio
-        let frame1 = rx1.try_recv();
-        assert!(frame1.is_err(), "Leg1 should not receive its own audio");
+        // Leg1 should not hear itself: silent frame only (leg2/leg3 idle).
+        let frame1 = rx1.try_recv().expect("steady per-tick output");
+        assert!(
+            frame1.samples.iter().all(|&s| s == 0),
+            "Leg1 should not receive its own audio (silence only)"
+        );
 
         // Now participant 2 speaks
         let samples2 = vec![2000i16; 160];
@@ -552,9 +600,12 @@ mod tests {
         let frame3 = rx3.try_recv();
         assert!(frame3.is_ok(), "Leg3 should receive audio from leg2");
 
-        // Leg2 should not receive its own audio
-        let frame2 = rx2.try_recv();
-        assert!(frame2.is_err(), "Leg2 should not receive its own audio");
+        // Leg2 should not hear itself: silent frame only (leg1/leg3 idle).
+        let frame2 = rx2.try_recv().expect("steady per-tick output");
+        assert!(
+            frame2.samples.iter().all(|&s| s == 0),
+            "Leg2 should not receive its own audio (silence only)"
+        );
 
         // Now all three speak simultaneously
         tx1.send(AudioFrame::new(samples1.clone(), 8000))
@@ -894,6 +945,77 @@ mod tests {
 
         assert!(rx_cust.try_recv().is_ok(), "Customer should hear agent");
         assert!(rx_sup.try_recv().is_ok(), "Supervisor should hear agent");
+
+        mixer.stop().await;
+    }
+
+    /// S3 regression: two loud speakers must not flat-top the mix. The
+    /// 1/sqrt(n) normalization plus the soft limiter keep the output loud but
+    /// strictly below full scale (hard clipping produced harsh harmonics).
+    #[tokio::test]
+    async fn normalization_keeps_multi_speaker_mix_below_full_scale() {
+        let mixer = ConferenceAudioMixer::new("norm-limiter".into(), 8000);
+        mixer.start();
+
+        let leg1 = LegId::new("leg1");
+        let leg2 = LegId::new("leg2");
+
+        let (tx1, mut rx1) = mixer.add_participant(leg1.clone(), CodecType::PCMU).await.unwrap();
+        let (tx2, _rx2) = mixer.add_participant(leg2.clone(), CodecType::PCMU).await.unwrap();
+
+        tx1.send(AudioFrame::new(vec![30000i16; 160], 8000)).await.unwrap();
+        tx2.send(AudioFrame::new(vec![30000i16; 160], 8000)).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let frame = rx1.try_recv().expect("mixed frame for leg1");
+        // Per-source contribution after 1/sqrt(2) normalization: 30000 * 0.707
+        // ≈ 21213 — still clearly loud, and strictly below full scale.
+        let loud = frame.samples.iter().filter(|&&s| s > 20000).count();
+        assert!(loud > 0, "mix must stay loud, peak {:?}", frame.samples.iter().max());
+        assert!(
+            frame.samples.iter().all(|&s| s < i16::MAX),
+            "1/sqrt(n) + soft limiter must prevent hard clipping"
+        );
+
+        mixer.stop().await;
+    }
+
+    /// S4 regression: an idle leg must not starve the other side. Every tick
+    /// produces exactly one mixed frame per participant, so downstream egress
+    /// never runs dry and levels do not jump when a leg goes quiet.
+    #[tokio::test(start_paused = true)]
+    async fn idle_legs_keep_outputs_on_steady_cadence() {
+        use tokio::time::{advance, Duration};
+
+        let mixer = ConferenceAudioMixer::new("steady-cadence".into(), 8000);
+        let speaker = LegId::new("speaker");
+        let idle = LegId::new("idle");
+
+        let (tx_speaker, mut rx_speaker) = mixer.add_participant(speaker, CodecType::PCMU).await.unwrap();
+        let (_tx_idle, mut rx_idle) = mixer.add_participant(idle, CodecType::PCMU).await.unwrap();
+
+        tx_speaker.send(AudioFrame::new(vec![1000i16; 160], 8000)).await.unwrap();
+        mixer.start();
+        tokio::task::yield_now().await;
+
+        // Tick 1: idle hears the speaker; speaker hears silence.
+        advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        let heard = rx_idle.try_recv().expect("idle leg must receive speaker audio");
+        assert!(heard.samples.iter().any(|&s| s != 0));
+        let self_frame = rx_speaker.try_recv().expect("speaker leg still on cadence");
+        assert!(self_frame.samples.iter().all(|&s| s == 0));
+
+        // Tick 2+: nobody sends anything — both legs still get silence frames
+        // (previously the speaker's output went silent/empty here).
+        advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        let silence_idle = rx_idle.try_recv().expect("idle leg keeps receiving frames");
+        assert!(silence_idle.samples.iter().all(|&s| s == 0));
+        let silence_speaker = rx_speaker.try_recv().expect("speaker leg keeps receiving frames");
+        assert!(silence_speaker.samples.iter().all(|&s| s == 0));
+        assert!(rx_idle.try_recv().is_err(), "one frame per tick, no burst");
 
         mixer.stop().await;
     }
