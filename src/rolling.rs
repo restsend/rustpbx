@@ -15,11 +15,13 @@
 //!      `/rolling/v1/relay_ingress` endpoint),
 //!   2. push the handoff payload (live call-id manifest, optional
 //!      registration dump) to the successor,
-//!   3. swap the SIP UDP transports to loopback-relayed channels (换线:
-//!      register channel conn → cancel the real conn token → the socket
-//!      drops with the connection), close the TCP/TLS SIP listeners and the
-//!      public HTTP/HTTPS listeners (stop-accept; established connections
-//!      keep running on the predecessor),
+//!   3. swap the SIP UDP transports to loopback-relayed channels (换线: close
+//!      the switchable backend of the public `UdpConnection` so the OS socket
+//!      drops even though live dialogs hold per-datagram clones → register a
+//!      relay channel under the same address → cancel the serve loop), close
+//!      the TCP/TLS SIP listeners and the public HTTP/HTTPS listeners
+//!      (stop-accept; established connections keep running on the
+//!      predecessor),
 //!   4. serve its live calls until drained: outbound in-dialog datagrams
 //!      are POSTed to the successor's `/rolling/v1/relay_egress` (which
 //!      `sendto`s them from the public socket), while the successor
@@ -50,9 +52,13 @@ use axum::{
     routing::post,
 };
 use rsipstack::sip::prelude::HeadersExt;
-use rsipstack::sip::{Method, SipMessage};
 use rsipstack::sip::transport::Transport;
-use rsipstack::transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection};
+use rsipstack::sip::{Method, SipMessage};
+use rsipstack::transaction::endpoint::TransportEventInspector;
+use rsipstack::transport::{
+    SipAddr, SipConnection, TransportEvent, channel::ChannelConnection,
+    udp::{UdpConnection, UdpInner},
+};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -80,6 +86,73 @@ struct PendingForward {
 const PENDING_CAP: usize = 64;
 const PENDING_TTL: Duration = Duration::from_secs(3);
 
+/// One public UDP listener of a rolling process.
+///
+/// `raw` is the socket used by `/rolling/v1/relay_egress`; `switch` is the
+/// handle handed to rsipstack's `UdpConnection`. The indirection lets the
+/// handover CLOSE the real socket (freeing the port for the successor) while
+/// live dialogs still hold per-datagram `UdpConnection` clones: those clones
+/// only keep the [`SwitchableUdpSocket`] alive, never the OS socket.
+struct PublicUdpSocket {
+    /// Address the socket was bound to (relay_egress keying).
+    local: SocketAddr,
+    raw: Arc<tokio::net::UdpSocket>,
+    switch: Arc<SwitchableUdpSocket>,
+}
+
+enum UdpBackend {
+    Open(Arc<tokio::net::UdpSocket>),
+    Closed,
+}
+
+/// `rsipstack::platform::net::UdpSocket` adapter whose backend can be closed
+/// at handover. See [`PublicUdpSocket`] for why the OS socket is not owned by
+/// the connection clones.
+struct SwitchableUdpSocket {
+    backend: arc_swap::ArcSwap<UdpBackend>,
+    local: SocketAddr,
+}
+
+impl SwitchableUdpSocket {
+    fn close(&self) {
+        self.backend.store(Arc::new(UdpBackend::Closed));
+    }
+}
+
+#[async_trait::async_trait]
+impl rsipstack::platform::net::UdpSocket for SwitchableUdpSocket {
+    async fn recv_from(&self, buf: &mut [u8]) -> rsipstack::Result<(usize, SocketAddr)> {
+        let backend = self.backend.load_full();
+        match &*backend {
+            UdpBackend::Open(sock) => {
+                let (len, addr) = tokio::net::UdpSocket::recv_from(sock, buf).await?;
+                Ok((len, rsipstack::platform::net::canonical_socket_addr(addr)))
+            }
+            // Parked forever: the serve loop is already cancelled at this
+            // point; never busy-loop on a closed socket.
+            UdpBackend::Closed => core::future::pending().await,
+        }
+    }
+
+    async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> rsipstack::Result<usize> {
+        let backend = self.backend.load_full();
+        match &*backend {
+            UdpBackend::Open(sock) => Ok(tokio::net::UdpSocket::send_to(sock, buf, addr).await?),
+            UdpBackend::Closed => Err(rsipstack::Error::TransportLayerError(
+                "rolling udp socket closed (handover)".to_string(),
+                SipAddr {
+                    r#type: Some(Transport::Udp),
+                    addr: self.local.into(),
+                },
+            )),
+        }
+    }
+
+    fn local_addr(&self) -> rsipstack::Result<SocketAddr> {
+        Ok(self.local)
+    }
+}
+
 /// Shared runtime for both roles. Created by the builder when
 /// `[rolling] enabled = true`; `None` otherwise (fully inert).
 pub struct RollingRuntime {
@@ -102,13 +175,14 @@ pub struct RollingRuntime {
     manifest_ms: AtomicI64,
     /// successor side: call-ids the predecessor still owns (manifest).
     old_calls: std::sync::RwLock<HashSet<String>>,
-    /// successor side: local UDP sockets for `relay_egress` sendto.
-    udp_sockets: std::sync::Mutex<Vec<(SocketAddr, Arc<tokio::net::UdpSocket>)>>,
+    /// successor side: public UDP sockets (relay_egress source + the
+    /// switchable backend the UdpConnection clones share).
+    udp_sockets: std::sync::Mutex<Vec<PublicUdpSocket>>,
     /// successor side: in-dialog datagrams captured before the first
     /// manifest arrived.
     pending: std::sync::Mutex<Vec<PendingForward>>,
     /// successor side: wired by the builder once the SIP server exists (the
-    /// UDP pump needs local-dialog checks).
+    /// ingress inspector needs local-dialog checks).
     sip: std::sync::OnceLock<crate::proxy::server::SipServerRef>,
     /// predecessor side: channel-relay handles for the swapped UDP
     /// transports (inbound injection targets).
@@ -121,10 +195,9 @@ pub struct RollingRuntime {
     busy_predicates: std::sync::Mutex<Vec<Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// predecessor side: loopback listener lifecycle.
     token: CancellationToken,
-    /// Cancels the UDP pumps created by `create_udp_transport` so the
-    /// sockets drop and the successor can bind at handover (the
-    /// predecessor's UDP sockets must be released when its transports swap
-    /// to the loopback relay).
+    /// Cancels the serve loops of the public UDP transports
+    /// (`UdpConnection`s created by `create_udp_transport`) so their sockets
+    /// drop and the successor can bind at handover.
     udp_close: CancellationToken,
     /// predecessor side: cancels the PUBLIC http/https accept loops without
     /// touching the established connections (app.rs owns the loops).
@@ -135,8 +208,10 @@ pub struct RollingRuntime {
 
 struct UdpRelayHandle {
     to_sip: tokio::sync::mpsc::UnboundedSender<TransportEvent>,
-    conn: SipConnection,
-    sip_addr: SipAddr,
+    /// Shared outbound channel of the public UDP transport: each relayed
+    /// datagram is injected on its OWN peer-addressed connection (see
+    /// [`peer_connection`]) whose sends land here.
+    outgoing: tokio::sync::mpsc::UnboundedSender<TransportEvent>,
 }
 
 impl RollingRuntime {
@@ -223,17 +298,6 @@ impl RollingRuntime {
     }
 
     /// The successor's management base URL (same config → same http port).
-    /// The live UDP socket bound to `local` (outbound pump lookup — the
-    /// socket is RELEASED at the handover swap, so absence means the
-    /// predecessor relay path applies).
-    fn socket_for(&self, local: SocketAddr) -> Option<Arc<tokio::net::UdpSocket>> {
-        self.udp_sockets
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(addr, _)| *addr == local)
-            .map(|(_, s)| s.clone())
-    }
 
     // ─────────────────────────────────────────────────────────────
     // successor side
@@ -402,8 +466,22 @@ impl RollingRuntime {
     }
 
     /// Register a local UDP socket for the `relay_egress` sendto path.
-    pub fn register_udp_socket(&self, local: SocketAddr, sock: Arc<tokio::net::UdpSocket>) {
-        self.udp_sockets.lock().unwrap().push((local, sock));
+    fn register_udp_socket(&self, socket: PublicUdpSocket) {
+        self.udp_sockets.lock().unwrap().push(socket);
+    }
+
+    /// Close every public UDP socket and drop their raw handles.
+    ///
+    /// The dialogs' per-datagram `UdpConnection` clones keep only the
+    /// [`SwitchableUdpSocket`] alive, so closing the switch releases the OS
+    /// socket and the successor can bind the port.
+    fn close_udp_sockets(&self) {
+        self.udp_close.cancel();
+        let mut sockets = self.udp_sockets.lock().unwrap();
+        for socket in sockets.iter() {
+            socket.switch.close();
+        }
+        sockets.clear();
     }
 
     /// old → new: send a datagram from the successor's public UDP socket.
@@ -424,10 +502,10 @@ impl RollingRuntime {
             match by_port {
                 Some(port) => sockets
                     .iter()
-                    .find(|(addr, _)| addr.port().to_string() == port)
+                    .find(|s| s.local.port().to_string() == port)
                     .or_else(|| sockets.first())
-                    .map(|(_, s)| s.clone()),
-                None => sockets.first().map(|(_, s)| s.clone()),
+                    .map(|s| s.raw.clone()),
+                None => sockets.first().map(|s| s.raw.clone()),
             }
         };
         let Some(sock) = sock else {
@@ -517,8 +595,7 @@ impl RollingRuntime {
             let relays = self.udp_relays.lock().unwrap();
             relays.first().map(|r| UdpRelayHandle {
                 to_sip: r.to_sip.clone(),
-                conn: r.conn.clone(),
-                sip_addr: r.sip_addr.clone(),
+                outgoing: r.outgoing.clone(),
             })
         };
         let Some(relay) = relay else {
@@ -537,10 +614,16 @@ impl RollingRuntime {
                         return StatusCode::BAD_REQUEST.into_response();
                     }
                 };
+                let Ok(conn) = peer_connection(src, relay.outgoing).await else {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                };
                 let _ = relay.to_sip.send(TransportEvent::Incoming(
                     msg,
-                    relay.conn.clone(),
-                    relay.sip_addr.clone(),
+                    conn,
+                    SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: src.into(),
+                    },
                 ));
                 StatusCode::OK.into_response()
             }
@@ -615,16 +698,16 @@ impl RollingRuntime {
         self.serve_predecessor_listener(router).await?;
 
         // 2. Swap UDP transports (换线) + close the stream listeners.
-        self.swap_and_close_transports(state);
+        self.swap_and_close_transports(state).await;
 
         // 3. Stop accepting on the public HTTP/HTTPS listeners WITHOUT
         //    killing established connections (WS clients stay here).
         // Close the public HTTP/HTTPS accept loops (established conns kept).
         self.close_http.cancel();
-        // Release the predecessor's UDP sockets: the successor binds the
-        // instant these ports are free (the pumps exit via udp_close).
-        self.udp_close.cancel();
-        self.udp_sockets.lock().unwrap().clear();
+        // Release every public UDP socket (switchable backends closed, serve
+        // loops cancelled) — the successor binds the instant the ports are
+        // free.
+        self.close_udp_sockets();
         info!(
             "rolling: public listeners closed ({}ms)",
             started.elapsed().as_millis()
@@ -689,15 +772,15 @@ impl RollingRuntime {
     }
 
     /// 换线 for the bound transports:
-    /// * rolling UDP (ChannelConnection owned by this module): switch the
-    ///   outbound pump to relay mode via the role flag, kill the
-    ///   real-socket read pump and RELEASE the socket — the successor binds
-    ///   the instant the port is free. The channel itself stays registered:
-    ///   dialogs keep their affinity, and injected ingress + relayed egress
-    ///   ride the same connection.
+    /// * UDP (a REAL `UdpConnection` bound to the public port): stop its serve
+    ///   loop, drop the socket so the successor binds the instant the port is
+    ///   free, and install the loopback relay CHANNEL under the same address.
+    ///   Established UDP dialogs keep sending through `transport_layer.lookup`
+    ///   (unreliable dialogs have no connection affinity), which now resolves
+    ///   to the relay channel; injected ingress rides the same channel.
     /// * stream listeners (TCP/TLS/WS): cancelled outright — established
     ///   stream connections live in their own tasks and keep flowing.
-    fn swap_and_close_transports(&self, state: &AppState) {
+    async fn swap_and_close_transports(self: &Arc<Self>, state: &AppState) {
         let sip = state.sip_server();
         let endpoint = sip.inner.endpoint.inner.clone();
         let transports: Vec<SipConnection> = {
@@ -707,14 +790,35 @@ impl RollingRuntime {
         for conn in transports {
             let sip_addr = conn.get_addr().clone();
             if sip_addr.r#type == Some(Transport::Udp) {
-                // Rolling pump transport (ChannelConnection owned by this
-                // module): keep the channel registered — dialogs keep their
-                // affinity and responses ride it — flip its outbound pump to
-                // relay mode (role flag), kill the real-socket read pump and
-                // RELEASE the socket (the port frees for the successor).
-                self.udp_close.cancel();
-                self.udp_sockets.lock().unwrap().clear();
-                info!(%sip_addr, "rolling: UDP transport switched to loopback relay (channel preserved)");
+                // 1. Release the public socket: close the switchable backend
+                //    first (drops the OS socket even though dialogs still hold
+                //    per-datagram connection clones) and stop the serve loops.
+                self.close_udp_sockets();
+                if let Some(token) = conn.cancel_token() {
+                    token.cancel();
+                }
+                endpoint.transport_layer.del_transport(&sip_addr);
+                info!(%sip_addr, "rolling: UDP transport released (successor binds)");
+
+                // 2. Dialogs keep sending: lookup now finds the relay channel.
+                match self.create_udp_relay_transport(sip_addr.clone()).await {
+                    Ok(relay) => {
+                        // add_connection starts the serve loop feeding injected
+                        // datagrams into the endpoint (serve_listener has no
+                        // arm for channels); add_transport makes lookup find it
+                        // for outbound in-dialog requests.
+                        endpoint.transport_layer.add_connection(relay.clone());
+                        endpoint.transport_layer.add_transport(relay);
+                        info!(%sip_addr, "rolling: UDP transport switched to loopback relay");
+                    }
+                    Err(e) => {
+                        warn!(
+                            %sip_addr,
+                            error = %e,
+                            "rolling: UDP relay transport failed — in-dialog datagrams will be dropped"
+                        );
+                    }
+                }
                 continue;
             }
             // Stream listeners (TCP/TLS/WS): cancelled outright —
@@ -1011,63 +1115,158 @@ fn has_to_tag(msg: &SipMessage) -> bool {
 
 // ── successor-side UDP transport ────────────────────────────────────────────
 
-/// UDP transport used by the SUCCESSOR while rolling is enabled: a real
-/// socket owned by this module so the read pump makes per-datagram forward
-/// decisions BEFORE any transaction is created (pre-transaction hook).
+/// Build a one-datagram in-memory connection addressed to the REAL sender.
+///
+/// Used by the predecessor's `/rolling/v1/relay_ingress` handler: the
+/// successor forwards in-dialog datagrams for the predecessor's live calls and
+/// the injected event must carry the real peer address (not the predecessor's
+/// local bind address) so source ACLs, bans and the dialog auth cache stay
+/// truthful. rsipstack's [`ChannelConnection`] reports its own `addr` as the
+/// remote address, so one connection per relayed datagram is required; its
+/// sends ride the relay transport's shared outbound pump.
+///
+/// The connection is deliberately NOT registered with the transport layer:
+/// the relay channel already feeds events into the endpoint, and UDP
+/// destinations are derived from the message (Via/Request-URI), not from the
+/// connection address.
+async fn peer_connection(
+    peer: SocketAddr,
+    outgoing: tokio::sync::mpsc::UnboundedSender<TransportEvent>,
+) -> anyhow::Result<SipConnection> {
+    // Never used: this connection is only handed to the transaction layer as
+    // the source identity. Its incoming channel exists because the rsipstack
+    // constructor requires one.
+    let (_unused_tx, unused_rx) = tokio::sync::mpsc::unbounded_channel();
+    let conn = ChannelConnection::create_connection(
+        unused_rx,
+        outgoing,
+        SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: peer.into(),
+        },
+        None,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("rolling udp: peer connection failed: {}", e))?;
+    Ok(SipConnection::Channel(conn))
+}
+
+/// Public UDP transport of a rolling-enabled process.
+///
+/// This is a REAL [`UdpConnection`], not a channel fake:
+/// * every datagram carries its own peer address (`get_remote_addr`), so
+///   trunk-by-IP resolution, source ACLs, ban accounting and the dialog auth
+///   cache all see the real sender;
+/// * [`SipConnection::is_reliable`] is false, so server/client transactions
+///   keep the RFC 3261 UDP retransmission timers. rsipstack classifies
+///   `SipConnection::Channel` as *reliable* — using a channel here silently
+///   disabled UDP retransmissions (the WS bridge contract does not apply to a
+///   datagram transport).
+///
+/// The socket is also kept by the rolling runtime for
+/// `/rolling/v1/relay_egress`: the successor sends the predecessor's
+/// in-dialog datagrams from this public address.
+///
+/// Ingress relay decisions (in-dialog datagrams for the predecessor's live
+/// calls) run in [`RollingIngressInspector`], the endpoint's pre-transaction
+/// hook, so this transport carries no pump of its own.
 pub async fn create_udp_transport(
     local_addr: SocketAddr,
+    external_addr: Option<SocketAddr>,
+    cancel: CancellationToken,
     rolling: &Arc<RollingRuntime>,
 ) -> anyhow::Result<SipConnection> {
     let std_sock = std::net::UdpSocket::bind(local_addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind UDP {}: {}", local_addr, e))?;
     std_sock.set_nonblocking(true)?;
-    let sock = Arc::new(tokio::net::UdpSocket::from_std(std_sock)?);
-    rolling.register_udp_socket(local_addr, sock.clone());
+    let raw = Arc::new(tokio::net::UdpSocket::from_std(std_sock)?);
 
-    let sip_addr = SipAddr {
-        r#type: Some(Transport::Udp),
-        addr: local_addr.into(),
-    };
-    // to_sip channel: rolling pump injects inbound datagrams into the stack.
-    // from_sip channel: the stack hands us outbound messages for sendto.
-    let (to_sip_tx, to_sip_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (from_sip_tx, mut from_sip_rx) = tokio::sync::mpsc::unbounded_channel();
-    let conn = ChannelConnection::create_connection(to_sip_rx, from_sip_tx, sip_addr.clone(), None)
-        .await
-        .map_err(|e| anyhow::anyhow!("rolling udp: channel conn failed: {}", e))?;
-    let sip_conn = SipConnection::Channel(conn.clone());
-
-    // Relay-ingress injection target: relay_ingress (from the successor)
-    // injects into THIS channel — the same connection the dialogs bind to,
-    // so responses ride the dialog-affinity outbound pump below.
-    rolling.udp_relays.lock().unwrap().push(UdpRelayHandle {
-        to_sip: to_sip_tx.clone(),
-        conn: sip_conn.clone(),
-        sip_addr: sip_addr.clone(),
+    // Same convention as `UdpConnection::create_connection`: an unspecified
+    // bind address is advertised as a concrete interface address
+    // (Via/Contact), never 0.0.0.0.
+    let bound = SipConnection::resolve_bind_address(local_addr);
+    let switch = Arc::new(SwitchableUdpSocket {
+        backend: arc_swap::ArcSwap::from_pointee(UdpBackend::Open(raw.clone())),
+        local: local_addr,
+    });
+    rolling.register_udp_socket(PublicUdpSocket {
+        local: local_addr,
+        raw,
+        switch: switch.clone(),
     });
 
-    // Outbound: endpoint → sendto (successor / idle role) or POST to the
-    // successor's relay_egress (predecessor role, after the handover swap).
-    // The pump NEVER exits: it is the dialog-affinity outbound path for the
-    // whole process lifetime; only its backend switches at the handover.
-    // The socket handle is looked up per send so the swap can release the
-    // real socket (freeing the port for the successor) without killing the
-    // pump.
-    let local_str = local_addr.to_string();
-    let pump_runtime = rolling.clone();
+    let udp = UdpConnection::attach(
+        UdpInner {
+            conn: switch,
+            addr: SipAddr {
+                r#type: Some(Transport::Udp),
+                addr: bound.into(),
+            },
+        },
+        external_addr,
+        Some(cancel),
+    )
+    .await;
+    Ok(SipConnection::Udp(udp))
+}
+
+/// Pre-transaction ingress hook of the endpoint.
+///
+/// The successor owns the public UDP socket the moment the predecessor closes
+/// it, but in-dialog traffic for the predecessor's LIVE calls still lands
+/// here. Relaying must happen BEFORE a local transaction is created, otherwise
+/// the successor would answer 481 for foreign dialogs. The endpoint calls this
+/// inspector for every transport event, before `on_received_message`.
+pub struct RollingIngressInspector {
+    inner: Box<dyn TransportEventInspector>,
+    rolling: Option<Arc<RollingRuntime>>,
+}
+
+impl RollingIngressInspector {
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(
+        inner: Box<dyn TransportEventInspector>,
+        rolling: Option<Arc<RollingRuntime>>,
+    ) -> Box<dyn TransportEventInspector> {
+        Box::new(Self { inner, rolling }) as Box<dyn TransportEventInspector>
+    }
+}
+
+#[async_trait::async_trait]
+impl TransportEventInspector for RollingIngressInspector {
+    async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
+        if let Some(rolling) = self.rolling.as_ref()
+            && !rolling.is_predecessor_role()
+            && let TransportEvent::Incoming(msg, conn, src) = &event
+            // Only datagram traffic is relayed: established TCP/TLS/WS
+            // dialogs stay on the predecessor (its own flow carries them), and
+            // injecting their requests as datagrams would answer on the wrong
+            // transport.
+            && !conn.is_reliable()
+            && let Ok(src_addr) = src.get_socketaddr()
+            && rolling.relay_inbound(src_addr, msg).await
+        {
+            // Relayed (or buffered) toward the predecessor: never create a
+            // local transaction for it.
+            return None;
+        }
+        self.inner.handle(event).await
+    }
+}
+
+/// Predecessor-side outbound path after the handover (换线): datagrams emitted
+/// by local dialogs ride this pump to the successor's
+/// `/rolling/v1/relay_egress`, which sends them from the public UDP socket.
+fn spawn_relay_egress_pump(
+    runtime: Arc<RollingRuntime>,
+    local_str: String,
+    mut from_sip_rx: tokio::sync::mpsc::UnboundedReceiver<TransportEvent>,
+) {
     tokio::spawn(async move {
-        info!(%local_str, "rolling probe: primary outbound pump started");
-        loop {
-            tokio::select! {
-                event = from_sip_rx.recv() => {
-                    let Some(event) = event else {
-                        warn!(%local_str, "rolling probe: outbound pump EXITED (channel closed)");
-                        return;
-                    };
-                    let TransportEvent::Incoming(ref msg, _, _) = event else {
-                        continue;
-                    };
-                    debug!(pred = pump_runtime.is_predecessor_role(), "rolling: primary-pump event");
+        while let Some(event) = from_sip_rx.recv().await {
+            let TransportEvent::Incoming(ref msg, _, _) = event else {
+                continue;
+            };
             let raw = msg.to_string();
             let dst = match msg {
                 SipMessage::Request(req) => {
@@ -1085,132 +1284,104 @@ pub async fn create_udp_transport(
                 _ => response_dest_from_via(&raw),
             };
             let Some(dst) = dst else { continue };
-            if pump_runtime.is_predecessor_role() {
-                let payload = serde_json::json!({
-                    "local": local_str,
-                    "dst": dst.to_string(),
-                    "data": raw,
-                });
-                let url = format!("{}{ROLLING_BASE}/relay_egress", pump_runtime.loopback_base());
-                // The successor rebinds within milliseconds of the listener
-                // close — retry once before dropping (requests are
-                // retransmitted by the transaction layer; a dropped early
-                // response is the accepted sub-second edge).
-                for attempt in 0..2u32 {
-                    match pump_runtime
-                        .http
-                        .post(&url)
-                        .json(&payload)
-                        .timeout(Duration::from_secs(3))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => break,
-                        _ if attempt == 0 => {
-                            tokio::time::sleep(Duration::from_millis(150)).await;
-                        }
-                        _ => {
-                            warn!(%dst, "rolling: egress POST failed after retry — datagram dropped");
-                        }
+            let payload = serde_json::json!({
+                "local": local_str,
+                "dst": dst.to_string(),
+                "data": raw,
+            });
+            let url = format!("{}{ROLLING_BASE}/relay_egress", runtime.loopback_base());
+            // The successor serves immediately after taking the ports; retry
+            // once before dropping (requests are retransmitted by the
+            // transaction layer; a dropped early response is the accepted
+            // sub-second edge).
+            for attempt in 0..2u32 {
+                match runtime
+                    .http
+                    .post(&url)
+                    .json(&payload)
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => break,
+                    _ if attempt == 0 => {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
                     }
-                }
-            } else if let Some(sock) = pump_runtime.socket_for(local_addr) {
-                if let Err(e) = sock.send_to(raw.as_bytes(), dst).await {
-                    debug!(%dst, error = %e, "rolling udp: send_to failed");
-                }
-            } else {
-                warn!(%dst, "rolling probe: outbound event DROPPED (no socket, not predecessor)");
-            }
-                }
-            }
-        }
-    });
-
-    // Inbound: recv_from → forward decision → stamp → inject. The pump
-    // exits when `udp_close` fires (handover: the predecessor releases the
-    // socket so the successor can bind).
-    let pump_runtime = rolling.clone();
-    let pump_sock = sock;
-    let pump_conn = conn;
-    let pump_addr = sip_addr;
-    let pump_to_sip = to_sip_tx;
-    let pump_close = rolling.udp_close.clone();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
-        loop {
-            tokio::select! {
-                _ = pump_close.cancelled() => {
-                    debug!("rolling udp: pump closing (handover)");
-                    return;
-                }
-                res = pump_sock.recv_from(&mut buf) => {
-                    match res {
-                        Ok((n, src)) => {
-                            let data = &buf[..n];
-                            let relayed = pump_runtime.pump_inbound(src, data).await;
-                            if relayed {
-                                continue;
-                            }
-                            match SipMessage::try_from(data) {
-                                Ok(msg) => {
-                                    let msg = match SipConnection::update_msg_received(
-                                        msg, src, Transport::Udp,
-                                    ) {
-                                        Ok(m) => m,
-                                        Err(_) => continue,
-                                    };
-                                    let _ = pump_to_sip.send(TransportEvent::Incoming(
-                                        msg,
-                                        SipConnection::Channel(pump_conn.clone()),
-                                        pump_addr.clone(),
-                                    ));
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                        Err(e) => {
-                            debug!(error = %e, "rolling udp: recv failed");
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
+                    _ => {
+                        warn!(%dst, "rolling: egress POST failed after retry — datagram dropped");
                     }
                 }
             }
         }
+        warn!(%local_str, "rolling: relay egress pump exited");
     });
-
-    Ok(sip_conn)
 }
 
 impl RollingRuntime {
-    /// Successor-side UDP read-pump decision for one datagram. Returns
-    /// `true` when handled by the relay path (caller must skip local
-    /// injection).
-    async fn pump_inbound(self: &Arc<Self>, src: SocketAddr, data: &[u8]) -> bool {
-        let Ok(msg) = SipMessage::try_from(data) else {
-            return false;
-        };
+    /// Token handed to every public UDP transport; cancelling it stops their
+    /// serve loops at handover so the successor can bind the ports.
+    pub fn udp_close_token(&self) -> CancellationToken {
+        self.udp_close.child_token()
+    }
+
+    /// Predecessor-side UDP bridge installed at handover (换线).
+    ///
+    /// The public socket is released (the successor owns it), so established
+    /// UDP dialogs keep sending through `transport_layer.lookup`, which now
+    /// resolves to this channel:
+    /// * outbound events are POSTed to the successor's
+    ///   `/rolling/v1/relay_egress` (sent from the public socket there);
+    /// * `/rolling/v1/relay_ingress` injects the successor's in-dialog
+    ///   datagrams into this same channel.
+    pub async fn create_udp_relay_transport(
+        self: &Arc<Self>,
+        sip_addr: SipAddr,
+    ) -> anyhow::Result<SipConnection> {
+        let (to_sip_tx, to_sip_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (from_sip_tx, from_sip_rx) = tokio::sync::mpsc::unbounded_channel();
+        let conn = ChannelConnection::create_connection(
+            to_sip_rx,
+            from_sip_tx.clone(),
+            sip_addr.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("rolling udp relay: channel conn failed: {}", e))?;
+
+        self.udp_relays.lock().unwrap().push(UdpRelayHandle {
+            to_sip: to_sip_tx,
+            outgoing: from_sip_tx,
+        });
+        spawn_relay_egress_pump(self.clone(), sip_addr.addr.to_string(), from_sip_rx);
+        info!(%sip_addr, "rolling: UDP relay transport ready (loopback egress)");
+        Ok(SipConnection::Channel(conn))
+    }
+
+    /// Successor-side ingress decision for one datagram. Returns `true` when
+    /// consumed by the relay path (the caller MUST drop it locally).
+    async fn relay_inbound(self: &Arc<Self>, src: SocketAddr, msg: &SipMessage) -> bool {
         let Some(call_id) = msg.call_id_header().ok().map(|c| c.value().to_string()) else {
             return false;
         };
         let known_locally = self.locally_known(&call_id);
 
-        if let SipMessage::Request(req) = &msg {
-            let to_tag = has_to_tag(&msg);
+        if let SipMessage::Request(req) = msg {
+            let to_tag = has_to_tag(msg);
             let old_owned = self.old_call_known(&call_id);
             let in_dialog_for_predecessor =
                 (to_tag || (req.method == Method::Cancel && old_owned)) && !known_locally;
             if in_dialog_for_predecessor {
+                let raw = msg.to_bytes();
                 if self.predecessor_alive() {
-                    // Spawned: a slow relay POST must not stall the pump.
+                    // Spawned: a slow relay POST must not stall the endpoint.
                     let runtime = self.clone();
-                    let payload = data.to_vec();
                     crate::utils::spawn(async move {
-                        runtime.forward_to_predecessor(src, &payload).await;
+                        runtime.forward_to_predecessor(src, &raw).await;
                     });
-                    return true;
+                } else {
+                    // Manifest gap right after the handover — buffer briefly.
+                    self.buffer_pending(src, &raw);
                 }
-                // Manifest gap right after the handover — buffer briefly.
-                self.buffer_pending(src, data);
                 return true;
             }
             return false;
@@ -1224,7 +1395,13 @@ impl RollingRuntime {
         // predecessor's server transaction retransmits it.
         if msg.is_response() && self.old_call_known(&call_id) {
             if self.predecessor_alive() {
-                let _ = self.forward_to_predecessor(src, data).await;
+                let raw = msg.to_bytes();
+                // Spawned: the endpoint's transport loop must not block on a
+                // slow loopback POST.
+                let runtime = self.clone();
+                crate::utils::spawn(async move {
+                    runtime.forward_to_predecessor(src, &raw).await;
+                });
             }
             return true;
         }
@@ -1737,6 +1914,112 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn peer_connection_reports_real_source_and_shares_outbound() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let src: SocketAddr = "192.140.183.213:6823".parse().unwrap();
+        let conn = peer_connection(src, out_tx).await.expect("peer connection");
+
+        assert_eq!(conn.transport(), Transport::Udp);
+        // NOTE: rsipstack reports Channel connections as "reliable"
+        // (`is_reliable` is `!matches!(Udp)`) — pre-existing rolling
+        // behaviour, since the whole UDP ingress rides a channel bridge.
+        let remote = conn.get_remote_addr().expect("remote addr");
+        assert_eq!(remote.addr.to_string(), src.to_string());
+        assert_eq!(remote.r#type, Some(Transport::Udp));
+
+        // UDP responses must ride the SHARED outbound pump: the transaction
+        // layer keeps this connection object, and the pump derives the
+        // datagram destination from the message (Via), not from the address.
+        let raw = "SIP/2.0 407 Proxy Authentication Required\r\n\
+                   Via: SIP/2.0/UDP 192.140.183.213:6823;received=192.140.183.213;rport=6823\r\n\
+                   From: <sip:pbx@192.140.183.213>;tag=1\r\n\
+                   To: <sip:123789@111.6.236.137>;tag=2\r\n\
+                   Call-ID: trunk-trunk-1\r\n\
+                   CSeq: 1 INVITE\r\n\
+                   \r\n";
+        let msg = SipMessage::try_from(raw.as_bytes()).expect("parse response");
+        conn.send(msg, None).await.expect("send through shared pump");
+        let event = out_rx.recv().await.expect("outbound event");
+        assert!(matches!(
+            event,
+            TransportEvent::Incoming(SipMessage::Response(_), _, _)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rolling_udp_injection_carries_real_source_addr() {
+        // End-to-end guard for the trunk-IP regression: a datagram landing on
+        // the rolling UDP transport must surface the SENDER's address on
+        // `tx.connection.get_remote_addr()` (trunk-by-IP resolution, source
+        // ACLs, bans and the dialog auth cache all read it) and must use
+        // UNRELIABLE transport semantics (RFC 3261 retransmission timers).
+        use rsipstack::EndpointBuilder;
+
+        let runtime = test_runtime();
+        let conn = create_udp_transport(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            runtime.udp_close_token(),
+            &runtime,
+        )
+        .await
+        .expect("rolling udp transport");
+        let server_addr = {
+            let sockets = runtime.udp_sockets.lock().unwrap();
+            sockets[0].raw.local_addr().expect("bound udp socket")
+        };
+
+        let mut builder = EndpointBuilder::new();
+        let endpoint = builder.build();
+        endpoint.inner.transport_layer.add_transport(conn.clone());
+        let mut incoming = endpoint.incoming_transactions().expect("incoming receiver");
+        let ep = endpoint.inner.clone();
+        tokio::spawn(async move {
+            ep.serve().await.ok();
+        });
+
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("client socket");
+        let client_addr = client.local_addr().expect("client addr");
+        let invite = format!(
+            "INVITE sip:123789@{server_addr} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP {client_addr};rport;branch=z9hG4bK-source-addr\r\n\
+             From: <sip:pbx@{client_addr}>;tag=src-tag\r\n\
+             To: <sip:123789@{server_addr}>\r\n\
+             Call-ID: rolling-source-addr@127.0.0.1\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:pbx@{client_addr}>\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\
+             \r\n"
+        );
+        client
+            .send_to(invite.as_bytes(), server_addr)
+            .await
+            .expect("send invite");
+
+        let tx = tokio::time::timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .expect("invite must reach the endpoint")
+            .expect("transaction");
+        let connection = tx.connection.as_ref().expect("transaction connection");
+        assert!(
+            !connection.is_reliable(),
+            "rolling UDP must be UNRELIABLE (RFC 3261 retransmissions), not a channel fake"
+        );
+        let remote = connection
+            .get_remote_addr()
+            .map(|addr| addr.addr.to_string())
+            .expect("connection source address");
+        assert_eq!(
+            remote,
+            client_addr.to_string(),
+            "rolling UDP ingress must preserve the real datagram source"
+        );
+    }
+
     #[test]
     fn test_select_evict_batch_cap() {
         let keys: Vec<(String, SocketAddr)> = (0..50)
@@ -1828,41 +2111,92 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pump_inbound_decisions() {
+    async fn test_relay_inbound_decisions() {
         let rt = test_runtime();
+        let src: SocketAddr = "10.0.0.9:5060".parse().unwrap();
+        let parse = |raw: &str| SipMessage::try_from(raw.as_bytes()).expect("parse sip message");
         // Manifest with one predecessor-owned call.
         rt.note_manifest(vec!["oldcall-1-2".into()]);
 
-        let bye_for_old = "BYE sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK1\r\nFrom: <sip:a@x>;tag=f1\r\nTo: <sip:b@y>;tag=t1\r\nCall-ID: oldcall-1-2\r\nCSeq: 2 BYE\r\n\r\n";
-        // Predecessor alive: forwarded (skips local injection).
-        assert!(
-            rt.pump_inbound("10.0.0.9:5060".parse().unwrap(), bye_for_old.as_bytes())
-                .await
-        );
+        let bye_for_old = parse("BYE sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK1\r\nFrom: <sip:a@x>;tag=f1\r\nTo: <sip:b@y>;tag=t1\r\nCall-ID: oldcall-1-2\r\nCSeq: 2 BYE\r\n\r\n");
+        // Predecessor alive: forwarded (consumed → the endpoint must not
+        // create a local transaction).
+        assert!(rt.relay_inbound(src, &bye_for_old).await);
 
         // After the manifest goes stale: buffered (still "handled", not
         // injected), flushed once a fresh manifest arrives.
         rt.manifest_ms
             .store(RollingRuntime::now_ms() - 60_000, Ordering::SeqCst);
-        assert!(
-            rt.pump_inbound("10.0.0.9:5060".parse().unwrap(), bye_for_old.as_bytes())
-                .await
-        );
+        assert!(rt.relay_inbound(src, &bye_for_old).await);
         assert_eq!(rt.pending.lock().unwrap().len(), 1);
         rt.note_manifest(vec!["oldcall-1-2".into()]);
         assert!(rt.pending.lock().unwrap().is_empty(), "flushed");
 
         // Out-of-dialog request: never forwarded.
-        let invite_new = "INVITE sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK2\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>\r\nCall-ID: brand-new-call\r\nCSeq: 1 INVITE\r\n\r\n";
-        assert!(!rt.pump_inbound("10.0.0.9:5060".parse().unwrap(), invite_new.as_bytes()).await);
+        let invite_new = parse("INVITE sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK2\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>\r\nCall-ID: brand-new-call\r\nCSeq: 1 INVITE\r\n\r\n");
+        assert!(!rt.relay_inbound(src, &invite_new).await);
 
         // Response for a call the successor owns (not in manifest): local.
-        let resp_new = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK3\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>;tag=t9\r\nCall-ID: myown-call-1\r\nCSeq: 1 INVITE\r\n\r\n";
-        assert!(!rt.pump_inbound("10.0.0.9:5060".parse().unwrap(), resp_new.as_bytes()).await);
+        let resp_new = parse("SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK3\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>;tag=t9\r\nCall-ID: myown-call-1\r\nCSeq: 1 INVITE\r\n\r\n");
+        assert!(!rt.relay_inbound(src, &resp_new).await);
 
         // Response for a predecessor call: forwarded.
-        let resp_old = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK4\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>;tag=t8\r\nCall-ID: oldcall-1-2\r\nCSeq: 9 OPTIONS\r\n\r\n";
-        assert!(rt.pump_inbound("10.0.0.9:5060".parse().unwrap(), resp_old.as_bytes()).await);
+        let resp_old = parse("SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK4\r\nFrom: <sip:a@x>\r\nTo: <sip:b@y>;tag=t8\r\nCall-ID: oldcall-1-2\r\nCSeq: 9 OPTIONS\r\n\r\n");
+        assert!(rt.relay_inbound(src, &resp_old).await);
+    }
+
+    struct PassthroughInspector;
+
+    #[async_trait::async_trait]
+    impl TransportEventInspector for PassthroughInspector {
+        async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
+            Some(event)
+        }
+    }
+
+    #[tokio::test]
+    async fn ingress_inspector_relays_only_datagrams() {
+        let rt = test_runtime();
+        rt.note_manifest(vec!["oldcall-1-2".into()]);
+        let inspector = RollingIngressInspector::new(Box::new(PassthroughInspector), Some(rt));
+        let src: SocketAddr = "10.0.0.9:5060".parse().unwrap();
+        let bye = "BYE sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK1\r\nFrom: <sip:a@x>;tag=f1\r\nTo: <sip:b@y>;tag=t1\r\nCall-ID: oldcall-1-2\r\nCSeq: 2 BYE\r\n\r\n";
+        let make = |conn: SipConnection| {
+            TransportEvent::Incoming(
+                SipMessage::try_from(bye.as_bytes()).expect("parse bye"),
+                conn,
+                SipAddr {
+                    r#type: Some(Transport::Udp),
+                    addr: src.into(),
+                },
+            )
+        };
+
+        // Reliable flow (WS bridge uses the same channel variant): a dialog
+        // there stays on its owner and must never be replayed as a datagram.
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let chan = peer_connection(src, out_tx).await.expect("channel conn");
+        assert!(chan.is_reliable());
+        assert!(
+            inspector.handle(make(chan)).await.is_some(),
+            "reliable transports must not be relayed"
+        );
+
+        // Unreliable datagram for a predecessor-owned call: consumed.
+        let udp = SipConnection::Udp(
+            UdpConnection::create_connection(
+                "127.0.0.1:0".parse().unwrap(),
+                None,
+                None,
+            )
+            .await
+            .expect("udp conn"),
+        );
+        assert!(!udp.is_reliable());
+        assert!(
+            inspector.handle(make(udp)).await.is_none(),
+            "in-dialog datagrams for the predecessor must be relayed"
+        );
     }
 }
 // ── tests ───────────────────────────────────────────────────────────────────

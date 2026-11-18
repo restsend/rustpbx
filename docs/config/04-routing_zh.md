@@ -57,7 +57,7 @@ direction = "any" # inbound, outbound, any
 | `dest` | string | 无 | 目标中继或 SIP URI（用于 `forward`） |
 | `select` | string | `"rr"` | 目标选择：`"rr"`（轮询）、`"sequential"`、`"parallel"` |
 | `hash_key` | string | 无 | 用于目标选择的一致性哈希键 |
-| `reject` | int | `403` | `reject` 动作的 SIP 状态码 |
+| `reject` | table | 无 | `reject` 动作的拒绝设置，例如 `{ code = 486, reason = "Busy Here" }`：SIP 状态码和可选的原因短语。未设置时以 `403` 拒绝 |
 | `queue` | string | 无 | `queue` 动作的队列名称 |
 | `app` | string | 无 | 应用名称（例如 `"ivr"`） |
 | `app_params` | table | 无 | 应用专属参数（JSON） |

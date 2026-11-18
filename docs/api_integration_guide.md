@@ -371,7 +371,7 @@ object (empty object when nothing was set).
 ### 2.1.1 Live Call Transcription (SSE)
 Subscribe to text emitted by an external quality service for an active call.
 Effective `[proxy.quality] enabled = true` (or a wholesale route/tenant policy)
-starts inspection automatically after answer. SSE subscriptions never start or
+starts inspection automatically after answer by default; `start_when = "early_media"` enables an earlier start after provisional SDP. SSE subscriptions never start or
 stop inspection. `text`, `calltrace`, and `hangup` service responses are forwarded,
 recorded, and executed respectively; there are no separate ASR or action switches.
 The SSE endpoint returns `503` if the event gateway is unavailable.
@@ -528,6 +528,8 @@ the `[outbound]` config: see [Outbound Dial SSE API](outbound_dial_api.md).
 For deployment, the v1 WebSocket wire protocol, an example service, wholesale policy precedence, and database queries, see [the realtime quality deployment guide](api_integration_guide_zh.md#实时语音质检部署服务协议与结果查询).
 
 The console exposes **Settings → Proxy settings → Realtime quality inspection**. It persists `[proxy.quality]` in the active TOML configuration and reloads it for new calls. Wholesale tenant and route-item policies live under `[addons.wholesale.quality]` and currently require a process restart when changed. They are not stored as tenant database columns.
+
+Set `start_when = "early_media"` under `[proxy.quality]` to begin inspection once provisional SDP negotiates media. The default, `start_when = "accepted"`, waits for answer. Early-media mode also starts on answer if no early media was received, and answering does not restart an existing inspection. The per-call quality plan can override `start_when`. Inspection still requires `enabled = true` and anchored media. For RWI and HTTP outbound originate, the first dialed endpoint is the session's caller/A leg; use `sides = "caller"` or `"both"` to inspect its audio.
 
 A connection carries one leg's decoded mono PCM16LE at the sample rate declared by its initial `start` JSON message. Services send WebSocket Ping every 10 seconds; the PBX defaults to closing inspection after 15 seconds without an incoming message. Closing inspection does not hang up the phone call. Use an explicit `hangup` event to terminate the call.
 

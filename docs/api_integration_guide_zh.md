@@ -359,7 +359,7 @@ REST 端点挂载在控制台的 `api_prefix` 下（默认为 `/api`，通过 `[
 
 ### 2.1.1 实时通话转写（SSE）
 
-订阅外部质检服务返回的实时文字。有效的 `[proxy.quality] enabled = true` 或 wholesale 租户／路由策略会在接听后自动启动质检；SSE 连接和断开只订阅／取消订阅事件，不启停质检。服务返回的 `text` 转发、`calltrace` 记录、`hangup` 执行，无需额外开关。事件网关不可用时返回 `503`。
+订阅外部质检服务返回的实时文字。有效的 `[proxy.quality] enabled = true` 或 wholesale 租户／路由策略默认在接听后自动启动质检，设置 `start_when = "early_media"` 可在早期媒体协商后启动；SSE 连接和断开只订阅／取消订阅事件，不启停质检。服务返回的 `text` 转发、`calltrace` 记录、`hangup` 执行，无需额外开关。事件网关不可用时返回 `503`。
 
 **端点**：`GET /cc/calls/{call_id}/transcript`（SSE，仅包含文本事件：`started` / `segment` / `error` / `ended`）
 
@@ -513,6 +513,7 @@ auto_start = true
 enabled = true
 url = "ws://127.0.0.1:8095/v1/quality"
 sides = "callee"                # caller | callee | both；默认 both
+start_when = "accepted"         # 默认接听后启动；early_media 在早期媒体协商后启动
 receive_timeout_secs = 15        # 默认 15，必须大于 0
 headers = []                    # 可选 [["Authorization", "Bearer your-token"]]
 

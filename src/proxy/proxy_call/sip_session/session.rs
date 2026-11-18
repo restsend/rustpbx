@@ -850,15 +850,18 @@ impl SipSession {
     }
 
     /// Effective enable policy owns inspection; subtitle subscriptions are passive.
-    async fn maybe_autostart_live_quality(&mut self, at: &'static str) {
+    pub(crate) async fn maybe_autostart_live_quality(&mut self, at: crate::call::quality::QualityStartWhen) {
         if self.live_quality.is_some() { return; }
         let mut config = self.server.proxy_config.load().quality.clone().unwrap_or_default();
         if let Some(plan) = self.context.dialplan.extensions.get::<crate::call::quality::QualityPlan>() {
             config.apply(plan);
         }
         if !config.enabled { return; }
+        if at == crate::call::quality::QualityStartWhen::EarlyMedia
+            && config.start_when != crate::call::quality::QualityStartWhen::EarlyMedia
+        { return; }
         if let Err(error) = self.start_live_quality().await {
-            warn!(session_id = %self.id, at, %error, "Auto start quality inspection failed");
+            warn!(session_id = %self.id, ?at, %error, "Auto start quality inspection failed");
             self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
                 call_id: self.context.session_id.clone(), side: None, error: error.to_string(),
             });
@@ -2787,7 +2790,7 @@ impl SipSession {
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
         self.set_auto_recorder_traced(None).await;
-        self.maybe_autostart_live_quality("originate_answer")
+        self.maybe_autostart_live_quality(crate::call::quality::QualityStartWhen::Accepted)
             .await;
         // The caller dialog is already answered when it is attached. Its
         // Confirmed state may have been consumed by the originate setup loop
@@ -7806,6 +7809,7 @@ impl SipSession {
                                             self.media.answer = caller_sdp.clone();
                                         }
                                         self.activate_callee_media(true).await?;
+                                        self.maybe_autostart_live_quality(crate::call::quality::QualityStartWhen::EarlyMedia).await;
                                         Ok::<_, anyhow::Error>(caller_sdp)
                                     }.await
                                     {
@@ -8326,7 +8330,7 @@ impl SipSession {
         }
 
         // PCM taps need the committed caller profile, not the provisional offer.
-        self.maybe_autostart_live_quality("call_answer").await;
+        self.maybe_autostart_live_quality(crate::call::quality::QualityStartWhen::Accepted).await;
 
         // A call has been answered (real callee or app) — any in-progress
         // blind transfer is over. Reconcile the watchdog: it is suppressed

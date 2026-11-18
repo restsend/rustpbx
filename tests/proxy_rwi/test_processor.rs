@@ -980,12 +980,24 @@ async fn test_originate_explicit_trunk_skips_route() {
 #[tokio::test]
 async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
     use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
-    use crate::common::rtp_utils::RtpReceiver;
+    use crate::common::rtp_utils::RtpPacket;
+    use futures::StreamExt;
+    use rustpbx::call::quality::{QualityConfig, QualityStartWhen};
     use crate::common::test_ua::TestUaEvent;
     use rustpbx::config::ProxyConfig;
 
+    let quality_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ProxyConfig {
+        quality: Some(QualityConfig {
+            enabled: true,
+            url: format!("ws://{}", quality_listener.local_addr().unwrap()),
+            start_when: QualityStartWhen::EarlyMedia,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let server =
-        E2eTestServer::start_with_inject(ProxyConfig::default(), E2eTestServerInject::default())
+        E2eTestServer::start_with_inject(config, E2eTestServerInject::default())
             .await
             .expect("start e2e server");
 
@@ -1024,14 +1036,16 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
 
     // Customer leg: 183 Session Progress with SDP (early media) first, then a
     // plain 180 Ringing.
-    let bob_rx = RtpReceiver::bind(0).await.expect("bind bob rtp");
-    let bob_sdp = crate::common::test_helpers::pcmu_sdp("127.0.0.1", bob_rx.port().unwrap());
+    let bob_rx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind bob rtp");
+    let bob_sdp = crate::common::test_helpers::pcmu_sdp("127.0.0.1", bob_rx.local_addr().unwrap().port());
 
     let mut bob_dialog = None;
+    let mut media_target = None;
     for _ in 0..100 {
         let events = bob.process_dialog_events().await.expect("bob events");
         for event in events {
-            if let TestUaEvent::IncomingCall(id, _offer) = event {
+            if let TestUaEvent::IncomingCall(id, offer) = event {
+                media_target = rustpbx::sipflow::extract_rtp_addr(&offer.expect("originate SDP offer"));
                 bob.send_ringing(&id, Some(bob_sdp.clone()))
                     .await
                     .expect("bob sends 183 with SDP");
@@ -1081,6 +1095,39 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
          then the 180 (early_media=false)"
     );
 
+    // A real provisional answer must negotiate the session-owned A leg,
+    // even before it belongs to a bridge, and deliver decoded RTP to quality.
+    let (socket, _) = tokio::time::timeout(std::time::Duration::from_secs(5), quality_listener.accept())
+        .await.expect("quality connects during early media").unwrap();
+    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await.unwrap().unwrap().unwrap();
+    let start: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+    assert_eq!(start["side"], "caller", "originate's first outbound endpoint is the A leg");
+    assert_eq!(start["sample_rate"], 8000);
+    let sender = tokio::spawn(async move {
+        let target = media_target.expect("PBX RTP address");
+        for seq in 0..30u16 {
+            let packet = RtpPacket::new(0, seq, u32::from(seq) * 160, 0x12345678, vec![0; 160]).encode();
+            bob_rx.send_to(&packet, &target).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(message) = ws.next().await {
+            let message = message.unwrap();
+            if message.is_binary() {
+                let pcm = message.into_data();
+                assert_eq!(pcm.len(), 320, "20 ms of 8 kHz mono PCM16");
+                // The jitter buffer can emit initial silence before RTP arrives.
+                if pcm.chunks_exact(2).any(|sample| i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() > 1000) {
+                    return;
+                }
+            }
+        }
+        panic!("quality connection closed before audio");
+    }).await.expect("quality receives early RTP as PCM");
+    sender.await.unwrap();
     bob.hangup(&bob_id).await.expect("bob hangs up");
     server.stop();
 }
