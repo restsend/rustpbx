@@ -2714,6 +2714,7 @@ mod tests {
             transport: None,
             user_agent: None,
             home_proxy: None,
+            outbound_trunk: None,
         };
         assert_eq!(
             PresenceManager::get_user(&loc).as_deref(),
@@ -2762,6 +2763,7 @@ mod tests {
             transport: None,
             user_agent: None,
             home_proxy: None,
+            outbound_trunk: None,
         };
         let pruned = manager
             .handle_locator_event(

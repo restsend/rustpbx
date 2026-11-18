@@ -75,6 +75,19 @@ impl TransferTargetDialog {
     }
 }
 
+/// The party that already answered the replaced (consult) session, as
+/// reported by `CallCommand::QueryAnsweredConsultTarget` — the attended-
+/// REFER gate's input for choosing between the R1 app hand-off and the
+/// RFC 3891 takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnsweredConsultTarget {
+    /// User part of the answered leg's endpoint (e.g. the dispatched
+    /// agent's extension; an application leg carries its target user).
+    pub endpoint_user: String,
+    /// Full endpoint for diagnostics.
+    pub endpoint: String,
+}
+
 /// Declared intent of a session-originated dial (`CallCommand::LegAdd`).
 ///
 /// Set by the DIALING side (the app / API that issues the command) so the
@@ -670,6 +683,17 @@ pub enum CallCommand {
         /// Extension of the transfer target (matches the leg's remote user).
         target_user: String,
         reply: oneshot::Sender<Option<super::TransferTargetDialog>>,
+    },
+
+    /// Attended-REFER gate (queue/IVR feature-code Refer-To): report the
+    /// party that already ANSWERED the replaced consult session, if any.
+    /// `None` while the consult is still inside the application (IVR
+    /// prompt / queue ringing — nobody picked up yet); `Some` once a real
+    /// leg (typically a queue-dispatched agent) is Connected/Hold. The
+    /// caller decides the R1 hand-off vs the RFC 3891 takeover from this.
+    #[serde(skip)]
+    QueryAnsweredConsultTarget {
+        reply: oneshot::Sender<Option<super::AnsweredConsultTarget>>,
     },
 
     #[serde(skip)]

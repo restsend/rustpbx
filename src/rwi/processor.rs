@@ -937,17 +937,16 @@ impl RwiCommandProcessor {
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
-        // Explicit-trunk originates stamp the trunk's correlation header
-        // with the session id (verbatim string channel) — the route-table
-        // originate path stamps inside build_target_invite_option instead.
-        if let Some(trunk_name) = req.trunk.as_deref() {
-            if let Some(name) = server.data_context.session_id_header_for(Some(trunk_name)) {
-                headers.push(rsipstack::sip::Header::Other(
-                    name,
-                    global_session_id.clone(),
-                ));
-            }
-        }
+        // Explicit-trunk originates select their correlation header from the
+        // named trunk; route-table originates fill this in when a Forward
+        // result names one. The stamp is applied after routing (see below) so
+        // the logical-call root always wins over caller-supplied headers.
+        let mut originate_trunk_name: Option<String> = req
+            .trunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         // Root session id via RFC 7433 UUI — the originate call is a session
         // root; the header lets external legs re-attach on the way back in.
         // Id-shaped values only: a custom (non-hex) session id correlates
@@ -1095,6 +1094,13 @@ impl RwiCommandProcessor {
                         let crate::config::RouteTarget { option: routed_option, hints, .. } =
                             targets.into_iter().next().ok_or_else(||
                                 CommandError::CommandFailed("routing returned no destinations".into()))?;
+                        if let Some(trunk) = hints.as_ref().and_then(|hints| {
+                            hints
+                                .extensions
+                                .get::<crate::call::OutboundTrunkContext>()
+                        }) {
+                            originate_trunk_name = Some(trunk.name.clone());
+                        }
                         invite_option.callee = routed_option.callee.clone();
                         if let Some(dest) = routed_option.destination.clone() {
                             invite_option.destination = Some(dest);
@@ -1125,6 +1131,41 @@ impl RwiCommandProcessor {
                     _ => None, // NotHandled / Queue / Application / disabled → legacy direct dial
                 }
             };
+
+        // Outbound correlation header for the selected trunk (explicit or
+        // route-table-selected). Without a trunk name the destination is
+        // matched against configured trunk next-hops (route-disabled direct
+        // originates). The value is the logical-call root, verbatim — never
+        // the RFC-padded wire form.
+        let correlation_header = match originate_trunk_name.as_deref() {
+            Some(name) => server.data_context.session_id_header_for(Some(name)),
+            None => {
+                let (host, port) = match invite_option.destination.as_ref() {
+                    Some(destination) => (
+                        destination.addr.host.to_string(),
+                        destination.addr.port.map(|port| port.0).unwrap_or(5060),
+                    ),
+                    None => (
+                        invite_option.callee.host().to_string(),
+                        invite_option
+                            .callee
+                            .host_with_port
+                            .port
+                            .map(|port| port.0)
+                            .unwrap_or(5060),
+                    ),
+                };
+                server
+                    .data_context
+                    .session_id_header_for_destination(&host, port)
+            }
+        };
+        if let Some(name) = correlation_header
+            && let Some(root) = crate::call::session_id::normalize_custom(&global_session_id)
+        {
+            let headers = invite_option.headers.get_or_insert_with(Vec::new);
+            crate::call::session_id::set_correlation_header(headers, &name, &root);
+        }
 
         let call_id = req.call_id.clone();
         let gateway = self.gateway.clone();

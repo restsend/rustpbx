@@ -376,6 +376,55 @@ pub fn build_wire_header(id: Option<&str>) -> (Option<String>, Option<Header>) {
     }
 }
 
+/// Ensure exactly one outbound custom correlation header carries `value`.
+///
+/// The header is a system-level correlation channel: when a previous value is
+/// already present (header passthrough, route rewrite, CTI-supplied headers),
+/// the logical-call ROOT id wins — the peer must always see the retained root,
+/// never a stale/legacy value. A standard typed header with the same name is
+/// never overwritten (that would corrupt SIP framing); the caller gets a
+/// warning instead of a broken message.
+pub fn set_correlation_header(headers: &mut Vec<Header>, name: &str, value: &str) {
+    // Custom correlation headers are X-* extensions. Refusing anything else
+    // keeps a misconfigured trunk from replacing a standard SIP header
+    // (Call-ID / User-to-User / ...) with an `Other` duplicate.
+    let is_x_header = name
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("X-"));
+    if !is_x_header {
+        tracing::warn!(
+            header = %name,
+            "session-id correlation header must be an X-* custom header; not stamping"
+        );
+        return;
+    }
+    if headers.iter().any(|header| {
+        header.name().eq_ignore_ascii_case(name) && !matches!(header, Header::Other(_, _))
+    }) {
+        tracing::warn!(
+            header = %name,
+            "session-id correlation header name collides with a standard SIP header; not stamping"
+        );
+        return;
+    }
+    let previous = headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+        .map(|header| header.value().to_string());
+    headers.retain(|header| !header.name().eq_ignore_ascii_case(name));
+    if let Some(previous) = previous
+        && previous != value
+    {
+        tracing::warn!(
+            header = %name,
+            previous = %previous,
+            value = %value,
+            "replacing outbound session-id correlation header with the logical-call root id"
+        );
+    }
+    headers.push(Header::Other(name.to_string(), value.to_string()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,5 +912,74 @@ mod tests {
         assert_eq!(normalize_custom("a b"), None);
         assert_eq!(normalize_custom("a\nb"), None);
         assert_eq!(normalize_custom("呼叫-2026"), None);
+    }
+
+    #[test]
+    fn set_correlation_header_replaces_stale_value() {
+        let mut headers = vec![
+            Header::Other("X-GSession-ID".to_string(), "stale".to_string()),
+            Header::Other("X-GSession-ID".to_string(), "duplicate".to_string()),
+        ];
+        set_correlation_header(&mut headers, "X-GSession-ID", "708fed201de7cbb");
+        let values: Vec<_> = headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case("X-GSession-ID"))
+            .map(|header| header.value().to_string())
+            .collect();
+        assert_eq!(values, vec!["708fed201de7cbb"]);
+    }
+
+    #[test]
+    fn set_correlation_header_keeps_single_equal_value() {
+        let mut headers = vec![Header::Other(
+            "X-GSession-ID".to_string(),
+            "708fed201de7cbb".to_string(),
+        )];
+        set_correlation_header(&mut headers, "X-GSession-ID", "708fed201de7cbb");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].value(), "708fed201de7cbb");
+    }
+
+    #[test]
+    fn set_correlation_header_preserves_unrelated_headers() {
+        let mut headers = vec![
+            Header::Other("X-Other-Correlation".to_string(), "keep-me".to_string()),
+            Header::Other("X-GSession-ID".to_string(), "stale".to_string()),
+            Header::Other("X-Trace-Id".to_string(), "trace-1".to_string()),
+        ];
+        set_correlation_header(&mut headers, "X-GSession-ID", "root-1");
+        assert!(headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case("X-Other-Correlation")
+                && header.value() == "keep-me"
+        }));
+        assert!(headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case("X-Trace-Id") && header.value() == "trace-1"
+        }));
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|header| header.name().eq_ignore_ascii_case("X-GSession-ID"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn set_correlation_header_never_overwrites_a_typed_header() {
+        let mut headers = vec![Header::Other("X-GSession-ID".to_string(), "root".to_string())];
+        // A standard `User-to-User` header must not be replaced even when the
+        // configured correlation name collides with it.
+        headers.push(crate::call::uui::build_uui_header("root", None, None, None, None));
+        let before = headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case("User-to-User"))
+            .count();
+        set_correlation_header(&mut headers, "User-to-User", "root");
+        let after = headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case("User-to-User"))
+            .count();
+        assert_eq!(before, after);
+        assert_eq!(after, 1);
     }
 }

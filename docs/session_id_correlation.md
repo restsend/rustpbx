@@ -41,9 +41,14 @@ consult 咨询腿、外转外部网络后回落的通话。
   头 / UUI wire 通道(`build_wire_header` 拒绝非 id 形态值;UUI 声明
   `encoding=hex`,不对非 hex 值撒谎)。
 - **出站关联头 stamping(自定义头闭环)**:发往配置了 `session_id_header` 的
-  trunk 的 INVITE(routing 路由腿与显式 trunk originate)自动以当前
-  session id stamp 该头 —— trunk 送进来的原始值在出站原样返回;内部腿
-  (agent 腿 / 注册分机)不 stamp;`header_passthrough` 已转发的头不重复。
+  trunk 的 INVITE(routing 路由腿、显式 trunk originate、动态腿/leg_add、
+  客户盲转/咨询、入站 REFER 独立执行分支)自动以当前逻辑呼叫的**根 session id**
+  stamp 该头 —— trunk 送进来的原始值在出站原样返回;没有路由上下文时按目标
+  `host:port` 匹配 trunk 的 `dest` 兜底(仅匹配已配置 trunk 的目标)。内部腿
+  (agent 腿 / 注册分机)不 stamp;同名头已存在时以根 session id 覆盖并 warn
+  (`header_passthrough` / 路由 rewrite / CTI 显式头不得保留旧值或产生重复);
+  `session_id_header` 必须是 `X-*` 自定义头。DB/控制台管理的 trunk 可通过
+  `metadata.sbc.session_id_header` 配置(与 `[proxy.trunks.<name>]` 等价)。
 - **子通话**:创建时从父通话的 CallMeta 继承 `session_id`(服务端内部继承为权威,
   不依赖信令头)
 - **`session_id == call_id`** 表示该通话是根

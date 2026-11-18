@@ -975,6 +975,317 @@ async fn test_originate_explicit_trunk_skips_route() {
     );
 }
 
+/// RWI originate WITHOUT an explicit trunk selects a trunk through the route
+/// table: the outbound INVITE must carry that trunk's `session_id_header`
+/// with the logical-call root (the reported G-system X-GSession-ID gap).
+#[tokio::test]
+async fn test_originate_route_table_stamps_trunk_correlation_header() {
+    use crate::common::e2e_test_server::E2eTestServer;
+    use rustpbx::config::ProxyConfig;
+    use rustpbx::proxy::routing::{
+        DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig,
+    };
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let trunk_dest = format!("sip:{}", socket.local_addr().unwrap());
+    let mut config = ProxyConfig::default();
+    config.route_originated_calls = true;
+    config.routes = Some(vec![RouteRule {
+        name: "outbound-g".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("9.*".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("g-system".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    config.trunks = std::collections::HashMap::from([(
+        "g-system".to_string(),
+        TrunkConfig {
+            dest: trunk_dest,
+            session_id_header: Some("X-GSession-ID".to_string()),
+            ..Default::default()
+        },
+    )]);
+
+    let server = E2eTestServer::start_with_config(config)
+        .await
+        .expect("start e2e server");
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        Arc::new(RwLock::new(RwiGateway::new())),
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    const ROOT: &str = "708fed201de7cbb";
+    let result = processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                session_id: Some(ROOT.to_string()),
+                call_id: "route-g-header".into(),
+                destination: "sip:9001@rustpbx.com".into(),
+                caller_id: None,
+                timeout_secs: Some(2),
+                extra_headers: std::collections::HashMap::new(),
+                agent: None,
+                trunk: None,
+                route_originated_calls: Some(true),
+                record: None,
+            },
+        ))
+        .await;
+    assert!(result.is_ok(), "route-table originate failed: {result:?}");
+
+    let mut buffer = [0u8; 8192];
+    let (size, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        socket.recv_from(&mut buffer),
+    )
+    .await
+    .expect("routed originate INVITE must reach the trunk")
+    .expect("UDP receive");
+    let invite = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
+    assert!(
+        invite.contains(&format!("\r\nx-gsession-id: {ROOT}")),
+        "route-table originate must stamp the selected trunk's header: {invite}"
+    );
+}
+
+/// Agent click-to-call (CTI originate): the RWI originate path must emit the
+/// full unified `call_*` webhook chain — `call_ringing` when the dialed
+/// customer leg rings (180), `call_answered` when it connects — enriched with
+/// the originating agent's `agent_id` (resolved via `resolved_agent_id` and
+/// published by the CC session hook), plus `call_hangup` on teardown.
+///
+/// Before the unification these were separate `cc_ringing`/`cc_answered`/
+/// `cc_hangup` events emitted by the CC addon; the originate setup loop
+/// dialing its first leg outside the session-hook lifecycle used to skip the
+/// ringing/answered events entirely.
+#[cfg(feature = "addon-cc")]
+#[tokio::test]
+async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events() {
+    use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+    use crate::common::rtp_utils::RtpReceiver;
+    use crate::common::test_ua::TestUaEvent;
+    use rustpbx::addons::cc::acd::{AcdConfig, AcdEngine};
+    use rustpbx::addons::cc::agent::{AgentRegistry as CcAgentRegistry, AgentStatus};
+    use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+    use rustpbx::config::ProxyConfig;
+
+    // ── CC wiring: agent registry + session hook ──────────────────────────
+    let cc_registry = Arc::new(CcAgentRegistry::new());
+    cc_registry
+        .register("1001".to_string(), vec![], 1)
+        .await
+        .expect("register agent");
+    cc_registry
+        .update_status("1001", AgentStatus::Idle)
+        .await
+        .expect("agent idle");
+
+    let hook = Arc::new(
+        rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
+            cc_registry.clone(),
+            Arc::new(rustpbx::addons::cc::metrics::MetricsCollector::new()),
+        ),
+    );
+    let adapter = Arc::new(CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        Arc::new(AcdEngine::new(AcdConfig::default())),
+        "127.0.0.1",
+    ));
+
+    // Shared gateway: the server AND the originate processor must use the SAME
+    // gateway so the session-published agent meta enriches the core events.
+    let gateway: Arc<RwLock<RwiGateway>> = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut tap = gateway.read().subscribe_events();
+
+    let inject = E2eTestServerInject {
+            queue_enricher: None,
+        session_hook: Some(hook),
+        agent_registry: Some(adapter),
+        rwi_gateway: Some(gateway.clone()),
+        ..Default::default()
+    };
+    let server = E2eTestServer::start_with_inject(ProxyConfig::default(), inject)
+        .await
+        .expect("start e2e server");
+
+    // ── Originate: agent 1001 → customer "bob" ─────────────────────────────
+    let bob = server.create_ua("bob").await.expect("create bob UA");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        gateway.clone(),
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    let call_id = "cti-originate-e2e-1".to_string();
+    // Direct-to-callee dial: point at bob's UA socket (the originate loop's
+    // raw client dialog does not consult the proxy locator).
+    let destination = format!("sip:bob@127.0.0.1:{}", bob.local_port());
+    processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                session_id: None,
+                call_id: call_id.clone(),
+                destination,
+                caller_id: Some("sip:1001@127.0.0.1".into()),
+                timeout_secs: Some(15),
+                extra_headers: std::collections::HashMap::new(),
+                agent: None,
+                trunk: None,
+                route_originated_calls: None,
+                record: None,
+            },
+        ))
+        .await
+        .expect("originate accepted");
+
+    // ── Customer leg: ring (180) then answer (200 OK) ──────────────────────
+    let bob_rx = RtpReceiver::bind(0).await.expect("bind bob rtp");
+    let bob_sdp = crate::common::test_helpers::pcmu_sdp("127.0.0.1", bob_rx.port().unwrap());
+
+    let mut bob_dialog = None;
+    for _ in 0..100 {
+        let events = bob.process_dialog_events().await.expect("bob events");
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _offer) = event {
+                // 180 Ringing first — this must produce call_ringing.
+                bob.ring_call(&id).await.expect("bob rings 180");
+                bob_dialog = Some(id.clone());
+                break;
+            }
+        }
+        if bob_dialog.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let bob_id = bob_dialog.expect("bob never received the originate INVITE");
+
+    // call_ringing must arrive after the 180 — now the DUAL contract like
+    // every other flow: the leg-level event first (leg_id "caller", the
+    // outgoing INVITE leg = the customer), then the session-level event.
+    // Both enriched with agent_id = 1001 via call-meta.
+    let ringing = wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
+        .await
+        .expect("call_ringing expected after 180 Ringing");
+    assert_eq!(ringing.call_id, call_id);
+    assert_eq!(
+        ringing.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the customer leg's ringing must carry its leg_id, got: {:?}",
+        ringing.event.payload
+    );
+    assert_eq!(
+        ringing.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg rings as the caller, got: {:?}",
+        ringing.event.payload
+    );
+    assert_eq!(
+        ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_ringing must carry the originating agent's id"
+    );
+    assert_eq!(
+        ringing.event.payload["early_media"].as_bool(),
+        Some(false),
+        "plain 180 must carry early_media=false"
+    );
+    let session_ringing =
+        wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-level call_ringing expected after the leg event");
+    assert!(
+        session_ringing.event.payload["leg_id"].is_null()
+            && session_ringing.event.payload["leg_role"].is_null(),
+        "session-level ringing must carry no leg fields, got: {:?}",
+        session_ringing.event.payload
+    );
+    assert_eq!(
+        session_ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "session-level call_ringing must carry the originating agent's id"
+    );
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(
+            matches!(agent.status, AgentStatus::Ringing { .. }),
+            "agent must be Ringing after customer 180, got {}",
+            agent.status
+        );
+    }
+
+    bob.answer_call(&bob_id, Some(bob_sdp))
+        .await
+        .expect("bob answers");
+
+    // call_answered is per leg now. In the UAC originate the OUTGOING
+    // INVITE leg IS the session's "caller" leg — its answer IS the customer
+    // answer. So exactly two answered events: the leg-level one (leg_id
+    // "caller") + the session-scoped duplicate (deprecated, no leg_id).
+    let answered = wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
+        .await
+        .expect("call_answered expected after 200 OK");
+    assert_eq!(answered.call_id, call_id);
+    assert_eq!(
+        answered.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the outgoing leg's answer must carry its leg_id, got: {:?}",
+        answered.event.payload
+    );
+    assert_eq!(
+        answered.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg answers as the caller, got: {:?}",
+        answered.event.payload
+    );
+
+    // The session-scoped duplicate (deprecated) follows from originate
+    // completion, without leg fields.
+    let session_answered =
+        wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-scoped call_answered expected after the leg event");
+    assert!(
+        session_answered.event.payload["leg_id"].is_null(),
+        "session-scoped duplicate must carry no leg_id, got: {:?}",
+        session_answered.event.payload
+    );
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(
+            matches!(agent.status, AgentStatus::Busy { .. }),
+            "agent must be Busy after customer answers, got {}",
+            agent.status
+        );
+    }
+
+    // ── Teardown: customer hangs up → call_hangup ─────────────────────────
+    bob.hangup(&bob_id).await.expect("bob hangs up");
+    let hangup = wait_for_tap_event(&mut tap, "call_hangup", std::time::Duration::from_secs(10))
+        .await
+        .expect("call_hangup expected after hangup");
+    assert_eq!(
+        hangup.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_hangup must carry the agent's id"
+    );
+
+    server.stop();
+}
+
+
 /// Originate provisional responses must surface as the CORE `call_ringing`
 /// event carrying an `early_media` flag — the separate `call_early_media`
 /// event type was folded into `call_ringing`. Emission is per provisional

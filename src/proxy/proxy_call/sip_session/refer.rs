@@ -33,6 +33,7 @@ impl SipSession {
             return Ok(());
         }
         let refer_to = targets[0].trim().trim_start_matches('<').trim_end_matches('>').to_string();
+        let mut refer_to = refer_to;
         if !dialog.state().is_confirmed() || self.leg_id_for_dialog(&dialog_id.to_string()).is_none() {
             transaction.reply(StatusCode::CallTransactionDoesNotExist).await?;
             return Ok(());
@@ -95,10 +96,54 @@ impl SipSession {
                 warn!(session_id = %self.id, error = %error, "REFER NOTIFY (Trying) failed; continuing transfer");
             }
             if let Some(app_target) = app_target {
-                return self.handle_inbound_refer(
-                    dialog_id, app_target,
-                    Self::refer_application_headers(request.headers.iter()), callee_state_rx,
-                ).await;
+                // The R1 hand-off (the customer enters the app) is only
+                // correct while the consult is still INSIDE the application.
+                // A queue/IVR consult that has already DISPATCHED to an
+                // agent who answered must complete via the RFC 3891 takeover:
+                // the hand-off would tear the answered consult (target hung),
+                // release the transferor, and re-queue the customer on hold
+                // music (production 2026-11-16: complete-transfer to a
+                // queue-dispatched consult target dropped both legs).
+                match Self::replaced_consult_answered_party(&self.server, replaces).await {
+                    Some(party) => {
+                        let is_registered_agent = if let Some(registry) = self.server.agent_registry.as_ref() {
+                            // Direct await (same pattern as the dial-time
+                            // exclusion guard below): a block_on would park
+                            // the session actor's thread while the registry
+                            // lookup awaits the same runtime.
+                            registry.resolve_dial_target_agent(&party.endpoint_user).await.is_some()
+                        } else {
+                            false
+                        };
+                        if !is_registered_agent {
+                            // Application leg still owns the consult (IVR
+                            // prompt playing / queue ringing): the 09-29
+                            // hand-off semantics stay.
+                            return self.handle_inbound_refer(
+                                dialog_id, app_target,
+                                Self::refer_application_headers(request.headers.iter()), callee_state_rx,
+                            ).await;
+                        }
+                        info!(
+                            session_id = %self.id,
+                            party = %party.endpoint_user,
+                            %app_target,
+                            "attended REFER to app target: consult already answered by a registered agent — Replaces takeover wins over the app hand-off"
+                        );
+                        // Rewrite the Refer-To onto the real consulted party
+                        // (keep host + Replaces query): the relayed REFER,
+                        // the transferee's INVITE(Replaces) Request-URI, the
+                        // takeover endpoint match and the transferred-call
+                        // markers all key off it.
+                        refer_to = Self::retarget_refer_to_user(&refer_to, &party.endpoint_user);
+                    }
+                    None => {
+                        return self.handle_inbound_refer(
+                            dialog_id, app_target,
+                            Self::refer_application_headers(request.headers.iter()), callee_state_rx,
+                        ).await;
+                    }
+                }
             }
             // The REFERer's User-Agent identifies the transferee's engine: a
             // restsend-family UA natively executes Refer-To with Replaces
@@ -793,6 +838,56 @@ impl SipSession {
             .then(|| user.to_string())
     }
 
+    /// The party that already ANSWERED the replaced (consult) session named
+    /// by the Replaces header, if any. `None` while the consult is still
+    /// inside the application (IVR prompt playing / target still ringing —
+    /// nobody picked up yet).
+    async fn replaced_consult_answered_party(
+        server: &SipServerRef,
+        replaces: &str,
+    ) -> Option<crate::call::domain::AnsweredConsultTarget> {
+        let call_id = replaces.split(';').next().unwrap_or_default().trim();
+        if call_id.is_empty() {
+            return None;
+        }
+        let owner = server.active_call_registry.get_handle_by_dialog(call_id)?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        owner
+            .send_command(crate::call::domain::CallCommand::QueryAnsweredConsultTarget {
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    /// Rewrite only the USER part of a Refer-To value (`sip:<user>@<host>`,
+    /// or a bare user token), preserving host/port and any `?query` (the
+    /// pct-encoded Replaces). The rewritten URI stays routable the same way
+    /// the original feature code was — same host, real consulted party.
+    fn retarget_refer_to_user(refer_to: &str, new_user: &str) -> String {
+        let (base, query) = match refer_to.split_once('?') {
+            Some((b, q)) => (b, Some(q)),
+            None => (refer_to, None),
+        };
+        let new_base = match base.split_once('@') {
+            Some((old_user, host)) => {
+                let scheme = if old_user.starts_with("sips:") {
+                    "sips:"
+                } else if old_user.starts_with("sip:") {
+                    "sip:"
+                } else {
+                    ""
+                };
+                format!("{scheme}{new_user}@{host}")
+            }
+            None => new_user.to_string(),
+        };
+        match query {
+            Some(q) => format!("{new_base}?{q}"),
+            None => new_base,
+        }
+    }
+
     /// `app_params.file` → IVR display name
     /// ("config/ivr/x.toml" → "x", "db://ivr/x.generated.toml" → "x").
     pub(super) fn ivr_display_name(file: &str) -> Option<String> {
@@ -916,6 +1011,24 @@ impl SipSession {
             None,
             Some(refer_role),
         ));
+        // Legacy standalone REFER execution bypasses the route table, so the
+        // target trunk is resolved from its next-hop host:port. When the
+        // transfer target is a configured trunk (durable external transfer,
+        // e.g. the G system), stamp the trunk's correlation header with the
+        // original logical-call root id.
+        let refer_host = destination_uri.host().to_string();
+        let refer_port = destination_uri
+            .host_with_port
+            .port
+            .map(|port| port.0)
+            .unwrap_or(5060);
+        if let Some(name) = server
+            .data_context
+            .session_id_header_for_destination(&refer_host, refer_port)
+            && let Some(root) = crate::call::session_id::normalize_custom(&root_session_id)
+        {
+            crate::call::session_id::set_correlation_header(&mut headers, &name, &root);
+        }
         let media = server.default_media_config();
         let external_ip = media
             .external_ip

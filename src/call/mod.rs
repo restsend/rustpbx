@@ -188,6 +188,12 @@ pub struct Location {
     pub transport: Option<Transport>,
     pub user_agent: Option<String>,
     pub home_proxy: Option<SipAddr>,
+    /// Outbound trunk selected by the route table for this target (if any).
+    /// Carried on the resolved location so per-target outbound INVITEs can
+    /// stamp the trunk's session-id correlation header
+    /// (`session_id_header`) even when the context never reaches the
+    /// session-level dialplan extensions (dynamic legs / transfer targets).
+    pub outbound_trunk: Option<OutboundTrunkContext>,
 }
 
 /// One routed or sequential destination, including its overrides and retry policy.
