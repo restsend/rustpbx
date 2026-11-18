@@ -33,7 +33,7 @@ use rustrtc::{
     rtp::{RtpHeader, RtpPacket},
 };
 use tokio::sync::{broadcast, oneshot};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::egress::{EgressCodec, EgressPipeline, EgressSource};
 use crate::inband_dtmf;
@@ -898,13 +898,15 @@ impl LegInner {
         // RTP port. Strict stacks like pjmedia demux by port — RTCP landing
         // on the RTP port (rustrtc's fallback destination) is discarded,
         // silently breaking PLI/FIR keyframe recovery and one-way video.
-        let rtcp_endpoints: Vec<(MediaKind, SocketAddr)> =
+        let rtcp_endpoints: Vec<(rustrtc::MediaKind, SocketAddr)> =
             if TransportMode::of(self.pc.config()) != TransportMode::WebRtc {
                 desc.media_sections
                     .iter()
                     .filter(|section| {
-                        matches!(section.kind, MediaKind::Audio | MediaKind::Video)
-                            && !section.attributes.iter().any(|a| a.key == "rtcp-mux")
+                        matches!(
+                            section.kind,
+                            rustrtc::MediaKind::Audio | rustrtc::MediaKind::Video
+                        ) && !section.attributes.iter().any(|a| a.key == "rtcp-mux")
                     })
                     .filter_map(|section| {
                         let value = section
@@ -1756,24 +1758,27 @@ struct RtcpEndpointSync {
     /// Weak handles on purpose: the PeerConnection holds observers for its
     /// lifetime, so strong references here would form a cycle that keeps a
     /// closed leg's transports alive.
-    transports: Mutex<Vec<(MediaKind, Weak<rustrtc::transports::ice::conn::IceConn>)>>,
+    transports: Mutex<Vec<(rustrtc::MediaKind, Weak<rustrtc::transports::ice::conn::IceConn>)>>,
 }
 
 impl RtcpEndpointSync {
     /// Remember the RTCP endpoint the remote SDP declared for `kind`.
-    fn record_declared(&self, kind: MediaKind, addr: SocketAddr) {
+    fn record_declared(&self, kind: rustrtc::MediaKind, addr: SocketAddr) {
         let mut declared = self.declared.lock();
         match kind {
-            MediaKind::Audio => declared.audio = Some(addr),
-            MediaKind::Video => declared.video = Some(addr),
-            _ => {}
+            rustrtc::MediaKind::Audio => declared.audio = Some(addr),
+            rustrtc::MediaKind::Video => declared.video = Some(addr),
         }
     }
 
     /// Track `conn` as the transport `kind`'s declared endpoint applies to.
     /// Registered when the transport appears during SDP application; the same
     /// transport is updated in place across re-INVITEs.
-    fn register_transport(&self, kind: MediaKind, conn: &Arc<rustrtc::transports::ice::conn::IceConn>) {
+    fn register_transport(
+        &self,
+        kind: rustrtc::MediaKind,
+        conn: &Arc<rustrtc::transports::ice::conn::IceConn>,
+    ) {
         let mut transports = self.transports.lock();
         match transports.iter_mut().find(|(k, _)| *k == kind) {
             Some((_, weak)) => *weak = Arc::downgrade(conn),
@@ -1791,9 +1796,8 @@ impl RtcpEndpointSync {
         let transports = self.transports.lock();
         for (kind, conn) in transports.iter() {
             let declared = match kind {
-                MediaKind::Audio => declared.audio,
-                MediaKind::Video => declared.video,
-                _ => None,
+                rustrtc::MediaKind::Audio => declared.audio,
+                rustrtc::MediaKind::Video => declared.video,
             };
             let Some(declared) = declared else { continue };
             let Some(conn) = conn.upgrade() else { continue };
@@ -2475,7 +2479,8 @@ a=sendrecv\r\n";
             .await
             .expect("apply offer");
 
-        let audio = rtp_transport_for_kind(leg.pc(), MediaKind::Audio).expect("audio transport");
+        let audio =
+            rtp_transport_for_kind(leg.pc(), rustrtc::MediaKind::Audio).expect("audio transport");
         assert_eq!(
             *audio.ice_conn().remote_rtcp_addr.read(),
             Some("10.0.0.8:4001".parse().unwrap()),
@@ -2483,7 +2488,7 @@ a=sendrecv\r\n";
         );
         // The video section is rtcp-mux — its (also-declared) endpoint must
         // NOT be installed; RTCP shares the RTP port there.
-        if let Some(video) = rtp_transport_for_kind(leg.pc(), MediaKind::Video) {
+        if let Some(video) = rtp_transport_for_kind(leg.pc(), rustrtc::MediaKind::Video) {
             assert_eq!(
                 *video.ice_conn().remote_rtcp_addr.read(),
                 None,
