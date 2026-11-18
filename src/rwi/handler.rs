@@ -401,9 +401,12 @@ fn build_command_result_event(
                 CommandResult::Success => {
                     event["status"] = serde_json::json!("success");
                 }
-                CommandResult::LegAdded { leg_id } => {
+                CommandResult::LegAdded { leg_id, answer } => {
                     event["status"] = serde_json::json!("success");
-                    event["data"] = serde_json::json!({ "leg_id": leg_id });
+                    event["data"] = match answer {
+                        Some(answer) => serde_json::json!({ "leg_id": leg_id, "answer": answer }),
+                        None => serde_json::json!({ "leg_id": leg_id }),
+                    };
                 }
                 CommandResult::ListCalls(calls) => {
                     event["status"] = serde_json::json!("success");

@@ -211,7 +211,7 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 | `call.set_userdata` / `call.get_userdata` | 全量替换/读取会话用户数据对象（见下） |
 | `call.send_dtmf` | 向远端发送 DTMF 数字 |
 | `dtmf.collect` | 收集多位 DTMF 字符串 |
-| `call.leg_add` / `call.leg_remove` | 动态添加/移除通话腿 |
+| `call.leg_add` / `call.leg_remove` | 动态添加/移除通话腿（拨号，或由 SDP offer 应答） |
 | `call.app_start` / `call.app_stop` | 在会话上启动/停止通话应用 |
 | `call.resume` | 重新附着后恢复接收某通通话事件 |
 | `app.chain` | 串联进入另一个通话应用 |
@@ -267,6 +267,17 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 ```
 
 有效 `reason` 值：`busy`、`forbidden`、`not_found`。
+
+**由 SDP offer 添加通话腿（WebRTC 加入）：**
+
+`call.leg_add` 可以不带 `target`，改带 `offer`：由直接加入通话的客户端（如浏览器，或经控制方通过 RWI 中转信令的 WebRTC 坐席）生成的 SDP offer。会话按 offer 创建该腿的媒体端点（ICE + DTLS → WebRTC，与 WebRTC SIP 主叫相同的传输），生成应答，并随腿 ID 返回 SDP answer。`target` 与 `offer` 互斥。
+
+```json
+{"action":"call.leg_add","action_id":"join-1","params":{"call_id":"session-1","leg_id":"0192f0c4a8e47b3c9d2e5f6a7b8c9d0e","offer":"v=0\r\n..."}}
+{"type":"command_completed","action_id":"join-1","status":"success","data":{"leg_id":"0192f0c4a8e47b3c9d2e5f6a7b8c9d0e","answer":"v=0\r\n..."}}
+```
+
+与拨号腿不同，命令在应答就绪（ICE 候选收集完成，最长 10 秒）后才完成，且该腿立即处于已接通状态：发出带 `leg_id` 的 `call_answered`，不发 `call_ringing`。若 offer 含主叫已协商的编解码，应答优先使用它，桥接时音频直通；否则按编解码策略（未配置时为 G.711）协商并转码。ICE 使用媒体配置中的 `external_ip`、`webrtc_port_start`/`end` 与 `ice_servers`。该腿没有 SIP 对话：用 `call.bridge` 桥接，用 `call.leg_remove` 结束，通话结束时随之结束。`call.bridge` 在派发前校验腿 ID，只接受 `caller`、`callee`、`consult*` 或至少 32 位十六进制字符，因此请为该腿使用这样的 ID。
 
 **设置会话用户数据**（全量替换——旧对象整体丢弃）：
 

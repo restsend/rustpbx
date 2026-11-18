@@ -330,6 +330,9 @@ pub enum RwiCommandPayload {
         #[serde(default)]
         target: String,
         leg_id: Option<String>,
+        /// SDP offer answered by a new media leg instead of dialing `target`
+        #[serde(default)]
+        offer: Option<String>,
     },
     #[serde(rename = "call.leg_remove")]
     LegRemove {

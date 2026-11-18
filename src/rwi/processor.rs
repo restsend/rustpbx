@@ -646,6 +646,20 @@ impl RwiCommandProcessor {
                 call_id,
                 target,
                 leg_id,
+                offer: Some(offer),
+            } => {
+                if !target.is_empty() {
+                    return Err(CommandError::CommandFailed(
+                        "call.leg_add takes either target or offer, not both".to_string(),
+                    ));
+                }
+                return self.leg_add_offer(call_id, leg_id.as_deref(), offer).await;
+            }
+            RwiCommandPayload::LegAdd {
+                call_id,
+                target,
+                leg_id,
+                offer: None,
             } => {
                 return self.leg_add(call_id, target, leg_id.as_deref(), None).await;
             }
@@ -2400,7 +2414,28 @@ impl RwiCommandProcessor {
             leg_id: Some(LegId::new(&leg_id)), headers: Vec::new(),
             purpose,
         }).map_err(|error| CommandError::CommandFailed(error.to_string()))?;
-        Ok(CommandResult::LegAdded { leg_id })
+        Ok(CommandResult::LegAdded {
+            leg_id,
+            answer: None,
+        })
+    }
+
+    /// Add a leg answering `offer`; completes once the session committed the answer.
+    async fn leg_add_offer(
+        &self,
+        call_id: &str,
+        leg_id: Option<&str>,
+        offer: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+        let (leg_id, answer) = handle
+            .add_offer_leg(leg_id.map(LegId::new), offer.to_string())
+            .await
+            .map_err(CommandError::CommandFailed)?;
+        Ok(CommandResult::LegAdded {
+            leg_id: leg_id.to_string(),
+            answer: Some(answer),
+        })
     }
 
     async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
@@ -3710,7 +3745,11 @@ impl RwiCommandProcessor {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum CommandResult {
     /// Dial request queued; progress is reported by leg lifecycle events.
-    LegAdded { leg_id: String },
+    /// `answer` carries the local SDP answer of a leg added from an offer.
+    LegAdded {
+        leg_id: String,
+        answer: Option<String>,
+    },
     Success,
     ListCalls(Vec<CallInfo>),
     CallFound {
