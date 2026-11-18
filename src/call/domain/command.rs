@@ -471,6 +471,12 @@ pub enum CallCommand {
     StartQualityCheck,
     /// Explicitly stop inspection. CC subtitle subscribers never issue this.
     StopQualityCheck,
+    /// Re-target the running inspection's audio sides (quality service
+    /// `{"type":"switch"}`): stop removed sides, connect missing ones.
+    /// Requires the inspection to be running; missing media legs are skipped.
+    QualitySwitchSides {
+        sides: crate::call::quality::QualitySides,
+    },
 
     /// Append an event to the session's call trace timeline.
     ///
@@ -1020,6 +1026,7 @@ impl CallCommand {
             CallCommand::Play { .. }
                 | CallCommand::StartRecording { .. }
                 | CallCommand::StartQualityCheck
+                | CallCommand::QualitySwitchSides { .. }
                 | CallCommand::SupervisorListen { .. }
                 | CallCommand::SupervisorWhisper { .. }
                 | CallCommand::SupervisorBarge { .. }

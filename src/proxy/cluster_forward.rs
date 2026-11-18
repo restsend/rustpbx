@@ -456,6 +456,89 @@ pub async fn routed_op_on_owner(
     }
 }
 
+/// Outcome of a streaming (SSE) owner-routed forward.
+#[derive(Debug)]
+pub enum OwnerStreamOutcome {
+    /// This node hosts the session (or no peers are configured) — the caller
+    /// applies its local handler.
+    ApplyLocally,
+    /// The owner node answered — pipe the response (status + byte stream)
+    /// through to the client unchanged.
+    Streaming(reqwest::Response),
+    /// The registry has no record of the call. Callers fall through to their
+    /// local handler (which answers 404 with its own semantics).
+    UnknownCall,
+    /// The registry backend failed — retryable, never a misleading 404.
+    RegistryUnavailable(String),
+    /// The owner was resolved but no peer matched its node id.
+    OwnerUnreachable,
+}
+
+/// Locate the session's owner and proxy a long-lived GET stream (SSE) from
+/// there — the transcript event tap lives on the node hosting the session.
+///
+/// Same owner-resolution contract as [`routed_op_on_owner`], with two stream
+/// specific differences: the response is piped through as a byte stream (no
+/// buffering, no forward timeout), and there is deliberately NO fan-out
+/// fallback — a stream must come from THE owner; probing every peer would
+/// open empty streams on non-owner nodes. Loop safety: the forwarded request
+/// carries `forwarded_header`, and the peer's handler MUST treat its
+/// presence as "apply locally" (terminal, never re-resolves) — single hop by
+/// construction.
+pub async fn proxy_stream_on_owner(
+    registry: &SessionRegistryRef,
+    peers: &[ClusterPeer],
+    self_node_id: Option<&str>,
+    base_path: &str,
+    client: &reqwest::Client,
+    call_id: &str,
+    relative_path: &str,
+    forwarded_header: (&str, String),
+    authorization: Option<String>,
+) -> OwnerStreamOutcome {
+    if peers.is_empty() {
+        return OwnerStreamOutcome::UnknownCall;
+    }
+    // The client's call_id is passed through verbatim — the owner's handler
+    // applies the same resolution/filter semantics as the local one.
+
+    match locate_owner(registry, call_id).await {
+        OwnerLocation::Unavailable(e) => OwnerStreamOutcome::RegistryUnavailable(e),
+        OwnerLocation::Unknown => OwnerStreamOutcome::UnknownCall,
+        OwnerLocation::Found(owner) => {
+            // Invariant: never HTTP ourselves — apply locally instead.
+            if self_node_id.is_some_and(|self_id| self_id == owner) {
+                return OwnerStreamOutcome::ApplyLocally;
+            }
+            let Some(peer) = peer_for_node_id(peers, &owner) else {
+                return OwnerStreamOutcome::OwnerUnreachable;
+            };
+            let url = format!(
+                "{}/{}",
+                peer_ami_base(peer, base_path),
+                relative_path
+            );
+            let mut req = client.get(&url);
+            if let Some(auth) = authorization {
+                req = req.header(reqwest::header::AUTHORIZATION, auth);
+            }
+            req = req.header(forwarded_header.0, forwarded_header.1);
+            match req.send().await {
+                Ok(resp) => OwnerStreamOutcome::Streaming(resp),
+                Err(error) => {
+                    tracing::warn!(
+                        %call_id,
+                        owner = %owner,
+                        %error,
+                        "streaming forward to owner failed"
+                    );
+                    OwnerStreamOutcome::OwnerUnreachable
+                }
+            }
+        }
+    }
+}
+
 /// ONE bounded fan-out round: every peer receives exactly one request
 /// (concurrently); the first non-404 response wins.  Loop-safe by
 /// construction — the terminal `cluster/*` endpoints apply locally and never
@@ -887,6 +970,148 @@ mod tests {
             Some("10.0.0.2".to_string())
         );
         assert!(peer_for_node_id(&peers, "10.9.9.9:5060").is_none());
+    }
+
+    /// `proxy_stream_on_owner` pipes the owner's SSE-like response through:
+    /// single-cast to the owning peer with the forwarded-marker and
+    /// Authorization headers preserved, body streamed (not buffered).
+    /// Self-owned applies locally; an unknown call and a registry outage
+    /// surface as their own outcomes.
+    #[tokio::test]
+    async fn proxy_stream_forwards_from_owning_peer() {
+        use crate::call::runtime::{MemorySessionRegistry, SessionInfo, SessionRegistry};
+        use axum::{Router, extract::State, routing::get};
+
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<(Option<String>, Option<String>)>();
+        type HeaderCapture = tokio::sync::mpsc::UnboundedSender<(Option<String>, Option<String>)>;
+        async fn stream_handler(
+            State(tx): State<HeaderCapture>,
+            headers: axum::http::HeaderMap,
+        ) -> axum::response::Response {
+            let _ = tx.send((
+                headers
+                    .get("x-rwi-transcript-forwarded")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.to_string()),
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.to_string()),
+            ));
+            axum::response::Response::builder()
+                .status(200)
+                .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                .body(axum::body::Body::from("event: segment\ndata: {}\n\n"))
+                .unwrap()
+        }
+        let app: Router = Router::new()
+            .route("/api/cc/calls/c-1/transcript", get(stream_handler))
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let peers = vec![peer("127.0.0.1", 5060, port)];
+        let registry: crate::call::runtime::SessionRegistryRef = MemorySessionRegistry::new(
+            "127.0.0.1:5060",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(3600),
+        );
+        registry
+            .register(&SessionInfo::new("c-1", "127.0.0.1:5060"))
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        // 1. Owner is the peer → Streaming: headers captured, body piped.
+        match proxy_stream_on_owner(
+            &registry,
+            &peers,
+            Some("10.9.9.9:5060"),
+            "/api",
+            &client,
+            "c-1",
+            "cc/calls/c-1/transcript",
+            ("x-rwi-transcript-forwarded", "self-node".to_string()),
+            Some("Bearer tok".to_string()),
+        )
+        .await
+        {
+            OwnerStreamOutcome::Streaming(resp) => {
+                assert_eq!(resp.status(), 200);
+                assert_eq!(
+                    resp.headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("text/event-stream")
+                );
+                let body = resp.text().await.unwrap();
+                assert!(body.contains("event: segment"), "stream body piped: {body}");
+            }
+            other => panic!("expected Streaming, got {other:?}"),
+        }
+        let (marker, auth) = rx.recv().await.unwrap();
+        assert_eq!(marker.as_deref(), Some("self-node"), "forwarded marker sent");
+        assert_eq!(auth.as_deref(), Some("Bearer tok"), "authorization forwarded");
+
+        // 2. This node owns the session → ApplyLocally, no HTTP round trip.
+        match proxy_stream_on_owner(
+            &registry,
+            &peers,
+            Some("127.0.0.1:5060"),
+            "/api",
+            &client,
+            "c-1",
+            "cc/calls/c-1/transcript",
+            ("x-rwi-transcript-forwarded", "self-node".to_string()),
+            None,
+        )
+        .await
+        {
+            OwnerStreamOutcome::ApplyLocally => {}
+            other => panic!("expected ApplyLocally, got {other:?}"),
+        }
+
+        // 3. Unknown call (no registry row) → UnknownCall, no HTTP.
+        match proxy_stream_on_owner(
+            &registry,
+            &peers,
+            Some("127.0.0.1:5060"),
+            "/api",
+            &client,
+            "missing-call",
+            "cc/calls/missing-call/transcript",
+            ("x-rwi-transcript-forwarded", "self-node".to_string()),
+            None,
+        )
+        .await
+        {
+            OwnerStreamOutcome::UnknownCall => {}
+            other => panic!("expected UnknownCall, got {other:?}"),
+        }
+
+        // 4. Registry outage → RegistryUnavailable (retryable, never 404).
+        let down = MockRegistry::new(MockPlan::Down);
+        match proxy_stream_on_owner(
+            &down,
+            &peers,
+            Some("127.0.0.1:5060"),
+            "/api",
+            &client,
+            "c-1",
+            "cc/calls/c-1/transcript",
+            ("x-rwi-transcript-forwarded", "self-node".to_string()),
+            None,
+        )
+        .await
+        {
+            OwnerStreamOutcome::RegistryUnavailable(_) => {}
+            other => panic!("expected RegistryUnavailable, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "outage path must not hit the peer");
     }
 
     /// `routed_op_on_owner` must POST the op body to the peer owning the

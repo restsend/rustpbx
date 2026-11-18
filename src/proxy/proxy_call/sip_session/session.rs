@@ -946,6 +946,13 @@ impl SipSession {
     /// Effective enable policy owns inspection; subtitle subscriptions are passive.
     pub(crate) async fn maybe_autostart_live_quality(&mut self, at: crate::call::quality::QualityStartWhen) {
         if self.live_quality.is_some() { return; }
+        // Cluster child legs never inspect: the root session at the
+        // dispatching node already streams both sides — a second tap here
+        // would double-bill ASR and duplicate transcripts under one id.
+        if self.context.dialplan.extensions.get::<crate::call::cookie::ClusterChildLeg>().is_some() {
+            debug!(session_id = %self.id, "cluster child leg: quality inspection stays on the root session");
+            return;
+        }
         let mut config = self.server.proxy_config.load().quality.clone().unwrap_or_default();
         if let Some(plan) = self.context.dialplan.extensions.get::<crate::call::quality::QualityPlan>() {
             config.apply(plan);
@@ -956,7 +963,7 @@ impl SipSession {
         { return; }
         if let Err(error) = self.start_live_quality().await {
             warn!(session_id = %self.id, ?at, %error, "Auto start quality inspection failed");
-            self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
+            self.emit_transcript_rwi_event(&crate::rwi::TranscriptError {
                 call_id: self.context.session_id.clone(), side: None, error: error.to_string(),
             });
         }
@@ -11376,7 +11383,7 @@ impl SipSession {
                     Ok(_) => CommandResult::success(),
                     Err(e) => {
                         // Surface the failure to subscribers (SSE / webhook).
-                        self.emit_typed_rwi_event(&crate::rwi::TranscriptError {
+                        self.emit_transcript_rwi_event(&crate::rwi::TranscriptError {
                             call_id: self.context.session_id.clone(),
                             side: None,
                             error: e.to_string(),
@@ -11389,6 +11396,13 @@ impl SipSession {
             CallCommand::StopQualityCheck => {
                 self.stop_live_quality("stopped").await;
                 CommandResult::success()
+            }
+
+            CallCommand::QualitySwitchSides { sides } => {
+                match self.switch_quality_sides(sides).await {
+                    Ok(()) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
             }
 
             CallCommand::Transfer {
@@ -13231,6 +13245,18 @@ impl SipSession {
             self.refresh_rwi_meta();
             let g = gw.read();
             g.send_to_owner(event);
+        }
+    }
+
+    /// Transcript-family events (started/segment/final/error/ended) also fan
+    /// out to context subscribers: any RWI session that subscribed to the
+    /// call id mirrors the stream alongside the owner. Owner delivery and
+    /// cache/webhook behavior are unchanged (single dispatch pass).
+    pub(crate) fn emit_transcript_rwi_event<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
+        if let Some(ref gw) = self.server.rwi_gateway {
+            self.refresh_rwi_meta();
+            let g = gw.read();
+            g.send_to_owner_and_fan_out(event);
         }
     }
 

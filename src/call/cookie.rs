@@ -126,6 +126,15 @@ pub struct CalleeDisplayName(pub String);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalleeOfflineMarker;
 
+/// This inbound INVITE is a CLUSTER CHILD leg of an existing logical call:
+/// the peer declared the root session id (CC UUI `leg=` intent) and the
+/// proxy seam adopted it. The logical call's quality inspection, recording
+/// attribution and CDR stay on the ROOT session at the dispatching node —
+/// a second inspection tap here would duplicate the transcript with
+/// side labels interpreted from local leg roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClusterChildLeg;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundTrunkContext {
     pub id: Option<i64>,

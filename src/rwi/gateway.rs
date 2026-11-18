@@ -200,6 +200,11 @@ impl SessionUserData {
 enum DispatchTarget<'a> {
     /// Deliver to the session that owns the routed `call_id`.
     Owner(&'a CallId),
+    /// Deliver to the owning session AND to every session subscribed to the
+    /// call id as a context — one cache/webhook pass for both audiences
+    /// (transcript events: the owner controls the call, monitoring /
+    /// dashboard subscribers mirror the stream).
+    OwnerAndFanOut,
     /// Deliver to every session subscribed to `context`, optionally excluding
     /// one session.
     FanOut(&'a str, Option<&'a SessionId>),
@@ -544,6 +549,17 @@ impl RwiGateway {
             DispatchTarget::Owner(owner_call_id) => {
                 if let Some(owner_id) = self.call_ownership.get(owner_call_id.as_str()) {
                     self.send_flat_to_session(owner_id, &entry.event);
+                }
+            }
+            DispatchTarget::OwnerAndFanOut => {
+                if let Some(owner_id) = self.call_ownership.get(dispatch_call_id.as_str()) {
+                    self.send_flat_to_session(owner_id, &entry.event);
+                }
+                if let Some(subscribers) = self.context_subscriptions.get(dispatch_call_id.as_str())
+                {
+                    for session_id in subscribers {
+                        self.send_flat_to_session(session_id, &entry.event);
+                    }
                 }
             }
             DispatchTarget::FanOut(context, exclude) => {
@@ -1162,6 +1178,20 @@ impl RwiGateway {
         self.dispatch(&cid, &flat, DispatchTarget::Owner(&cid));
     }
 
+    /// Deliver to the call owner AND to every RWI session subscribed to the
+    /// call id as a context — one cache entry and one webhook pass for both
+    /// audiences. Used by the transcript event family so non-owner monitors
+    /// (dashboards, coach panels) mirror the stream without a second dispatch
+    /// duplicating cache/webhook traffic.
+    pub fn send_to_owner_and_fan_out<E: RwiEventSpec>(&self, event: &E) {
+        let Some(cid) = event.call_id().map(ToOwned::to_owned) else {
+            warn!("send_to_owner_and_fan_out: event has no call_id, skipping");
+            return;
+        };
+        let flat = RwiEvent::from_spec(event, None);
+        self.dispatch(&cid, &flat, DispatchTarget::OwnerAndFanOut);
+    }
+
     /// Send an event to the owner of an explicit `call_id` regardless of the
     /// event's own `call_id()`. Used by supervisor / ringback flows that fan a
     /// single event out to several call owners. Caches and forwards to the
@@ -1329,6 +1359,61 @@ mod tests {
             });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_answered"));
+    }
+
+    /// Transcript delivery: `send_to_owner_and_fan_out` reaches the owning
+    /// session AND every session subscribed to the call id as a context, in
+    /// exactly ONE cache/webhook pass — a non-subscribed session sees nothing
+    /// and the event tap receives a single copy.
+    #[tokio::test]
+    async fn test_send_to_owner_and_fan_out_reaches_owner_and_subscribers() {
+        let mut gw = RwiGateway::new();
+        let owner_sid = gw.create_session(create_identity()).read().id.clone();
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&owner_sid, owner_tx);
+        gw.claim_call_ownership(&owner_sid, "c1".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.meta_store.insert("c1".into(), Default::default());
+
+        let sub_sid = gw.create_session(create_identity()).read().id.clone();
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sub_sid, sub_tx);
+        assert!(
+            gw.subscribe(&sub_sid, vec!["c1".to_string()], None),
+            "subscribe to the call-id context"
+        );
+
+        let bystander_sid = gw.create_session(create_identity()).read().id.clone();
+        let (bystander_tx, mut bystander_rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&bystander_sid, bystander_tx);
+
+        let mut tap = gw.subscribe_events();
+
+        gw.send_to_owner_and_fan_out(&crate::rwi::TranscriptFinal {
+            call_id: "c1".into(),
+            side: "caller".into(),
+            text: "hello".into(),
+            start_ms: 0,
+            end_ms: 900,
+            lang: None,
+            provider: None,
+        });
+
+        // Owner received the event.
+        let owner_v = owner_rx.recv().await.unwrap();
+        assert!(owner_v.to_string().contains("transcript_final"));
+        // Context subscriber mirrored the same event.
+        let sub_v = sub_rx.recv().await.unwrap();
+        assert!(sub_v.to_string().contains("transcript_final"));
+        // Exactly one event-tap copy (single cache/webhook pass).
+        let tap_entry = tap.recv().await.unwrap();
+        assert_eq!(tap_entry.event.event_type, "transcript_final");
+        assert!(
+            tap.try_recv().is_err(),
+            "the tap must not receive a duplicate copy"
+        );
+        // The bystander session saw nothing.
+        assert!(bystander_rx.try_recv().is_err(), "non-subscriber must stay silent");
     }
 
     /// Agent-initiated originates seed `CallMeta` with the originating agent

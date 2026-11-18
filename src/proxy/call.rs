@@ -1238,6 +1238,13 @@ impl CallModule {
             .with_diversion_chain_from_request(original)
             .with_passthrough_failure(self.inner.server.proxy_config.load().passthrough_failure);
 
+        // Cluster child legs (the peer declared the root id and this node
+        // adopted it) keep their quality inspection on the ROOT session at
+        // the dispatching node — see [`crate::call::cookie::ClusterChildLeg`].
+        if Self::inherited_child_session_id(&self.inner.server, cookie, original).is_some() {
+            dialplan.extensions.insert(crate::call::cookie::ClusterChildLeg);
+        }
+
         // `with_media` already seeded `caller_media_network` from the global /
         // default-profile baseline; apply explicit inbound-trunk overrides on top
         // before destination hints modify `dialplan.media` for the callee leg.
