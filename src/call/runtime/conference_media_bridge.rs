@@ -641,7 +641,7 @@ fn resample_to_target(samples: &[i16], from: u32, to: u32) -> Vec<i16> {
         return samples.to_vec();
     }
     match audio_codec::BoxedResampler::new(from as usize, to as usize) {
-        Ok(rs) => rs.resample(samples),
+        Ok(mut rs) => rs.resample(samples),
         Err(_) => samples.to_vec(),
     }
 }
