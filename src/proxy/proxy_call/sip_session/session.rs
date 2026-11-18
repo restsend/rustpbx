@@ -3,8 +3,8 @@ use super::prelude::*;
 use super::inbox::{SessionEvent, SessionInbox};
 use super::supervisor::SupervisorMode;
 use super::util::{
-    CalleeError, forward_dtmf_event, inject_dtmf_into_app, into_callee_err,
-    normalize_call_hangup_by, parse_dial_target, parse_dtmf_digit,
+    CalleeError, forward_dtmf_event, has_event_package, inject_dtmf_into_app,
+    into_callee_err, normalize_call_hangup_by, parse_dial_target, parse_dtmf_digit,
     parse_sipfrag_status, route_outbound_leg, sip_status_to_hangup_reason,
 };
 use super::{live_quality, transfer};
@@ -5843,9 +5843,11 @@ if self
             .respond(rsipstack::sip::StatusCode::OK, None, None)
             .await;
 
-        let is_refer = request.headers.iter().any(|h| {
-            matches!(h, rsipstack::sip::Header::Event(e) if e.value().eq_ignore_ascii_case("refer"))
-        });
+        // RFC 3265 event package token, parameters ignored: a standard
+        // transferee (baresip) stamps `Event: refer;id=<cseq>` on the implicit
+        // REFER subscription NOTIFY — the strict equality check dropped it and
+        // the transferor never got its final NOTIFY.
+        let is_refer = has_event_package(&request.headers, "refer");
 
         if is_refer {
             let body = String::from_utf8_lossy(request.body());

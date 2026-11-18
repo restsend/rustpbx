@@ -540,8 +540,44 @@ let server = E2eTestServer::start_with_config(config).await.unwrap();
     .await
     .expect("replaced consult dialog must terminate once the replacement answers");
 
-    // Alice's old (customer-side) dialog releases per the transferee flow.
-    alice.hangup(&calls[0].0).await.unwrap();
+    // The transferee reports the replacement outcome on the implicit REFER
+    // subscription. A STANDARD transferee (baresip) stamps the RFC 3515 `id`
+    // parameter: `Event: refer;id=40999`. The server must match the package
+    // token, deliver the deferred final NOTIFY to the transferor (bob) and
+    // release its original (customer-side) leg.
+    alice
+        .send_refer_notify(&calls[0].0, 200, "refer;id=40999")
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(8), async {
+        let mut notified = false;
+        let mut released = false;
+        loop {
+            for event in bob.process_dialog_events().await.unwrap() {
+                match event {
+                    TestUaEvent::ReferNotify(id, status) => {
+                        assert_eq!(id, calls[0].1, "final NOTIFY must ride the REFER dialog");
+                        assert_eq!(status, 200, "transferor's final NOTIFY must carry 200");
+                        notified = true;
+                    }
+                    TestUaEvent::CallTerminated(id) if id == calls[0].1 => {
+                        released = true;
+                    }
+                    _ => {}
+                }
+            }
+            if notified && released {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect(
+        "transferor must get the final NOTIFY (Event: refer;id=…) and release its original leg",
+    );
+
     // Charlie then hangs up the replacement — everything must release.
     charlie.hangup(&charlie_replacement_dialog).await.unwrap();
     timeout(Duration::from_secs(6), async {
