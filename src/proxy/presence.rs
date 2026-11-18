@@ -1074,24 +1074,67 @@ impl PresenceManager {
             }
             LocatorEvent::Unregistered(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
-                    // Drop this watcher's subscriptions before broadcasting Offline
-                    // so we do not keep retrying NOTIFY on a dead transport.
-                    pruned.extend(self.prune_watcher_subscriptions(&user));
-                    self.update_state(
-                        &user,
-                        PresenceState {
-                            status: PresenceStatus::Offline,
-                            last_updated: chrono::Utc::now().timestamp(),
-                            // Explicit REGISTER expires=0 — the client said
-                            // goodbye; stamp the cause so NOTIFY bodies and
-                            // downstream consumers can tell it apart from a
-                            // transport drop or a TTL sweep.
-                            offline_reason: Some("unregistered".to_string()),
-                            ..Default::default()
-                        },
-                        source,
-                    )
-                    .await;
+                    // Identity-guard against PEER-NODE cleanup events: when a
+                    // cross-node child leg is torn down on the peer (e.g. a
+                    // REFER-Replaces room fallback finished and the agent node
+                    // dropped the customer's temporary leg), it broadcasts an
+                    // Unregistered for an AOR this node may still hold a REAL
+                    // registration for (the WSS/UDP REGISTER itself). Flipping
+                    // presence Offline here would evict a live registration and
+                    // push a bogus "server offline" NOTIFY to the client
+                    // (production 2026-11-15: agent 1003, WSS registration
+                    // alive, flipped Idle→Offline 13 minutes by this path).
+                    // Recheck under the REGISTER writer's lock, same guard as
+                    // the LocatorEvent::Offline arm below.
+                    let _registration = match self.registration_guard.as_ref() {
+                        Some((_, lock)) => Some(lock.lock().await),
+                        None => None,
+                    };
+                    // Identity-guard against PEER-NODE cleanup events: a peer
+                    // tearing down a cross-node child leg broadcasts
+                    // Unregistered for an AOR this node may still hold a REAL
+                    // registration for (production 2026-11-15: agent 1003,
+                    // WSS registration alive, flipped Idle→Offline 13 minutes
+                    // by this path). Skip the offline flip in that case —
+                    // same guard as the LocatorEvent::Offline arm.
+                    let peer_leg_cleanup = if let Some((locator, _)) = self.registration_guard.as_ref() {
+                        match locator.has_active_binding_for_user(&user).await {
+                            Ok(true) => {
+                                debug!(
+                                    extension = %user,
+                                    "Skipping Unregistered presence flip: this node still holds an active registration (peer cleaned a cross-node leg)"
+                                );
+                                true
+                            }
+                            Ok(false) => false,
+                            Err(error) => {
+                                warn!(extension = %user, %error, "Skipping Unregistered presence cleanup: registration lookup failed");
+                                true
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if !peer_leg_cleanup {
+                        // Drop this watcher's subscriptions before broadcasting Offline
+                        // so we do not keep retrying NOTIFY on a dead transport.
+                        pruned.extend(self.prune_watcher_subscriptions(&user));
+                        self.update_state(
+                            &user,
+                            PresenceState {
+                                status: PresenceStatus::Offline,
+                                last_updated: chrono::Utc::now().timestamp(),
+                                // Explicit REGISTER expires=0 — the client said
+                                // goodbye; stamp the cause so NOTIFY bodies and
+                                // downstream consumers can tell it apart from a
+                                // transport drop or a TTL sweep.
+                                offline_reason: Some("unregistered".to_string()),
+                                ..Default::default()
+                            },
+                            source,
+                        )
+                        .await;
+                    }
                 }
             }
             LocatorEvent::Offline(locs, reason) => {
@@ -2671,6 +2714,7 @@ mod tests {
             transport: None,
             user_agent: None,
             home_proxy: None,
+            outbound_trunk: None,
         };
         assert_eq!(
             PresenceManager::get_user(&loc).as_deref(),
@@ -2719,6 +2763,7 @@ mod tests {
             transport: None,
             user_agent: None,
             home_proxy: None,
+            outbound_trunk: None,
         };
         let pruned = manager
             .handle_locator_event(

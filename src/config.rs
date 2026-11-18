@@ -1803,6 +1803,17 @@ pub struct ProxyConfig {
     /// only `Session-ID` headers inherit and every originate gets a fresh id.
     #[serde(default = "default_session_id_inherit_callid")]
     pub session_id_inherit_callid: bool,
+    /// Default custom inbound correlation header for the global session id.
+    /// Trunk-sourced INVITEs consult it when the trunk itself has no
+    /// `session_id_header` override. TRUNK-ONLY: registered clients and
+    /// anonymous peers cannot merge calls by planting it. Values are any
+    /// safe caller-chosen string: non-empty, at most 120 chars, characters
+    /// from `A-Za-z0-9._@-` (safe as a Call-ID part, filename component, and
+    /// DB value); unsafe or empty values are skipped with a warning. Non-hex
+    /// values correlate through the internal channels (events / CDR /
+    /// CallMeta) and skip the RFC wire channels (`Session-ID` header / UUI).
+    #[serde(default)]
+    pub session_id_default_header: Option<String>,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -1982,6 +1993,15 @@ pub struct ProxyConfig {
     /// `history_info` overrides this.
     #[serde(default)]
     pub history_info: bool,
+    /// Attended-transfer execution path: when enabled (default), the
+    /// transferor's REFER(Replaces) is RELAYED to the transferee UA, which
+    /// executes the standard transferee role — INVITE(Replaces) toward the
+    /// target — and the replacement attaches in-session as a normal bridge
+    /// (no conference room). When disabled (or the transferee's trunk
+    /// disables `refer_replaces`, or the relay fails), the transfer falls
+    /// back to the server-side transfer room.
+    #[serde(default = "default_true")]
+    pub refer_replaces_relay: bool,
     /// SIP conference factory URI. Disabled when unset.
     #[serde(default)]
     pub conference_factory_uri: Option<String>,
@@ -2047,6 +2067,15 @@ pub struct ProxyConfig {
     /// PBX-wide queue wait music (`[proxy] queue_hold_music`). Fills the
     /// queue wait audio when the queue itself has no
     /// `[proxy.queues.<name>.hold].audio_file`; per-queue config wins.
+    ///
+    /// When unset, the queue wait audio falls back to the built-in guzheng
+    /// loop `sounds/queue-waiting-8k.wav` (see
+    /// [`ProxyConfig::queue_wait_music`]) — a queued caller should hear
+    /// waiting music, **not** the agent ringback. The ringback
+    /// (`sounds/phone-calling.wav`) is reserved for the phase where an agent
+    /// leg is actually ringing (`queue_agent_ringback_enabled`), so
+    /// "waiting in queue" and "an agent is ringing" are two distinct
+    /// sounds.
     #[serde(default)]
     pub queue_hold_music: Option<String>,
     /// Allow pre-connect queue transfer prompts, including queue and escalation overrides.
@@ -2586,6 +2615,23 @@ impl ProxyConfig {
         self.max_subscription_expires.unwrap_or(3600).max(60)
     }
 
+    /// Audio the queue app plays while the caller is **waiting** for an
+    /// agent (queued / no agent available / between attempts).
+    ///
+    /// Priority: `queue_hold_music` > built-in
+    /// [`DEFAULT_QUEUE_WAIT_AUDIO`](crate::call::DEFAULT_QUEUE_WAIT_AUDIO)
+    /// (an original piano loop shipped with the PBX). The agent-ringback
+    /// phase keeps its own sound (`DEFAULT_QUEUE_HOLD_AUDIO`, gated by
+    /// `queue_agent_ringback_enabled`), so a caller can tell "I am queued"
+    /// (waiting music) from "an agent's phone is ringing" (ringback).
+    pub fn queue_wait_music(&self) -> Option<String> {
+        Some(
+            self.queue_hold_music
+                .clone()
+                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_WAIT_AUDIO.to_string()),
+        )
+    }
+
     pub fn session_timer_mode(&self) -> SessionTimerMode {
         if !self.session_timer {
             SessionTimerMode::Off
@@ -2737,6 +2783,7 @@ impl Default for ProxyConfig {
             session_id_length: default_session_id_length(),
             session_id_header_mode: Default::default(),
             session_id_inherit_callid: default_session_id_inherit_callid(),
+            session_id_default_header: None,
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),
@@ -2808,6 +2855,7 @@ impl Default for ProxyConfig {
             inbound_refer_in_session: true,
             diversion_headers: false,
             history_info: false,
+            refer_replaces_relay: true,
             conference_factory_uri: None,
             conference_empty_timeout_secs: default_conference_empty_timeout_secs(),
             route_originated_calls: false,
@@ -3681,6 +3729,42 @@ bucket = "default-recordings"
             config.callrecord.as_ref().unwrap().storage,
             CallRecordStorageConfig::S3 { .. }
         ));
+    }
+
+    /// 排队/等坐席两段声音（产品 2026-11-14）：等待音优先
+    /// `queue_hold_music`，其次 `hold_music`；只有坐席腿真的 180 时才换
+    /// 成 `DEFAULT_QUEUE_HOLD_AUDIO` 回铃音（由 `queue_agent_ringback_enabled`
+    /// 门控）——避免"排队"被听成"坐席在振铃"。
+    #[test]
+    fn queue_wait_music_defaults_to_the_builtin_loop_and_prefers_queue_hold() {
+        // Unconfigured: the built-in piano loop, never the agent ringback.
+        let mut p = ProxyConfig::default();
+        assert_eq!(
+            p.queue_wait_music().as_deref(),
+            Some(crate::call::DEFAULT_QUEUE_WAIT_AUDIO)
+        );
+        assert_ne!(
+            p.queue_wait_music().as_deref(),
+            Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
+        );
+        // `hold_music` alone no longer leaks into the queue waiting audio.
+        p.hold_music = Some("sounds/moh/hold.wav".into());
+        assert_eq!(
+            p.queue_wait_music().as_deref(),
+            Some(crate::call::DEFAULT_QUEUE_WAIT_AUDIO)
+        );
+        // Explicit queue music wins.
+        p.queue_hold_music = Some("sounds/moh/queue.wav".into());
+        assert_eq!(p.queue_wait_music().as_deref(), Some("sounds/moh/queue.wav"));
+        // The built-in file is shipped alongside the ringback.
+        let builtin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join(crate::call::DEFAULT_QUEUE_WAIT_AUDIO);
+        assert!(
+            builtin.is_file(),
+            "missing built-in queue waiting music: {}",
+            builtin.display()
+        );
     }
 
     #[test]

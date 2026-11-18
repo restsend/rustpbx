@@ -818,6 +818,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         volume_stats: Default::default(),
         quality_stats: Default::default(),
         call_id: None,
+        root_session_id: None,
         ice_servers: Vec::new(),
         relay_only: false,
         enable_ice_lite: false,
@@ -842,7 +843,6 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         inband_dtmf: Default::default(),
         relay_ready_timeout: None,
         ingress_stall_warn_secs: 0,
-        root_session_id: None,
     };
     let mut mb = MediaBridge::new("it-rtp-webrtc");
     let a = LegInner::new("a", &cfg, None).unwrap();

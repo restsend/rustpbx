@@ -131,7 +131,7 @@ field_tags_placeholder = "premium, apac, vip"
 
 # 保持部分
 section_hold = "保持处理"
-section_hold_desc = "请单独上传提示音并在此填写存储路径。留空则回落到 config/sounds/phone-calling.wav。"
+section_hold_desc = "请单独上传提示音并在此填写存储路径。留空则回落到 config/sounds/queue-waiting-8k.wav。"
 hold_enable_label = "播放自定义保持音频"
 hold_audio_file = "音频文件路径"
 hold_audio_file_placeholder = "sounds/hold.wav"

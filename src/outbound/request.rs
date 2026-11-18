@@ -9,6 +9,14 @@ pub struct DialRequest {
     #[serde(default)]
     pub call_id: Option<String>,
 
+    /// Explicit global session id override. Any safe caller-chosen string:
+    /// non-empty, at most 120 characters, drawn from `A-Za-z0-9._@-`
+    /// (no hex/UUID shape requirement). Takes precedence over the Call-ID
+    /// derivation; an invalid value fails the dial request instead of
+    /// silently generating a fresh id.
+    #[serde(default)]
+    pub session_id: Option<String>,
+
     /// SIP URI of the caller (A-leg identity). Example: `sip:1000@pbx.local`.
     pub caller_id: Option<String>,
 

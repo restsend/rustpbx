@@ -3021,3 +3021,377 @@ async fn relay_late_tail_does_not_rewind_paced_hold_clock() {
         "relay-to-paced must anchor to the output high-water sampling time"
     );
 }
+
+
+/// Minimal looping tone source standing in for the hold-music file source.
+struct TestHoldMusicSource {
+    pos: usize,
+}
+
+impl rustpbx_media::audio_source::AudioSource for TestHoldMusicSource {
+    fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+        for (i, sample) in buffer.iter_mut().enumerate() {
+            let t = (self.pos + i) as f32 / 8000.0;
+            *sample = (4000.0 * (2.0 * std::f32::consts::PI * 500.0 * t).sin()) as i16;
+        }
+        self.pos += buffer.len();
+        buffer.len()
+    }
+    fn sample_rate(&self) -> u32 {
+        8000
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn has_data(&self) -> bool {
+        true
+    }
+    fn reset(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Hold → unhold on a transcoded bridge must keep the audio intact.
+///
+/// Production incident 2026-11-13 (cluster call `c8935420…`): a G729↔PCMA
+/// transcode bridge carried clean audio after call setup, but after the peer
+/// placed the call on hold and resumed it the far end heard broadband noise.
+/// The hold path detaches the bridge route (`unbridge` → both egresses go
+/// silent, hold music takes over); the resume path rebuilds the route via
+/// `bridge()`, which creates **fresh decoders** (`create_decoder`) that must
+/// pick up both RTP streams **mid-stream** — the streams never stopped during
+/// hold (each UA kept sending real frames, seq continuous).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hold_unhold_route_rebuild_keeps_transcoded_audio_intact() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::G729,
+        TransportMode::Rtp,
+        CodecType::PCMA,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(false);
+
+    // Baseline: both directions carry the fed tone losslessly on the freshly
+    // built transcode pipeline (matches the 25 s of clean audio the production
+    // call carried between transfer and hold).
+    let fed_ab = transcode_voiced_duration(
+        &h.test_a,
+        CodecType::G729,
+        &h.test_b,
+        CodecType::PCMA,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, fed_ab, "baseline A→B G729→PCMA");
+    let fed_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, fed_ba, "baseline B→A PCMA→G729");
+
+    // Hold: the session detaches the route (hold music takes the egress) —
+    // but the UAs keep streaming real frames for the whole hold window, so
+    // feed both directions while the route is down. Feed MORE frames than the
+    // receiver track's ring holds (~100): the production hold lasted 2.7 s
+    // (≈135 frames @20 ms) and overflowed the un-consumed ring, which is the
+    // state the rebuilt pipeline inherits. The held leg also plays looping
+    // hold music during this window (propagate_hold_to_leg's play_media),
+    // so the egress history is relay→silence→media→transcode_peer.
+    h.mb.unbridge().await.expect("unbridge");
+    let held_leg = h.mb.leg(LegSide::A).expect("caller leg").clone();
+    held_leg
+        .play_media(Box::new(TestHoldMusicSource { pos: 0 }), true)
+        .await
+        .expect("hold music");
+    let _hold_ab = transcode_voiced_duration(
+        &h.test_a,
+        CodecType::G729,
+        &h.test_b,
+        CodecType::PCMA,
+        20,
+        160,
+        Some(20),
+    )
+    .await;
+    let _hold_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        160,
+        Some(20),
+    )
+    .await;
+    held_leg.stop_playback().await.expect("stop hold music");
+
+    // Resume: the session re-arms the route — fresh decoders attach to both
+    // mid-stream flows.
+    h.bridge_and_accept().await;
+
+    // Post-resume audio must still be intact in both directions. The
+    // production defect surfaced exactly here: broadband noise instead of the
+    // peer's audio.
+    let post_ab = transcode_voiced_duration(
+        &h.test_a,
+        CodecType::G729,
+        &h.test_b,
+        CodecType::PCMA,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, post_ab, "post-resume A→B G729→PCMA");
+    let post_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, post_ba, "post-resume B→A PCMA→G729");
+}
+
+/// Acceptance scenario "保持再取回" is usually exercised more than once per
+/// call — every cycle rebuilds the route, so each must stay clean.
+/// The production caller was a WebRTC (DTLS-SRTP) leg; rerun the rebuild
+/// sequence with a WebRTC leg A to cover the latching/jitter-buffer path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hold_unhold_rebuild_webrtc_leg_keeps_transcoded_audio_intact() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::G729,
+        TransportMode::Rtp,
+        CodecType::PCMA,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(false);
+
+    let fed_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, fed_ba, "baseline B→A PCMA→G729 (webrtc)");
+
+    h.mb.unbridge().await.expect("unbridge");
+    let _hold_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        160,
+        Some(20),
+    )
+    .await;
+    h.bridge_and_accept().await;
+
+    let post_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, post_ba, "post-resume B→A PCMA→G729 (webrtc)");
+    let post_ab = transcode_voiced_duration(
+        &h.test_a,
+        CodecType::G729,
+        &h.test_b,
+        CodecType::PCMA,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, post_ab, "post-resume A→B G729→PCMA (webrtc)");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_hold_unhold_cycles_keep_transcoded_audio_intact() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::G729,
+        TransportMode::Rtp,
+        CodecType::PCMA,
+    )
+    .await;
+    h.bridge_and_accept().await;
+
+    for cycle in 0..2 {
+        h.mb.unbridge().await.expect("unbridge");
+        let _hold = transcode_voiced_duration(
+            &h.test_a,
+            CodecType::G729,
+            &h.test_b,
+            CodecType::PCMA,
+            20,
+            25,
+            Some(20),
+        )
+        .await;
+        h.bridge_and_accept().await;
+
+        let post_ab = transcode_voiced_duration(
+            &h.test_a,
+            CodecType::G729,
+            &h.test_b,
+            CodecType::PCMA,
+            20,
+            50,
+            Some(20),
+        )
+        .await;
+        assert_voiced_duration_preserved(1000, post_ab, &format!("cycle{cycle} A→B"));
+        let post_ba = transcode_voiced_duration(
+            &h.test_b,
+            CodecType::PCMA,
+            &h.test_a,
+            CodecType::G729,
+            20,
+            50,
+            Some(20),
+        )
+        .await;
+        assert_voiced_duration_preserved(1000, post_ba, &format!("cycle{cycle} B→A"));
+    }
+}
+
+
+/// Network jitter (frames arriving AFTER the egress tick's deadline) must not
+/// punch silent slots into the transcoded output: a late frame is decoded on
+/// the next tick and carried by the accumulator, so the far end hears a
+/// continuous tone. Production incident 2026-11-13 (G729↔PCMA calls heard
+/// broadband noise after hold/resume under real-network jitter; localhost
+/// tests never reproduced it because frames arrived with zero jitter).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::G729,
+        TransportMode::Rtp,
+        CodecType::PCMA,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(false);
+
+    // Prime the pipeline with evenly-paced frames first.
+    let _prime = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        25,
+        Some(20),
+    )
+    .await;
+
+    // Drain the prime tail so it does not pollute the jitter-window stats.
+    let drain_until = tokio::time::Instant::now() + Duration::from_millis(400);
+    while tokio::time::Instant::now() < drain_until {
+        match h.test_a.recv_audio(25).await {
+            Some(_) => {}
+            None => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+
+    // Feed B's PCMA tone at a 20 ms AVERAGE cadence with a ~36 ms late spike
+    // on every 5th frame (the spike is recovered by shortening the interval
+    // before it — the RTP timestamps stay on the 20 ms grid, matching how a
+    // real sender's jitter bursts arrive: late, then bunched).
+    let frames = encode_tone_frames(CodecType::PCMA, 20, 120);
+    assert!(!frames.is_empty());
+    let rate = CodecType::PCMA.samplerate();
+    let clock_rate = CodecType::G729.samplerate() as u64;
+    let mut decoder = audio_codec::create_decoder(CodecType::G729);
+    let mut ts = 10_000u32;
+    let mut voiced_samples = 0u64;
+    let mut total_samples = 0u64;
+
+    // Interleave: send each frame on the jittered cadence, then drain the A
+    // side for the same wall-clock slice (the egress emits one frame per
+    // tick; the drain keeps the receiver ring from overflowing between
+    // counts).
+    for (i, frame) in frames.iter().enumerate() {
+        h.test_b.send_audio(frame.clone(), ts);
+        ts = ts.wrapping_add(rate / 50);
+        let wait = if i % 5 == 4 {
+
+            Duration::from_millis(36)
+        } else {
+            Duration::from_millis(16)
+        };
+        let deadline = tokio::time::Instant::now() + wait;
+        while tokio::time::Instant::now() < deadline {
+            match h.test_a.recv_audio(4).await {
+                Some(frame) if !frame.data.is_empty() => {
+                    let pcm = decoder.decode(&frame.data);
+                    total_samples += pcm.len() as u64;
+                    if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
+                        voiced_samples += pcm.len() as u64;
+                    }
+                }
+                _ => tokio::time::sleep(Duration::from_millis(2)).await,
+            }
+        }
+    }
+    // Short post-feed drain (300 ms) to flush the accumulator's last frames —
+    // the comfort-noise tail AFTER this point is the pipeline idling, not a
+    // mid-stream hole, so it stays out of the stats.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while tokio::time::Instant::now() < deadline {
+        match h.test_a.recv_audio(25).await {
+            Some(frame) if !frame.data.is_empty() => {
+                let pcm = decoder.decode(&frame.data);
+                total_samples += pcm.len() as u64;
+                if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
+                    voiced_samples += pcm.len() as u64;
+                }
+            }
+            _ => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+
+    // With jitter, the accumulator absorbs late frames: the mid-stream CN
+    // hole ratio stays tiny (≤ 5%). The old blocking-per-tick pull punched a
+    // silent slot per late frame (~20% holes) — that is the regression this
+    // test pins. No input frame may be lost either.
+    let ratio = voiced_samples as f64 / total_samples.max(1) as f64;
+    assert!(
+        ratio >= 0.90,
+        "jittered feed produced {:.1}% voiced audio ({voiced_samples}/{total_samples} samples) —          late frames must merge into the accumulator, not punch silent slots",
+        ratio * 100.0
+    );
+    assert!(
+        total_samples >= 120 * 160,
+        "output lost frames: got {total_samples} samples, fed {}",
+        120 * 160
+    );
+    let _ = clock_rate;
+}

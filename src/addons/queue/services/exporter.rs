@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::addons::queue::models as queue;
 use crate::addons::queue::services::utils as queue_utils;
-use crate::call::DEFAULT_QUEUE_HOLD_AUDIO;
+use crate::call::DEFAULT_QUEUE_WAIT_AUDIO;
 use crate::config::ProxyConfig;
 use crate::config_store::GeneratedConfigStore;
 use crate::proxy::routing::{RouteQueueConfig, RouteQueueHoldConfig};
@@ -41,7 +41,7 @@ impl QueueExporter {
                 config
                     .queue_hold_music
                     .as_deref()
-                    .unwrap_or(DEFAULT_QUEUE_HOLD_AUDIO),
+                    .unwrap_or(DEFAULT_QUEUE_WAIT_AUDIO),
             );
             queues_map.insert(key, queue_config);
         }

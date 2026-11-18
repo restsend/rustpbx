@@ -1040,7 +1040,10 @@ impl SipSession {
         if let Some(peer) = self.media_leg(side)
             && let Some(local) = peer.negotiated_local_sdp()
         {
-            return Ok(rustrtc::modify_sdp_direction(&local.to_sdp_string(), direction));
+            return Ok(self.pin_sdp_to_negotiated_codec(
+                side,
+                rustrtc::modify_sdp_direction(&local.to_sdp_string(), direction),
+            ));
         }
         // Signaling-only calls use the descriptions kept on their SIP dialog.
         let base_sdp = match side.as_str() {
@@ -1049,7 +1052,44 @@ impl SipSession {
             _ => None,
         }
         .ok_or_else(|| anyhow!("No SDP available for {} hold/unhold", side.0))?;
-        Ok(rustrtc::modify_sdp_direction(base_sdp, direction))
+        Ok(self.pin_sdp_to_negotiated_codec(
+            side,
+            rustrtc::modify_sdp_direction(base_sdp, direction),
+        ))
+    }
+
+    /// Pin an outgoing hold/unhold offer to the codec the leg already
+    /// negotiated.
+    ///
+    /// A hold/resume re-INVITE is a direction change, not a renegotiation:
+    /// re-offering the full codec list lets the peer answer with a different
+    /// codec, while the anchored media path (conference-room bridge encoder,
+    /// transcoder profile) keeps the codec it armed at join/bridge time. The
+    /// leg's egress sender then stamps the NEW payload type on the OLD
+    /// codec's bytes and the peer decodes a foreign payload as its new codec
+    /// — audible broadband noise right after hold/resume (production
+    /// 2026-11-14, transfer-room cross-platform calls over TURN).
+    ///
+    /// RFC 3264 §8 permits re-offering a subset of the negotiated codecs, so
+    /// pinning is protocol-clean. Falls back to the untouched SDP when the
+    /// leg has no live profile or the rewrite fails.
+    fn pin_sdp_to_negotiated_codec(&self, side: &LegId, sdp: String) -> String {
+        let codec = self
+            .legs
+            .media_leg(side)
+            .and_then(|leg| leg.negotiated())
+            .and_then(|profile| profile.audio)
+            .map(|audio| audio.codec);
+        let pinned = pin_sdp_codec(sdp, codec);
+        if let Some(codec) = codec {
+            debug!(
+                session_id = %self.id,
+                %side,
+                ?codec,
+                "Hold/unhold offer pinned to the already-negotiated codec"
+            );
+        }
+        pinned
     }
 
     /// Keep only the explicitly requested pair.
@@ -1085,4 +1125,28 @@ impl SipSession {
             self.clear_bridge().await;
         }
     }
+}
+
+/// Restrict an outgoing SDP's audio codec list to `codec` (keeping the
+/// telephone-event PT), so a hold/unhold re-INVITE cannot re-open codec
+/// negotiation.
+///
+/// RFC 3264 §8 allows re-offering a subset of the already-negotiated codecs.
+/// Holding/resuming must not silently switch codecs: the anchored media path
+/// (conference-room bridge encoder, transcoder profile, recorder) keeps the
+/// codec armed when the leg joined/bridged, while the leg's egress sender
+/// stamps the freshly negotiated payload type on those bytes — the peer then
+/// decodes a foreign payload as its new codec (audible broadband noise after
+/// hold/resume; production 2026-11-14 transfer-room calls over TURN).
+///
+/// Returns the SDP untouched when there is nothing to pin or the rewrite is
+/// not applicable.
+pub(super) fn pin_sdp_codec(sdp: String, codec: Option<audio_codec::CodecType>) -> String {
+    use crate::media::negotiate::MediaNegotiator;
+
+    let Some(codec) = codec else {
+        return sdp;
+    };
+    let codecs = MediaNegotiator::build_codec_list_from_offer(&sdp, &[codec]);
+    MediaNegotiator::rewrite_sdp_codec_list(&sdp, &codecs).unwrap_or(sdp)
 }

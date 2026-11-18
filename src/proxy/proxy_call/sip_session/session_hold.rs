@@ -131,6 +131,58 @@ impl SipSession {
         Ok(())
     }
 
+    /// Route hold/unhold for an attended-transfer room leg to the partner
+    /// session. After the transferor departs, the in-session bridged peer is
+    /// the retired consult dialog — the real peer leg lives in the partner
+    /// session, which applies its own proven propagate path (hold re-INVITE
+    /// + hold music) on it. The held side's mixer feed is paused by the
+    /// partner's hold handler, so the hold music is the single egress writer
+    /// (mixer + hold source on the same track would interleave garbage).
+    pub(crate) async fn route_transfer_room_hold(
+        &mut self,
+        leg_id: &LegId,
+        prev: Option<LegState>,
+        new_state: LegState,
+    ) {
+        let Some(partner) = self.transfer_partner.clone() else {
+            return;
+        };
+        if !matches!(
+            (prev, new_state),
+            (Some(LegState::Connected), LegState::Hold)
+                | (Some(LegState::Hold), LegState::Connected)
+        ) {
+            return;
+        }
+        let cmd = if new_state == LegState::Hold {
+            crate::call::domain::CallCommand::Hold {
+                leg_id: partner.their_leg.clone(),
+                music: None,
+            }
+        } else {
+            crate::call::domain::CallCommand::Unhold {
+                leg_id: partner.their_leg.clone(),
+            }
+        };
+        info!(
+            session_id = %self.id,
+            leg = leg_id.as_str(),
+            partner_session = %partner.partner_session,
+            their_leg = %partner.their_leg,
+            hold = new_state == LegState::Hold,
+            "Transfer-room hold state routed to partner session"
+        );
+        if let Err(error) = partner.cmd_tx.send(cmd).await {
+            warn!(
+                session_id = %self.id,
+                partner_session = %partner.partner_session,
+                %error,
+                "Failed to route transfer-room hold state to partner"
+            );
+        }
+    }
+
+
     pub(crate) async fn apply_reinvite_hold_transition(
         &mut self,
         side: DialogSide,
@@ -274,9 +326,9 @@ impl SipSession {
         if let Some(path) = &self.server.proxy_config.load().hold_music {
             return Some(crate::call::domain::MediaSource::File { path: path.clone() });
         }
-        // 4. Built-in default so the held party always hears hold audio.
+        // 4. Built-in default so the held party always hears hold audio
         Some(crate::call::domain::MediaSource::File {
-            path: crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
+            path: crate::call::DEFAULT_HOLD_AUDIO.to_string(),
         })
     }
 
@@ -527,6 +579,24 @@ impl SipSession {
         // held party always hears hold audio instead of silence.
         let music = music.or_else(|| self.resolve_hold_music(&[]));
 
+        // Transfer-room held leg: the hold music flows through the
+        // conference bridge's hold gate (the mixer feed is substituted in
+        // place) — no leg-level hold source, and the room lifecycle is
+        // untouched. Scoped to the transfer room (partner bound); real
+        // conference holds keep the pre-existing behavior.
+        let room_hold = self.transfer_partner.is_some()
+            && self.legs.conference_bridge_handle(&leg_id).is_some();
+        if room_hold {
+            if let Some(handle) = self.legs.conference_bridge_handle(&leg_id) {
+                handle.set_hold(true);
+                info!(
+                    session_id = %self.id,
+                    %leg_id,
+                    "Transfer-room hold gate engaged — hold music replaces the mixer feed"
+                );
+            }
+        }
+
         let hold_sdp = self.generate_sdp_for_side(&leg_id, true)?;
 
         match self.send_reinvite_to_leg(&leg_id, hold_sdp).await {
@@ -555,7 +625,13 @@ impl SipSession {
                 // CNG/silence. Mirrors propagate_hold_to_callee / _to_caller: without
                 // this the leg stays on EgressSource::RewriteRelay, which parks the
                 // ptime-paced egress loop and emits nothing to the held party.
-                self.apply_hold_media(&leg_id, music).await?;
+                // Transfer-room legs instead hold through the conference
+                // bridge's hold gate — the gate replaces the mixer feed with
+                // hold music in place, so a leg-level hold source would only
+                // fight it.
+                if !room_hold {
+                    self.apply_hold_media(&leg_id, music).await?;
+                }
                 Ok(())
             }
             Err(e) => {
@@ -703,6 +779,20 @@ impl SipSession {
                 peer.set_ingress_quiet_expected(false);
             }
             return Ok(());
+        }
+
+        // Transfer-room held leg: release the hold gate — the forward loop
+        // switches back to the mixer feed in place (no re-join, no leg-level
+        // source swap; the room lifecycle is untouched).
+        if self.transfer_partner.is_some()
+            && let Some(handle) = self.legs.conference_bridge_handle(&leg_id)
+        {
+            handle.set_hold(false);
+            info!(
+                session_id = %self.id,
+                %leg_id,
+                "Transfer-room hold gate released — mixer feed restored"
+            );
         }
 
         let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;

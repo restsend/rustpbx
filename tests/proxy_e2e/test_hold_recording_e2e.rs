@@ -146,6 +146,13 @@ fn assert_tone(channel: &[i16], rate: u32, freq: f64, label: &str) {
 const PRE_WINDOW: (f64, f64) = (0.04, 0.14);
 const HOLD_WINDOW: (f64, f64) = (0.28, 0.44);
 const POST_WINDOW: (f64, f64) = (0.58, 0.72);
+/// Q2.A recording contract (2026-10-30): during hold BOTH parties' ingress
+/// capture is switched off and the held party's lane carries the hold music
+/// they hear — the hold window must contain NO private talk. The pre/post
+/// windows keep both parties' own tones (voice → MOH → voice timeline).
+/// (The pre-Q2.A expectation — the caller's tone continuing through hold —
+/// expired when private-talk suppression shipped; see
+/// `apply_hold_recording_routes`.)
 
 /// Minimal RTP link used by both parties: one socket that streams a tone
 /// toward the PBX and tracks sequence-number continuity of everything it

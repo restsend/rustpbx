@@ -1211,6 +1211,109 @@ impl TestUa {
         }
     }
 
+    /// Execute a received REFER as the standard transferee: dial the
+    /// Refer-To target carrying the verbatim `Replaces` header (from the
+    /// Refer-To query) so the far side treats the new INVITE as a dialog
+    /// replacement. Returns the replacement dialog id.
+    pub async fn execute_referred(
+        &self,
+        refer_to: &str,
+        sdp_offer: Option<String>,
+    ) -> Result<DialogId> {
+        // Split the Refer-To into the target URI and the Replaces query.
+        let (target, query) = match refer_to.split_once('?') {
+            Some((t, q)) => (t.to_string(), q.to_string()),
+            None => (refer_to.to_string(), String::new()),
+        };
+        let replaces_raw = query
+            .split('&')
+            .find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                k.eq_ignore_ascii_case("replaces").then(|| v.to_string())
+            })
+            .ok_or_else(|| anyhow!("Refer-To carries no Replaces parameter"))?;
+        // The Refer-To query is URL-encoded per the REFER construction — the
+        // transferee decodes it before using the value as a header.
+        let replaces = urlencoding::decode(&replaces_raw)
+            .map(|v| v.to_string())
+            .unwrap_or(replaces_raw);
+
+        // The target URI may be a full contact (sip:user@host:port); extract
+        // the user for the routing-shaped callee used by make_call.
+        let callee_user = target
+            .split(':')
+            .nth(1)
+            .and_then(|rest| rest.split('@').next().map(|u| u.to_string()))
+            .or_else(|| target.split('@').next().map(|u| u.to_string()))
+            .ok_or_else(|| anyhow!("Refer-To target has no user"))?;
+
+        // Dial the target with the Replaces header on the INVITE.
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+        let contact = self
+            .contact_uri
+            .as_ref()
+            .ok_or_else(|| anyhow!("Contact URI not available"))?;
+        let credential = Credential {
+            username: self.config.username.clone(),
+            auth_username: None,
+            password: self.config.password.clone(),
+            realm: Some(self.config.realm.clone()),
+        };
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee_user,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
+        let proxy_uri: rsipstack::sip::Uri = format!(
+            "sip:{}:{};lr",
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid proxy URI: {:?}", e))?;
+        let mut extra_headers = vec![rsipstack::sip::Header::from(
+            rsipstack::sip::typed::Route::from(proxy_uri),
+        )];
+        extra_headers.push(rsipstack::sip::Header::Other(
+            "Replaces".into(),
+            replaces,
+        ));
+        let (content_type, offer) = match sdp_offer {
+            Some(sdp) => (Some("application/sdp".to_string()), Some(sdp.into_bytes())),
+            None => (None, None),
+        };
+        let invite_option = InviteOption {
+            callee: callee_uri,
+            caller: contact.clone(),
+            content_type,
+            offer,
+            contact: contact.clone(),
+            credential: Some(credential),
+            headers: Some(extra_headers),
+            ..Default::default()
+        };
+        let state_sender = self.state_sender.clone().unwrap_or_else(|| {
+            let (sender, _) = unbounded_channel();
+            sender
+        });
+        let (dialog, resp) = dialog_layer
+            .do_invite(invite_option, state_sender)
+            .await
+            .map_err(|e| e.into_anyhow())?;
+        let resp = resp.ok_or_else(|| anyhow!("No response"))?;
+        if resp.status_code == rsipstack::sip::StatusCode::OK {
+            Ok(dialog.id())
+        } else {
+            Err(anyhow!("replacement call failed: {}", resp.status_code))
+        }
+    }
+
     /// Process dialog events and return collected events
     /// Drain the events buffered by the background pump (fork semantics:
     /// events accumulate between calls and are never lost).
