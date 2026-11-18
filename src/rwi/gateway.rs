@@ -20,6 +20,23 @@ pub struct EventCacheEntry {
     pub cached_at: DateTime<Utc>,
     pub call_id: CallId,
     pub event: RwiEvent,
+    #[serde(skip)]
+    pub(crate) delivery: Option<WebhookDelivery>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WebhookDelivery {
+    pub event_id: String,
+    pub wire_event_type: &'static str,
+    pub receipt: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+}
+
+impl WebhookDelivery {
+    pub(crate) fn complete(&self, delivered: bool) {
+        if let Some(receipt) = self.receipt.lock().take() {
+            let _ = receipt.send(delivered);
+        }
+    }
 }
 
 /// Sender for pushing JSON-serialized events to a WebSocket session.
@@ -195,7 +212,7 @@ enum DispatchTarget<'a> {
     /// one session.
     FanOut(&'a str, Option<&'a SessionId>),
     /// Deliver to every online session (global events).
-    Broadcast,
+    Broadcast { webhook: bool },
 }
 
 impl RwiGateway {
@@ -500,14 +517,19 @@ impl RwiGateway {
         let event = self.snapshot_recording_identity(event);
         let event = &event;
         match target {
-            DispatchTarget::Broadcast => {
+            DispatchTarget::Broadcast { webhook } => {
                 let enriched = self.enrich_flat_event(event);
                 let entry = EventCacheEntry {
                     cached_at: chrono::Utc::now(),
                     call_id: enriched.call_id.clone().unwrap_or_default(),
                     event: enriched.clone(),
+                    delivery: None,
                 };
-                self.fanout_webhook_tap(&entry);
+                if webhook {
+                    self.fanout_webhook_tap(&entry);
+                } else {
+                    let _ = self.event_tap.send(entry);
+                }
                 for session_id in self.session_event_senders.keys() {
                     self.send_flat_to_session(session_id, &enriched);
                 }
@@ -538,6 +560,7 @@ impl RwiGateway {
                     cached_at: chrono::Utc::now(),
                     call_id: dispatch_call_id.clone(),
                     event: enriched.clone(),
+                    delivery: None,
                 };
                 self.fanout_webhook_tap(&entry);
                 if let Some(owner_id) = self.call_ownership.get(owner_call_id) {
@@ -551,6 +574,7 @@ impl RwiGateway {
                     cached_at: chrono::Utc::now(),
                     call_id: dispatch_call_id.clone(),
                     event: enriched.clone(),
+                    delivery: None,
                 };
                 self.fanout_webhook_tap(&entry);
                 if let Some(subscribers) = self.context_subscriptions.get(context) {
@@ -789,6 +813,7 @@ impl RwiGateway {
             cached_at: now,
             call_id: call_id.clone(),
             event: event.clone(),
+            delivery: None,
         };
 
         cache_state.cache.push_back(entry);
@@ -848,7 +873,45 @@ impl RwiGateway {
     /// Call-scoped broadcasts are enriched with flat context (caller/callee/
     /// names/direction) from the `CallMetaStore` exactly like call_owner events.
     pub fn broadcast_event(&self, event: &RwiEvent) {
-        self.dispatch(&String::new(), event, DispatchTarget::Broadcast);
+        self.dispatch(&String::new(), event, DispatchTarget::Broadcast { webhook: true });
+    }
+
+    pub(crate) fn broadcast_event_without_webhook(&self, event: &RwiEvent) {
+        self.dispatch(&String::new(), event, DispatchTarget::Broadcast { webhook: false });
+    }
+
+    pub(crate) fn has_webhook(&self) -> bool {
+        self.webhook_tx
+            .as_ref()
+            .is_some_and(|tx| tx.receiver_count() > 0)
+    }
+
+    /// Enqueue an event with a caller-provided wire type and require an application acknowledgement.
+    pub(crate) fn enqueue_confirmed_webhook(
+        &self,
+        event: RwiEvent,
+        event_id: String,
+        wire_event_type: &'static str,
+        cached_at: DateTime<Utc>,
+    ) -> anyhow::Result<tokio::sync::oneshot::Receiver<bool>> {
+        let (receipt, receiver) = tokio::sync::oneshot::channel();
+        if let Some(tx) = &self.webhook_tx {
+            tx.send(EventCacheEntry {
+                cached_at,
+                call_id: event.call_id.clone().unwrap_or_default(),
+                event: self.enrich_flat_event(&event),
+                delivery: Some(WebhookDelivery {
+                    event_id,
+                    wire_event_type,
+                    receipt: Arc::new(Mutex::new(Some(receipt))),
+                }),
+            })
+            .map_err(|_| anyhow::anyhow!("RWI webhook handler is closed"))?;
+        } else {
+            // Another node may share the outbox and still have webhook delivery.
+            let _ = receipt.send(false);
+        }
+        Ok(receiver)
     }
 
     /// Resume a session after disconnect.
@@ -880,6 +943,7 @@ impl RwiGateway {
             cached_at: entry.cached_at,
             call_id: entry.call_id.clone(),
             event: self.enrich_flat_event(&entry.event),
+            delivery: None,
         }
     }
 
@@ -1056,7 +1120,7 @@ impl RwiGateway {
 
     pub fn broadcast<E: RwiEventSpec>(&self, event: &E) {
         let flat = RwiEvent::from_spec(event, None);
-        self.dispatch(&String::new(), &flat, DispatchTarget::Broadcast);
+        self.dispatch(&String::new(), &flat, DispatchTarget::Broadcast { webhook: true });
     }
 
     pub fn send_to_owner<E: RwiEventSpec>(&self, event: &E) {

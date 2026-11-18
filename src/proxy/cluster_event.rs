@@ -10,6 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::sip::Uri;
+use rsipstack::transport::SipAddr;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,11 +50,23 @@ impl EventSource {
 
 // ── Addon handler trait ─────────────────────────────────────────────────────
 
+/// Server-observed flow for a SIP WebSocket presence publication.
+pub struct WebSocketPublishFlow {
+    pub realm: Option<String>,
+    pub remote: SipAddr,
+    pub home_proxy: Option<SipAddr>,
+}
+
 #[async_trait]
 pub trait ClusterEventHandler: Send + Sync {
     /// Admit a client PUBLISH before persistence, cluster broadcast and NOTIFY.
     /// Addons may reserve automatic states for their call-bound state machine.
-    async fn accepts_presence_publish(&self, _identity: &str, _state: &PresenceState) -> bool {
+    async fn accepts_presence_publish(
+        &self,
+        _identity: &str,
+        _state: &PresenceState,
+        _flow: Option<&WebSocketPublishFlow>,
+    ) -> bool {
         true
     }
 
@@ -495,9 +508,21 @@ impl ClusterEventHub {
         old_state: Option<&PresenceState>,
         new_state: &PresenceState,
     ) {
+        self.emit_presence_change_from_flow(identity, old_state, new_state, None)
+            .await;
+    }
+
+    pub(crate) async fn emit_presence_change_from_flow(
+        &self,
+        identity: &str,
+        old_state: Option<&PresenceState>,
+        new_state: &PresenceState,
+        flow: Option<&WebSocketPublishFlow>,
+    ) {
         let publication_lock = self.presence_manager.publication_lock(identity);
         let _publication = publication_lock.lock().await;
-        self.emit_presence_change_locked(identity, old_state, new_state).await;
+        self.emit_presence_change_locked(identity, old_state, new_state, flow)
+            .await;
     }
 
     // The expiry sweeper holds the same identity lock while checking its lease.
@@ -506,11 +531,15 @@ impl ClusterEventHub {
         identity: &str,
         old_state: Option<&PresenceState>,
         new_state: &PresenceState,
+        flow: Option<&WebSocketPublishFlow>,
     ) {
         let handlers: Vec<Arc<dyn ClusterEventHandler>> =
             self.handlers.read().iter().cloned().collect();
         for handler in handlers {
-            if !handler.accepts_presence_publish(identity, new_state).await {
+            if !handler
+                .accepts_presence_publish(identity, new_state, flow)
+                .await
+            {
                 return;
             }
         }

@@ -112,11 +112,20 @@ impl RwiWebhookSender {
             .await
             .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
         let status_code = resp.status().as_u16();
+        let acknowledgements = resp.headers().get_all("x-rwi-event-ack");
+        let mut acknowledgements = acknowledgements.iter();
+        let acknowledged = payload["event_id"].as_str().is_some_and(|event_id| {
+            acknowledgements
+                .next()
+                .is_some_and(|value| value.as_bytes() == event_id.as_bytes())
+                && acknowledgements.next().is_none()
+        });
         // Drain the body (best-effort) so the connection can be reused.
         let _ = resp.text().await;
         Ok(WebhookCallRecord {
             url: self.url.clone(),
             status_code: Some(status_code),
+            acknowledged,
             latency_ms: start.elapsed().as_millis() as u64,
             body: body.to_string(),
         })
@@ -137,6 +146,7 @@ const PUSH_RETRY_BACKOFF_MS: u64 = 200;
 pub struct WebhookCallRecord {
     pub url: String,
     pub status_code: Option<u16>,
+    acknowledged: bool,
     pub latency_ms: u64,
     pub body: String,
 }
@@ -255,17 +265,25 @@ async fn run_rwi_webhook_handler(
 
         // Apply event type filter if configured.
         if !sender.accepts_event(event_type) {
+            if let Some(delivery) = &entry.delivery {
+                delivery.complete(false);
+            }
             continue;
         }
 
+        let wire_event_type = entry
+            .delivery
+            .as_ref()
+            .map_or(event_type, |delivery| delivery.wire_event_type);
         let payload = json!({
             "rwi": "1.0",
             // Idempotency key: re-sent unchanged on every retry attempt so
             // receivers can dedupe redeliveries.
-            "event_id": uuid::Uuid::new_v4().to_string(),
+            "event_id": entry.delivery.as_ref().map(|delivery| delivery.event_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             "timestamp": crate::utils::rfc3339_local(entry.cached_at),
             "call_id": entry.call_id,
-            "event_type": event_type,
+            "event_type": wire_event_type,
             "event": event_value,
         });
         // Serialize once and reuse the exact bytes for every attempt and log
@@ -275,10 +293,14 @@ async fn run_rwi_webhook_handler(
 
         match sender.send_payload(&payload, &body, event_type).await {
             Ok(record) => {
-                let success = record
+                let http_success = record
                     .status_code
                     .map(|c| (200..300).contains(&c))
                     .unwrap_or(false);
+                let success = http_success && (entry.delivery.is_none() || record.acknowledged);
+                if let Some(delivery) = &entry.delivery {
+                    delivery.complete(success);
+                }
                 let call_id = if entry.call_id.is_empty() {
                     "-"
                 } else {
@@ -316,13 +338,18 @@ async fn run_rwi_webhook_handler(
                         event_type,
                         call_id,
                         status_code = record.status_code.unwrap_or(0),
+                        ack_required = entry.delivery.is_some(),
+                        ack_matches = record.acknowledged,
                         latency_ms = record.latency_ms,
                         body = %record.body,
-                        "RWI webhook returned non-success status, giving up"
+                        "RWI webhook delivery failed"
                     );
                 }
             }
             Err(e) => {
+                if let Some(delivery) = &entry.delivery {
+                    delivery.complete(false);
+                }
                 consecutive_send_failures += 1;
                 metrics::counter!(
                     "rwi_events_push_failed_total",
@@ -426,6 +453,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_durable_webhook_requires_matching_event_acknowledgement() {
+        use axum::http::StatusCode;
+
+        let (outgoing, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    outgoing.send(body["event_type"].clone()).unwrap();
+                    let (status, acknowledgement) = match body["event_id"].as_str().unwrap() {
+                        "plain-200" => (StatusCode::OK, None),
+                        "mismatched" => (StatusCode::OK, Some("another-event")),
+                        "failed" => (StatusCode::SERVICE_UNAVAILABLE, Some("failed")),
+                        "accepted" => (StatusCode::OK, Some("accepted")),
+                        id => panic!("unexpected event ID {id}"),
+                    };
+                    let mut headers = axum::http::HeaderMap::new();
+                    if let Some(acknowledgement) = acknowledgement {
+                        headers.insert("x-rwi-event-ack", acknowledgement.parse().unwrap());
+                    }
+                    (status, headers)
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut gateway = crate::rwi::RwiGateway::new();
+        gateway.set_webhook_tx(start_rwi_webhook_handler(
+            LocatorWebhookConfig {
+                url,
+                events: vec!["call_ringing".into()],
+                headers: None,
+                timeout_ms: Some(2000),
+                retries: None,
+                track_queue_latency: None,
+            },
+            WEBHOOK_CHANNEL_SIZE,
+        ));
+
+        for (event_id, accepted) in [
+            ("plain-200", false),
+            ("mismatched", false),
+            ("failed", false),
+            ("accepted", true),
+        ] {
+            let receipt = gateway
+                .enqueue_confirmed_webhook(
+                    crate::rwi::RwiEvent {
+                        event_type: "call_ringing",
+                        call_id: Some("call-ack".into()),
+                        payload: json!({"call_id": "call-ack"}),
+                    },
+                    event_id.into(),
+                    "confirmed_call_ringing",
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), receipt)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                accepted,
+                "unexpected receipt for {event_id}"
+            );
+            assert_eq!(incoming.try_recv().unwrap(), "confirmed_call_ringing");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn test_webhook_receives_call_ringing() {
         let server = TestHttpServer::start().await;
         let config = LocatorWebhookConfig {
@@ -439,6 +538,7 @@ mod tests {
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let entry = EventCacheEntry {
+            delivery: None,
             cached_at: chrono::Utc::now(),
             call_id: "c1".into(),
             event: crate::rwi::event::to_legacy_event(
@@ -545,6 +645,7 @@ mod tests {
         // Three `ivr_step_trace` events for one call, same microsecond,
         // differing only in payload (as real flow-end traces do).
         let mk_trace = |trigger: &str| EventCacheEntry {
+            delivery: None,
             cached_at: ts,
             call_id: "burst-call".into(),
             event: crate::rwi::event::RwiEvent {
@@ -601,6 +702,7 @@ mod tests {
 
         let ts = chrono::Utc::now();
         let mk = || EventCacheEntry {
+            delivery: None,
             cached_at: ts,
             call_id: "redelivery-call".into(),
             event: crate::rwi::event::to_legacy_event(
@@ -647,6 +749,7 @@ mod tests {
 
         // agent_state_changed: broadcast-style event (empty call_id).
         let agent_entry = EventCacheEntry {
+            delivery: None,
             cached_at: now,
             call_id: String::new(),
             event: crate::rwi::event::RwiEvent {
@@ -662,6 +765,7 @@ mod tests {
         };
         // recording_metadata_available: carries the download URL after upload.
         let rec_meta_entry = EventCacheEntry {
+            delivery: None,
             cached_at: now + chrono::Duration::milliseconds(1),
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
@@ -676,6 +780,7 @@ mod tests {
         };
         // record_end: recording finalization (url/duration/file_size).
         let record_end_entry = EventCacheEntry {
+            delivery: None,
             cached_at: now + chrono::Duration::milliseconds(2),
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
@@ -874,6 +979,7 @@ mod tests {
 
     fn retry_test_entry(call_id: &str) -> EventCacheEntry {
         EventCacheEntry {
+            delivery: None,
             cached_at: chrono::Utc::now(),
             call_id: call_id.into(),
             event: crate::rwi::event::to_legacy_event(
@@ -978,6 +1084,7 @@ mod tests {
 
         let transcript = "请检查录音质量与通话摘要。".repeat(100);
         let entry = EventCacheEntry {
+            delivery: None,
             cached_at: chrono::Utc::now(),
             call_id: "call-cn".into(),
             event: crate::rwi::event::RwiEvent {

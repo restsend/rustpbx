@@ -86,6 +86,14 @@ pub struct LocatorStats {
     pub non_webrtc_locations: usize,
 }
 
+/// Current bindings pinned while an operation authorized by a registration is applied.
+#[derive(Default)]
+pub struct ActiveRegistrationSnapshot {
+    pub bindings: Vec<Location>,
+    pub(super) _database_lock: Option<sea_orm::DatabaseTransaction>,
+    pub(super) _local_lock: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
 pub type LocatorEventReceiver = tokio::sync::broadcast::Receiver<LocatorEvent>;
 pub type LocatorEventLock = Arc<tokio::sync::Mutex<()>>;
@@ -153,6 +161,17 @@ pub trait Locator: Send + Sync {
         }
         self.has_active_bindings(username, Some("localhost")).await
     }
+    /// Read exact active bindings without emitting expiry or registration events.
+    /// Shared stores hold a row lock across the caller's authorized operation.
+    async fn lock_active_registrations(
+        &self,
+        _username: &str,
+        _realm: Option<&str>,
+        _local_lock: &LocatorEventLock,
+    ) -> Result<ActiveRegistrationSnapshot> {
+        Ok(ActiveRegistrationSnapshot::default())
+    }
+
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
@@ -800,6 +819,25 @@ impl Locator for MemoryLocator {
             .locations
             .get(&identifier)
             .is_some_and(|map| map.values().any(|location| !location.is_expired_at(now))))
+    }
+
+    async fn lock_active_registrations(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        local_lock: &LocatorEventLock,
+    ) -> Result<ActiveRegistrationSnapshot> {
+        let identifier = self.get_identifier(username, realm).await;
+        let lock = local_lock.clone().lock_owned().await;
+        let now = Instant::now();
+        let bindings = self.locations.get(&identifier).map_or_else(Vec::new, |entry| {
+            entry.values().filter(|location| !location.is_expired_at(now)).cloned().collect()
+        });
+        Ok(ActiveRegistrationSnapshot {
+            bindings: sort_locations_by_recency(bindings),
+            _local_lock: Some(lock),
+            ..Default::default()
+        })
     }
 
     /// Full scan: a registration may be keyed under ANY realm

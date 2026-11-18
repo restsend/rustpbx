@@ -1,5 +1,5 @@
 use super::locator::{
-    Locator, LocatorEvent, LocatorEventLock, LocatorEventSender, RealmChecker,
+    ActiveRegistrationSnapshot, Locator, LocatorEvent, LocatorEventLock, LocatorEventSender, RealmChecker,
     UNREGISTER_GRACE_SECS, choose_registered_aor, invalid_host_fallback, is_local_realm,
     is_location_expired, locations_without_active_bindings, now_epoch_secs,
     sort_locations_by_recency,
@@ -945,6 +945,55 @@ impl Locator for DbLocator {
                     .2
                     .is_some_and(matches_stored_aor)
         }))
+    }
+
+    async fn lock_active_registrations(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        local_lock: &LocatorEventLock,
+    ) -> Result<ActiveRegistrationSnapshot> {
+        let Some((username, realm)) = self.normalize_identity(username, realm).await else {
+            return Ok(ActiveRegistrationSnapshot::default());
+        };
+        use sea_orm::sea_query::{Expr, ExprTrait};
+
+        let now = now_epoch_secs();
+        let cutoff = now - LOCATOR_EXPIRE_GRACE_SECS;
+        let query = Entity::find()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(realm))
+            .filter(
+                Condition::any().add(Column::Expires.lte(0)).add(
+                    Expr::col(Column::LastModified)
+                        .add(Expr::col(Column::Expires))
+                        .gt(cutoff),
+                ),
+            )
+            // A fresh native engine creates a new Contact; renewing an older
+            // Contact must not make it the current desktop again.
+            .order_by_desc(Column::Id);
+        let mut snapshot = ActiveRegistrationSnapshot::default();
+        let binding = if self.db.get_database_backend() == sea_orm::DbBackend::Sqlite {
+            // SQLite shares the node's existing locator-event lock.
+            snapshot._local_lock = Some(local_lock.clone().lock_owned().await);
+            query.one(&self.db).await?
+        } else {
+            // Holding only this identity's rows avoids blocking unrelated REGISTERs.
+            let transaction = self.db.begin().await?;
+            let binding = query.lock_exclusive().one(&transaction).await?;
+            snapshot._database_lock = Some(transaction);
+            binding
+        };
+        let now = now_epoch_secs();
+        if let Some(binding) = binding
+            && !is_location_expired(binding.expires, binding.last_modified, now)
+        {
+            snapshot
+                .bindings
+                .push(model_to_location(&binding, now, Instant::now())?);
+        }
+        Ok(snapshot)
     }
 
     async fn diagnostic_lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {

@@ -3,7 +3,7 @@ use crate::call::Location;
 use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::models::presence;
-use crate::proxy::cluster_event::{EventSource, event_etags};
+use crate::proxy::cluster_event::{EventSource, WebSocketPublishFlow, event_etags};
 use crate::proxy::cluster_sync::ClusterSync;
 use crate::proxy::locator::{Locator, LocatorEvent, LocatorEventLock};
 use anyhow::{Result, anyhow};
@@ -847,7 +847,7 @@ impl PresenceManager {
             // An addon may defer logout or reject the write. Admit expiry
             // before notifying subscribers, just like a client PUBLISH.
             if let Some(hub) = hub {
-                hub.emit_presence_change_locked(&identity, None, &state)
+                hub.emit_presence_change_locked(&identity, None, &state, None)
                     .await;
             } else {
                 self.update_state(&identity, state, &EventSource::Local)
@@ -1609,13 +1609,12 @@ impl PresenceModule {
 
     async fn handle_publish(&self, tx: &mut Transaction, cookie: &TransactionCookie) -> Result<()> {
         let auth_user = cookie.get_user();
-        let authenticated = auth_user.is_some();
         let from = tx.original.from_header()?.typed()?;
 
         // If authenticated, use the authenticated username to avoid spoofing
         // and support non-extension users.
-        let identity = if let Some(user) = auth_user {
-            user.username
+        let identity = if let Some(user) = &auth_user {
+            user.username.clone()
         } else {
             match from.uri.user() {
                 Some(u) => u.to_string(),
@@ -1752,7 +1751,7 @@ impl PresenceModule {
         let publish_body = tx.original.body.clone();
         let mut consumed = false;
         let wants_confirmation =
-            authenticated && expires > 0 && requests_presence_result(&tx.original);
+            auth_user.is_some() && expires > 0 && requests_presence_result(&tx.original);
         let mut confirmation = None;
         for hook in self.manager.publish_hooks() {
             if wants_confirmation {
@@ -1779,8 +1778,36 @@ impl PresenceModule {
             // Addon admission precedes persistence and NOTIFY, so a rejected
             // automatic client request cannot overwrite the authoritative mirror.
             if let Some(hub) = &self.server.cluster_event_hub {
-                hub.emit_presence_change(&identity, Some(&old_state), &current)
-                    .await;
+                use rsipstack::sip::Transport;
+                use rsipstack::transport::SipAddr;
+                let flow = if current.status == PresenceStatus::Offline {
+                    tx.connection
+                        .as_ref()
+                        .and_then(|connection| connection.get_remote_addr())
+                        .filter(|addr| matches!(addr.r#type, Some(Transport::Ws | Transport::Wss)))
+                        .map(|remote| WebSocketPublishFlow {
+                            // The native From may contain a private socket address.
+                            // The registrar route is the identity domain on this ingress.
+                            realm: auth_user
+                                .and_then(|user| user.realm)
+                                .or_else(|| Some(tx.original.uri.host_with_port.to_string())),
+                            remote: remote.clone(),
+                            home_proxy: self.server.cluster_self_addr.clone().or_else(|| {
+                                self.server
+                                    .default_contact_uri()
+                                    .and_then(|uri| SipAddr::try_from(uri).ok())
+                            }),
+                        })
+                } else {
+                    None
+                };
+                hub.emit_presence_change_from_flow(
+                    &identity,
+                    Some(&old_state),
+                    &current,
+                    flow.as_ref(),
+                )
+                .await;
             } else {
                 let publication_lock = self.manager.publication_lock(&identity);
                 let _publication = publication_lock.lock().await;

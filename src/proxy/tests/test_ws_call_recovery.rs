@@ -18,20 +18,27 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn connect(port: u16) -> Ws {
+    connect_ws(port, false).await
+}
+
+pub(crate) async fn connect_ws(port: u16, secure: bool) -> Ws {
     let mut request = format!("ws://127.0.0.1:{port}/")
         .into_client_request()
         .unwrap();
     request
         .headers_mut()
         .insert("sec-websocket-protocol", "sip".parse().unwrap());
+    if secure {
+        request.headers_mut().insert("x-forwarded-proto", "https".parse().unwrap());
+    }
     tokio_tungstenite::connect_async(request).await.unwrap().0
 }
 
 // Use the production HTTP-upgraded channel adapter, including its close semantics.
-async fn serve_ws(
+pub(crate) async fn serve_ws(
     ws_listener: tokio::net::TcpListener,
     inner: Arc<crate::proxy::server::SipServerInner>,
     cancel: CancellationToken,
@@ -174,7 +181,7 @@ impl crate::proxy::ProxyModule for ExistingDialogSipOwner {
     }
 }
 
-async fn receive(ws: &mut Ws) -> SipMessage {
+pub(crate) async fn receive(ws: &mut Ws) -> SipMessage {
     loop {
         match ws.next().await.expect("WS remains open").unwrap() {
             Message::Text(text) => return SipMessage::try_from(text.as_bytes()).unwrap(),
@@ -221,7 +228,7 @@ async fn send_as(
     ).into())).await.unwrap();
 }
 
-async fn register(ws: &mut Ws, port: u16, generation: u32) {
+pub(crate) async fn register(ws: &mut Ws, port: u16, generation: u32) {
     send(
         ws,
         port,
