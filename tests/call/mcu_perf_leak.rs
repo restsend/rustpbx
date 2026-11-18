@@ -40,14 +40,15 @@ async fn test_many_participants_single_conference() {
         rxs.push(rx);
     }
 
-    // All speak simultaneously.
+    // All speak simultaneously (mix bus rate: 20 ms = 320 samples at 16 kHz).
     for (i, tx) in txs.iter().enumerate() {
-        let samples = vec![((i % 16) as i16 + 1) * 500; 160];
-        tx.send(AudioFrame::new(samples, 8000)).await.unwrap();
+        let samples = vec![((i % 16) as i16 + 1) * 500; 320];
+        tx.send(AudioFrame::new(samples, 16_000)).await.unwrap();
     }
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    // Every participant should receive non-silent mixed audio of frame size 160.
+    // Every participant should receive non-silent mixed audio of one 20 ms
+    // mix-bus frame.
     for (i, rx) in rxs.iter_mut().enumerate() {
         let frame = rx
             .try_recv()
@@ -56,7 +57,7 @@ async fn test_many_participants_single_conference() {
             frame.samples.iter().any(|&s| s != 0),
             "participant {i} received silence"
         );
-        assert_eq!(frame.samples.len(), 160);
+        assert_eq!(frame.samples.len(), 320);
     }
 
     manager

@@ -305,7 +305,11 @@ impl ConferenceManager {
         // overwriting a room whose mixer may already be running (a leaked
         // permanently-running task).
         use dashmap::mapref::entry::Entry;
-        let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
+        // 16 kHz mix bus: G.722 legs (16 kHz PCM) pass through untouched, while
+        // 8 kHz PCMU and 48 kHz Opus legs are resampled by the bridge's
+        // anti-aliased FIR — downmixing everything to 8 kHz would fold the
+        // 4-7 kHz band G.722 exists to carry back into the voice band (aliasing).
+        let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), crate::media::conference_mixer::CONFERENCE_MIXER_SAMPLE_RATE));
         match self.conferences.entry(conf_id.clone()) {
             Entry::Vacant(e) => {
                 e.insert(ConferenceState {
@@ -412,6 +416,13 @@ impl ConferenceManager {
     /// Get a conference if it exists
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
         self.conferences.get(conf_id).map(|v| v.room.clone())
+    }
+
+    /// Mix-bus sample rate of a live conference. Media bridges resample each
+    /// leg's decoded PCM to this rate on ingress and the mixed audio back to
+    /// the leg's encoder rate on egress — never hard-code 8 kHz here.
+    pub fn conference_mixer_sample_rate(&self, conf_id: &ConferenceId) -> Option<u32> {
+        self.conferences.get(conf_id).map(|s| s.mixer.sample_rate())
     }
 
     /// Bind an attached SIP participant to its owning session's command queue.

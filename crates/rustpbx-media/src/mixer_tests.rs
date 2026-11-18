@@ -26,7 +26,10 @@ fn test_mixer_saturation_at_boundary() {
 
     let result = mixer.mix_frames(vec![frame1, frame2, frame3], &[1.0, 1.0, 1.0]);
 
-    assert!(result.iter().all(|&s| s == i16::MAX));
+    // Soft limiter: the massive over-limit sum stays pinned just below full
+    // scale (never flat-topping at i16::MAX, which produced harsh clipping
+    // harmonics).
+    assert!(result.iter().all(|&s| s > 32700 && s < i16::MAX));
 }
 
 #[test]

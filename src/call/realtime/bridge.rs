@@ -7,11 +7,46 @@
 //! egress, [`BridgeOutput`]s → RWI gateway + command channel.
 
 use super::{DownlinkEvent, RealtimeParams, RealtimeProtocol, UplinkMessage};
+use audio_codec::BoxedResampler;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Cached stateful FIR resampler: `(cached source rate, resampler)`.
+/// Filter state must persist across frames — a per-frame instance turns
+/// every frame boundary into a click, and naive decimation folds high
+/// frequencies back into the voice band as aliasing noise.
+type ResamplerState = Option<(u32, BoxedResampler)>;
+
+/// Resample `samples` from `src_rate` to `dst_rate`, keeping filter state in
+/// `state` across calls. Falls back to passing the samples through (with a
+/// warning) if the resampler cannot be built — rates are negotiated up front
+/// so this should never happen in practice.
+fn resample_fir(
+    state: &mut ResamplerState,
+    samples: &[i16],
+    src_rate: u32,
+    dst_rate: u32,
+) -> Vec<i16> {
+    if src_rate == dst_rate {
+        return samples.to_vec();
+    }
+    if state.as_ref().map_or(true, |(r, _)| *r != src_rate) {
+        *state = match BoxedResampler::new(src_rate as usize, dst_rate as usize) {
+            Ok(rs) => Some((src_rate, rs)),
+            Err(e) => {
+                warn!(%src_rate, %dst_rate, error = %e, "realtime bridge resampler build failed; passing PCM through");
+                None
+            }
+        };
+    }
+    match state {
+        Some((_, rs)) => rs.resample(samples),
+        None => samples.to_vec(),
+    }
+}
 
 /// One uplink PCM frame (mono, at `sample_rate`) ready for the protocol.
 #[derive(Debug, Clone)]
@@ -108,6 +143,9 @@ pub async fn run_realtime_bridge(
         .await;
 
     let mut muted = false;
+    // Per-direction resampler state (leg/WS PCM rates can differ per frame).
+    let mut uplink_resampler: ResamplerState = None;
+    let mut downlink_resampler: ResamplerState = None;
     let reason = 'bridge: loop {
         tokio::select! {
             _ = io.cancel.cancelled() => break 'bridge BridgeEndReason::Cancelled,
@@ -117,15 +155,12 @@ pub async fn run_realtime_bridge(
                     // Leg tap detached (call ended) — stop quietly.
                     break 'bridge BridgeEndReason::Cancelled;
                 };
-                let pcm = if frame.sample_rate == ws_rate {
-                    frame.samples
-                } else {
-                    crate::call::runtime::conference_media_bridge::resample_linear(
-                        &frame.samples,
-                        frame.sample_rate,
-                        ws_rate,
-                    )
-                };
+                let pcm = resample_fir(
+                    &mut uplink_resampler,
+                    &frame.samples,
+                    frame.sample_rate,
+                    ws_rate,
+                );
                 let mut send_failed = false;
                 for msg in protocol.encode_uplink(&pcm) {
                     if send_uplink(&mut ws_write, &msg).await.is_err() {
@@ -163,13 +198,7 @@ pub async fn run_realtime_bridge(
                                 continue; // barge-in: playout stays muted until next utterance cycle
                             }
                             let rate = if rate == 0 { ws_rate } else { rate };
-                            let pcm = if rate == ws_rate {
-                                pcm
-                            } else {
-                                crate::call::runtime::conference_media_bridge::resample_linear(
-                                    &pcm, rate, ws_rate,
-                                )
-                            };
+                            let pcm = resample_fir(&mut downlink_resampler, &pcm, rate, ws_rate);
                             io.playout.write(&pcm).await;
                         }
                         DownlinkEvent::SpeechStarted => {
