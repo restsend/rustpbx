@@ -65,7 +65,7 @@ impl TryFrom<RawConfig> for QualityStatsConfig {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Range {
     pub min: f64,
     pub max: f64,
@@ -186,6 +186,11 @@ impl QualityWindow {
         }
         self.reports.retain(|report| report.at > cutoff);
     }
+    #[doc(hidden)]
+    pub(crate) fn samples_len(&self) -> usize {
+        self.samples.len()
+    }
+
     pub(crate) fn summary(&mut self, now: Instant) -> Option<WindowSummary> {
         self.prune(now);
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
