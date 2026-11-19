@@ -2694,6 +2694,72 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
 }
 
 #[tokio::test]
+async fn rwi_originate_attach_starts_talk_time() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "rwi",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "rwi-originate-talk-time".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "rwi-originate-talk-time".to_string(),
+            request,
+            DialDirection::Outbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:rwi@rustpbx.com".to_string(),
+        original_callee: "sip:target@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let dialog_layer = server.dialog_layer.clone();
+    let (mut session, _handle, _cmd_rx) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, true);
+    let codecs = vec![MediaNegotiator::codec_info_for_type(CodecType::PCMU)];
+    let offer = session
+        .prepare_originate_caller_leg(codecs)
+        .await
+        .expect("originate A leg must create the INVITE offer");
+    let remote = LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None).expect("remote RTP leg");
+    let answer = remote.answer(&offer).await.expect("remote SDP answer");
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let (dialog, _tx) = dialog_layer
+        .create_client_invite_dialog(
+            rsipstack::dialog::invitation::InviteOption {
+                caller: "sip:rwi@rustpbx.com".try_into().unwrap(),
+                callee: "sip:target@127.0.0.1".try_into().unwrap(),
+                contact: "sip:rwi@127.0.0.1".try_into().unwrap(),
+                offer: Some(offer.into_bytes()),
+                ..Default::default()
+            },
+            state_tx,
+        )
+        .expect("client INVITE dialog");
+    assert!(session.meta.answer_time.is_none());
+
+    session
+        .attach_caller_dialog(dialog, Some(answer))
+        .await
+        .expect("answered originate must attach");
+
+    assert!(
+        session.meta.answer_time.is_some(),
+        "an answered originate must start talk time, or call_hangup reports duration_secs 0"
+    );
+    remote.stop();
+}
+
+#[tokio::test]
 async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::media::leg::{LegConfig, LegInner};
