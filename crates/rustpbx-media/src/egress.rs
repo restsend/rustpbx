@@ -2064,19 +2064,31 @@ mod tests {
         let pcm: Vec<i16> = (0..960).map(|i| {
             ((i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 8000.0) as i16
         }).collect();
-        peer_sender.try_send(MediaSample::Audio(AudioFrame {
-            data: Bytes::from(opus_encoder.encode(&pcm)),
-            payload_type: Some(111),
-            rtp_timestamp: 64 * 960,
-            clock_rate: 48_000,
-            ..Default::default()
-        })).unwrap();
-        let MediaSample::Audio(frame) = tokio::time::timeout(Duration::from_millis(500), output_track.recv())
-            .await.expect("new speech must be forwarded without the queued 1.28-second delay").unwrap()
-        else { panic!("expected audio"); };
-        assert_eq!(frame.payload_type, Some(0));
-        let pcm = audio_codec::create_decoder(CodecType::PCMU).decode(&frame.data);
-        assert!(pcm.iter().any(|s| s.unsigned_abs() > 100), "fresh speech must survive transcoding");
+        // Send two frames so the 2-frame jitter-absorber prebuffer arms and
+        // emits live speech (the first tick emits prebuffer comfort noise).
+        for idx in 0..2u32 {
+            peer_sender.try_send(MediaSample::Audio(AudioFrame {
+                data: Bytes::from(opus_encoder.encode(&pcm)),
+                payload_type: Some(111),
+                rtp_timestamp: (64 + idx) * 960,
+                clock_rate: 48_000,
+                ..Default::default()
+            })).unwrap();
+        }
+        let mut decoder = audio_codec::create_decoder(CodecType::PCMU);
+        let mut saw_speech = false;
+        for _ in 0..4 {
+            let MediaSample::Audio(frame) = tokio::time::timeout(Duration::from_millis(500), output_track.recv())
+                .await.expect("new speech must be forwarded without the queued 1.28-second delay").unwrap()
+            else { panic!("expected audio"); };
+            assert_eq!(frame.payload_type, Some(0));
+            let decoded = decoder.decode(&frame.data);
+            if decoded.iter().any(|s| s.unsigned_abs() > 100) {
+                saw_speech = true;
+                break;
+            }
+        }
+        assert!(saw_speech, "fresh speech must survive transcoding");
         pipeline.cancel.cancel();
     }
 
@@ -2742,9 +2754,10 @@ mod transcode_drain_tests {
             let frame = task.next_frame().await.expect("frame while peer alive");
             assert_eq!(frame.data.len(), 160);
         }
-        // Queues drained: 480 ms of PCM still carried — timeout ticks must
-        // flush it instead of emitting silence (paused time fires instantly).
-        for _ in 0..3 {
+        // Queues drained: tick 0 prebuffered (240 < 320), ticks 1..=5 emitted
+        // 5 frames (leaving 640 samples = 4 × 20 ms frames) — 4 flush ticks
+        // drain all remaining PCM.
+        for _ in 0..4 {
             let frame = task.next_frame().await.expect("carry flush tick");
             assert_eq!(frame.data.len(), 160);
         }
@@ -2787,7 +2800,7 @@ mod transcode_drain_tests {
     async fn dtmf_frame_mid_drain_emits_and_recovers() {
         let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
         let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 64);
-        // a1, a2 (10 ms audio), then an RFC 2833 event, then a3.
+        // a1, a2 (10 ms audio), then an RFC 2833 event, then a3 (20 ms) + a4 (10 ms).
         for (idx, sample) in [
             pcmu_frame(10, 0, 0),
             pcmu_frame(10, 80, 1),
@@ -2803,7 +2816,8 @@ mod transcode_drain_tests {
                 source_addr: None,
                 raw_packet: None,
             }),
-            pcmu_frame(10, 240, 3),
+            pcmu_frame(20, 240, 3),
+            pcmu_frame(10, 400, 4),
         ]
         .into_iter()
         .enumerate()
@@ -2814,19 +2828,22 @@ mod transcode_drain_tests {
         }
         let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
 
-        // Tick 1 pops a1 + a2 via drain, hits the DTMF frame, emits it.
+        // Tick 1 pops a1 + a2 (160 samples) via drain, hits the DTMF frame, emits it.
         let first = task.next_frame().await.expect("dtmf tick");
         assert_eq!(first.payload_type, Some(101), "DTMF frame emitted on its tick");
 
-        // Tick 2 resumes audio: the carried a1+a2 merge into one full frame;
-        // a3 (80) becomes the new carried tail.
+        // Tick 2 drains a3 + a4 (400 samples >= 320 prebuffer -> arms) and emits
+        // one full 20 ms frame; tick 3 emits the second full 20 ms frame, leaving
+        // the 80-sample tail carried for future audio.
         let second = task.next_frame().await.expect("audio tick after dtmf");
         assert_eq!(second.payload_type, Some(8));
         assert_eq!(second.data.len(), 160);
+        let third = task.next_frame().await.expect("second audio tick after dtmf");
+        assert_eq!(third.payload_type, Some(8));
+        assert_eq!(third.data.len(), 160);
 
-        // Everything consumed: a1+a2+dtmf+a3 = 3 audio frames (240 samples);
-        // 2 were emitted, the 80-sample tail stays carried for future audio
-        // (no loss, no overflow).
+        // Everything consumed: a1+a2+a3+a4 = 400 samples; 320 emitted across
+        // two 20 ms frames, 80-sample tail stays carried (no loss, no overflow).
         assert_eq!(task.transcode_pending.len(), 80);
         assert_eq!(task.transcode_overflow_samples, 0);
         assert_eq!(in_sender.drop_count(), 0);
@@ -2852,18 +2869,29 @@ mod transcode_drain_tests {
             task.source,
             EgressSource::TranscodePeer { primed: true, .. }
         ));
+        // First frame primes the stream and stays in the 2-frame prebuffer.
+        assert_eq!(task.transcode_pending.len(), 160);
 
-        // After priming an empty tick emits silence (never None — the paced
-        // stream must not gap).
+        // Second frame arms the prebuffer and emits the first real frame.
+        in_sender.try_send(pcmu_frame(20, 160, 1)).unwrap();
+        let second = task.next_frame().await.expect("second audio arms");
+        assert_eq!(second.payload_type, Some(8));
+        assert_eq!(task.transcode_pending.len(), 160);
+
+        // Next tick flushes the remaining buffered frame; the following empty
+        // tick emits silence (never None — the paced stream must not gap).
+        let third = task.next_frame().await.expect("flush buffered frame");
+        assert_eq!(third.payload_type, Some(8));
+        assert_eq!(task.transcode_pending.len(), 0);
+
         let silence = task.next_frame().await.expect("post-primed silence");
         assert_eq!(silence.payload_type, Some(8));
         assert_eq!(task.transcode_pending.len(), 0);
     }
 
-    /// THE padded-path regression: a lone 10 ms frame on a 20 ms leg is
-    /// emitted zero-padded and CONSUMED — the partial must never surface
-    /// again inside a later frame (pre-fix, every input segment was played
-    /// twice: once padded, once folded into the next full frame).
+    /// Partial 10 ms frames fed one-per-tick on a 20 ms leg are buffered and
+    /// merged into clean 20 ms frames once the 2-frame prebuffer arms — each
+    /// 10 ms segment appears exactly once in order, never repeated or dropped.
     #[tokio::test(start_paused = true)]
     async fn padded_partial_frame_is_not_repeated() {
         let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
@@ -2872,9 +2900,12 @@ mod transcode_drain_tests {
         let mut pcma_dec = create_decoder(CodecType::PCMA);
         let mut pcmu_enc = create_encoder(CodecType::PCMU);
 
-        // Paced lone 10 ms frames, each a distinct constant amplitude, fed
-        // one per tick so the drain never finds a second frame.
-        for (i, amp) in [6_000i16, -6_000, 3_000, -3_000].into_iter().enumerate() {
+        // Feed four distinct 10 ms segments one per tick (4 × 80 = 320 samples
+        // = 2 full 20 ms frames). Ticks 0..2 prebuffer; tick 3 arms and emits
+        // [6000, -6000]; tick 4 flushes [3000, -3000].
+        let amps = [6_000i16, -6_000, 3_000, -3_000];
+        let mut emitted = Vec::new();
+        for (i, amp) in amps.into_iter().enumerate() {
             in_sender
                 .try_send(MediaSample::Audio(AudioFrame {
                     rtp_timestamp: i as u32 * 80,
@@ -2889,35 +2920,46 @@ mod transcode_drain_tests {
                 }))
                 .unwrap();
 
-            let frame = task.next_frame().await.expect("padded frame");
+            let frame = task.next_frame().await.expect("paced frame");
             assert_eq!(frame.data.len(), 160, "one full 20 ms PCMA frame");
-            let decoded = pcma_dec.decode(&frame.data);
+            if i == 3 {
+                emitted.push(pcma_dec.decode(&frame.data));
+            }
+        }
+        // Flush the second buffered 20 ms frame.
+        let flush = task.next_frame().await.expect("flush second frame");
+        assert_eq!(flush.data.len(), 160);
+        emitted.push(pcma_dec.decode(&flush.data));
+
+        let expected_halves: [(i16, i16); 2] = [(6_000, -6_000), (3_000, -3_000)];
+        for (idx, (decoded, (first_amp, second_amp))) in
+            emitted.iter().zip(expected_halves).enumerate()
+        {
             assert_eq!(decoded.len(), 160);
-            // Signal half: every sample close to THIS tick's amplitude. A
-            // repeated previous segment (the pre-fix bug) or silence fails.
             for (j, s) in decoded[..80].iter().enumerate() {
                 assert_eq!(
                     s.signum(),
-                    amp.signum(),
-                    "tick {i} sample {j}: stale/repeated sample {s}, expected {amp}"
+                    first_amp.signum(),
+                    "frame {idx} first half sample {j}: got {s}, expected {first_amp}"
                 );
                 assert!(
-                    ((*s as i32) - amp as i32).abs() < (amp as i32).abs() / 2 + 64,
-                    "tick {i} sample {j}: {s} not close to {amp}"
+                    ((*s as i32) - first_amp as i32).abs() < (first_amp as i32).abs() / 2 + 64,
+                    "frame {idx} first half sample {j}: {s} not close to {first_amp}"
                 );
             }
-            // Padding half: silence. The egress encoder's filter state leaks
-            // a tiny residual into a digital-zero tail, so allow a small
-            // bound — anything near the repeated amplitude (the pre-fix bug)
-            // still fails loudly.
-            assert!(
-                decoded[80..].iter().all(|s| s.abs() < 200),
-                "tick {i}: padding half must be silence, got {:?}",
-                &decoded[80..][..8]
-            );
+            for (j, s) in decoded[80..].iter().enumerate() {
+                assert_eq!(
+                    s.signum(),
+                    second_amp.signum(),
+                    "frame {idx} second half sample {j}: got {s}, expected {second_amp}"
+                );
+                assert!(
+                    ((*s as i32) - second_amp as i32).abs() < (second_amp as i32).abs() / 2 + 64,
+                    "frame {idx} second half sample {j}: {s} not close to {second_amp}"
+                );
+            }
         }
-        // Each lone segment was fully consumed: nothing carried, nothing
-        // dropped.
+        // All four segments were fully consumed: nothing carried, nothing dropped.
         assert_eq!(task.transcode_pending.len(), 0);
         assert_eq!(task.transcode_overflow_samples, 0);
         assert_eq!(in_sender.drop_count(), 0);

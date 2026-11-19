@@ -286,7 +286,19 @@ async fn attended_transfer_hold_reaches_customer_via_partner_session() {
     // transfer). The room keeps the customer and the transfer target.
     bob.hangup(&calls[1].0).await.unwrap();
     bob.hangup(&calls[0].1).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait briefly for the PBX to process Bob's BYEs while keeping the two
+    // surviving conference participants intact, then drain any UA events.
+    super::wait::wait_until(Duration::from_secs(2), || async {
+        server
+            .server_ref
+            .conference_manager
+            .list_conferences_detail()
+            .await
+            .into_iter()
+            .any(|room| room.participant_count() == 2)
+    })
+    .await
+    .expect("surviving conference participants must remain active");
     for ua in [&alice, &charlie] {
         ua.process_dialog_events().await.unwrap();
     }

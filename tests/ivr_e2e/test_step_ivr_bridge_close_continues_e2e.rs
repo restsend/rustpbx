@@ -216,7 +216,18 @@ async fn make_registered_ua(server: &E2eTestServer, username: &str) -> Result<Te
     });
     ua.start().await?;
     ua.register().await?;
-    sleep(Duration::from_millis(300)).await;
+    let uri: rsipstack::sip::Uri = format!("sip:{username}@127.0.0.1").parse().unwrap();
+    crate::common::wait::wait_until(Duration::from_secs(2), || async {
+        !server
+            .server_ref
+            .locator
+            .lookup(&uri)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    })
+    .await
+    .expect("registration must land in the locator");
     Ok(ua)
 }
 
@@ -286,7 +297,6 @@ async fn blind_transfer_to_step_ivr_bridge_close_must_continue_the_tree() -> Res
     });
     let bob_dialog = answer_next_incoming(&bob, &bob_sdp, 10).await?;
     let alice_dialog = dial.await.expect("agent dial must complete");
-    sleep(Duration::from_millis(500)).await;
     bob.set_answer_sdp(&bob_dialog, &bob_sdp).await;
 
     // ── single-step blind transfer to the step IVR ───────────────────
@@ -313,7 +323,6 @@ async fn blind_transfer_to_step_ivr_bridge_close_must_continue_the_tree() -> Res
     }
     assert!(refer_ok, "the transferor must get the final NOTIFY 200");
     alice.hangup(&alice_dialog).await?;
-    sleep(Duration::from_millis(300)).await;
 
     // the announcement bridge must be entered
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -331,7 +340,7 @@ async fn blind_transfer_to_step_ivr_bridge_close_must_continue_the_tree() -> Res
     // (bridge closes at ~BRIDGE_HOLD_MS; the resumed step must follow)
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while provider.request_count() < 2 && std::time::Instant::now() < deadline {
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     assert!(
         provider.request_count() >= 2,
@@ -351,7 +360,7 @@ async fn blind_transfer_to_step_ivr_bridge_close_must_continue_the_tree() -> Res
                 bob_terminated = true;
             }
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     assert!(
         bob_terminated,

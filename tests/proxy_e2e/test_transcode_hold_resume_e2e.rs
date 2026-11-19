@@ -180,7 +180,28 @@ async fn test_transcode_hold_resume_keeps_downlink_audio_intact() -> Result<()> 
     alice_ua.register().await?;
     let alice = Arc::new(alice_ua);
     let bob = server.create_ua("bob").await?;
-    sleep(Duration::from_millis(150)).await;
+    crate::common::wait::wait_until(Duration::from_secs(2), || async {
+        let alice_uri: rsipstack::sip::Uri =
+            format!("sip:alice@{}", server.proxy_addr.ip()).parse().unwrap();
+        let bob_uri: rsipstack::sip::Uri =
+            format!("sip:bob@{}", server.proxy_addr.ip()).parse().unwrap();
+        !server
+            .server_ref
+            .locator
+            .lookup(&alice_uri)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+            && !server
+                .server_ref
+                .locator
+                .lookup(&bob_uri)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+    })
+    .await
+    .expect("alice and bob registrations must land in the locator");
 
     let caller_handle = rustpbx::utils::spawn({
         let a = alice.clone();
@@ -189,7 +210,7 @@ async fn test_transcode_hold_resume_keeps_downlink_audio_intact() -> Result<()> 
 
     let mut bob_dialog = None;
     let mut pbx_callee_endpoint: Option<SocketAddr> = None;
-    for _ in 0..60 {
+    for _ in 0..120 {
         let events = bob.process_dialog_events().await?;
         for event in events {
             if let TestUaEvent::IncomingCall(id, offer) = event {
@@ -212,7 +233,7 @@ async fn test_transcode_hold_resume_keeps_downlink_audio_intact() -> Result<()> 
         if bob_dialog.is_some() {
             break;
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     let bob_dialog = bob_dialog.expect("bob must receive the call");
     let pbx_callee_endpoint =
@@ -269,7 +290,12 @@ async fn test_transcode_hold_resume_keeps_downlink_audio_intact() -> Result<()> 
         0x2222_0002,
         20,
     );
-    sleep(Duration::from_millis(1500)).await;
+    // Stream ~1.5 s (75 × 20 ms packets) of baseline transcoded audio.
+    crate::common::wait::wait_until(Duration::from_secs(5), || async {
+        callee_media.total_received() >= 75
+    })
+    .await
+    .expect("callee must receive baseline transcoded downlink");
 
     // Baseline: the transcode bridge carries both tones across.
     assert!(
@@ -288,16 +314,34 @@ async fn test_transcode_hold_resume_keeps_downlink_audio_intact() -> Result<()> 
          a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendonly\r\n",
         callee_media.local_port()?
     );
+    let hold_alice_start = alice.webrtc_rx_packets().len();
     bob.send_reinvite(&bob_dialog, Some(hold_sdp.clone())).await?;
-    sleep(Duration::from_millis(2800)).await;
+    // Hold for ~2.8 s (140 × 20 ms packets of hold audio on the caller leg).
+    crate::common::wait::wait_until(Duration::from_secs(6), || async {
+        alice.webrtc_rx_packets().len() >= hold_alice_start + 140
+    })
+    .await
+    .expect("caller must receive hold audio while callee is on hold");
 
     // ── UNHOLD: sendrecv re-INVITE → bridge route rebuilt ─────────────────
+    let post_callee_start = callee_media.total_received();
+    let post_alice_start = alice.webrtc_rx_packets().len();
     let unhold_sdp = hold_sdp.replace("a=sendonly", "a=sendrecv").replace("o=- 2 2", "o=- 2 3");
     bob.send_reinvite(&bob_dialog, Some(unhold_sdp)).await?;
-    sleep(Duration::from_millis(2500)).await;
+    // Stream ~2.5 s (125 × 20 ms packets) of resumed transcoded audio on both legs.
+    crate::common::wait::wait_until(Duration::from_secs(6), || async {
+        callee_media.total_received() >= post_callee_start + 125
+            && alice.webrtc_rx_packets().len() >= post_alice_start + 125
+    })
+    .await
+    .expect("both legs must receive resumed transcoded audio after unhold");
 
     alice.hangup(&alice_dialog).await?;
-    sleep(Duration::from_millis(300)).await;
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        server.registry.count() == 0
+    })
+    .await
+    .expect("call must clear from registry after hangup");
 
     // ── Downlink content assertions ───────────────────────────────────────
     // The callee's downlink after the rebuild must be the caller's 400 Hz

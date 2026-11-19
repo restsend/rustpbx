@@ -125,8 +125,13 @@ enum QualityEvent {
     /// (`{"action": "mute", ...}` — identical to the REST
     /// `POST /calls/active/{id}/commands` body), converted through the shared
     /// console adapter and gated by [`quality_command_allowed`].
+    #[cfg(feature = "console")]
     Command {
         command: crate::console::handlers::call_control::CallCommandPayload,
+    },
+    #[cfg(not(feature = "console"))]
+    Command {
+        command: Value,
     },
     /// Re-target the audio sides of the running inspection (`"caller"`,
     /// `"callee"`, `"both"`). Any live connection may issue it; it acts on the
@@ -145,6 +150,7 @@ enum QualityEvent {
 /// connection that issued them (stop would self-terminate mid-dispatch; start
 /// would pile a second `LiveQuality` over the running one). Everything else
 /// maps through the console adapter exactly as the REST/AMI surfaces do.
+#[cfg(feature = "console")]
 fn quality_command_allowed(
     command: &crate::console::handlers::call_control::CallCommandPayload,
 ) -> bool {
@@ -181,6 +187,7 @@ fn quality_command_trace(
 /// Convert and dispatch one passthrough command from the quality service.
 /// Fire-and-forget, matching the `hangup` precedent: `try_send` success means
 /// the session accepted the request, not that the action completed.
+#[cfg(feature = "console")]
 fn dispatch_quality_command(
     call_id: &str,
     side: QualitySide,
@@ -627,8 +634,13 @@ fn spawn_quality_connection(
                                             tracing::warn!(%call_id, ?side, "quality hangup command dropped: no command sender");
                                         }
                                     }
+                                    #[cfg(feature = "console")]
                                     QualityEvent::Command { command } => {
                                         dispatch_quality_command(&call_id, side, command, cmd_tx.as_ref());
+                                    }
+                                    #[cfg(not(feature = "console"))]
+                                    QualityEvent::Command { command } => {
+                                        tracing::warn!(%call_id, ?side, ?command, "quality service command ignored: console feature disabled");
                                     }
                                     QualityEvent::Switch { sides } => {
                                         tracing::info!(%call_id, ?side, ?sides, "quality service switched inspection sides");
@@ -738,6 +750,7 @@ mod tests {
             .expect("idle audio is not a blocked write");
     }
 
+    #[cfg(feature = "console")]
     #[test]
     fn quality_command_wire_format_parses() {
         let event: QualityEvent = serde_json::from_str(
@@ -823,6 +836,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    #[cfg(feature = "console")]
     #[test]
     fn quality_command_allowlist_blocks_accept_and_lifecycle() {
         use crate::console::handlers::call_control::CallCommandPayload;
@@ -853,6 +867,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "console")]
     #[tokio::test]
     async fn quality_command_dispatch_converts_and_audits() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -879,6 +894,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "console")]
     #[tokio::test]
     async fn quality_command_dispatch_rejects_lifecycle_commands() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);

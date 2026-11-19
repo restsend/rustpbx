@@ -205,7 +205,18 @@ async fn make_registered_ua(server: &E2eTestServer, username: &str) -> Result<Te
     });
     ua.start().await?;
     ua.register().await?;
-    sleep(Duration::from_millis(300)).await;
+    let uri: rsipstack::sip::Uri = format!("sip:{username}@127.0.0.1").parse().unwrap();
+    crate::common::wait::wait_until(Duration::from_secs(2), || async {
+        !server
+            .server_ref
+            .locator
+            .lookup(&uri)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    })
+    .await
+    .expect("registration must land in the locator");
     Ok(ua)
 }
 
@@ -227,7 +238,11 @@ async fn test_queue_dispatched_agent_receives_consult_state_marker() -> Result<(
         false,
     );
     let dialog = caller.make_call(IVR_NUMBER, Some(offer)).await?;
-    sleep(Duration::from_millis(600)).await;
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        server.registry.count() >= 1
+    })
+    .await
+    .expect("IVR call must register in active calls");
     caller.send_dtmf_info(&dialog, "1").await?;
 
     // Wait for the dispatched agent-leg INVITE and answer it.
@@ -244,11 +259,22 @@ async fn test_queue_dispatched_agent_receives_consult_state_marker() -> Result<(
             }
         }
         if bob_dialog_id.is_none() {
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(50)).await;
         }
     }
-    let bob_dialog_id = bob_dialog_id.expect("queue must dispatch the agent");
-    sleep(Duration::from_millis(500)).await;
+    let _bob_dialog_id = bob_dialog_id.expect("queue must dispatch the agent");
+    // Wait until the PBX has processed Bob's 200 OK (ACK arrives at Bob).
+    let ack_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < ack_deadline {
+        let events = bob.process_dialog_events().await?;
+        if events
+            .iter()
+            .any(|e| matches!(e, TestUaEvent::CallEstablished(_)))
+        {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
 
     // Caller announces the local 3-way merge edge (consult_state marker).
     caller
@@ -314,7 +340,11 @@ async fn test_queue_dispatched_agent_receives_consult_state_marker() -> Result<(
     );
 
     caller.hangup(&dialog).await?;
-    sleep(Duration::from_millis(300)).await;
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        server.registry.count() == 0
+    })
+    .await
+    .expect("call must clear from registry after hangup");
     server.stop();
     Ok(())
 }
