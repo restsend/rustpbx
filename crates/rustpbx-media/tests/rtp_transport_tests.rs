@@ -38,6 +38,7 @@ struct TestPeer {
     tx: rustrtc::media::track::SampleStreamSource,
     codec: CodecInfo,
     video_tx: Option<rustrtc::media::track::SampleStreamSource>,
+    video_seq: std::sync::atomic::AtomicU16,
 }
 
 impl TestPeer {
@@ -51,6 +52,7 @@ impl TestPeer {
             tx,
             codec,
             video_tx: None,
+            video_seq: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -71,6 +73,7 @@ impl TestPeer {
             tx,
             codec,
             video_tx: None,
+            video_seq: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -133,6 +136,7 @@ impl TestPeer {
     /// Push a raw H264 access-unit frame to the remote peer (via the bridge).
     fn send_video(&self, payload: Vec<u8>, ts: u32) {
         if let Some(vtx) = &self.video_tx {
+            let seq = self.video_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             vtx.send(MediaSample::Video(rustrtc::media::frame::VideoFrame {
                 data: bytes::Bytes::from(payload),
                 payload_type: Some(96),
@@ -144,7 +148,7 @@ impl TestPeer {
                 is_last_packet: true,
                 header_extension: None,
                 csrcs: Vec::new(),
-                sequence_number: None,
+                sequence_number: Some(seq),
                 source_addr: None,
                 raw_packet: None,
             }))
@@ -2295,6 +2299,58 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
     );
 }
 
+#[tokio::test]
+async fn reinvite_with_same_codec_rebuilds_relay_payload_mapping() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::Opus,
+        TransportMode::Rtp,
+        CodecType::Opus,
+    ).await;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    let leg_b = h.mb.leg(LegSide::B).unwrap().clone();
+    let original = leg_b.negotiated().unwrap().audio.unwrap();
+    let voice = encode_codec_frames(CodecType::Opus, 20);
+    h.test_a.send_audio(voice[0].clone(), 0);
+    let before = h.test_b.recv_audio(2000).await.expect("original relay packet");
+    assert_eq!(before.payload_type, Some(original.payload_type));
+
+    let new_pt = 109;
+    let mut offer = h.test_b.pc.create_offer().await.unwrap();
+    let audio = offer.media_sections.iter_mut().find(|m| m.kind == rustrtc::MediaKind::Audio).unwrap();
+    let old_format = original.payload_type.to_string();
+    let format = audio.formats.iter_mut().find(|f| **f == old_format).unwrap();
+    *format = new_pt.to_string();
+    for attr in &mut audio.attributes {
+        if matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
+            && let Some(value) = attr.value.as_mut()
+            && let Some((pt, params)) = value.split_once(' ')
+            && pt == old_format
+        {
+            *value = format!("{new_pt} {params}");
+        }
+    }
+    h.test_b.pc.set_local_description(offer.clone()).unwrap();
+    let answer = leg_b.answer(&offer.to_sdp_string()).await.unwrap();
+    let audio = leg_b.negotiated().unwrap().audio.unwrap();
+    assert_eq!(audio.codec, original.codec);
+    assert_eq!(audio.payload_type, new_pt);
+    h.test_b.pc
+        .set_remote_description(SessionDescription::parse(SdpType::Answer, &answer).unwrap())
+        .await.unwrap();
+    h.mb.bridge().await.unwrap();
+
+    h.test_a.send_audio(voice[0].clone(), 960);
+    let after = h.test_b.recv_audio(2000).await.expect("relay packet after re-INVITE");
+    assert_eq!(after.payload_type, Some(new_pt));
+    assert_eq!(after.sequence_number, before.sequence_number.map(|seq| seq.wrapping_add(1)));
+    assert_eq!(after.rtp_timestamp.wrapping_sub(before.rtp_timestamp), 960);
+    assert_eq!(after.raw_packet.unwrap().header.ssrc, before.raw_packet.unwrap().header.ssrc);
+    h.close();
+}
+
 /// Transcoded call recording (the exact scenario of the reported stutter bug
 /// `0duu44tqb5hs0f8rii8n`: WebRTC-Opus caller ↔ RTP-PCMU callee).
 ///
@@ -3013,7 +3069,8 @@ async fn relay_late_tail_does_not_rewind_paced_hold_clock() {
     h.close();
     assert_eq!(
         resumed.sequence_number,
-        received[2].sequence_number.wrapping_add(1)
+        received[1].sequence_number.wrapping_add(1),
+        "late arrivals must not rewind or reuse outgoing sequence numbers"
     );
     assert_eq!(
         resumed.timestamp.wrapping_sub(high_water),
@@ -3021,7 +3078,6 @@ async fn relay_late_tail_does_not_rewind_paced_hold_clock() {
         "relay-to-paced must anchor to the output high-water sampling time"
     );
 }
-
 
 /// Minimal looping tone source standing in for the hold-music file source.
 struct TestHoldMusicSource {
@@ -3394,4 +3450,73 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
         120 * 160
     );
     let _ = clock_rate;
+}
+
+/// Feedback addresses the producer's SSRC and sequence space, not the relay's.
+#[tokio::test]
+async fn video_feedback_translates_nack_gaps_and_keyframe_targets() {
+    use rustrtc::rtp::{
+        FirRequest, FullIntraRequest, GenericNack, PictureLossIndication,
+        RtcpPacket, RtpHeader, RtpPacket,
+    };
+    let mut h = create_video_harness(
+        TransportMode::Rtp, TransportMode::Rtp, h264_caps(96), h264_caps(110),
+    ).await;
+    let video_sender = |pc: &PeerConnection| pc.get_transceivers().into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Video).unwrap().sender().unwrap();
+    let upstream = video_sender(&h.test_a.pc);
+    let downstream = video_sender(&h.test_b.pc);
+    let mut feedback = upstream.subscribe_rtcp();
+    let mut received = Vec::new();
+    // Start on a higher SSRC to ensure feedback still reaches the active
+    // producer even though the tap remembers the previous source for this PT.
+    for (ssrc, seq) in [(u32::MAX, 9), (upstream.ssrc(), 10), (upstream.ssrc(), 12)] {
+        let mut header = RtpHeader::new(96, seq, 9000 + u32::from(seq - 9) * 3600, ssrc);
+        header.marker = true;
+        upstream.transport().unwrap().send_rtp(
+            RtpPacket::new(header, vec![0x65, 1, 2, 3]),
+        ).await.unwrap();
+        let frame = h.test_b.recv_video(2000).await.expect("relayed video");
+        received.push(frame);
+    }
+    let first = received[1].raw_packet.as_ref().unwrap().header.clone();
+    let last = received[2].raw_packet.as_ref().unwrap().header.clone();
+    assert_eq!(last.sequence_number, first.sequence_number.wrapping_add(2));
+    downstream.transport().unwrap().send_rtcp(&[
+        RtcpPacket::GenericNack(GenericNack {
+            sender_ssrc: downstream.ssrc(), media_ssrc: first.ssrc,
+            lost_packets: vec![first.sequence_number.wrapping_add(1), last.sequence_number.wrapping_add(1000)],
+        }),
+        RtcpPacket::PictureLossIndication(PictureLossIndication {
+            sender_ssrc: downstream.ssrc(), media_ssrc: first.ssrc,
+        }),
+        RtcpPacket::FullIntraRequest(FullIntraRequest {
+            sender_ssrc: downstream.ssrc(),
+            requests: vec![FirRequest { ssrc: first.ssrc, sequence_number: 55 }],
+        }),
+    ]).await.unwrap();
+    let mut seen = [false; 3];
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while seen != [true; 3] {
+            match feedback.recv().await.unwrap() {
+                RtcpPacket::GenericNack(nack) => {
+                    assert_eq!(nack.media_ssrc, upstream.ssrc());
+                    assert_eq!(nack.lost_packets, vec![11], "lost upstream packet must be reverse-mapped; unknown numbers omitted");
+                    seen[0] = true;
+                }
+                RtcpPacket::PictureLossIndication(pli) => {
+                    assert_eq!(pli.media_ssrc, upstream.ssrc());
+                    seen[1] = true;
+                }
+                RtcpPacket::FullIntraRequest(fir) => {
+                    assert_eq!(fir.requests.len(), 1);
+                    assert_eq!(fir.requests[0].ssrc, upstream.ssrc());
+                    assert_eq!(fir.requests[0].sequence_number, 55);
+                    seen[2] = true;
+                }
+                _ => {}
+            }
+        }
+    }).await.expect("translated feedback reaches original producer");
+    h.close();
 }

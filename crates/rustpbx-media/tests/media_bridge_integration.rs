@@ -1578,6 +1578,7 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
         }
         let relay_ssrc = peers[1].outbound_audio_ssrc();
         tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut prev_source = 0;
         for (source, play_hold_music) in [(0, false), (0, true), (2, true), (0, false)] {
             bridge.unbridge().await.unwrap();
             if play_hold_music {
@@ -1597,9 +1598,25 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }).await.unwrap_or_else(|_| panic!("{codec:?} source={source} hold_music={play_hold_music}: relay must resume"));
-            assert_eq!(after.1.sequence_number, before.1.sequence_number.wrapping_add(1), "{codec:?}: sequence reset on resume");
-            assert_eq!(after.1.timestamp.wrapping_sub(before.1.timestamp), 160,
-                "{codec:?}: resume must continue one packet after the sender's last timestamp");
+            // Either way the resume advances by the real elapsed time (8 kHz
+            // RTP clock for PCMU and G722).
+            let advance = after.1.timestamp.wrapping_sub(before.1.timestamp) as i64;
+            let elapsed_ticks = after.0.duration_since(before.0).as_millis() as i64 * 8;
+            assert!(advance >= 160 && (advance - elapsed_ticks).abs() <= 8 * 60,
+                "{codec:?}: resume must advance by the elapsed time: advance={advance} elapsed_ticks={elapsed_ticks}");
+            let seq_step = after.1.sequence_number.wrapping_sub(before.1.sequence_number);
+            if play_hold_music || source != prev_source {
+                // Packets in between (hold music) or another peer: anchored
+                // right after the newest packet.
+                assert_eq!(seq_step, 1, "{codec:?}: sequence reset on resume");
+            } else {
+                // Nothing went out while unbridged (silence is not sent) and
+                // the same peer resumes: its mapping continues, and the
+                // packets not relayed meanwhile show as loss.
+                assert_eq!(i64::from(seq_step), advance / 160,
+                    "{codec:?} source={source}: the gap passes through as loss");
+            }
+            prev_source = source;
             tokio::time::sleep(Duration::from_millis(100)).await;
             let packets = capture.0.lock().unwrap();
             let resumed: Vec<_> = packets.iter().filter(|(time, h)| *time >= after.0 && h.ssrc == relay_ssrc).collect();
@@ -1619,8 +1636,6 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
         let injected_at = Instant::now();
         peers[1].set_egress_source(rustpbx_media::egress::EgressSource::Inject {
             rx: parking_lot::Mutex::new(rx),
-            timestamp_offset: None,
-            behind_frames: 0,
         }).await.unwrap();
         let mut encoder = audio_codec::create_encoder(codec);
         for index in 0..3 {
@@ -1650,14 +1665,89 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
             let packets = capture.0.lock().unwrap();
             let output: Vec<_> = packets.iter().filter(|(_, h)| h.ssrc == relay_ssrc).collect();
             for pair in output.windows(2) {
-                assert_eq!(pair[1].1.sequence_number, pair[0].1.sequence_number.wrapping_add(1),
-                    "{codec:?}: all output paths must share the sender sequence: {:?} -> {:?}", pair[0], pair[1]);
+                let seq_step = pair[1].1.sequence_number.wrapping_sub(pair[0].1.sequence_number);
                 let advance = pair[1].1.timestamp.wrapping_sub(pair[0].1.timestamp);
                 assert!(advance > 0 && advance < 8000,
                     "{codec:?}: output timestamp must advance through playback/mixer/relay/transcode: {advance}");
+                // One sequence space for every output path. A gap only where a
+                // relayed peer's own loss passes through (sequence and
+                // timestamp step together).
+                assert!(seq_step == 1 || (!pair[1].1.marker && u32::from(seq_step) * 160 == advance),
+                    "{codec:?}: all output paths must share the sender sequence: {:?} -> {:?}", pair[0], pair[1]);
             }
         }
         bridge.close();
         for peer in peers.into_iter().chain(phones) { peer.stop(); }
     }
+}
+
+/// A prompt played to one leg of a relayed call (IVR `single_peer`, queue
+/// service prompt) replaces only what that leg hears: its wire carries one
+/// writer at a time on its SSRC (relay, then prompt) with continuous sequence
+/// numbers, while the peer keeps hearing it.
+#[tokio::test]
+async fn single_leg_prompt_on_relay_keeps_one_writer_per_ssrc() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use rustpbx_media::audio_source::ToneAudioSource;
+    use rustrtc::peer_connection::RtpObserver;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    struct Capture(std::sync::Mutex<Vec<RtpHeader>>);
+    impl RtpObserver for Capture {
+        fn on_ingress(&self, packet: &RtpPacket, _: std::net::SocketAddr) {
+            self.0.lock().unwrap().push(packet.header.clone());
+        }
+    }
+
+    let cfg = LegConfig::rtp_pcmu();
+    let mut peers = Vec::new();
+    let mut phones = Vec::new();
+    let mut captures = Vec::new();
+    for id in ["a", "b"] {
+        let peer = LegInner::new(id, &cfg, None).unwrap();
+        let phone = LegInner::new(format!("phone-{id}"), &cfg, None).unwrap();
+        let capture = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        phone.pc().add_observer(capture.clone());
+        let offer = peer.create_offer().await.unwrap();
+        let answer = phone.answer(&offer).await.unwrap();
+        peer.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        peer.accept();
+        phone.accept();
+        peers.push(peer);
+        phones.push(phone);
+        captures.push(capture);
+    }
+    let mut bridge = MediaBridge::new("single-leg-prompt");
+    bridge.select_pair(peers[0].clone(), peers[1].clone()).await.unwrap();
+    bridge.bridge().await.unwrap();
+    for phone in &phones {
+        phone.play_media(Box::new(ToneAudioSource::new(440, Duration::from_secs(10), 8000).unwrap()), true).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let a_ssrc = peers[0].outbound_audio_ssrc();
+    let b_ssrc = peers[1].outbound_audio_ssrc();
+    let heard_by_b = |captures: &[Arc<Capture>]| {
+        captures[1].0.lock().unwrap().iter().filter(|h| h.ssrc == b_ssrc).count()
+    };
+    let relayed_before = captures[0].0.lock().unwrap().iter().filter(|h| h.ssrc == a_ssrc).count();
+    assert!(relayed_before > 5, "A hears B over the relay");
+
+    bridge.invalidate_route_cache();
+    peers[0].play_media(Box::new(ToneAudioSource::new(660, Duration::from_secs(10), 8000).unwrap()), true).await.unwrap();
+    let b_before = heard_by_b(&captures);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(heard_by_b(&captures) > b_before + 5, "B keeps hearing A during A's prompt");
+    let heard_by_a: Vec<_> = captures[0].0.lock().unwrap().iter()
+        .filter(|h| h.ssrc == a_ssrc).cloned().collect();
+    assert!(heard_by_a.len() > relayed_before + 5, "A hears the prompt");
+    for pair in heard_by_a.windows(2) {
+        assert_eq!(pair[1].sequence_number, pair[0].sequence_number.wrapping_add(1),
+            "one writer at a time on A's SSRC: {:?} -> {:?}", pair[0], pair[1]);
+        assert!((pair[1].timestamp.wrapping_sub(pair[0].timestamp) as i32) > 0,
+            "A's timestamp must advance monotonically: {:?} -> {:?}", pair[0], pair[1]);
+    }
+    bridge.close();
+    for leg in peers.into_iter().chain(phones) { leg.stop(); }
 }

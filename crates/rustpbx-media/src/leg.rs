@@ -14,6 +14,16 @@
 //! [`LegInner::set_egress_source`] routes [`EgressSource::RewriteRelay`] to the
 //! PC's rewrite bridge (transport-level, ICE exclusively owned) and all other
 //! sources to the always-alive [`EgressPipeline`].
+//!
+//! ## Outbound timeline
+//!
+//! Each of a leg's senders owns one `rustrtc::rtp_timeline::OutboundTimeline`
+//! for its SSRC. Relayed peer packets are mapped onto it with a fixed offset
+//! (anchored again on a new peer, SSRC or jump); generated packets (the paced
+//! pipeline) advance by one `ptime` interval. The sender preserves the start
+//! timestamp of telephone events interleaved with generated audio. A relay
+//! source arms the peer's rewrite bridge into this leg, and any other source
+//! removes it, so the timeline sees one writer at a time.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -196,12 +206,6 @@ pub struct LegInner {
     /// Egress pipeline — always alive; the source is switched via the command
     /// channel. For [`EgressSource::RewriteRelay`] the pacing loop parks.
     egress: EgressPipeline,
-    /// Whether the current egress source is [`EgressSource::RewriteRelay`].
-    /// Tracked so the Leg knows when to tear down/rebuild the PC's rewrite
-    /// bridge on mode switches (EgressSource is not Clone). Shared with the
-    /// outbound clock sync observer so rewrite packets update the paced
-    /// sender's RTCP/seq state while relay owns the wire.
-    was_relay: Arc<AtomicBool>,
     negotiated: Mutex<Option<NegotiatedLegProfile>>,
     /// Audio address this leg advertised in its local SDP (session/media `c=`
     /// + audio m-line port), captured when the local description commits —
@@ -230,6 +234,9 @@ pub struct LegInner {
     /// `Drop` and before re-spawning, so stale arming tasks never pile up
     /// across negotiation churn / leg replacement.
     relay_arm_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The peer whose rewrite bridge currently relays packets onto this leg's
+    /// wire (`None` when paced). Ensures this leg's wire has one writer at a time.
+    relay_from: Mutex<Option<PeerConnection>>,
     /// Max wait for a WebRTC peer's ICE+DTLS before degrading the relay to
     /// transcoding (from config; falls back to `WEBRTC_RELAY_READY_TIMEOUT`).
     relay_ready_timeout: Option<std::time::Duration>,
@@ -434,7 +441,7 @@ impl LegInner {
         // scheduling jitter). Depth 8 (160 ms) was too shallow: when
         // `try_send` failed, older code still advanced RTP ts/seq → wire holes
         // → Chrome PLC pops on app/IVR (p2p RewriteRelay parks egress). 64 ≈
-        // 1.28 s headroom; egress also rolls back timeline on WouldBlock.
+        // 1.28 s headroom; rustrtc assigns numbering only after dequeue.
         // (500 was ~95 KB/leg × 1600 ≈ 150 MB reserved — too large.)
         let (sender, track, _feedback) = sample_track(MediaKind::Audio, 64);
         let params = RtpCodecParameters {
@@ -522,25 +529,11 @@ impl LegInner {
             }
         }
 
-        let was_relay = Arc::new(AtomicBool::new(false));
-        // Keep paced-sender RTCP SR / next-seq coherent while rewrite owns the
-        // shared outbound SSRC. Hold the audio sender as a WEAK ref so
-        // this observer cannot keep the PeerConnection or RtpTransport alive in
-        // a cycle: the observer is attached to the transport, and a strong
-        // sender would hold that same transport (transport -> observer ->
-        // sender -> transport), which reference counting never frees.
-        let audio_sender = audio_rtp_sender(&pc).map(|s| Arc::downgrade(&s));
-        pc.add_observer(Arc::new(OutboundClockSync {
-            sender: audio_sender,
-            relay_active: was_relay.clone(),
-        }));
-
         Ok(Arc::new(LegInner {
             id: LegId::from(label),
             pc,
             tap,
             egress,
-            was_relay,
             negotiated: Mutex::new(None),
             advertised_addr: Mutex::new(None),
             peer_advertised_addr: Mutex::new(None),
@@ -549,6 +542,7 @@ impl LegInner {
             observer_attached: Arc::new(AtomicBool::new(false)),
             observer_task: Mutex::new(None),
             relay_arm_task: Mutex::new(None),
+            relay_from: Mutex::new(None),
             relay_ready_timeout,
             rtcp_stats,
             ingress_stall_tx: broadcast::channel(8).0,
@@ -1204,7 +1198,7 @@ impl LegInner {
     /// Whether the leg's egress source is the fast-path relay (vs the paced
     /// egress pipeline: silence / media / transcode).
     pub fn egress_is_relay(&self) -> bool {
-        self.was_relay.load(Ordering::SeqCst)
+        self.relay_from.lock().is_some()
     }
 
     /// Switch the egress source. [`EgressSource::RewriteRelay`] is routed to
@@ -1222,19 +1216,28 @@ impl LegInner {
             session_id = %self.pc.config().label.as_deref().unwrap_or_default(),
             leg = %self.id, source = kind, "leg egress source switch"
         );
-        let is_relay = matches!(&source, EgressSource::RewriteRelay { .. });
         if let Some(previous) = self.relay_arm_task.lock().take() {
             previous.abort();
         }
-        let prev_was_relay = self.was_relay.swap(is_relay, Ordering::SeqCst);
+        // This leg's source alone decides what writes its wire: the relay into
+        // it stops on every switch and is re-armed only for a relay source.
+        {
+            let mut relay_from = self.relay_from.lock();
+            if let Some(peer) = relay_from.take() {
+                peer.clear_rtp_rewrite_bridge_into(&self.pc);
+            }
+            if let EgressSource::RewriteRelay { peer_pc, .. } = &source {
+                *relay_from = Some(peer_pc.clone());
+            }
+        }
 
-        match &source {
-            // Switching TO RewriteRelay: (re)arm the rewrite bridge on this PC.
+        match source {
+            // Switching TO RewriteRelay: arm the peer's rewrite bridge onto
+            // this leg's wire (the peer's ingress relayed to this PC).
             EgressSource::RewriteRelay {
                 peer_pc,
                 options,
-                rules,
-                video_payload_types,
+                routes,
                 on_arm_failed,
             } => {
                 // The rewrite bridge needs the exact per-kind sender
@@ -1250,6 +1253,16 @@ impl LegInner {
                 // defer the arming to a background task and return
                 // immediately. RTP-mode transports are created during SDP
                 // application and are ready synchronously.
+                // Park and clear paced output before enabling the direct relay.
+                self.egress
+                    .set_source(EgressSource::RewriteRelay {
+                        peer_pc: peer_pc.clone(),
+                        options,
+                        routes: routes.clone(),
+                        on_arm_failed: on_arm_failed.clone(),
+                    })
+                    .await?;
+                let timelines = own_timelines(&self.pc);
                 let has_webrtc_peer = TransportMode::of(self.pc.config()) == TransportMode::WebRtc
                     || TransportMode::of(peer_pc.config()) == TransportMode::WebRtc;
                 let ready_timeout = self
@@ -1257,21 +1270,16 @@ impl LegInner {
                     .unwrap_or(WEBRTC_RELAY_READY_TIMEOUT);
                 if has_webrtc_peer {
                     let pc = self.pc.clone();
-                    let peer = peer_pc.clone();
-                    let options = options.clone();
-                    let rules = rules.clone();
-                    let video_payload_types = video_payload_types.clone();
-                    let on_arm_failed = on_arm_failed.clone();
                     let leg_id = self.id.clone();
                     let handle = tokio::spawn(async move {
                         if let Err(error) = wait_and_arm_rewrite_relay(
                             &leg_id,
                             ready_timeout,
+                            &peer_pc,
                             &pc,
-                            &peer,
                             options,
-                            &rules,
-                            &video_payload_types,
+                            &routes,
+                            timelines,
                         )
                         .await
                         {
@@ -1289,47 +1297,23 @@ impl LegInner {
                     wait_and_arm_rewrite_relay(
                         &self.id,
                         ready_timeout,
+                        &peer_pc,
                         &self.pc,
-                        peer_pc,
-                        *options,
-                        rules,
-                        video_payload_types,
+                        options,
+                        &routes,
+                        timelines,
                     )
                     .await?;
                 }
+                Ok(())
             }
-            // Switching FROM RewriteRelay: tear the rewrite bridge down so the
-            // paced output continues after the sender's last relay packet.
-            _ if prev_was_relay => {
-                self.pc.clear_rtp_rewrite_bridge();
-                if let Some(sender) = audio_rtp_sender(&self.pc)
-                    && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
-                {
-                    // Adopt both the timestamp AND the sequence space: the
-                    // receiver has already consumed the relay's numbers on
-                    // this SSRC, and a sequence restart makes the paced
-                    // output look like stale retransmissions (dropped by
-                    // jitter buffers -> choppy/absent audio after hold).
-                    tracing::debug!(
-                        leg = %self.id,
-                        wire_ts = wire_timestamp_high_water,
-                        next_seq = sender.next_sequence_number(),
-                        "relay -> paced egress: adopting wire timeline"
-                    );
-                    self.egress
-                        .adopt_wire_timeline(
-                            wire_timestamp_high_water,
-                            sender.next_sequence_number(),
-                        )
-                        .await?;
-                }
-            }
-            _ => {}
+            // Paced source: the relay into this leg was removed above (the
+            // peer's packets go back to its own receivers, e.g. for
+            // transcoding), and the paced output continues this leg's
+            // outbound timeline. This leg's audio relayed to the peer is the
+            // peer's source, left alone: the peer keeps hearing this leg.
+            source => self.egress.set_source(source).await,
         }
-
-        // Forward to the pipeline. For RewriteRelay the pacing loop parks
-        // (tick skipped); for everything else it produces frames.
-        self.egress.set_source(source).await
     }
 
     /// Subscribe to decoded ingress audio without depending on bridge slots.
@@ -1566,6 +1550,9 @@ impl LegInner {
         if let Some(handle) = self.relay_arm_task.lock().take() {
             handle.abort();
         }
+        if let Some(peer) = self.relay_from.lock().take() {
+            peer.clear_rtp_rewrite_bridge_into(&self.pc);
+        }
         for handle in self.rtcp_listener_tasks.lock().drain(..) {
             handle.abort();
         }
@@ -1599,69 +1586,15 @@ fn rtp_transport_for_kind(
         .and_then(|sender| sender.transport())
 }
 
-fn audio_rtp_sender(pc: &PeerConnection) -> Option<Arc<rustrtc::peer_connection::RtpSender>> {
+/// A leg's outbound timelines (one per sender SSRC), handed to the relay
+/// writing into it so relayed packets continue the same sequence/timestamp
+/// space as the leg's own output.
+fn own_timelines(pc: &PeerConnection) -> Vec<Arc<rustrtc::rtp_timeline::OutboundTimeline>> {
     pc.get_transceivers()
         .into_iter()
-        .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Audio)
-        .and_then(|transceiver| transceiver.sender())
-}
-
-/// When rewrite stamps the destination paced-sender SSRC, seed seq/ts
-/// from that sender so IVR → relay stays one continuous outbound timeline.
-fn seed_rewrite_options_from_destination(
-    destination_pc: &PeerConnection,
-    rules: &[rustrtc::RtpRewriteRule],
-    mut options: rustrtc::RtpRewriteBridgeOptions,
-) -> rustrtc::RtpRewriteBridgeOptions {
-    let Some(sender) = audio_rtp_sender(destination_pc) else {
-        return options;
-    };
-    let sender_ssrc = sender.ssrc();
-    let stamps_sender = rules
-        .iter()
-        .any(|rule| rule.fixed_out_ssrc == Some(sender_ssrc));
-    if !stamps_sender {
-        return options;
-    }
-
-    if options.initial_sequence_number.is_none() {
-        options.initial_sequence_number = Some(sender.next_sequence_number());
-    }
-    if options.initial_output_timestamp.is_none()
-        && let Some(wire_timestamp_high_water) = sender.rtp_timestamp_high_water()
-    {
-        let clock_rate = sender.params().clock_rate.max(1);
-        let step = ((clock_rate as u64 * 20) / 1000) as u32;
-        options.initial_output_timestamp =
-            Some(wire_timestamp_high_water.wrapping_add(step.max(1)));
-    }
-    options
-}
-
-/// While rewrite owns the shared playback SSRC, feed each outbound packet into
-/// the paced sender so RTCP SR and the next IVR sequence stay coherent.
-struct OutboundClockSync {
-    sender: Option<std::sync::Weak<rustrtc::peer_connection::RtpSender>>,
-    relay_active: Arc<AtomicBool>,
-}
-
-impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
-    fn on_egress(&self, packet: &rustrtc::rtp::RtpPacket, _dst_addr: std::net::SocketAddr) {
-        if !self.relay_active.load(Ordering::SeqCst) {
-            return;
-        }
-        let Some(sender) = self.sender.as_ref().and_then(|w| w.upgrade()) else {
-            return;
-        };
-        if packet.header.ssrc != sender.ssrc() {
-            return;
-        }
-        sender.note_external_packet(
-            packet.header.sequence_number,
-            packet.header.timestamp,
-            packet.payload.len() as u32,
-        );
-    }
+        .filter_map(|transceiver| transceiver.sender())
+        .map(|sender| sender.timeline())
+        .collect()
 }
 
 /// Default max wait for a WebRTC peer's ICE+DTLS before degrading the fast-path
@@ -1701,8 +1634,8 @@ async fn wait_and_arm_rewrite_relay(
     source_pc: &PeerConnection,
     destination_pc: &PeerConnection,
     options: rustrtc::RtpRewriteBridgeOptions,
-    rules: &[rustrtc::RtpRewriteRule],
-    video_payload_types: &[u8],
+    routes: &[(rustrtc::MediaKind, Vec<rustrtc::RtpRewriteRule>)],
+    timelines: Vec<Arc<rustrtc::rtp_timeline::OutboundTimeline>>,
 ) -> Result<()> {
     let arm_started = std::time::Instant::now();
     let webrtc_pc = if TransportMode::of(source_pc.config()) == TransportMode::WebRtc {
@@ -1731,80 +1664,59 @@ async fn wait_and_arm_rewrite_relay(
         );
     }
 
-    let audio_source = wait_rtp_transport(source_pc, rustrtc::MediaKind::Audio, "source").await?;
-    let audio_target =
-        wait_rtp_transport(destination_pc, rustrtc::MediaKind::Audio, "destination").await?;
-
-    if video_payload_types.is_empty() {
-        // Audio-only relay: remove any stale routes from an earlier
-        // negotiation, then install the single audio route.
-        source_pc.clear_rtp_rewrite_bridge();
-        let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
-        audio_source.bridge_rewrite_rules_to(audio_target, options, rules.to_vec());
-        debug!(
-            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
-            leg = %leg,
-            video = false,
-            arm_ms = arm_started.elapsed().as_millis() as u64,
-            "fast-path relay armed"
-        );
-        return Ok(());
+    // Resolve every route's source/target transports before clearing the old
+    // bridges so a missing late WebRTC video transport never tears down audio.
+    let mut resolved = Vec::with_capacity(routes.len());
+    for (kind, rules) in routes {
+        let source = wait_rtp_transport(source_pc, *kind, "source").await?;
+        let target = wait_rtp_transport(destination_pc, *kind, "destination").await?;
+        resolved.push((*kind, source, target, rules.clone()));
     }
 
-    // Resolve both video transports before clearing the old routes. A missing
-    // late WebRTC video transport must not tear down working audio.
-    let video_source = wait_rtp_transport(source_pc, rustrtc::MediaKind::Video, "source").await?;
-    let video_target =
-        wait_rtp_transport(destination_pc, rustrtc::MediaKind::Video, "destination").await?;
-
     source_pc.clear_rtp_rewrite_bridge();
-    let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
 
-    if Arc::ptr_eq(&audio_source, &video_source) {
-        // BUNDLE source: one receive loop handles both media kinds. Only a
-        // non-BUNDLE destination needs the optional video dispatch target.
-        let destination_is_non_bundle = !Arc::ptr_eq(&audio_target, &video_target);
-        debug!(
-            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
-            leg = %leg,
-            source_bundle = true,
-            destination_bundle = !destination_is_non_bundle,
-            video_payload_types = ?video_payload_types,
-            "arming bundled RTP rewrite bridge"
-        );
-        let separate_video_target = destination_is_non_bundle.then_some(video_target);
-        audio_source.bridge_rewrite_rules_to_with_video(
-            audio_target,
-            separate_video_target,
-            video_payload_types.iter().copied().collect(),
-            options,
-            rules.to_vec(),
-        );
+    let mut video_source_for_pli = None;
+    if resolved.len() == 1 {
+        let (kind, source, target, rules) = resolved.pop().unwrap();
+        if kind == rustrtc::MediaKind::Video {
+            video_source_for_pli = Some(source.clone());
+        }
+        source.bridge_rewrite_rules_with_timelines(target, options, rules, timelines);
     } else {
-        // Non-BUNDLE source: audio and video have independent receive loops,
-        // so install one ordinary one-target bridge on each source transport.
-        let (video_rules, audio_rules): (Vec<_>, Vec<_>) =
-            rules.iter().cloned().partition(|rule| {
-                rule.match_payload_type
-                    .is_some_and(|pt| video_payload_types.contains(&pt))
-            });
-        debug!(
-            session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
-            leg = %leg,
-            source_bundle = false,
-            destination_bundle = Arc::ptr_eq(&audio_target, &video_target),
-            audio_rules = audio_rules.len(),
-            video_rules = video_rules.len(),
-            "arming separate audio/video RTP rewrite bridges"
+        for (kind, source, target, rules) in resolved {
+            if kind == rustrtc::MediaKind::Video {
+                video_source_for_pli = Some(source.clone());
+            }
+            source.bridge_media_rewrite_rules(kind, target, options, rules, timelines.clone());
+        }
+    }
+
+    // Request an immediate keyframe from the video sender to recover any
+    // initial SPS/PPS + IDR packets dropped before the bridge was armed.
+    if let Some(video_source) = video_source_for_pli {
+        let (sender_ssrc, media_ssrc) = source_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Video)
+            .map(|t| {
+                let sender_ssrc = t.sender_ssrc().unwrap_or(0);
+                let media_ssrc = t.receiver().map(|r| r.ssrc()).unwrap_or(0);
+                (sender_ssrc, media_ssrc)
+            })
+            .unwrap_or((0, 0));
+        let pli = rustrtc::rtp::RtcpPacket::PictureLossIndication(
+            rustrtc::rtp::PictureLossIndication {
+                sender_ssrc,
+                media_ssrc,
+            },
         );
-        audio_source.bridge_rewrite_rules_to(audio_target, options, audio_rules);
-        video_source.bridge_rewrite_rules_to(video_target, options, video_rules);
+        let _ = video_source.send_rtcp(&[pli]).await;
     }
 
     debug!(
         session_id = %source_pc.config().label.as_deref().unwrap_or_default(),
         leg = %leg,
-        video = true,
+        routes = routes.len(),
         arm_ms = arm_started.elapsed().as_millis() as u64,
         "fast-path relay armed"
     );
@@ -2160,14 +2072,18 @@ mod tests {
         set_test_sender_transport(source.pc(), rustrtc::MediaKind::Audio, source_audio.clone());
         set_test_sender_transport(target.pc(), rustrtc::MediaKind::Audio, target_audio.clone());
 
+        let av_routes = [
+            (rustrtc::MediaKind::Audio, Vec::new()),
+            (rustrtc::MediaKind::Video, Vec::new()),
+        ];
         let missing_video = wait_and_arm_rewrite_relay(
             &LegId::from("test-leg"),
             Duration::from_secs(5),
             source.pc(),
             target.pc(),
             Default::default(),
-            &[],
-            &[96],
+            &av_routes,
+            Vec::new(),
         )
         .await;
         assert!(missing_video.is_err(), "video transports must be required");
@@ -2181,8 +2097,8 @@ mod tests {
             source.pc(),
             target.pc(),
             Default::default(),
-            &[],
-            &[96],
+            &av_routes,
+            Vec::new(),
         )
         .await;
         assert!(
@@ -2199,8 +2115,8 @@ mod tests {
             source.pc(),
             target.pc(),
             Default::default(),
-            &[],
-            &[96],
+            &av_routes,
+            Vec::new(),
         )
         .await
         .expect("relay should arm once all transports are ready");
@@ -2465,8 +2381,8 @@ mod tests {
         ).unwrap()), true, None).await.unwrap();
         tokio::time::sleep(Duration::from_millis(80)).await;
         a.egress.set_source(EgressSource::RewriteRelay {
-            peer_pc: a.pc().clone(), options: Default::default(), rules: Vec::new(),
-            video_payload_types: Vec::new(), on_arm_failed: None,
+            peer_pc: a.pc().clone(), options: Default::default(), routes: Vec::new(),
+            on_arm_failed: None,
         }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         let direct = serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].clone();
@@ -2479,8 +2395,8 @@ mod tests {
         let count = rows.len();
         drop(rows);
         a.egress.set_source(EgressSource::RewriteRelay {
-            peer_pc: a.pc().clone(), options: Default::default(), rules: Vec::new(),
-            video_payload_types: Vec::new(), on_arm_failed: None,
+            peer_pc: a.pc().clone(), options: Default::default(), routes: Vec::new(),
+            on_arm_failed: None,
         }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(captured.lock().len(), count, "finishing again without PCM must not duplicate logs");
@@ -2521,8 +2437,10 @@ mod tests {
         let answer = relay_b.answer(&offer).await.unwrap();
         relay_a.apply_remote_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
         relay_a.set_egress_source(EgressSource::RewriteRelay {
-            peer_pc: relay_b.pc().clone(), options: Default::default(), rules: Vec::new(),
-            video_payload_types: Vec::new(), on_arm_failed: None,
+            peer_pc: relay_b.pc().clone(),
+            options: Default::default(),
+            routes: vec![(rustrtc::MediaKind::Audio, Vec::new())],
+            on_arm_failed: None,
         }).await.unwrap();
         let rows = relay_logs.lock();
         for message in ["leg egress source switch", "fast-path relay armed"] {

@@ -734,18 +734,25 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
     assert_eq!(channels, 2);
     assert_eq!(sample_rate, 8000);
 
+    // The recorder places packets by RTP time, so a stream need not start on
+    // a 160-byte boundary of the file: match frames at the best offset.
+    let matched_frames = |leg: &[u8], payloads: &[Vec<u8>]| {
+        let set: std::collections::HashSet<&[u8]> = payloads.iter().map(|p| p.as_slice()).collect();
+        (0..160)
+            .map(|offset| {
+                leg.get(offset..)
+                    .unwrap_or_default()
+                    .chunks(160)
+                    .filter(|c| set.contains(c))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    };
     // Leg A = caller ingress = the browser's audio.
-    let alice_set: std::collections::HashSet<&Vec<u8>> = alice_payloads.iter().collect();
-    let leg_a_matched = leg_a
-        .chunks(160)
-        .filter(|c| alice_set.contains(&c.to_vec()))
-        .count();
+    let leg_a_matched = matched_frames(&leg_a, &alice_payloads);
     // Leg B = caller egress = the plain leg's audio relayed to the browser.
-    let bob_set: std::collections::HashSet<&Vec<u8>> = bob_payloads.iter().collect();
-    let leg_b_matched = leg_b
-        .chunks(160)
-        .filter(|c| bob_set.contains(&c.to_vec()))
-        .count();
+    let leg_b_matched = matched_frames(&leg_b, &bob_payloads);
 
     let leg_a_silent = leg_a.iter().filter(|&&b| b == 0xFF).count();
     println!(

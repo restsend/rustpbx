@@ -90,8 +90,6 @@ impl SipSession {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             peer.set_egress_source(crate::media::egress::EgressSource::Inject {
                 rx: parking_lot::Mutex::new(rx),
-                timestamp_offset: None,
-                behind_frames: 0,
             }).await?;
             let bridge = crate::call::runtime::ConferenceMediaBridge::new(
                 self.server.conference_server.manager_raw().clone(),
