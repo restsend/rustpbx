@@ -54,25 +54,6 @@ mod callback;
 // Queue Configuration Extensions
 // ===================================================================
 
-/// No-answer action for CC queues (business policy; executed by CC addon).
-///
-/// Kept on [`QueueConfig`] so the executor can surface the configured action
-/// to hooks; selection of which action applies belongs to CC / ACD policy.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum NoAnswerAction {
-    /// Transfer to voicemail.
-    #[default]
-    Voicemail,
-    /// Hangup the call.
-    Hangup,
-    /// Create a callback task.
-    Callback,
-    /// Fallback to another skill group.
-    FallbackSkill,
-    /// Go back to IVR.
-    BackToIvr,
-}
-
 /// Extended queue configuration.
 ///
 /// Executor fields (`name`, `hold`, `agents`, `strategy`, `ring_timeout`, …)
@@ -112,8 +93,6 @@ pub struct QueueConfig {
     pub autonomous_routing: bool,
     /// Routing strategy for agent selection.
     pub routing_strategy: RoutingStrategy,
-    /// No-answer action.
-    pub no_answer_action: NoAnswerAction,
     /// Fallback skill group.
     pub fallback_skill_group: Option<String>,
     /// Enable SLA monitoring.
@@ -222,9 +201,7 @@ impl Default for QueueConfig {
             max_retries: 2,
             autonomous_routing: false,
             routing_strategy: RoutingStrategy::LongestIdle,
-            no_answer_action: NoAnswerAction::Voicemail,
-            fallback_skill_group: None,
-            sla_monitoring: false,
+            fallback_skill_group: None,            sla_monitoring: false,
             metrics_enabled: false,
             voice_prompts: None,
             escalation_mode: EscalationMode::Replace,
