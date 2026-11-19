@@ -2944,6 +2944,11 @@ impl SipSession {
             return Err(e);
         }
         leg.accept();
+        // The final response answered the call, so talk time starts here; the
+        // UAC path never runs accept_call, which sets it for inbound calls
+        if self.meta.answer_time.is_none() {
+            self.meta.answer_time = Some(Instant::now());
+        }
 
         self.caller_dialog = Some(dialog.clone());
         let caller_id = LegId::from("caller");
