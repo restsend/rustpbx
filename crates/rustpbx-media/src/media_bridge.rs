@@ -448,8 +448,6 @@ impl MediaBridge {
         let video_match =
             crate::negotiate::MediaNegotiator::find_common_video_codec(&pa.video, &pb.video);
 
-        // If there is no common video format, keep the audio-only fallback
-        // so no source video can fall through the audio relay.
         let video_mismatch = (!pa.video.is_empty() || !pb.video.is_empty()) && video_match.is_none();
         let a_transport = TransportMode::of(la.pc().config());
         let b_transport = TransportMode::of(lb.pc().config());
@@ -461,11 +459,11 @@ impl MediaBridge {
                 session = %self.session_id,
                 a_video = ?pa.video.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
                 b_video = ?pb.video.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
-                "legs share no video codec — degrading to audio-only (transcoded)"
+                "legs share no video codec — degrading to audio-only"
             );
         }
 
-        if ca.codec == cb.codec && !video_mismatch && !self.force_transcode {
+        if ca.codec == cb.codec && !self.force_transcode {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
@@ -559,11 +557,11 @@ impl MediaBridge {
                 b_video_mid,
             );
             let mut routes_a_to_b = vec![(rustrtc::MediaKind::Audio, audio_a_to_b)];
-            if !pa.video.is_empty() {
+            if !video_a_to_b.is_empty() {
                 routes_a_to_b.push((rustrtc::MediaKind::Video, video_a_to_b));
             }
             let mut routes_b_to_a = vec![(rustrtc::MediaKind::Audio, audio_b_to_a)];
-            if !pb.video.is_empty() {
+            if !video_b_to_a.is_empty() {
                 routes_b_to_a.push((rustrtc::MediaKind::Video, video_b_to_a));
             }
 
@@ -2013,15 +2011,12 @@ fn video_relay_rules(
         codec: &NegotiatedVideoCodec,
         peer: &'x [NegotiatedVideoCodec],
     ) -> Option<&'x NegotiatedVideoCodec> {
-        // Prefer an exact (name, fmtp) match so H264 profiles map 1:1 (their
-        // PTs are preserved across legs by the codec builder); fall back to a
-        // name-only match when the fmtp differs between legs.
-        peer.iter()
-            .find(|c| c.name.eq_ignore_ascii_case(&codec.name) && c.fmtp == codec.fmtp)
-            .or_else(|| {
-                peer.iter()
-                    .find(|c| c.name.eq_ignore_ascii_case(&codec.name))
-            })
+        let mut compatible = peer.iter().filter(|c| codec.can_relay_to(c));
+        compatible
+            .clone()
+            .find(|c| c.fmtp == codec.fmtp && c.payload_type == codec.payload_type)
+            .or_else(|| compatible.clone().find(|c| c.fmtp == codec.fmtp))
+            .or_else(|| compatible.next())
     }
 
     let mid_fields = |m: &Option<(u8, std::sync::Arc<str>)>| {

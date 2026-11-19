@@ -9279,7 +9279,7 @@ if self
             .iter()
             .find(|s| s.kind == rustrtc::MediaKind::Video);
         let offer_video_active = offer_video_section.is_some_and(|section| {
-            section.port != 0 && section.direction != rustrtc::Direction::Inactive
+            !parsed.is_media_rejected(section) && section.direction != rustrtc::Direction::Inactive
         });
         let mut offered_video_caps = offer_video_active.then(|| {
             if self.video_relay_enabled() {
@@ -9298,7 +9298,33 @@ if self
             let peer_key = peer_leg_id
                 .as_ref()
                 .ok_or_else(|| anyhow!("No bridged peer for re-INVITE leg {}", leg_id))?;
-            if !self.legs.leg_has_video(peer_key) {
+            let has_compatible_peer_video = self.legs.leg_has_video(peer_key)
+                && self
+                    .media
+                    .bridge
+                    .as_ref()
+                    .and_then(|_| self.media_leg(peer_key))
+                    .and_then(|leg| leg.negotiated())
+                    .is_some_and(|peer_profile| {
+                        let peer_video = peer_profile.video;
+                        if let Some(caps) = offered_video_caps.as_mut() {
+                            let matching: Vec<_> = caps
+                                .iter()
+                                .filter(|offered_cap| {
+                                    peer_video.iter().any(|peer_cap| {
+                                        peer_cap.matches_relay_capability(offered_cap)
+                                    })
+                                })
+                                .cloned()
+                                .collect();
+                            if !matching.is_empty() {
+                                *caps = matching;
+                                return true;
+                            }
+                        }
+                        false
+                    });
+            if !has_compatible_peer_video {
                 let accepted_by_peer = self
                     .negotiate_added_video_with_peer(
                         leg_id,
@@ -9308,22 +9334,6 @@ if self
                     )
                     .await?;
                 offered_video_caps = Some(accepted_by_peer);
-            } else if let Some(peer_profile) = self
-                .media
-                .bridge
-                .as_ref()
-                .and_then(|_| self.media_leg(peer_key))
-                .and_then(|leg| leg.negotiated())
-            {
-                let peer_video = peer_profile.video;
-                if let Some(caps) = offered_video_caps.as_mut() {
-                    caps.retain(|offered_cap| {
-                        peer_video.iter().any(|peer_cap| {
-                            offered_cap.codec_name.eq_ignore_ascii_case(&peer_cap.name)
-                                && offered_cap.clock_rate == peer_cap.clock_rate
-                        })
-                    });
-                }
             }
         }
         let accepted_video_active = offered_video_caps
@@ -9340,10 +9350,6 @@ if self
             .and_then(|leg| leg.negotiated())
             .and_then(|profile| profile.audio.map(|codec| codec.codec));
 
-        // Track whether this leg accepted active video. A later re-INVITE may
-        // transition the leg from audio-only to video and create the video
-        // transceiver while building the local answer below.
-        self.legs.set_video_state(leg_id, accepted_video_active);
         if accepted_video_active && !had_video {
             if let Some(video_codec) = offered_video_caps.as_ref().and_then(|caps| caps.first()) {
                 info!(session_id = %self.id,
@@ -9381,6 +9387,14 @@ if self
         answer_sdp = MediaNegotiator::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
 
         let answer_sdp = leg.commit_local_answer(&answer_sdp, rustrtc::SdpType::Answer).await?;
+        // A video re-INVITE can keep the same codecs while changing the
+        // BUNDLE transport or the MID that the relay stamps on outgoing RTP.
+        if (had_video || accepted_video_active)
+            && let Some(bridge) = self.media.bridge.as_mut()
+            && bridge.side_for_leg(leg_id).is_some()
+        {
+            bridge.invalidate_route_cache();
+        }
 
         match side {
             DialogSide::Caller => {
@@ -14000,12 +14014,12 @@ impl SipSession {
         } else {
             Vec::new()
         };
-        if mode == crate::media::TransportMode::WebRtc {
-            MediaNegotiator::remap_bundle_video_payload_types(
-                &mut video,
-                codecs.iter().map(|codec| codec.payload_type),
-            )?;
-        }
+        // Both WebRTC and direct SIP offers can propose BUNDLE. Keep their
+        // audio and video PTs distinct even when each has a fallback port.
+        MediaNegotiator::remap_bundle_video_payload_types(
+            &mut video,
+            codecs.iter().map(|codec| codec.payload_type),
+        )?;
         let cfg = self.build_leg_config(leg_id, mode, codecs, video);
         // Any dynamic leg can become the selected B side after queue dispatch
         // or transfer. Capture stays off until hold selects that exact peer,

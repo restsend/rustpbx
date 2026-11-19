@@ -1572,8 +1572,8 @@ async fn read_json<T: serde::de::DeserializeOwned>(body: axum::body::Body) -> Op
 struct HelloPayload {
     #[serde(default)]
     instance_id: u64,
-    #[serde(default)]
-    pid: u32,
+    #[serde(default, rename = "pid")]
+    _pid: u32,
 }
 
 async fn hello_handler(State(state): State<AppState>, req: Request) -> Response {

@@ -242,25 +242,38 @@ impl SipSession {
             .media_leg(target_leg_id)
             .ok_or_else(|| anyhow!("opposite media leg is unavailable for video re-INVITE"))?;
 
-        // Only a BUNDLE destination needs globally unique audio/video payload
-        // types. Plain RTP has separate audio and video sockets, so preserving
-        // an offered PT such as 96 on both m-lines is valid and avoids a
-        // needless PT change during a SIP re-INVITE.
-        let mut target_video_caps = offered_caps.to_vec();
-        if crate::media::TransportMode::of(target_leg.pc().config()) == crate::media::TransportMode::WebRtc {
-            let occupied_audio_payload_types = target_leg
-                .pc()
-                .config()
-                .media_capabilities
-                .as_ref()
-                .into_iter()
-                .flat_map(|capabilities| capabilities.audio.iter())
-                .map(|capability| capability.payload_type);
-            MediaNegotiator::remap_bundle_video_payload_types(
-                &mut target_video_caps,
-                occupied_audio_payload_types,
-            )?;
-        }
+        // A SIP peer can accept BUNDLE even on a plain RTP or SDES leg.
+        // Keep the new video formats distinct from the existing audio formats.
+        let audio_profile = target_leg.negotiated();
+        let configured_audio = target_leg
+            .pc()
+            .config()
+            .media_capabilities
+            .as_ref()
+            .into_iter()
+            .flat_map(|capabilities| capabilities.audio.iter().map(|cap| cap.payload_type));
+        let negotiated_audio = audio_profile.iter().flat_map(|profile| {
+            profile
+                .audio
+                .iter()
+                .map(|codec| codec.payload_type)
+                .chain(profile.dtmf_pts.iter().copied())
+        });
+        let previous_remote_video: Vec<_> = target_leg
+            .pc()
+            .remote_description()
+            .map(|desc| MediaNegotiator::extract_video_codecs(&desc.to_sdp_string()))
+            .unwrap_or_default();
+        let existing_video: Vec<_> = audio_profile
+            .iter()
+            .flat_map(|profile| profile.video.iter().cloned())
+            .chain(previous_remote_video)
+            .collect();
+        let target_video_caps = allocate_target_video_payload_types(
+            offered_caps,
+            configured_audio.chain(negotiated_audio),
+            &existing_video,
+        )?;
         let source_target_video_caps: Vec<_> = offered_caps
             .iter()
             .cloned()
@@ -286,7 +299,7 @@ impl SipSession {
 
         // A video-only change must not reorder or expand the already selected
         // audio codec. Keep the target leg's current audio and DTMF entries.
-        if let Some(profile) = target_leg.negotiated() {
+        if let Some(profile) = audio_profile {
             let mut selected_audio = Vec::new();
             if let Some(audio) = profile.audio {
                 selected_audio.push(audio.to_codec_info());
@@ -352,10 +365,7 @@ impl SipSession {
             .filter(|(_, target_cap)| {
                 peer_accepted_video.iter().any(|accepted_cap| {
                     accepted_cap.payload_type == target_cap.payload_type
-                        && accepted_cap
-                            .name
-                            .eq_ignore_ascii_case(&target_cap.codec_name)
-                        && accepted_cap.clock_rate == target_cap.clock_rate
+                        && accepted_cap.matches_relay_capability(target_cap)
                 })
             })
             .map(|(source_cap, _)| source_cap.clone())
@@ -383,8 +393,6 @@ impl SipSession {
             .await?;
         target_leg.refresh_observer();
 
-        self.legs
-            .set_video_state(target_leg_id, !accepted_caps.is_empty());
         self.legs
             .set_answer(target_leg_id.clone(), peer_answer_sdp.clone());
         match target_leg_id.as_str() {
@@ -1149,4 +1157,132 @@ pub(super) fn pin_sdp_codec(sdp: String, codec: Option<audio_codec::CodecType>) 
     };
     let codecs = MediaNegotiator::build_codec_list_from_offer(&sdp, &[codec]);
     MediaNegotiator::rewrite_sdp_codec_list(&sdp, &codecs).unwrap_or(sdp)
+}
+
+/// Keep existing target-leg payload types bound to their formats on re-INVITE.
+fn allocate_target_video_payload_types(
+    offered_caps: &[rustrtc::VideoCapability],
+    occupied_audio_pts: impl IntoIterator<Item = u8>,
+    existing_video: &[crate::media::negotiate::NegotiatedVideoCodec],
+) -> Result<Vec<rustrtc::VideoCapability>> {
+    let mut claimed: std::collections::HashSet<u8> = occupied_audio_pts.into_iter().collect();
+    let mut reserved = claimed.clone();
+    for existing in existing_video {
+        reserved.insert(existing.payload_type);
+        reserved.extend(existing.rtx_payload_type);
+    }
+
+    // Claim all reusable primary PTs before handling new formats or RTX.
+    let reused: Vec<_> = offered_caps
+        .iter()
+        .map(|cap| {
+            existing_video.iter().find(|existing| {
+                existing.matches_relay_capability(cap) && claimed.insert(existing.payload_type)
+            })
+        })
+        .collect();
+
+    let mut allocate = |preferred| {
+        if reserved.insert(preferred) {
+            return Ok(preferred);
+        }
+        (96..=127)
+            .find(|pt| reserved.insert(*pt))
+            .ok_or(MediaNegotiationError::NoFreeVideoPayloadType)
+    };
+
+    let mut target_caps = offered_caps.to_vec();
+    for (cap, existing) in target_caps.iter_mut().zip(&reused) {
+        cap.payload_type = match existing {
+            Some(existing) => existing.payload_type,
+            None => allocate(cap.payload_type)?,
+        };
+    }
+    for (cap, existing) in target_caps.iter_mut().zip(reused) {
+        if let Some(preferred) = cap.rtx_payload_type {
+            let reusable_rtx = existing
+                .and_then(|codec| codec.rtx_payload_type)
+                .filter(|pt| claimed.insert(*pt));
+            cap.rtx_payload_type = Some(match reusable_rtx {
+                Some(pt) => pt,
+                None => allocate(preferred)?,
+            });
+        }
+    }
+    Ok(target_caps)
+}
+
+#[cfg(test)]
+mod video_pt_allocation_tests {
+    use super::*;
+    use crate::media::negotiate::NegotiatedVideoCodec;
+
+    #[test]
+    fn existing_compatible_pt_is_reserved_independent_of_offer_order() {
+        let existing = vec![
+            NegotiatedVideoCodec {
+                name: "VP8".into(),
+                payload_type: 96,
+                clock_rate: 90_000,
+                fmtp: None,
+                rtcp_fbs: Vec::new(),
+                rtx_payload_type: Some(97),
+            },
+            NegotiatedVideoCodec {
+                name: "H264".into(),
+                payload_type: 102,
+                clock_rate: 90_000,
+                fmtp: Some("packetization-mode=1;profile-level-id=42001f".into()),
+                rtcp_fbs: Vec::new(),
+                rtx_payload_type: Some(103),
+            },
+            NegotiatedVideoCodec {
+                name: "H264".into(),
+                payload_type: 104,
+                clock_rate: 90_000,
+                fmtp: Some("packetization-mode=0;profile-level-id=42001f".into()),
+                rtcp_fbs: Vec::new(),
+                rtx_payload_type: Some(107),
+            },
+        ];
+        // Offer puts an incompatible codec (VP9) requesting PT 104 BEFORE
+        // H264 mode=0 (requesting PT 102). H264 mode=0 must still keep PT 104
+        // while VP9 gets a fresh unused PT (not 96, 97, 102, 103, 104, 107).
+        let offered = vec![
+            rustrtc::VideoCapability {
+                payload_type: 104,
+                codec_name: "VP9".into(),
+                clock_rate: 90_000,
+                fmtp: None,
+                rtcp_fbs: Vec::new(),
+                rtx_payload_type: None,
+            },
+            rustrtc::VideoCapability {
+                payload_type: 102,
+                codec_name: "H264".into(),
+                clock_rate: 90_000,
+                fmtp: Some("profile-level-id=42801F".into()),
+                rtcp_fbs: Vec::new(),
+                rtx_payload_type: Some(105),
+            },
+        ];
+
+        let allocated =
+            allocate_target_video_payload_types(&offered, [111, 126], &existing).unwrap();
+        assert_eq!(allocated[0].codec_name, "VP9");
+        assert_eq!(allocated[1].codec_name, "H264");
+        assert_eq!(allocated[1].payload_type, 104);
+        assert_eq!(allocated[1].rtx_payload_type, Some(107));
+        let mut without_previous_rtx = existing.clone();
+        without_previous_rtx[2].rtx_payload_type = None;
+        let allocated_without_previous_rtx =
+            allocate_target_video_payload_types(&offered, [111, 126], &without_previous_rtx).unwrap();
+        assert_eq!(allocated_without_previous_rtx[1].payload_type, 104);
+        assert_eq!(allocated_without_previous_rtx[1].rtx_payload_type, Some(105));
+        assert!(
+            ![96, 97, 102, 103, 104, 107, 111, 126].contains(&allocated[0].payload_type),
+            "incompatible codec must not steal existing PTs, got {}",
+            allocated[0].payload_type
+        );
+    }
 }

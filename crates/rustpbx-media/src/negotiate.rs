@@ -53,9 +53,14 @@ impl TransportMode {
             TransportMode::Srtp => {
                 let mut c = RtcConfiguration::sip();
                 c.keying = Keying::Sdes;
+                c.bundle_policy = rustrtc::BundlePolicy::Disabled;
                 c
             }
-            TransportMode::Rtp => RtcConfiguration::sip(),
+            TransportMode::Rtp => {
+                let mut c = RtcConfiguration::sip();
+                c.bundle_policy = rustrtc::BundlePolicy::Disabled;
+                c
+            }
         };
         if !matches!(self, TransportMode::WebRtc) && ice_lite {
             config.connectivity = Connectivity::IceLite;
@@ -214,8 +219,8 @@ impl NegotiatedCodec {
 ///
 /// The codec name is kept verbatim (`H264`, etc.) — unlike the audio-only
 /// [`CodecType`] used by [`NegotiatedCodec`], which cannot represent video
-/// codecs. Used only for relay matching (same name → transport-level relay) and
-/// rewrite-rule construction; video is never transcoded.
+/// codecs. Used for relay compatibility and rewrite-rule construction; video
+/// is never transcoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedVideoCodec {
     pub name: String,
@@ -224,6 +229,73 @@ pub struct NegotiatedVideoCodec {
     pub fmtp: Option<String>,
     pub rtcp_fbs: Vec<String>,
     pub rtx_payload_type: Option<u8>,
+}
+
+impl NegotiatedVideoCodec {
+    pub(crate) fn can_relay_to(&self, peer: &Self) -> bool {
+        self.matches_relay_format(&peer.name, peer.clock_rate, peer.fmtp.as_deref())
+    }
+
+    /// Check whether this answer uses the offered codec's wire format.
+    /// Compare payload types separately when they were never remapped.
+    pub fn matches_relay_capability(&self, offered: &rustrtc::config::VideoCapability) -> bool {
+        self.matches_relay_format(&offered.codec_name, offered.clock_rate, offered.fmtp.as_deref())
+    }
+
+    fn matches_relay_format(&self, name: &str, clock_rate: u32, fmtp: Option<&str>) -> bool {
+        if !self.name.eq_ignore_ascii_case(name) || self.clock_rate != clock_rate {
+            return false;
+        }
+        if !self.name.eq_ignore_ascii_case("H264") {
+            return true;
+        }
+        h264_wire_format(self.fmtp.as_deref()).is_some_and(|left| Some(left) == h264_wire_format(fmtp))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum H264Profile {
+    ConstrainedBaseline,
+    Baseline,
+    Main,
+    Extended,
+    Other(u8, u8),
+}
+
+fn h264_wire_format(fmtp: Option<&str>) -> Option<(H264Profile, u8)> {
+    let mut profile = H264Profile::Baseline;
+    let mut packetization_mode = 0;
+    for (key, value) in fmtp
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|parameter| parameter.split_once('='))
+    {
+        let (key, value) = (key.trim(), value.trim());
+        if key.eq_ignore_ascii_case("packetization-mode") {
+            packetization_mode = value.parse().ok().filter(|mode| *mode <= 2)?;
+        } else if key.eq_ignore_ascii_case("profile-level-id") {
+            if value.len() != 6 {
+                return None;
+            }
+            let [_, idc, iop, level] = u32::from_str_radix(value, 16).ok()?.to_be_bytes();
+            if idc == 0 || level == 0 {
+                return None;
+            }
+            // RFC 6184 Table 5. Different profile_idc/constraint bits can
+            // specify the same sub-profile. The level is negotiable separately.
+            profile = match idc {
+                0x42 if iop & 0x4f == 0x40 => H264Profile::ConstrainedBaseline,
+                0x42 if iop & 0x4f == 0x00 => H264Profile::Baseline,
+                0x4d if iop & 0x8f == 0x80 => H264Profile::ConstrainedBaseline,
+                0x4d if iop & 0xaf == 0x00 => H264Profile::Main,
+                0x58 if iop & 0xcf == 0xc0 => H264Profile::ConstrainedBaseline,
+                0x58 if iop & 0xcf == 0x80 => H264Profile::Baseline,
+                0x58 if iop & 0xcf == 0x00 => H264Profile::Extended,
+                _ => H264Profile::Other(idc, iop),
+            };
+        }
+    }
+    Some((profile, packetization_mode))
 }
 
 impl From<rustrtc::config::VideoCapability> for NegotiatedVideoCodec {
@@ -650,7 +722,7 @@ impl MediaNegotiator {
     ) -> Option<(NegotiatedVideoCodec, NegotiatedVideoCodec)> {
         for ca in a {
             for cb in b {
-                if ca.name.eq_ignore_ascii_case(&cb.name) {
+                if ca.can_relay_to(cb) {
                     return Some((ca.clone(), cb.clone()));
                 }
             }
@@ -706,41 +778,24 @@ impl MediaNegotiator {
         accepted
             .iter()
             .filter_map(|accepted_cap| {
-                offered
+                let mut compatible = offered
                     .iter()
-                    .find(|offered_cap| {
-                        offered_cap.payload_type == accepted_cap.payload_type
-                            && offered_cap
-                                .codec_name
-                                .eq_ignore_ascii_case(&accepted_cap.name)
-                            && offered_cap.clock_rate == accepted_cap.clock_rate
-                    })
+                    .filter(|offered_cap| accepted_cap.matches_relay_capability(offered_cap));
+                compatible
+                    .clone()
+                    .find(|offered_cap| offered_cap.payload_type == accepted_cap.payload_type)
                     .or_else(|| {
-                        offered.iter().find(|offered_cap| {
-                            offered_cap
-                                .codec_name
-                                .eq_ignore_ascii_case(&accepted_cap.name)
-                                && offered_cap.clock_rate == accepted_cap.clock_rate
-                                && offered_cap.fmtp == accepted_cap.fmtp
-                        })
+                        compatible.clone().find(|offered_cap| offered_cap.fmtp == accepted_cap.fmtp)
                     })
-                    .or_else(|| {
-                        offered.iter().find(|offered_cap| {
-                            offered_cap
-                                .codec_name
-                                .eq_ignore_ascii_case(&accepted_cap.name)
-                                && offered_cap.clock_rate == accepted_cap.clock_rate
-                        })
-                    })
+                    .or_else(|| compatible.next())
                     .cloned()
             })
             .collect()
     }
 
     /// Assign video payload types that do not collide with other media on a
-    /// BUNDLE transport. Plain RTP may reuse a dynamic PT on separate audio
-    /// and video sockets, but a bundled WebRTC receiver must be able to infer
-    /// the media kind from the PT before the bridge rewrites the packet.
+    /// BUNDLE transport. A bundled leg can then infer the media kind from
+    /// the PT even when an RTP packet arrives without a usable MID.
     pub fn remap_bundle_video_payload_types(
         caps: &mut [rustrtc::config::VideoCapability],
         occupied_payload_types: impl IntoIterator<Item = u8>,
@@ -776,8 +831,9 @@ impl MediaNegotiator {
 
     /// Replace an SDP's video formats and codec attributes with `caps`.
     ///
-    /// This only filters/reorders the video capabilities supplied by the
-    /// caller. Cross-media payload-type collision handling belongs to the
+    /// Codec formats come from the shared capabilities. Transport-wide
+    /// congestion feedback is negotiated on the local WebRTC leg.
+    /// Cross-media payload-type collision handling belongs to the
     /// BUNDLE leg setup; plain RTP uses separate transports and may reuse the
     /// same payload type for audio and video.
     pub fn rewrite_video_capabilities(
@@ -841,6 +897,10 @@ impl MediaNegotiator {
                 }
             }
 
+            let browser_transport = video_section.protocol == "UDP/TLS/RTP/SAVPF";
+            let browser_twcc = browser_transport
+                && video_section.get_extmap_id(rustrtc::sdp::TRANSPORT_CC_URI).is_some();
+
             for cap in ordered_caps {
                 video_section.attributes.push(Attribute::new(
                     "rtpmap",
@@ -856,9 +916,25 @@ impl MediaNegotiator {
                     ));
                 }
                 for feedback in &cap.rtcp_fbs {
+                    // The SIP endpoint's rate feedback describes a different
+                    // path. The browser's rate feedback is handled locally.
+                    if feedback == "transport-cc"
+                        || (browser_transport && matches!(feedback.as_str(), "goog-remb" | "ccm tmmbr"))
+                    {
+                        continue;
+                    }
                     video_section.attributes.push(Attribute::new(
                         "rtcp-fb",
                         Some(format!("{} {}", cap.payload_type, feedback)),
+                    ));
+                }
+                if browser_twcc
+                    && (sdp_type == SdpType::Offer
+                        || cap.rtcp_fbs.iter().any(|fb| fb == "transport-cc"))
+                {
+                    video_section.attributes.push(Attribute::new(
+                        "rtcp-fb",
+                        Some(format!("{} transport-cc", cap.payload_type)),
                     ));
                 }
                 // RTX retransmission association (RFC 4588): the rtx PT rides
@@ -1186,8 +1262,8 @@ impl MediaNegotiator {
     /// | `inactive`   | `inactive`   |
     /// | `sendrecv`   | `sendrecv`   |
     ///
-    /// Also treats `port=0` and `c=IN IP4 0.0.0.0` (or `c=IN IP6 ::`)
-    /// as equivalent to `inactive`.
+    /// Also treats rejected media and a zero connection address that
+    /// signals hold as equivalent to `inactive`.
     ///
     /// Sections are matched by index between offer and answer (the answer
     /// is expected to have the same number of `m=` lines).
@@ -1202,7 +1278,7 @@ impl MediaNegotiator {
             .media_sections
             .iter()
             .map(|s| {
-                if s.port == 0 {
+                if offer.is_media_rejected(s) {
                     return Some("inactive");
                 }
                 if Self::section_has_zero_hold_connection(s, offer.session.connection.as_deref()) {
@@ -1368,6 +1444,36 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
     }
 
     #[test]
+    fn browser_video_feedback_is_negotiated_independently_of_the_sip_leg() {
+        let sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 97\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+        let mut caps = [video_cap(
+            97, "H264", Some("profile-level-id=42801F"), &["nack pli", "ccm tmmbr"],
+        )];
+        let offer = MediaNegotiator::rewrite_video_capabilities(SdpType::Offer, sdp, &caps).unwrap();
+        assert!(offer.contains("a=rtcp-fb:97 transport-cc\r\n"));
+        assert!(offer.contains("a=rtcp-fb:97 nack pli\r\n"));
+        assert!(!offer.contains("ccm tmmbr"));
+
+        let answer = MediaNegotiator::rewrite_video_capabilities(SdpType::Answer, sdp, &caps).unwrap();
+        assert!(!answer.contains("a=rtcp-fb:97 transport-cc"));
+
+        caps[0].rtcp_fbs.push("transport-cc".into());
+        let answer = MediaNegotiator::rewrite_video_capabilities(SdpType::Answer, sdp, &caps).unwrap();
+        assert!(answer.contains("a=rtcp-fb:97 transport-cc\r\n"));
+
+        let sip = sdp.split("a=extmap:").next().unwrap().replace("UDP/TLS/RTP/SAVPF", "RTP/AVP");
+        let offer = MediaNegotiator::rewrite_video_capabilities(SdpType::Offer, &sip, &caps).unwrap();
+        assert!(!offer.contains("transport-cc"));
+        assert!(offer.contains("a=rtcp-fb:97 ccm tmmbr\r\n"));
+    }
+
+    #[test]
     fn accepted_video_capabilities_keep_offer_payload_types() {
         let offered = vec![
             video_cap(96, "H264", Some("profile-level-id=42801F"), &[]),
@@ -1392,6 +1498,37 @@ a=rtpmap:110 VP8/90000\r\n";
         assert!(
             MediaNegotiator::accepted_video_capabilities(&offered, &rejected_answer).is_empty()
         );
+    }
+
+    #[test]
+    fn accepted_h264_formats_require_a_common_profile_and_packetization_mode() {
+        let offered = vec![
+            video_cap(96, "H264", Some("packetization-mode=1;profile-level-id=42001f"), &[]),
+            video_cap(98, "H264", Some("profile-level-id=42001f"), &[]),
+            video_cap(100, "H264", Some("packetization-mode=1;profile-level-id=42e01f"), &[]),
+        ];
+        let answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 96\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 profile-level-id=42801F; packetization-mode=0\r\n";
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, answer);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].payload_type, 98);
+
+        let unsupported = answer.replace("42801F", "64001f");
+        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &unsupported).is_empty());
+
+        let invalid = answer.replace("42801F", "invalid");
+        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &invalid).is_empty());
+
+        let constrained = answer.replace("42801F; packetization-mode=0", "4d801f; packetization-mode=1");
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, &constrained);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].payload_type, 100);
     }
 
     #[test]

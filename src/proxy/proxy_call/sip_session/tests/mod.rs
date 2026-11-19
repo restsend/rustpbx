@@ -6216,6 +6216,88 @@ a=rtcp:42001\r\n";
     leg.stop();
 }
 
+#[tokio::test]
+async fn callee_reinvite_enables_existing_bundle_only_video() {
+    use crate::call::{DialDirection, Dialplan, MediaConfig};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "caller",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new("bundle-video".into(), request, DialDirection::Inbound)
+        .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    let _guard = session.cancel_token.clone().drop_guard();
+    let mut cfg = LegConfig::rtp_pcmu();
+    cfg.video_codecs = vec![make_video_cap(96, "H264", Some("profile-level-id=42801F"), &[])];
+
+    let sendrecv_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+a=group:BUNDLE as vs\r\n\
+m=audio 45033 RTP/AVP 0\r\n\
+a=mid:as\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+m=video 0 RTP/AVP 96\r\n\
+a=mid:vs\r\n\
+a=bundle-only\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 profile-level-id=42801F\r\n";
+    let recvonly_offer = format!("{sendrecv_offer}a=recvonly\r\n");
+    let caller = LegId::from("caller");
+    let callee = LegId::from("callee");
+    for (id, offer) in [(&caller, sendrecv_offer), (&callee, recvonly_offer.as_str())] {
+        let leg = LegInner::new(id.as_str(), &cfg, None).unwrap();
+        leg.answer(offer).await.unwrap();
+        leg.accept();
+        session.legs.set_media_leg(id, leg);
+        assert!(session.legs.leg_has_video(id));
+        session.update_leg_state(id, LegState::Connected);
+    }
+    let bridged = session
+        .execute_command(
+            CallCommand::Bridge {
+                leg_a: caller,
+                leg_b: callee.clone(),
+                mode: crate::call::domain::P2PMode::Audio,
+            },
+            None,
+        )
+        .await;
+    assert!(bridged.success, "{:?}", bridged.message);
+
+    let offer = sendrecv_offer.replace("o=- 1 1", "o=- 1 2");
+    let answer = session
+        .build_local_dialog_answer(
+            DialogSide::Callee,
+            &callee,
+            rsipstack::sip::Method::Invite,
+            &offer,
+        )
+        .await
+        .unwrap();
+    let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &answer).unwrap();
+    let video = parsed
+        .media_sections
+        .iter()
+        .find(|section| section.kind == rustrtc::MediaKind::Video)
+        .unwrap();
+    assert!(!parsed.is_media_rejected(video), "{answer}");
+    assert_eq!(video.direction, rustrtc::Direction::SendRecv, "{answer}");
+    assert!(session.legs.leg_has_video(&callee));
+}
+
 // ── MediaBridge caller leg: video SDP ─────────────────────────────────
 
 /// A WebRTC caller offer carrying audio + H264/VP8 video. The MediaBridge

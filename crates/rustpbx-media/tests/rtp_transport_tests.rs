@@ -139,7 +139,7 @@ impl TestPeer {
             let seq = self.video_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             vtx.send(MediaSample::Video(rustrtc::media::frame::VideoFrame {
                 data: bytes::Bytes::from(payload),
-                payload_type: Some(96),
+                payload_type: None,
                 rtp_timestamp: ts,
                 width: 640,
                 height: 480,
@@ -1395,8 +1395,9 @@ async fn video_codec_mismatch_degrades_to_audio_only() {
     )
     .await;
     h.assert_video_not_relayed().await;
-    // Audio must keep flowing after the degradation: the bridge falls back to
-    // the transcoding path (PCMU → decode → PCMU), so B still receives audio.
+    // Audio must keep flowing on fast-path relay after the video degradation,
+    // without forcing software transcoding when audio codecs match.
+    h.assert_relay(true);
     let audio = h.relay_audio_a_to_b(3000).await;
     assert!(audio.is_some(), "audio must survive the video degradation");
     h.close();

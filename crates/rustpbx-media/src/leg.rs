@@ -1676,19 +1676,11 @@ async fn wait_and_arm_rewrite_relay(
     source_pc.clear_rtp_rewrite_bridge();
 
     let mut video_source_for_pli = None;
-    if resolved.len() == 1 {
-        let (kind, source, target, rules) = resolved.pop().unwrap();
+    for (kind, source, target, rules) in resolved {
         if kind == rustrtc::MediaKind::Video {
             video_source_for_pli = Some(source.clone());
         }
-        source.bridge_rewrite_rules_with_timelines(target, options, rules, timelines);
-    } else {
-        for (kind, source, target, rules) in resolved {
-            if kind == rustrtc::MediaKind::Video {
-                video_source_for_pli = Some(source.clone());
-            }
-            source.bridge_media_rewrite_rules(kind, target, options, rules, timelines.clone());
-        }
+        source.bridge_media_rewrite_rules(kind, target, options, rules, timelines.clone());
     }
 
     // Request an immediate keyframe from the video sender to recover any
@@ -2994,8 +2986,12 @@ mod p24_uac_test {
             "m=application causes 488 on strict SIP phones:\n{offer}"
         );
         assert!(
-            offer.contains("a=group:BUNDLE"),
-            "0.6.x bundles multi-m-line offers (documented shape change):\n{offer}"
+            !offer.contains("a=group:BUNDLE"),
+            "plain SIP offers must not propose BUNDLE:\n{offer}"
+        );
+        assert!(
+            !offer.contains("a=mid:"),
+            "plain SIP offers without BUNDLE must not emit a=mid:\n{offer}"
         );
         assert_eq!(
             offer.lines().filter(|l| l.starts_with("a=rtcp:")).count(),
