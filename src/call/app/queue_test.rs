@@ -6405,6 +6405,70 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    /// Boundary classification: caller hangs up AFTER pressing the callback
+    /// key but BEFORE the confirm prompt completes. The request was never
+    /// finalized — no task row is created and the exit classifies as a plain
+    /// abandon (the abandon bookkeeping releases the waiting depth / shared
+    /// row so no ghost waiter survives). This is the ONLY callback-adjacent
+    /// path where `skill_group_call_abandoned` may appear.
+    #[tokio::test]
+    async fn test_callback_mid_confirm_hangup_classifies_as_abandon() {
+        let (logs, _log_guard, _interest_guard) = capture_queue_logs();
+        let mut config = build_callback_config();
+        // The abandon notify only fires for skill-routed queues (the
+        // `skill_events_enabled` gate) — the production callback queue is
+        // skill-routed.
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("sg_callback".to_string());
+        let plan = config.to_plan();
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let mut stack = MockCallStack::run(
+            Box::new(
+                QueueApp::new(plan, config)
+                    .with_call_id("call-cb-mid".to_string())
+                    .with_agent_registry(registry.clone()),
+            ),
+            "1001",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let hold = stack.next_cmd(2000).await.expect("hold Play");
+        assert!(is_play(&hold));
+
+        // Key accepted → confirm prompt playing.
+        stack.dtmf("2");
+        let confirm_cmd = stack.next_cmd(2000).await.expect("confirm Play");
+        assert!(is_play(&confirm_cmd));
+
+        // Caller gives up mid-confirmation.
+        stack.remote_hangup();
+        stack.join().await.unwrap();
+
+        assert!(
+            registry.callbacks.lock().unwrap().is_empty(),
+            "an unconfirmed request must NOT create a task row"
+        );
+        let abandoned = registry.abandoned.lock().unwrap();
+        assert_eq!(
+            abandoned.len(),
+            1,
+            "mid-confirm hangup classifies as an abandon (waiting depth / shared row release rides this path): {abandoned:?}"
+        );
+        assert_eq!(abandoned[0].0, "call-cb-mid");
+        assert_eq!(
+            abandoned[0].1, "sg_callback",
+            "the abandon notify carries the skill-group id (skill_queue_id)"
+        );
+        let text = logs.text();
+        assert!(
+            !text.contains("callback request registered"),
+            "the chain never finalized: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn test_callback_offer_prompt_plays_once_then_hold_resumes() {
         let mut config = build_callback_config();
