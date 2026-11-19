@@ -310,18 +310,52 @@ impl SipSession {
         peer_leg: &LegId,
         refer_to: &str,
     ) -> Result<()> {
-        // The original Refer-To is passed through VERBATIM: it already names
-        // the transfer target with the Replaces parameter identifying the
-        // dialog to be replaced (the consult dialog). The transferee executes
-        // the standard role — INVITE(Replaces) toward the target.
+        // The original Refer-To names the transfer target with the Replaces
+        // parameter identifying the dialog to be replaced (the consult
+        // dialog), and the transferee dials that target itself (RFC 5589
+        // auto mode). The host it carries is usually the branded realm — a
+        // registrar domain that may have no UDP/TCP SIP route at all
+        // (WSS-only deployments). restsend-family engines ride their own
+        // registrar transport regardless of the URI host, but a third-party
+        // datagram UA (baresip / PSTN-style) dials `host:5060` literally —
+        // against a WSS-only realm that destination never reaches us, the
+        // REFER relay then times out (~15s) and the transfer dies with a
+        // failure NOTIFY.
+        //
+        // Point the target at the address this node advertised as its
+        // Contact ON THIS TRANSFEREE DIALOG (the snapshot's local_contact:
+        // NAT/advertise-aware, so a cluster egress domain when configured
+        // and the local listener otherwise) — the same address the
+        // transferee already targets for in-dialog requests here, so it is
+        // provably dialable. Fall back to the cluster advertise address,
+        // then leave the target untouched when neither exists. The Replaces
+        // identity (Call-ID + tags) is host-agnostic, so the takeover match
+        // is unchanged, and the delegated cross-node routing carries the
+        // INVITE(Replaces) to the node owning the consult dialog.
         use rsipstack::dialog::dialog::Dialog;
         let Some(peer_dialog) = self.legs.get_dialog(peer_leg) else {
             return Err(anyhow!("Transferee dialog is gone"));
         };
+        let advertised = match &peer_dialog {
+            Dialog::Invite(invite) => invite
+                .snapshot()
+                .local_contact
+                .map(|uri| uri.host_with_port.to_string()),
+            _ => None,
+        };
+        let refer_to = match advertised.or_else(|| {
+            self.server
+                .cluster_self_addr
+                .clone()
+                .map(|addr| addr.to_string())
+        }) {
+            Some(host_port) => Self::rewrite_refer_to_host(refer_to, &host_port),
+            None => refer_to.to_string(),
+        };
         let response = match peer_dialog {
             Dialog::Invite(invite) => {
                 invite
-                    .refer(refer_to, None, None)
+                    .refer(refer_to.clone(), None, None)
                     .await
                     .map_err(|e| anyhow!("REFER relay failed: {e}"))?
             }
@@ -914,6 +948,26 @@ impl SipSession {
         }
     }
 
+    /// Rewrites the host[:port] of the Refer-To target URI to `host_port`,
+    /// preserving the user part and every `?…` parameter (the Replaces
+    /// identity) verbatim. Angle brackets are not re-added: the relayed
+    /// header form matches the bare-URI shape the REFER carries here.
+    fn rewrite_refer_to_host(refer_to: &str, host_port: &str) -> String {
+        let trimmed = refer_to.trim().trim_start_matches('<').trim_end_matches('>');
+        let (target, params) = match trimmed.split_once('?') {
+            Some((t, p)) => (t, Some(p)),
+            None => (trimmed, None),
+        };
+        let routed = match target.split_once('@') {
+            Some((user, _old_host)) => format!("{user}@{host_port}"),
+            None => format!("sip:{host_port}"),
+        };
+        match params {
+            Some(p) => format!("{routed}?{p}"),
+            None => routed,
+        }
+    }
+
     fn refer_application_headers<'a>(
         headers: impl IntoIterator<Item = &'a rsipstack::sip::Header>,
     ) -> HashMap<String, String> {
@@ -1257,6 +1311,46 @@ impl SipSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_refer_to_host_repoints_the_target_and_keeps_replaces() {
+        // WSS-only branded realm + percent-encoded Replaces — the baresip
+        // third-party transferee form (10:27 incident): the relay must hand
+        // the transferee a host it can actually dial while the Replaces
+        // identity stays verbatim.
+        assert_eq!(
+            SipSession::rewrite_refer_to_host(
+                "sip:1001@pbx.ruzhila.cn?Replaces=pcc1698c38380d4d%3Bto-tag%3DgatElhVN%3Bfrom-tag%3DFeIIkSQl",
+                "192.168.3.211:35060",
+            ),
+            "sip:1001@192.168.3.211:35060?Replaces=pcc1698c38380d4d%3Bto-tag%3DgatElhVN%3Bfrom-tag%3DFeIIkSQl",
+        );
+    }
+
+    #[test]
+    fn rewrite_refer_to_host_covers_bracketed_and_bare_forms() {
+        assert_eq!(
+            SipSession::rewrite_refer_to_host(
+                "<sip:1001@realm.example.com;transport=udp>",
+                "10.0.0.5:35060",
+            ),
+            "sip:1001@10.0.0.5:35060",
+        );
+        assert_eq!(
+            SipSession::rewrite_refer_to_host("1001@realm.example.com", "10.0.0.5:35060"),
+            "1001@10.0.0.5:35060",
+        );
+        // No user part at all — synthesize the scheme around the new host.
+        assert_eq!(
+            SipSession::rewrite_refer_to_host("realm.example.com", "10.0.0.5:35060"),
+            "sip:10.0.0.5:35060",
+        );
+        // Plain blind-target form without query params stays intact.
+        assert_eq!(
+            SipSession::rewrite_refer_to_host("sip:1002@realm.example.com", "10.0.0.5:35060"),
+            "sip:1002@10.0.0.5:35060",
+        );
+    }
 
     #[test]
     fn refer_application_headers_preserve_extension_headers() {
