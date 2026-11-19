@@ -1325,21 +1325,24 @@ async fn sample_leg(leg: &Leg) -> LegSample {
     // Sequence-number-based inbound counters (RFC 3550 §A.3). Always sampled:
     // the 5s health loss figure is derived from them.
     let mut ingress_quality = None;
-    let receiver = leg.pc().get_transceivers().into_iter()
-        .find(|transceiver| transceiver.kind() == MediaKind::Audio)
-        .and_then(|transceiver| transceiver.receiver());
-    if let (Some(receiver), Some(codec)) = (receiver, leg.negotiated().and_then(|profile| profile.audio)) {
+    let has_audio_receiver = leg.pc().get_transceivers().into_iter()
+        .any(|transceiver| transceiver.kind() == MediaKind::Audio && transceiver.receiver().is_some());
+    if has_audio_receiver && let Some(codec) = leg.negotiated().and_then(|profile| profile.audio) {
         if codec.clock_rate != 0 {
-            let ssrc = receiver.ssrc();
             match leg.pc().get_stats().await {
                 Ok(report) => {
+                    // InboundRtp's SSRC is the REMOTE sender's: our
+                    // receiver's `ssrc()` is the local media SSRC and
+                    // never matches the inbound stream. There is exactly
+                    // one audio InboundRtp stream per leg — take it and
+                    // report the remote SSRC it observed.
                     ingress_quality = report.entries.iter().find(|entry|
-                        entry.kind == rustrtc::stats::StatsKind::InboundRtp
-                        && entry.values.get("ssrc").and_then(serde_json::Value::as_u64) == Some(ssrc as u64))
+                        entry.kind == rustrtc::stats::StatsKind::InboundRtp)
                         .and_then(|entry| {
                             let received = entry.values.get("packetsReceived")?.as_u64()?;
                             Some(IngressSample {
-                                ssrc, clock_rate: codec.clock_rate,
+                                ssrc: entry.values.get("ssrc")?.as_u64()? as u32,
+                                clock_rate: codec.clock_rate,
                                 received,
                                 lost: entry.values.get("packetsLost")?.as_i64()?,
                                 jitter_ms: (received > 1).then_some(
@@ -1482,7 +1485,17 @@ fn spawn_bridge_stats_task(
         let mut previous_sample = std::time::Instant::now();
         let mut last_emit = previous_sample;
         let mut sample_a: Option<LegSample> = None;
+        // Last non-None samples: the closing flush window fires after the
+        // legs tore down (samples clear to None) and must still carry the
+        // legs' final measurements — including ingress quality — out of the
+        // bridge instead of reporting a null leg.
+        let mut last_known_a: Option<LegSample> = None;
+        // Last known ingress jitter/loss ranges per side: the closing flush
+        // interval has no fresh RTCP sample, so its window would emit nulls
+        // — carry the previous interval's ranges instead.
+        let mut last_ingress_ranges: [Option<(Option<crate::quality_stats::Range>, Option<crate::quality_stats::Range>)>; 2] = [None, None];
         let mut sample_b: Option<LegSample> = None;
+        let mut last_known_b: Option<LegSample> = None;
         let mut report_counts = [0u64; 2];
         let mut leg_report_counts = [0u64; 2];
         let mut sampled_ids = [None, None];
@@ -1544,16 +1557,27 @@ fn spawn_bridge_stats_task(
                 let ids = [la.as_ref().map(|leg| leg.id().to_string()), lb.as_ref().map(|leg| leg.id().to_string())];
                 let membership_changed = ids != sampled_ids;
                 let previous_ids = std::mem::replace(&mut sampled_ids, ids);
-                let reset = (membership_changed && (sample_a.is_some() || sample_b.is_some()))
+                // A leg disappearing (current None) is removal/normal
+                // shutdown — never a counter reset; only backwards counters
+                // on a live stream are. During the closing flush
+                // (`finishing`) the counters tear down with the bridge and
+                // read backwards for the same reason — a closing bridge
+                // reports no reset at all.
+                let reset = !finishing
+                    && ((membership_changed && !sa.is_none() && !sb.is_none()
+                        && (sample_a.is_some() || sample_b.is_some()))
                     || [(sa.as_ref(), sample_a.as_ref()), (sb.as_ref(), sample_b.as_ref())]
                     .into_iter().any(|(current, previous)| match (current, previous) {
                         (Some(current), Some(previous)) => current.transport_rx < previous.transport_rx
                             || current.transport_tx < previous.transport_tx
                             || current.recording_queue_drops < previous.recording_queue_drops,
-                        (None, Some(_)) => true,
                         _ => false,
-                    });
-                if reset { window.reset(now); report_counts = [0, 0]; }
+                    }));
+
+                if reset {
+                    window.reset(now);
+                    report_counts = [0, 0];
+                }
                 // A newly observed leg establishes counters; it has no prior interval.
                 else if !membership_changed && (la.is_some() || lb.is_some()) { window.observe(now, elapsed, [
                     observed_a.transport_rx + observed_b.transport_rx,
@@ -1579,11 +1603,20 @@ fn spawn_bridge_stats_task(
                             && current.received >= previous.received);
                         let stream_reset = ingress.is_some() && previous_ingress.is_some() && same_stream.is_none();
                         let changed = sampled_ids[side] != previous_ids[side];
-                        let reset = previous.is_some_and(|previous| current.is_some_and(|current|
+                        // Closing-bridge counters tear down and read
+                        // backwards — the flush window reports no reset.
+                        let reset = !finishing && previous.is_some_and(|previous| current.is_some_and(|current|
                             current.transport_rx < previous.transport_rx
                             || current.transport_tx < previous.transport_tx
                             || current.recording_queue_drops < previous.recording_queue_drops));
-                        if reset || stream_reset || (changed && previous.is_some()) {
+                        // A leg leaving (current None) is normal shutdown
+                        // or removal — not a counter reset; only a genuine
+                        // replacement (new identity on the side) restarts
+                        // the leg window.
+                        if reset
+                            || stream_reset
+                            || (changed && previous.is_some() && current.is_some())
+                        {
                             leg_windows[side].reset(now);
                             leg_report_counts[side] = 0;
                             recovery = None;
@@ -1629,6 +1662,15 @@ fn spawn_bridge_stats_task(
                         }
                     }
                 }
+                // Only a sample that actually carries ingress quality feeds
+                // the last-known slot: post-teardown samples are `Some` but
+                // quality-less and would blank the closing flush window.
+                if let Some(s) = sa.as_ref().filter(|s| s.ingress_quality.is_some()) {
+                    last_known_a = Some(s.clone());
+                }
+                if let Some(s) = sb.as_ref().filter(|s| s.ingress_quality.is_some()) {
+                    last_known_b = Some(s.clone());
+                }
                 sample_a = sa.clone();
                 sample_b = sb.clone();
             }
@@ -1642,9 +1684,43 @@ fn spawn_bridge_stats_task(
                             let summary = window.summary(now)?;
                             let [caller, callee] = summary.reports;
                             let (egress, ingress) = if side == 0 { (caller, callee) } else { (callee, caller) };
-                            let current = if side == 0 { sample_a.as_ref() } else { sample_b.as_ref() };
+                            // The closing flush fires after the legs tore
+                            // down: the fresh sample is `Some` but
+                            // quality-less. Prefer a sample that carries
+                            // ingress quality (last-known wins over the empty
+                            // post-teardown one) so the flush window carries
+                            // the legs' final measurements out instead of a
+                            // null leg.
+                            let current = if side == 0 {
+                                sample_a
+                                    .as_ref()
+                                    .filter(|s| s.ingress_quality.is_some())
+                                    .or_else(|| last_known_a.as_ref())
+                            } else {
+                                sample_b
+                                    .as_ref()
+                                    .filter(|s| s.ingress_quality.is_some())
+                                    .or_else(|| last_known_b.as_ref())
+                            };
                             let recovering = current.and_then(|sample| sample.ingress_recovery).is_some_and(|at|
                                 now.duration_since(at) < Duration::from_millis(config.window_ms));
+                            // A closing flush's interval has no fresh RTCP
+                            // sample: fall back to the previous window's
+                            // ingress ranges rather than reporting nulls.
+                            if ingress.jitter_ms.is_some() || ingress.loss_percent.is_some() {
+                                last_ingress_ranges[side] =
+                                    Some((ingress.jitter_ms.clone(), ingress.loss_percent.clone()));
+                            }
+                            let mut jitter_ms = ingress.jitter_ms.clone();
+                            let mut loss_percent = ingress.loss_percent.clone();
+                            if jitter_ms.is_none()
+                                && let Some((jitter, loss)) = &last_ingress_ranges[side]
+                            {
+                                jitter_ms = jitter.clone();
+                                if loss_percent.is_none() {
+                                    loss_percent = loss.clone();
+                                }
+                            }
                             Some(LegQualityWindow {
                                 audio_packet_samples: current.and_then(|sample| sample.audio_packet_samples.clone()),
                                 leg_id: id.clone(), side: if side == 0 { "caller" } else { "callee" },
@@ -1656,8 +1732,8 @@ fn spawn_bridge_stats_task(
                                 egress_report: egress,
                                 ingress_report: current.and_then(|sample| sample.ingress_quality.as_ref()).map(|sample|
                                     IngressQualityWindow { ssrc: sample.ssrc, clock_rate: sample.clock_rate,
-                                        jitter_ms: ingress.jitter_ms,
-                                        loss_percent: if recovering { None } else { ingress.loss_percent } }),
+                                        jitter_ms,
+                                        loss_percent: if recovering { None } else { loss_percent } }),
                             })
                         }).collect();
                         match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs }) {

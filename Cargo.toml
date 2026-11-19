@@ -124,10 +124,10 @@ chrono-tz = "0.10.4"
 # 0.4.11 fixes a G.711 µ-law (PCMU) encoder bug: ~12% of samples were
 # emitted as non-standard codes, adding audible quantization noise ("hiss")
 # on recordings when decoded by standard players/peers.
-audio-codec = "0.4.13"
+audio-codec = "0.4.14"
 rsipstack = "0.8.5"
 # Published fork keeps vendor APIs and adds correlated, rate-limited boundary logs.
-rustrtc = "0.6.4"
+rustrtc = "0.6.5"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
