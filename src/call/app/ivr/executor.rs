@@ -30,6 +30,10 @@ const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
 /// there); internal key, never forwarded to the provider as an ivr param.
 pub(crate) const IVR_SUSPENDED_EXECUTION_ID_KEY: &str = "_ivr_suspended_execution_id";
 
+/// Source step of a route-point jump, kept until the next app starts or the handoff ends.
+#[derive(Clone)]
+pub(crate) struct SuspendedJumpTrace(pub crate::rwi::IvrStepTrace);
+
 /// Default number of consecutive no-input prompt cycles before the step IVR
 /// asks the provider to resolve (DtmfMenuTimeout). 0 disables the runaway guard.
 const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
@@ -397,6 +401,56 @@ impl StepIvrApp {
         if entry.step_start_time.is_none() {
             entry.step_start_time = entry.step_end_time.clone();
         }
+        // Provider payloads and trigger details can contain credentials or collected numbers.
+        // Keep the durable observation limited to executed-node identity and outcome.
+        let end_reason = serde_json::json!(entry.end_reason);
+        tracing::info!(
+            event = "ivr.step_completed",
+            session_id = %entry.session_id,
+            app_execution_id = self.app_execution_id.map(|id| id.to_string()).unwrap_or_default(),
+            step_index = entry.step_index,
+            step_id = entry.step_id.as_deref().unwrap_or(""),
+            step_name = entry.step_name.as_deref().unwrap_or(""),
+            trigger = %entry.trigger.r#type,
+            action_type = %entry.action_type,
+            step_start_time = entry.step_start_time.as_deref().unwrap_or(""),
+            step_end_time = entry.step_end_time.as_deref().unwrap_or(""),
+            duration_ms = entry.duration_ms,
+            next_node_id = entry.next_node_id.as_deref().unwrap_or(""),
+            end = entry.end.unwrap_or(false),
+            end_reason = end_reason.as_str().unwrap_or(""),
+            failed = entry.error.is_some(),
+            "IVR step completed"
+        );
+        if let Some(ref handle) = self.session_handle {
+            let detail = serde_json::json!({
+                "event": "ivr.step_completed",
+                "session_id": entry.session_id,
+                "app_execution_id": self.app_execution_id,
+                "step_index": entry.step_index,
+                "step_id": entry.step_id,
+                "step_name": entry.step_name,
+                "trigger": entry.trigger.r#type,
+                "action_type": entry.action_type,
+                "step_start_time": entry.step_start_time,
+                "step_end_time": entry.step_end_time,
+                "duration_ms": entry.duration_ms,
+                "next_node_id": entry.next_node_id,
+                "end": entry.end.unwrap_or(false),
+                "end_reason": entry.end_reason,
+                "failed": entry.error.is_some(),
+            });
+            // Shutdown may stop consuming commands before on_exit completes; the log above
+            // remains the terminal observation even when the CDR command cannot be consumed.
+            if let Err(error) = handle.send_command(crate::call::domain::CallCommand::Trace {
+                event: crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Ivr, "IVR step completed",
+                ).detail(detail),
+            }) {
+                warn!(call_id = %entry.session_id, session_id = %entry.session_id,
+                    step_id = ?entry.step_id, %error, "Failed to submit IVR CDR trace");
+            }
+        }
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
             crate::utils::spawn(async move {
@@ -435,6 +489,14 @@ impl StepIvrApp {
             // no-op today — it keeps the "emitted event always carries both
             // stamps" guarantee local to the construction site as well.
             .with_completion_stamps();
+            if ev.action_type == "JumpIvr"
+                && ev.end_reason == Some(SessionEndTag::TransferToIvr)
+                && ev.end_detail.as_deref().is_some_and(|target| target.starts_with("toivr:"))
+                && let Some(extensions) = &self.session_extensions
+            {
+                extensions.write().insert(SuspendedJumpTrace(ev));
+                return;
+            }
             let guard = gw.read();
             guard.fan_out(&call_id, &ev);
         }
@@ -814,23 +876,35 @@ impl StepIvrApp {
                             TerminalAction::Transfer(target)
                                 if Self::is_resumable_handoff(&node, target)
                         );
+                        let mut trace = self.trace_entry(
+                            &session_id,
+                            &caller,
+                            &callee,
+                            trigger.clone(),
+                            &node_type_str,
+                            action_json,
+                            None,
+                            step_id.clone(),
+                            step_name.clone(),
+                        );
+                        if let EntryAction::JumpIvr { params, .. } = &node.action
+                            && let Some(id) = params.get("handoff_id").filter(|id| !id.is_empty())
+                        {
+                            let extra = trace.extra.get_or_insert_with(|| serde_json::json!({}));
+                            if let Some(extra) = extra.as_object_mut() {
+                                extra.insert(
+                                    "handoff_id".into(),
+                                    serde_json::Value::String(id.clone()),
+                                );
+                            }
+                        }
                         self.record_trace(IvrTraceEntry {
                             step_end_time: Some(step_end),
                             duration_ms: elapsed_ms,
                             end_reason: handoff_end.as_ref().map(|(tag, _)| tag.clone()),
                             end_detail: handoff_end.map(|(_, target)| target),
                             end: flow_ended.then_some(true),
-                            ..self.trace_entry(
-                                &session_id,
-                                &caller,
-                                &callee,
-                                trigger.clone(),
-                                &node_type_str,
-                                action_json,
-                                None,
-                                step_id.clone(),
-                                step_name.clone(),
-                            )
+                            ..trace
                         });
                         match terminal {
                             TerminalAction::Transfer(target) => {
@@ -1669,6 +1743,16 @@ impl StepIvrApp {
             pending
         });
 
+        // Arm before the request: the remote provider can plan a jump even
+        // if the caller hangs up before this actor receives its response.
+        if self.provider.advertises_sip_trunk_jump()
+            && let Some(extensions) = &self.session_extensions
+        {
+            let mut extensions = extensions.write();
+            if extensions.get::<crate::rwi::event::IvrJumpResult>().is_none() {
+                extensions.insert(crate::rwi::event::IvrJumpResult::default());
+            }
+        }
         let start = std::time::Instant::now();
         let result = self.provider.next_action(ctx.clone()).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1892,6 +1976,7 @@ impl StepIvrApp {
         let result = common::execute_action(
             &node.action,
             node.wait_for_result,
+            node.transfer_timeouts,
             ctrl,
             ctx,
             &mut self.sess,
@@ -2051,6 +2136,7 @@ impl CallApp for StepIvrApp {
         // so a later compensation can never attribute the successor's end to
         // the predecessor.
         context.session_vars.remove(IVR_SUSPENDED_EXECUTION_ID_KEY);
+        context.session_extensions.write().remove::<SuspendedJumpTrace>();
         self.session_extensions = Some(context.session_extensions.clone());
         self.app_execution_id = context
             .invocation
@@ -3044,6 +3130,91 @@ mod tests {
         StepIvrApp::with_provider(Box::new(MockProvider::new(nodes)))
     }
 
+    #[test]
+    fn completed_step_logs_correlated_progress_without_provider_payload() {
+        let (logs, _guard, _interest) = crate::log_capture::LogCapture::start_filtered("info");
+        let mut app = mock_app(vec![]);
+        app.app_execution_id = Some(3);
+        let mut entry = app.trace_entry(
+            "ivr-observation-session-full-id",
+            "1001",
+            "2000",
+            crate::rwi::TriggerInfo::with_detail(
+                "dtmf",
+                serde_json::json!({"number": "private-collected-number"}),
+            ),
+            "Prompt",
+            Some("private-action-payload".into()),
+            Some("private-provider-error".into()),
+            Some("menu-1".into()),
+            Some("Main menu".into()),
+        );
+        entry.extra = Some(serde_json::json!({"token": "private-extra-payload"}));
+        entry.next_node_id = Some("prompt-2".into());
+        entry.duration_ms = 25;
+        entry.end = Some(true);
+        entry.end_reason = Some(SessionEndTag::UserHangup);
+        app.record_trace(entry);
+
+        let output = logs.text();
+        assert_eq!(output.lines().count(), 1, "{output}");
+        for field in [
+            "event=\"ivr.step_completed\"",
+            "session_id=ivr-observation-session-full-id",
+            "app_execution_id=\"3\"",
+            "step_id=\"menu-1\"",
+            "step_name=\"Main menu\"",
+            "trigger=dtmf",
+            "action_type=Prompt",
+            "step_start_time=\"",
+            "step_end_time=\"",
+            "duration_ms=25",
+            "next_node_id=\"prompt-2\"",
+            "end=true",
+            "end_reason=\"user_hangup\"",
+            "failed=true",
+        ] {
+            assert!(output.contains(field), "missing {field}: {output}");
+        }
+        assert!(!output.contains("private-"), "{output}");
+    }
+
+    #[test]
+    fn completed_steps_submit_sanitized_cdr_trace_for_normal_and_terminal_nodes() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let mut app = mock_app(vec![]);
+        app.session_handle = Some(
+            crate::proxy::proxy_call::sip_session::SipSessionHandle::new_for_test(
+                "ivr-cdr-session-full-id", sender,
+            ),
+        );
+        for terminal in [false, true] {
+            let mut entry = app.trace_entry(
+                "ivr-cdr-session-full-id", "1001", "2000",
+                crate::rwi::TriggerInfo::new(if terminal { "session_end" } else { "audio_complete" }),
+                "Prompt", Some("private-action-payload".into()), None,
+                Some("prompt-1".into()), Some("Greeting".into()),
+            );
+            entry.end = terminal.then_some(true);
+            entry.end_reason = terminal.then_some(SessionEndTag::UserHangup);
+            app.record_trace(entry);
+            let CallCommand::Trace { event } = receiver.try_recv()
+                .expect("completed IVR node must submit its existing CDR trace command") else {
+                panic!("expected CDR trace command");
+            };
+            let trace = serde_json::to_value(event).unwrap();
+            assert_eq!(trace["kind"], "ivr");
+            assert_eq!(trace["detail"]["event"], "ivr.step_completed");
+            assert_eq!(trace["detail"]["session_id"], "ivr-cdr-session-full-id");
+            assert_eq!(trace["detail"]["step_id"], "prompt-1");
+            assert_eq!(trace["detail"]["end"], terminal);
+            assert_eq!(trace["detail"]["end_reason"], if terminal {
+                serde_json::json!("user_hangup")
+            } else { serde_json::Value::Null });
+            assert!(!trace.to_string().contains("private-"));
+        }
+    }
+
     fn make_test_context() -> ApplicationContext {
         ApplicationContext::new(
             DatabaseConnection::default(),
@@ -3303,17 +3474,12 @@ mod tests {
         use crate::call::domain::TransferOutcome;
         use crate::rwi::gateway::RwiGateway;
 
-        let mut transfer = ActionNode::new(EntryAction::Transfer {
-            target: "2001".into(),
-            headers: HashMap::new(),
-            params: HashMap::new(),
-            return_app: None,
-            return_target: None,
-        });
-        transfer.wait_for_result = true;
-        if let EntryAction::Transfer { headers, .. } = &mut transfer.action {
-            headers.insert("X-Route-Metadata".into(), "workflow=example".into());
-        }
+        let mut transfer: ActionNode = serde_json::from_value(serde_json::json!({
+            "type": "transfer", "target": "sip:target@example.test", "wait_for_result": true,
+            "headers": {"X-Route-Metadata": "workflow=example"},
+            "params": {"from_user": "relay-caller"},
+            "transfer_timeouts": {"connect_timeout_ms": 3000, "max_duration_ms": 12000}
+        })).unwrap();
         transfer.step_id = Some("transfer-step".into());
         transfer.extra = Some(serde_json::json!({"nodetype": "transfer"}));
         let hangup = ActionNode::new(EntryAction::hangup_none());
@@ -3328,8 +3494,10 @@ mod tests {
             .await;
         stack
             .assert_cmd(2000, "transfer", |c| {
-                matches!(c, CallCommand::TransferAwaitResult { target, headers, .. }
-                    if target == "2001"
+                matches!(c, CallCommand::TransferAwaitResult { target, headers, timeouts, .. }
+                    if target == "sip:target@example.test?from_user=relay-caller"
+                        && timeouts.connect_timeout_ms.map(|ms| ms.get()) == Some(3000)
+                        && timeouts.max_duration_ms.map(|ms| ms.get()) == Some(12000)
                         && headers.get("X-Route-Metadata").map(String::as_str)
                             == Some("workflow=example"))
             })
@@ -6975,12 +7143,14 @@ mod tests {
             .await;
 
         // The stale 3s menu timeout now fires while prompt_break is playing.
-        // It must be ignored — no hangup, no provider contact, no commands.
+        // It must be ignored — no hangup, provider contact or control commands.
         stack.timeout("ivr_dtmf_timeout");
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let cmds = stack.drain_cmds();
         assert!(
-            cmds.is_empty(),
+            cmds.iter().all(|command| matches!(command, CallCommand::Trace { event }
+                if event.detail.as_ref().is_some_and(|detail|
+                    detail["event"] == "ivr.step_completed" && detail["session_id"] == "test-session"))),
             "stale menu timeout must not derail the current node, got: {cmds:?}"
         );
 
@@ -7286,7 +7456,9 @@ mod tests {
         // Hangup. The greeting must continue uninterrupted.
         let cmds = stack.drain_cmds();
         assert!(
-            cmds.is_empty(),
+            cmds.iter().all(|command| matches!(command, CallCommand::Trace { event }
+                if event.detail.as_ref().is_some_and(|detail|
+                    detail["event"] == "ivr.step_completed" && detail["session_id"] == "test-session"))),
             "non-matching DTMF during greeting must not stop playback or contact provider, got: {cmds:?}"
         );
 
@@ -7367,7 +7539,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let cmds = stack.drain_cmds();
         assert!(
-            cmds.is_empty(),
+            cmds.iter().all(|command| matches!(command, CallCommand::Trace { event }
+                if event.detail.as_ref().is_some_and(|detail|
+                    detail["event"] == "ivr.step_completed" && detail["session_id"] == "test-session"))),
             "non-matching DTMF in waiting window must not contact provider, got: {cmds:?}"
         );
 

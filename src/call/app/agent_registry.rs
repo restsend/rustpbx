@@ -551,6 +551,22 @@ pub trait AgentRegistry: Send + Sync {
             .await
     }
 
+    /// Select while excluding caller/previous-offer identities. Backends
+    /// with assignment or reservation side effects must filter before them.
+    async fn select_agent_with_exclusions(
+        &self,
+        required_skills: &[String],
+        strategy: RoutingStrategy,
+        policy: Option<&str>,
+        call_id: &str,
+        priority: i32,
+        excluded_agent_ids: &[String],
+    ) -> Option<AgentRecord> {
+        self.select_agent_with_priority(required_skills, strategy, policy, call_id, priority)
+            .await
+            .filter(|agent| !excluded_agent_ids.contains(&agent.agent_id))
+    }
+
     /// Resolve the escalation plan for a queue target URI (e.g.
     /// `"skill-group:support"`): which skill groups to widen to, after how
     /// many queued seconds, and whether the widened set is scheduled fairly.

@@ -122,6 +122,90 @@ async fn test_presence_e2e_away_to_idle() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "contact-center")]
+#[tokio::test]
+async fn test_presence_e2e_authenticated_publish_returns_committed_result() -> Result<()> {
+    use crate::addons::cc::{agent::AgentRegistry, presence_hook::CcPresencePublishHook};
+    use rsipstack::sip::SipMessage;
+    use rsipstack::transaction::Transaction;
+    use rsipstack::transaction::key::{TransactionKey, TransactionRole};
+    use rsipstack::transport::{SipAddr, TransportEvent, channel::ChannelConnection};
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let (server, module) = setup_presence_e2e().await?;
+    let db = sea_orm::Database::connect("sqlite::memory:").await?;
+    crate::addons::cc::migration::Migrator::up(&db, None).await?;
+    let registry = Arc::new(AgentRegistry::with_db(db.clone()));
+    registry.register("bob".into(), vec![], 1).await?;
+    server
+        .server_ref
+        .presence_manager
+        .add_publish_hook(Arc::new(CcPresencePublishHook::new(registry, Some(db))));
+    for (authenticated, opted_in, expects_result) in [
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let mut request = create_test_request(
+            rsipstack::sip::Method::Publish,
+            "bob",
+            None,
+            "127.0.0.1",
+            None,
+        );
+        if opted_in {
+            request.headers.push(rsipstack::sip::Header::Other(
+                "X-Restsend-Presence-Result".into(),
+                "snapshot-v1".into(),
+            ));
+        }
+        request.body = br#"<presence xmlns="urn:ietf:params:xml:ns:pidf"><tuple id="p"><status><basic>open</basic></status><note>idle</note></tuple></presence>"#.to_vec();
+        let cookie = TransactionCookie::default();
+        if authenticated {
+            cookie.set_user(crate::call::SipUser {
+                username: "bob".into(),
+                ..Default::default()
+            });
+        }
+        let (_, incoming) = mpsc::unbounded_channel();
+        let (outgoing, mut wire) = mpsc::unbounded_channel();
+        let addr: SipAddr = "127.0.0.1:5060".parse::<std::net::SocketAddr>()?.into();
+        let connection =
+            ChannelConnection::create_connection(incoming, outgoing, addr, None).await?;
+        let key = TransactionKey::from_request(&request, TransactionRole::Server)?;
+        let mut tx = Transaction::new_server(
+            key,
+            request,
+            server.server_ref.endpoint.inner.clone(),
+            Some(connection.into()),
+        );
+        module
+            .on_transaction_begin(CancellationToken::new(), &mut tx, cookie)
+            .await?;
+        let event = tokio::time::timeout(Duration::from_secs(2), wire.recv()).await?;
+        let Some(TransportEvent::Incoming(SipMessage::Response(response), _, _)) = event else {
+            anyhow::bail!("expected a SIP PUBLISH response, got {event:?}");
+        };
+        assert_eq!(response.status_code, rsipstack::sip::StatusCode::OK);
+        if expects_result {
+            assert!(response.headers.iter().any(|h| matches!(h,
+                rsipstack::sip::Header::ContentType(t)
+                    if t.value() == "application/vnd.restsend.presence-result+json")));
+            let receipt: serde_json::Value = serde_json::from_slice(&response.body)?;
+            assert_eq!(receipt["agent_id"], "bob");
+            assert_eq!(receipt["outcome"], "committed");
+            assert_eq!(receipt["state"]["status"], "idle");
+            assert!(receipt["state"]["transition_id"].as_i64().unwrap() > 0);
+        } else {
+            assert!(response.body.is_empty());
+        }
+    }
+    server.stop();
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_presence_e2e_busy() -> Result<()> {
     let (server, module) = setup_presence_e2e().await?;

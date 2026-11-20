@@ -2262,7 +2262,11 @@ async fn cluster_query_transfer_target_dialog_handler(
             .into_response();
     };
     let registry = state.sip_server().inner.active_call_registry.clone();
-    for handle in registry.handles_snapshot() {
+    let candidates = match req.get("consult_hop_call_id").and_then(|v| v.as_str()) {
+        Some(call_id) => registry.get_handle_by_dialog(call_id).into_iter().collect(),
+        None => registry.handles_snapshot(),
+    };
+    for handle in candidates {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if handle
             .send_command(crate::call::domain::CallCommand::QueryTransferTargetDialog {
@@ -2293,7 +2297,10 @@ async fn cluster_query_transfer_target_dialog_handler(
             );
             continue;
         }
-        return Json(serde_json::json!({ "dialog": info })).into_response();
+        return Json(serde_json::json!({
+            "dialog": info,
+            "target_facing_replaces": true
+        })).into_response();
     }
     (
         StatusCode::NOT_FOUND,

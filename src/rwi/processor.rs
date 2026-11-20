@@ -1134,29 +1134,18 @@ impl RwiCommandProcessor {
         // matched against configured trunk next-hops (route-disabled direct
         // originates). The value is the logical-call root, verbatim — never
         // the RFC-padded wire form.
-        let correlation_header = match originate_trunk_name.as_deref() {
-            Some(name) => server.data_context.session_id_header_for(Some(name)),
-            None => {
-                let (host, port) = match invite_option.destination.as_ref() {
-                    Some(destination) => (
-                        destination.addr.host.to_string(),
-                        destination.addr.port.map(|port| port.0).unwrap_or(5060),
-                    ),
-                    None => (
-                        invite_option.callee.host().to_string(),
-                        invite_option
-                            .callee
-                            .host_with_port
-                            .port
-                            .map(|port| port.0)
-                            .unwrap_or(5060),
-                    ),
-                };
-                server
-                    .data_context
-                    .session_id_header_for_destination(&host, port)
-            }
+        let target = crate::call::Location {
+            aor: invite_option.callee.clone(),
+            destination: invite_option.destination.clone(),
+            ..Default::default()
         };
+        let correlation_header = server
+            .outbound_session_id_header(
+                originate_trunk_name.as_deref(),
+                &target,
+                &invite_option.callee,
+            )
+            .await;
         if let Some(name) = correlation_header
             && let Some(root) = crate::call::session_id::normalize_custom(&global_session_id)
         {
@@ -1270,7 +1259,13 @@ impl RwiCommandProcessor {
                                             if size == 0 {
                                                 return None;
                                             }
-                                            let mut extra = std::collections::HashMap::new();
+                                            let mut extra: HashMap<_, _> = segment
+                                                .metadata
+                                                .into_iter()
+                                                .map(|(key, value)| {
+                                                    (key, serde_json::Value::String(value))
+                                                })
+                                                .collect();
                                             extra.insert(
                                                 "session_id".to_string(),
                                                 serde_json::Value::String(cdr_call_id.clone()),

@@ -93,12 +93,42 @@ impl ProxyDataContext {
     /// considered; an unmatched (non-trunk) target never gets a correlation
     /// header through this fallback.
     pub fn session_id_header_for_destination(&self, host: &str, port: u16) -> Option<String> {
+        self.outbound_session_id_header_for(None, host, port, false)
+    }
+
+    /// Resolve one authoritative header. Conflicting trunks at the same address
+    /// require explicit routing; hash iteration must never choose the protocol.
+    pub fn outbound_session_id_header_for(
+        &self,
+        trunk: Option<&str>,
+        host: &str,
+        port: u16,
+        external: bool,
+    ) -> Option<String> {
+        if let Some(trunk) = trunk {
+            return self.session_id_header_for(Some(trunk));
+        }
+        let default = crate::call::session_id::settings().source_header;
         let trunks = self.trunks_snapshot();
-        let trunk = crate::proxy::routing::find_trunk_by_dest(&trunks, host, port)?;
-        trunk
-            .session_id_header
-            .clone()
-            .or_else(|| crate::call::session_id::settings().source_header.clone())
+        let mut matched = trunks.values().filter(|trunk| {
+            crate::proxy::routing::trunk_dest_host_port(&trunk.dest)
+                .is_some_and(|(h, p)| h.eq_ignore_ascii_case(host) && p == port)
+        });
+        let Some(first) = matched.next() else {
+            return external.then_some(default).flatten();
+        };
+        let header = first.session_id_header.clone().or_else(|| default.clone());
+        if matched.any(|trunk| {
+            let other = trunk.session_id_header.as_ref().or(default.as_ref());
+            match (header.as_deref(), other) {
+                (Some(a), Some(b)) => !a.eq_ignore_ascii_case(b),
+                (None, None) => false,
+                _ => true,
+            }
+        }) {
+            return None;
+        }
+        header
     }
 
     pub async fn new(config: Arc<ProxyConfig>, db: Option<DatabaseConnection>) -> Result<Self> {
@@ -2535,6 +2565,35 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         assert_eq!(trunk.ice_lite, None);
     }
 
+    #[tokio::test]
+    async fn correlation_destination_rejects_conflicting_trunks() {
+        let (server, _) = crate::proxy::tests::common::create_test_server().await;
+        for (name, header) in [("one", "X-One"), ("two", "X-Two")] {
+            server.data_context.trunks.insert(
+                name.into(),
+                TrunkConfig {
+                    dest: "sip:192.0.2.50:5060".into(),
+                    session_id_header: Some(header.into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            server
+                .data_context
+                .session_id_header_for_destination("192.0.2.50", 5060),
+            None,
+            "shared destinations cannot select a business correlation header by hash iteration order"
+        );
+        assert_eq!(
+            server
+                .data_context
+                .session_id_header_for(Some("one"))
+                .as_deref(),
+            Some("X-One")
+        );
+    }
+
     /// Console/DB-managed trunks carry SBC overrides in `metadata.sbc`.
     /// `session_id_header` must survive the model → TrunkConfig conversion —
     /// otherwise per-trunk correlation headers silently fall back to the
@@ -2546,14 +2605,14 @@ file = "db://ivr/lf-step-ivr.generated.toml"
             name: "g-system".to_string(),
             sip_server: Some("sip:10.0.0.9:5060".to_string()),
             metadata: Some(serde_json::json!({
-                "sbc": {"session_id_header": "X-GSession-ID"}
+                "sbc": {"session_id_header": "X-RustPBX-SessionID"}
             })),
             ..Default::default()
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert_eq!(
             trunk.session_id_header.as_deref(),
-            Some("X-GSession-ID")
+            Some("X-RustPBX-SessionID")
         );
     }
 

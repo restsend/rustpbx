@@ -263,7 +263,7 @@ async fn trunk_correlation_session(with_trunk_context: bool) -> SipSession {
         "target-g".to_string(),
         TrunkConfig {
             dest: "sip:1.2.3.4:5060".to_string(),
-            session_id_header: Some("X-GSession-ID".to_string()),
+            session_id_header: Some("X-RustPBX-SessionID".to_string()),
             ..Default::default()
         },
     );
@@ -440,7 +440,7 @@ async fn target_trunk_correlation_header_wins_over_dialplan_trunk() {
         .await
         .expect("target-trunk INVITE must build");
     assert_eq!(
-        header_value_of(&option, "X-GSession-ID").as_deref(),
+        header_value_of(&option, "X-RustPBX-SessionID").as_deref(),
         Some("ORD-88923")
     );
     assert_eq!(
@@ -464,7 +464,7 @@ async fn destination_matching_stamps_trunk_correlation_header() {
         .await
         .expect("destination-matched INVITE must build");
     assert_eq!(
-        header_value_of(&option, "X-GSession-ID").as_deref(),
+        header_value_of(&option, "X-RustPBX-SessionID").as_deref(),
         Some("ORD-88923")
     );
 }
@@ -504,6 +504,30 @@ async fn root_id_replaces_stale_correlation_header() {
 /// wire, not only in the plan-level option.
 #[tokio::test]
 async fn dynamic_leg_wire_invite_stamps_root_correlation_header() {
+    assert_dynamic_leg_wire_correlation(true).await;
+}
+
+#[tokio::test]
+async fn dynamic_external_direct_leg_wire_stamps_global_correlation_header() {
+    let _serial = lock_settings_serial();
+    let _restore = CorrelationSettingsRestore(crate::call::session_id::settings());
+    assert_dynamic_leg_wire_correlation(false).await;
+}
+
+struct CorrelationSettingsRestore(crate::call::session_id::SessionIdSettings);
+impl Drop for CorrelationSettingsRestore {
+    fn drop(&mut self) {
+        let s = &self.0;
+        crate::call::session_id::init_settings(
+            s.length,
+            s.header_mode,
+            s.inherit_callid,
+            s.source_header.clone(),
+        );
+    }
+}
+
+async fn assert_dynamic_leg_wire_correlation(explicit_trunk: bool) {
     use crate::call::{DialDirection, Dialplan, OutboundTrunkContext};
     use crate::config::ProxyConfig;
     use crate::proxy::routing::TrunkConfig;
@@ -526,10 +550,24 @@ async fn dynamic_leg_wire_invite_stamps_root_correlation_header() {
         .insert(
             "target-g".to_string(),
             TrunkConfig {
-                session_id_header: Some("X-GSession-ID".to_string()),
+                session_id_header: Some("X-RustPBX-SessionID".to_string()),
                 ..Default::default()
             },
         );
+    if !explicit_trunk {
+        server.data_context.trunks.clear();
+        server
+            .data_context
+            .trunks
+            .insert("fromsbc".into(), TrunkConfig::default());
+        let s = crate::call::session_id::settings();
+        crate::call::session_id::init_settings(
+            s.length,
+            s.header_mode,
+            s.inherit_callid,
+            Some("X-RustPBX-SessionID".into()),
+        );
+    }
     // The shared test server installs a mock (channel) transport. Replace it
     // with a real UDP transport and serve the endpoint so the dynamic leg's
     // INVITE actually reaches the test socket.
@@ -572,11 +610,8 @@ async fn dynamic_leg_wire_invite_stamps_root_correlation_header() {
     let address = socket.local_addr().unwrap();
     let target = crate::call::Location {
         aor: format!("sip:agent@{address}").parse().unwrap(),
-        outbound_trunk: Some(OutboundTrunkContext {
-            id: Some(1),
-            name: "target-g".to_string(),
-            dest: None,
-            tenant_id: None,
+        outbound_trunk: explicit_trunk.then(|| OutboundTrunkContext {
+            id: Some(1), name: "target-g".to_string(), dest: None, tenant_id: None,
         }),
         ..Default::default()
     };
@@ -596,7 +631,7 @@ async fn dynamic_leg_wire_invite_stamps_root_correlation_header() {
         .expect("UDP receive");
     let invite = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
     assert!(
-        invite.contains(&format!("\r\nx-gsession-id: {root}")),
+        invite.contains(&format!("\r\nx-rustpbx-sessionid: {root}")),
         "dynamic-leg INVITE must carry the root id: {invite}"
     );
     session.cancel_token.cancel();
@@ -863,5 +898,65 @@ async fn session_id_peer_delivery_preserves_root_without_collapsing_local_ids() 
                 }
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn external_direct_leg_uses_global_correlation_header_without_trunk_destination() {
+    let _serial = lock_settings_serial();
+    use crate::call::session_id::{SessionIdSettings, init_settings, settings};
+    struct Restore(SessionIdSettings);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            init_settings(
+                self.0.length,
+                self.0.header_mode,
+                self.0.inherit_callid,
+                self.0.source_header.clone(),
+            );
+        }
+    }
+    let _restore = Restore(settings());
+    let mut session = trunk_correlation_session(false).await;
+    session.server.data_context.trunks.clear();
+    session.server.data_context.trunks.insert(
+        "fromsbc".into(),
+        crate::proxy::routing::TrunkConfig::default(),
+    );
+    let previous = settings();
+    init_settings(
+        previous.length,
+        previous.header_mode,
+        previous.inherit_callid,
+        Some("X-RustPBX-SessionID".into()),
+    );
+    for uri in ["sip:1001@localhost", "sip:1001@[::1]"] {
+        let internal = crate::call::Location {
+            aor: uri.parse().unwrap(),
+            ..Default::default()
+        };
+        let (option, ..) = session
+            .build_target_invite_option(&internal, None, None)
+            .await
+            .unwrap();
+        assert_eq!(header_value_of(&option, "X-RustPBX-SessionID"), None);
+    }
+    for registered in [false, true] {
+        let mut target = crate::call::Location {
+            aor: "sip:9001@192.0.2.90:5070".parse().unwrap(),
+            ..Default::default()
+        };
+        if registered {
+            target.registered_aor = Some("sip:9001@example.test".parse().unwrap());
+        }
+        let (option, ..) = session
+            .build_target_invite_option(&target, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            header_value_of(&option, "X-RustPBX-SessionID").as_deref(),
+            if registered { None } else { Some("ORD-88923") },
+            "external direct dials need the root while registration legs stay internal"
+        );
     }
 }

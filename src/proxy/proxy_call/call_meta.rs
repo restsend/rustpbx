@@ -1,10 +1,27 @@
-use crate::call::domain::{ReturnAppSpec, RtpTimeoutSide, TransferOutcome};
+use crate::call::domain::{ReturnAppSpec, RtpTimeoutSide, TransferOutcome, TransferTimeouts};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::state::SessionHangupMessage;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
 use std::collections::HashSet;
 use std::time::Instant;
+
+/// One outstanding synchronous transfer and its connected-segment deadline.
+pub struct PendingTransfer {
+    pub outcome: TransferOutcome,
+    pub timeouts: TransferTimeouts,
+    pub deadline: Option<tokio::time::Instant>,
+}
+
+impl PendingTransfer {
+    pub fn new(timeouts: TransferTimeouts) -> Self {
+        Self {
+            outcome: TransferOutcome::NotConnected,
+            timeouts,
+            deadline: None,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct CallMeta {
@@ -100,7 +117,7 @@ pub struct CallMeta {
     /// Consumed once by the `CallCommand::StartReturnApp` handler so the
     /// return is one-shot.
     pub transfer_return_app: Option<ReturnAppSpec>,
-    pub pending_transfer_outcome: Option<TransferOutcome>,
+    pub pending_transfer: Option<PendingTransfer>,
     /// Ordered diagnostic timeline of the call (ring → answer → ivr → queue →
     /// transfer → bridge → hold/resume → plays → hangup). Persisted into the
     /// call-record `metadata["trace"]` array by `record_snapshot`.
@@ -196,5 +213,13 @@ mod tests {
             effective_queue_name(&meta).as_deref(),
             Some("Sales Hotline")
         );
+    }
+}
+
+impl CallMeta {
+    pub(crate) fn set_transfer_outcome(&mut self, outcome: TransferOutcome) {
+        self.pending_transfer
+            .get_or_insert_with(|| PendingTransfer::new(TransferTimeouts::default()))
+            .outcome = outcome;
     }
 }

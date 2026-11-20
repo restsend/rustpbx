@@ -258,12 +258,14 @@ impl CallController {
         &self,
         target: impl Into<String>,
         headers: HashMap<String, String>,
+        timeouts: crate::call::domain::TransferTimeouts,
     ) -> anyhow::Result<()> {
         self.session
             .send_command(CallCommand::TransferAwaitResult {
                 leg_id: LegId::from("caller"),
                 target: target.into(),
                 headers,
+                timeouts,
             })?;
         Ok(())
     }

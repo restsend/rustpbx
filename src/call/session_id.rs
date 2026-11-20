@@ -910,13 +910,13 @@ mod tests {
     #[test]
     fn set_correlation_header_replaces_stale_value() {
         let mut headers = vec![
-            Header::Other("X-GSession-ID".to_string(), "stale".to_string()),
-            Header::Other("X-GSession-ID".to_string(), "duplicate".to_string()),
+            Header::Other("X-RustPBX-SessionID".to_string(), "stale".to_string()),
+            Header::Other("X-RustPBX-SessionID".to_string(), "duplicate".to_string()),
         ];
-        set_correlation_header(&mut headers, "X-GSession-ID", "708fed201de7cbb");
+        set_correlation_header(&mut headers, "X-RustPBX-SessionID", "708fed201de7cbb");
         let values: Vec<_> = headers
             .iter()
-            .filter(|header| header.name().eq_ignore_ascii_case("X-GSession-ID"))
+            .filter(|header| header.name().eq_ignore_ascii_case("X-RustPBX-SessionID"))
             .map(|header| header.value().to_string())
             .collect();
         assert_eq!(values, vec!["708fed201de7cbb"]);
@@ -925,10 +925,10 @@ mod tests {
     #[test]
     fn set_correlation_header_keeps_single_equal_value() {
         let mut headers = vec![Header::Other(
-            "X-GSession-ID".to_string(),
+            "X-RustPBX-SessionID".to_string(),
             "708fed201de7cbb".to_string(),
         )];
-        set_correlation_header(&mut headers, "X-GSession-ID", "708fed201de7cbb");
+        set_correlation_header(&mut headers, "X-RustPBX-SessionID", "708fed201de7cbb");
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].value(), "708fed201de7cbb");
     }
@@ -937,10 +937,10 @@ mod tests {
     fn set_correlation_header_preserves_unrelated_headers() {
         let mut headers = vec![
             Header::Other("X-Other-Correlation".to_string(), "keep-me".to_string()),
-            Header::Other("X-GSession-ID".to_string(), "stale".to_string()),
+            Header::Other("X-RustPBX-SessionID".to_string(), "stale".to_string()),
             Header::Other("X-Trace-Id".to_string(), "trace-1".to_string()),
         ];
-        set_correlation_header(&mut headers, "X-GSession-ID", "root-1");
+        set_correlation_header(&mut headers, "X-RustPBX-SessionID", "root-1");
         assert!(headers.iter().any(|header| {
             header.name().eq_ignore_ascii_case("X-Other-Correlation")
                 && header.value() == "keep-me"
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(
             headers
                 .iter()
-                .filter(|header| header.name().eq_ignore_ascii_case("X-GSession-ID"))
+                .filter(|header| header.name().eq_ignore_ascii_case("X-RustPBX-SessionID"))
                 .count(),
             1
         );
@@ -959,7 +959,10 @@ mod tests {
 
     #[test]
     fn set_correlation_header_never_overwrites_a_typed_header() {
-        let mut headers = vec![Header::Other("X-GSession-ID".to_string(), "root".to_string())];
+        let mut headers = vec![Header::Other(
+            "X-RustPBX-SessionID".to_string(),
+            "root".to_string(),
+        )];
         // A standard `User-to-User` header must not be replaced even when the
         // configured correlation name collides with it.
         headers.push(crate::call::uui::build_uui_header("root", None, None, None, None));

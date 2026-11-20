@@ -291,11 +291,17 @@ pub(crate) fn node_delay(delay_ms: u64) -> Duration {
 pub async fn execute_action(
     action: &EntryAction,
     wait_for_result: bool,
+    transfer_timeouts: Option<crate::call::domain::TransferTimeouts>,
     ctrl: &mut CallController,
     ctx: &ApplicationContext,
     sess: &mut SessionData,
     tts_service: Option<&Arc<TtsService>>,
 ) -> anyhow::Result<ActionResult> {
+    if transfer_timeouts.is_some()
+        && (!wait_for_result || !matches!(action, EntryAction::Transfer { .. }))
+    {
+        return Err(anyhow::anyhow!("transfer_timeouts require an awaited transfer action"));
+    }
     match action {
         EntryAction::Transfer {
             target,
@@ -318,7 +324,8 @@ pub async fn execute_action(
                 t.push_str(&query);
             }
             if wait_for_result {
-                ctrl.transfer_await_result(t, headers.clone()).await?;
+                ctrl.transfer_await_result(t, headers.clone(), transfer_timeouts.unwrap_or_default())
+                    .await?;
                 return Ok(ActionResult::WaitFor(WaitEvent::TransferResult));
             }
             if !headers.is_empty() {

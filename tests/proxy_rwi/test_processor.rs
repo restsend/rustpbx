@@ -977,7 +977,7 @@ async fn test_originate_explicit_trunk_skips_route() {
 
 /// RWI originate WITHOUT an explicit trunk selects a trunk through the route
 /// table: the outbound INVITE must carry that trunk's `session_id_header`
-/// with the logical-call root (the reported G-system X-GSession-ID gap).
+/// with the logical-call root (the reported G-system X-RustPBX-SessionID gap).
 #[tokio::test]
 async fn test_originate_route_table_stamps_trunk_correlation_header() {
     use crate::common::e2e_test_server::E2eTestServer;
@@ -1008,7 +1008,7 @@ async fn test_originate_route_table_stamps_trunk_correlation_header() {
         "g-system".to_string(),
         TrunkConfig {
             dest: trunk_dest,
-            session_id_header: Some("X-GSession-ID".to_string()),
+            session_id_header: Some("X-RustPBX-SessionID".to_string()),
             ..Default::default()
         },
     )]);
@@ -1052,7 +1052,7 @@ async fn test_originate_route_table_stamps_trunk_correlation_header() {
     .expect("UDP receive");
     let invite = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
     assert!(
-        invite.contains(&format!("\r\nx-gsession-id: {ROOT}")),
+        invite.contains(&format!("\r\nx-rustpbx-sessionid: {ROOT}")),
         "route-table originate must stamp the selected trunk's header: {invite}"
     );
 }

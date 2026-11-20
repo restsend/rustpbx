@@ -41,6 +41,76 @@ pub use cookie::{
     ReferReplacesContext, TransactionCookie, TrunkContext,
 };
 
+#[derive(Debug, Default)]
+enum RecordingHandoffState {
+    #[default]
+    Pending,
+    Delivered {
+        identity: TransferredRecordIdentity,
+        segments: Vec<crate::callrecord::RecordingSegment>,
+    },
+    Closed,
+}
+
+/// Local recording ownership transfer, including the successor's Drop safety net.
+#[derive(Clone, Debug, Default)]
+pub struct RecordingHandoff(std::sync::Arc<parking_lot::Mutex<RecordingHandoffState>>);
+
+impl RecordingHandoff {
+    pub(crate) fn deliver(
+        &self,
+        identity: TransferredRecordIdentity,
+        segments: &mut Vec<crate::callrecord::RecordingSegment>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    ) -> bool {
+        let mut state = self.0.lock();
+        if !matches!(*state, RecordingHandoffState::Pending) {
+            let _ = reply.send(false);
+            return false;
+        }
+        if reply.send(true).is_err() {
+            return false;
+        }
+        *state = RecordingHandoffState::Delivered {
+            identity,
+            segments: std::mem::take(segments),
+        };
+        true
+    }
+
+    pub(crate) fn committed_or_close(&self) -> bool {
+        let mut state = self.0.lock();
+        // The deadline can win while the acknowledgement is being delivered.
+        // Decide ownership under the same lock as delivery.
+        if matches!(*state, RecordingHandoffState::Delivered { .. }) {
+            return true;
+        }
+        *state = RecordingHandoffState::Closed;
+        false
+    }
+
+    pub(crate) fn take(
+        &self,
+    ) -> Option<(TransferredRecordIdentity, Vec<crate::callrecord::RecordingSegment>)> {
+        match std::mem::replace(&mut *self.0.lock(), RecordingHandoffState::Closed) {
+            RecordingHandoffState::Delivered { identity, segments } => Some((identity, segments)),
+            _ => None,
+        }
+    }
+}
+
+/// Captured exact replaced actor; the logical root registry key can be reused.
+#[derive(Clone)]
+pub struct ReplacedSessionRecord {
+    pub root_session_id: String,
+    pub handle: crate::proxy::proxy_call::sip_session::SipSessionHandle,
+    pub recordings: RecordingHandoff,
+}
+
+/// Persistent record ID adopted by a successfully replaced SIP session.
+#[derive(Clone, Debug)]
+pub(crate) struct TransferredRecordIdentity(pub String);
+
 /// Attended-transfer REFER-Replaces chain: marker on the REPLACED (consult)
 /// session — its CDR row is suppressed (the replacement session inherits the
 /// root session id and carries the transferred call's record). The CC

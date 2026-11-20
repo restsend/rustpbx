@@ -2322,8 +2322,40 @@ impl SipServerInner {
         }
     }
 
+    /// Select correlation from the actual egress target, excluding registered
+    /// agent/peer legs before considering the global external-dial fallback.
+    pub async fn outbound_session_id_header(
+        &self,
+        trunk: Option<&str>,
+        target: &crate::call::Location,
+        callee: &rsipstack::sip::Uri,
+    ) -> Option<String> {
+        if target.registered_aor.is_some()
+            || target.registered_username.is_some()
+            || target.home_proxy.is_some()
+        {
+            return None;
+        }
+        let destination = target
+            .destination
+            .as_ref()
+            .map(|d| &d.addr)
+            .unwrap_or(&callee.host_with_port);
+        let external = !self.is_same_realm(&destination.to_string()).await;
+        self.data_context.outbound_session_id_header_for(
+            trunk,
+            &destination.host.to_string(),
+            destination.port.map(|p| p.0).unwrap_or(5060),
+            external,
+        )
+    }
+
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
-        let (host, port) = if let Some(pos) = callee_realm.find(':') {
+        let (host, port) = if let Some((host, suffix)) = callee_realm.strip_prefix('[').and_then(|value| value.split_once(']')) {
+            (host, suffix.strip_prefix(':').and_then(|port| port.parse::<u16>().ok()))
+        } else if callee_realm.parse::<std::net::Ipv6Addr>().is_ok() {
+            (callee_realm, None)
+        } else if let Some(pos) = callee_realm.find(':') {
             (
                 &callee_realm[..pos],
                 callee_realm[pos + 1..].parse::<u16>().ok(),

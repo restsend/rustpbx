@@ -51,6 +51,11 @@ pub struct RwiCallRecordGuard {
 struct RwiCallRecordGuardInner {
     gateway: StdWeak<RwLock<RwiGateway>>,
     call_id: CallId,
+    owner: Option<(
+        StdWeak<crate::proxy::active_call_registry::ActiveProxyCallRegistry>,
+        uuid::Uuid,
+    )>,
+    cleanup_allowed: bool,
 }
 
 impl RwiCallRecordGuard {
@@ -59,6 +64,28 @@ impl RwiCallRecordGuard {
             _inner: StdArc::new(RwiCallRecordGuardInner {
                 gateway: StdArc::downgrade(gateway),
                 call_id,
+                owner: None,
+                cleanup_allowed: true,
+            }),
+        }
+    }
+
+    /// An old physical session must not clear a successor that reused its key.
+    pub(crate) fn for_session(
+        gateway: &RwiGatewayRef,
+        call_id: CallId,
+        registry: &StdArc<crate::proxy::active_call_registry::ActiveProxyCallRegistry>,
+        instance: uuid::Uuid,
+    ) -> Self {
+        let cleanup_allowed = registry
+            .get_handle(&call_id)
+            .is_none_or(|handle| handle.instance_token() == instance);
+        Self {
+            _inner: StdArc::new(RwiCallRecordGuardInner {
+                gateway: StdArc::downgrade(gateway),
+                call_id,
+                owner: Some((StdArc::downgrade(registry), instance)),
+                cleanup_allowed,
             }),
         }
     }
@@ -72,6 +99,17 @@ impl Drop for RwiCallRecordGuardInner {
         // `originate_call`, which releases before `cleanup()`).
         // The critical section is pure in-memory bookkeeping (microseconds),
         // so a blocking lock here is fine; do not defer it.
+        if !self.cleanup_allowed {
+            return;
+        }
+        if let Some((registry, instance)) = self.owner.as_ref()
+            && let Some(registry) = registry.upgrade()
+            && registry
+                .get_handle(&self.call_id)
+                .is_some_and(|handle| handle.instance_token() != *instance)
+        {
+            return;
+        }
         if let Some(gateway) = self.gateway.upgrade() {
             gateway.write().call_finished(&self.call_id);
         }

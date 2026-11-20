@@ -14,6 +14,20 @@ mod transfer_target_dialog_tests;
 
 #[tokio::test]
 async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
+    assert_cleanup_recording_ownership(0).await;
+}
+
+#[tokio::test]
+async fn replaced_call_recording_is_uploaded_by_its_successor() {
+    assert_cleanup_recording_ownership(1).await;
+}
+
+#[tokio::test]
+async fn chained_replacements_preserve_and_upload_the_original_recording() {
+    assert_cleanup_recording_ownership(2).await;
+}
+
+async fn assert_cleanup_recording_ownership(replacements: usize) {
     use crate::call::{DialDirection, Dialplan};
     use crate::callrecord::{CallRecordHook, recording_upload::RecordingUploadHook};
     use crate::config::{RecordingPolicy, RecordingType};
@@ -117,6 +131,54 @@ async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
         call_record_sender: Some(records),
     });
 
+    for _ in 0..replacements {
+        let recordings = crate::call::RecordingHandoff::default();
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let mut plan = Dialplan::new(session_id.clone(), request, DialDirection::Inbound);
+        plan.extensions.insert(crate::call::ReplacedSessionRecord {
+            root_session_id: session_id.clone(),
+            handle: live.get_handle(&session_id).unwrap(),
+            recordings: recordings.clone(),
+        });
+        let (successor, successor_handle, _successor_commands) =
+            build_session_with_cmd_rx_on(server.clone(), plan).await;
+        live.register_handle(session_id.clone(), successor_handle);
+        let mut successor = successor;
+        successor.reporter = Some(CallReporter {
+            server: server.clone(),
+            context: successor.context.clone(),
+            call_record_sender: session
+                .reporter
+                .as_ref()
+                .unwrap()
+                .call_record_sender
+                .clone(),
+        });
+        let (reply, completed) = tokio::sync::oneshot::channel();
+        assert!(
+            session
+                .execute_command(CallCommand::SuppressCallRecord { recordings, reply }, None)
+                .await
+                .success
+        );
+        assert!(completed.await.unwrap());
+        session.cleanup().await;
+        assert!(
+            received.try_recv().is_err(),
+            "only the successor may publish the transferred artifact"
+        );
+        assert!(
+            live.get_handle(&session_id).is_some(),
+            "old cleanup must preserve the successor sharing its registry key"
+        );
+        session = successor;
+    }
     session.cleanup().await;
 
     assert!(
@@ -131,15 +193,17 @@ async fn cleanup_keeps_session_live_for_watchdog_until_ended_hooks_finish() {
         live.get(&session_id).is_none(),
         "completed teardown must remove its active-call row"
     );
-    assert!(
-        !session
-            .media
-            .recording
-            .recorder_status()
-            .await
-            .unwrap()
-            .active
-    );
+    if replacements == 0 {
+        assert!(
+            !session
+                .media
+                .recording
+                .recorder_status()
+                .await
+                .unwrap()
+                .active
+        );
+    }
     let wav = std::fs::read(&path).unwrap();
     assert!(
         wav.len() > 44
@@ -1145,6 +1209,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
             detail: None,
         },
         Some(7),
+        None,
     );
 
     let ev = events
@@ -1231,6 +1296,7 @@ fn suspended_flow_end_without_identity_omits_field_and_warns_without_gateway() {
             detail: None,
         },
         None,
+        None,
     );
 
     let ev = events
@@ -1256,6 +1322,7 @@ fn suspended_flow_end_without_identity_omits_field_and_warns_without_gateway() {
             detail: None,
         },
         Some(9),
+        None,
     );
 }
 
@@ -13617,6 +13684,331 @@ async fn device_dial_leg_marker_synthesizes_transfer_source() {
     }
 }
 
+#[tokio::test]
+async fn jump_ivr_uses_selected_trunk_and_reports_only_an_answered_transfer() {
+    use crate::call::app::ivr::{
+        ActionNode, ActionProvider, EntryAction, ProviderContext, StepIvrApp,
+    };
+    use crate::call::app::testing::MockCallStack;
+    use crate::call::app::{AppInvocationContext, ApplicationContext, CallInfo};
+    use crate::call::domain::RecordConfig;
+    use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
+    use crate::config::{MediaProxyMode, ProxyConfig};
+    use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecHook, IvrExecResult, IvrExecState};
+    use crate::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::proxy::tests::test_sip_session_regressions::setup_recording_test_media;
+    use rsipstack::sip::{Header, Method, SipMessage};
+    use rsipstack::transport::udp::UdpConnection;
+
+    struct JumpProvider(bool);
+
+    #[async_trait::async_trait]
+    impl ActionProvider for JumpProvider {
+        fn advertises_sip_trunk_jump(&self) -> bool {
+            self.0
+        }
+
+        async fn next_action(&self, _: ProviderContext) -> anyhow::Result<ActionNode> {
+            let mut node = ActionNode::new(EntryAction::JumpIvr {
+                route_point: "39302".into(),
+                params: HashMap::from([("handoff_id".into(), "jump-plan".into())]),
+            });
+            node.step_id = Some("to-g".into());
+            node.extra = Some(serde_json::json!({ "business_node": "toivr" }));
+            Ok(node)
+        }
+    }
+
+    for (status, has_answer, report_jump) in [
+        (StatusCode::BusyHere, false, false),
+        (StatusCode::BusyHere, false, true),
+        (StatusCode::OK, false, true),
+        (StatusCode::OK, true, true),
+    ] {
+        let trunk = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = trunk.local_addr().unwrap();
+        let mut config = ProxyConfig::default();
+        config.trunks.insert(
+            "g-trunk".into(),
+            TrunkConfig {
+                dest: addr.to_string(),
+                ..Default::default()
+            },
+        );
+        config.routes = Some(vec![RouteRule {
+            name: "G via trunk".into(),
+            match_conditions: MatchConditions {
+                request_uri_user: Some("^39302$".into()),
+                ..Default::default()
+            },
+            rewrite: Some(crate::proxy::routing::RewriteRules {
+                from_user: Some("routed-caller".into()),
+                ..Default::default()
+            }),
+            action: RouteAction {
+                dest: Some(DestConfig::Single("g-trunk".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let (mut server, _) = create_test_server_with_rwi_gateway(
+            config,
+            Arc::new(parking_lot::RwLock::new(gateway)),
+        )
+        .await;
+        Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(IvrExecHook)]);
+        let endpoint = server.endpoint.inner.clone();
+        for local in endpoint.transport_layer.get_addrs() {
+            endpoint.transport_layer.del_transport(&local);
+        }
+        let transport =
+            UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+        endpoint.transport_layer.add_transport(transport.into());
+        let serving_endpoint = endpoint.clone();
+        let serving = tokio::spawn(async move { serving_endpoint.serve().await });
+        let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+        let (caller_tx, _) = create_transaction(request.clone()).await;
+        let (caller_states, _caller_rx) = mpsc::unbounded_channel();
+        let caller = server
+            .dialog_layer
+            .get_or_create_server_invite(&caller_tx, caller_states, None, None)
+            .unwrap();
+        caller.accept(None, None).unwrap();
+        let dialplan = Dialplan::new("jump-to-g".into(), request, DialDirection::Inbound)
+            .with_caller("sip:customer@example.test".parse().unwrap())
+            .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+        let context = CallContext {
+            session_id: "jump-to-g".into(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:customer@example.test".into(),
+            original_callee: "sip:source-ivr@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, mut commands) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            caller,
+            true,
+        );
+        setup_recording_test_media(&mut session).await;
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+        session.extensions.write().insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "ivr-exec".into(),
+            held_leg: Some(LegId::from("callee")),
+            initiator_leg: LegId::from("unused"),
+            webhook_url: None,
+            app_name: "ivr".into(),
+            metadata: serde_json::Value::Null,
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source-ivr.wav");
+        let recording = session
+            .execute_command(
+                CallCommand::StartRecording {
+                    config: RecordConfig {
+                        path: path.to_str().unwrap().to_string(),
+                        segment_type: Some("ivr".into()),
+                        ..Default::default()
+                    },
+                },
+                None,
+            )
+            .await;
+        assert!(recording.success, "{recording:?}");
+        let (state_tx, mut state_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(state_tx);
+        let app = StepIvrApp::with_provider(Box::new(JumpProvider(report_jump)))
+            .with_name("source-ivr")
+            .with_rwi_gateway(session.server.rwi_gateway.clone());
+        let mut app_context = ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            CallInfo {
+                session_id: session.context.session_id.clone(),
+                caller: session.context.original_caller.clone(),
+                callee: session.context.original_callee.clone(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: HashMap::new(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        app_context.session_extensions = session.extensions.clone();
+        app_context.invocation = Some(AppInvocationContext {
+            app_execution_id: 1,
+            ..Default::default()
+        });
+        let mut stack = MockCallStack::run_with_context(Box::new(app), app_context);
+        let command = loop {
+            let command = stack.next_cmd(2000).await.expect("jump transfer command");
+            if matches!(command, CallCommand::Transfer { .. }) {
+                break command;
+            }
+        };
+        let dial = session.execute_command(command, Some(&mut state_rx));
+        let peer = async {
+            let mut bytes = [0; 16384];
+            let (len, from) =
+                tokio::time::timeout(Duration::from_secs(2), trunk.recv_from(&mut bytes))
+                    .await
+                    .expect("route-point handoff must send an INVITE to the selected trunk")
+                    .unwrap();
+            let raw = std::str::from_utf8(&bytes[..len]).unwrap();
+            assert!(raw.starts_with("INVITE sip:39302@"), "{raw}");
+            assert!(raw.lines().any(|line| line.starts_with("From:") && line.contains("sip:routed-caller@")), "{raw}");
+            assert!(!raw.contains("jump-plan"), "correlation is private to RWI");
+            let SipMessage::Request(invite) = SipMessage::try_from(raw).unwrap() else {
+                panic!("expected INVITE");
+            };
+            assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|entry| {
+                entry.event.event_type != "call_transferred"
+                    && !(entry.event.event_type == "ivr_step_trace"
+                        && entry.event.payload["step_id"] == "to-g")
+            }), "do not publish the source step while dial outcome is pending");
+            let mut response = endpoint.make_response(
+                &invite,
+                status.clone(),
+                has_answer.then(|| invite.body.clone()),
+            );
+            response
+                .headers
+                .retain(|header| !matches!(header, Header::To(_)));
+            response
+                .headers
+                .push(Header::To(format!("<sip:39302@{addr}>;tag=g-peer").into()));
+            if status == StatusCode::OK {
+                response
+                    .headers
+                    .push(Header::Contact(format!("<sip:39302@{addr}>").into()));
+                response
+                    .headers
+                    .push(Header::ContentType("application/sdp".into()));
+            }
+            trunk
+                .send_to(response.to_string().as_bytes(), from)
+                .await
+                .unwrap();
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(6), async { tokio::join!(dial, peer) })
+                .await
+                .unwrap();
+        // An older B-slot implementation completes the dial inline. The customer-anchored path
+        // consumes the result through the session's normal dynamic-leg command channel.
+        if result.success && session.pending_customer_transfer_release.is_some() {
+            loop {
+                let command = tokio::time::timeout(Duration::from_secs(4), commands.recv())
+                    .await.unwrap().expect("target dial command");
+                let terminal = matches!(command, CallCommand::LegConnected { .. } | CallCommand::LegFailed { .. });
+                let result = session.execute_command(command, Some(&mut state_rx)).await;
+                if terminal {
+                    assert_eq!(result.success, has_answer, "{result:?}");
+                    break;
+                }
+            }
+        } else {
+            assert_eq!(result.success, has_answer, "{result:?}");
+        }
+        let outcomes: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let transferred: Vec<_> = outcomes
+            .iter()
+            .filter(|entry| entry.event.event_type == "call_transferred")
+            .collect();
+        assert_eq!(transferred.len(), usize::from(has_answer));
+        if let Some(entry) = transferred.first() {
+            let payload = &entry.event.payload;
+            assert_eq!(payload["transfer_target_type"], "sip");
+            assert_eq!(payload["handoff_id"], "jump-plan");
+            assert_eq!(payload["transfer_source"]["source_type"], "ivr");
+            assert_eq!(payload["transfer_source"]["ivr_node_id"], "to-g");
+            while let Ok(state) = state_rx.try_recv() {
+                session.handle_callee_state(state).await.unwrap();
+            }
+            let target_id = session.bridge.legs.iter().find(|leg| leg.as_str() != "caller").unwrap();
+            assert_ne!(target_id.as_str(), "callee", "the target owns an independent leg");
+            let callee = session.legs.get(target_id).unwrap();
+            assert_eq!(callee.state, LegState::Connected);
+            assert!(session.bridge().is_some_and(|bridge| bridge.is_bridged()));
+            assert!(
+                callee.agent_id.is_none(),
+                "a trunk must not enter agent state"
+            );
+        }
+        assert_eq!(
+            outcomes.iter().filter(|entry| {
+                entry.event.event_type == "ivr_step_trace"
+                    && entry.event.payload["step_id"] == "to-g"
+            }).count(),
+            1,
+            "the source IVR node must publish once"
+        );
+        let terminal: Vec<_> = outcomes
+            .iter()
+            .filter(|entry| {
+                entry.event.event_type == "ivr_step_trace"
+                    && entry.event.payload["trigger"]["type"] == "session_end"
+            })
+            .collect();
+        assert_eq!(terminal.len(), 1);
+        let terminal = &terminal[0].event.payload;
+        assert_eq!(terminal["step_id"], "to-g");
+        assert_eq!(terminal["extra"]["business_node"], "toivr");
+        assert_eq!(terminal["extra"]["handoff_id"], "jump-plan");
+        assert_eq!(terminal["app_execution_id"], 1);
+        assert_eq!(terminal["action_type"], "JumpIvr");
+        assert_eq!(terminal["end"], true);
+        assert_eq!(
+            terminal["end_reason"],
+            if has_answer {
+                "transfer"
+            } else {
+                "hangup"
+            }
+        );
+        assert!(!session.meta.ivr_flow_suspended);
+        assert!(session.extensions.read().get::<IvrExecState>().is_none());
+        assert!(session.extensions.read().get::<IvrExecResult>().is_none());
+        let snapshot = session.record_snapshot();
+        assert_eq!(snapshot.recording_segments.len(), 1);
+        assert_eq!(snapshot.recording_segments[0].segment_type, "ivr");
+        assert_eq!(snapshot.recording_segments[0].path, path.to_str().unwrap());
+        assert!(std::fs::metadata(path).unwrap().len() >= 44);
+        session.cleanup().await;
+        let root = std::iter::from_fn(|| events.try_recv().ok())
+            .find(|entry| {
+                entry.event.event_type == "call_hangup"
+                    && entry.event.payload["scope"] == "call"
+            })
+            .expect("root hangup event");
+        let answer = &root.event.payload["ivr_jump_result"];
+        if has_answer {
+            assert_eq!(answer["id"], "jump-plan");
+            assert_eq!(answer["node"], "to-g");
+            assert!(answer["answered_at"].is_string());
+        } else if report_jump {
+            assert_eq!(answer, &serde_json::json!({}));
+        } else {
+            assert!(!root.event.payload.as_object().unwrap().contains_key("ivr_jump_result"));
+        }
+        serving.abort();
+    }
+}
+
 /// A rejected replacement must leave the original dialog's locality intact.
 #[tokio::test]
 async fn failed_blind_transfer_restores_agent_leg_locality() {
@@ -15201,4 +15593,155 @@ async fn adversarial_opaque_registered_contact_marks_actual_transfer_invite() {
         );
         serving.abort();
     }
+}
+
+#[tokio::test]
+async fn cleanup_suppressed_cdr_does_not_publish_a_second_record() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(Dialplan::new(
+        "suppressed-consult".into(),
+        request,
+        DialDirection::Inbound,
+    ))
+    .await;
+    let (records, mut received) = mpsc::channel(1);
+    session.reporter = Some(CallReporter {
+        server: session.server.clone(),
+        context: session.context.clone(),
+        call_record_sender: Some(records),
+    });
+    let recordings = crate::call::RecordingHandoff::default();
+    let (reply, completed) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .execute_command(CallCommand::SuppressCallRecord { recordings, reply }, None)
+            .await
+            .success
+    );
+    assert!(completed.await.unwrap());
+    session.cleanup().await;
+    assert!(
+        received.try_recv().is_err(),
+        "a replaced consult must not publish its own CDR during normal cleanup"
+    );
+}
+
+#[tokio::test]
+async fn closed_recording_successor_keeps_the_old_cdr() {
+    assert_closed_recording_successor_keeps_the_old_cdr(false).await;
+    assert_closed_recording_successor_keeps_the_old_cdr(true).await;
+}
+
+async fn assert_closed_recording_successor_keeps_the_old_cdr(timed_out: bool) {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(Dialplan::new(
+        "failed-successor".into(),
+        request,
+        DialDirection::Inbound,
+    ))
+    .await;
+    let (records, mut received) = mpsc::channel(1);
+    session.reporter = Some(CallReporter {
+        server: session.server.clone(),
+        context: session.context.clone(),
+        call_record_sender: Some(records),
+    });
+    let recordings = crate::call::RecordingHandoff::default();
+    let (reply, completed) = tokio::sync::oneshot::channel();
+    let completed = if timed_out {
+        // A successor that timed out can remain connected. Its recording
+        // destination stays open, but it can no longer commit the old CDR ID.
+        drop(completed);
+        None
+    } else {
+        assert!(recordings.take().is_none());
+        Some(completed)
+    };
+    session
+        .execute_command(CallCommand::SuppressCallRecord { recordings, reply }, None)
+        .await;
+    if let Some(completed) = completed {
+        assert!(
+            !completed.await.unwrap(),
+            "a finished successor cannot accept ownership"
+        );
+    }
+    session.cleanup().await;
+    assert_eq!(
+        received
+            .try_recv()
+            .expect("the old CDR must survive failed handoff")
+            .call_id,
+        session.context.session_id
+    );
+}
+
+#[tokio::test]
+async fn failed_replaced_record_cannot_clear_a_live_successors_gateway_state() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    let gateway = Arc::new(parking_lot::RwLock::new(
+        crate::rwi::gateway::RwiGateway::new(),
+    ));
+    let (server, _) =
+        create_test_server_with_rwi_gateway(crate::config::ProxyConfig::default(), gateway.clone())
+            .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let plan = || Dialplan::new("shared-root".into(), request.clone(), DialDirection::Inbound);
+    let (mut old, _, _commands) = build_session_with_cmd_rx_on(server.clone(), plan()).await;
+    let (successor, successor_handle, _successor_commands) =
+        build_session_with_cmd_rx_on(server.clone(), plan()).await;
+    let id = old.context.session_id.clone();
+    server
+        .active_call_registry
+        .register_handle(id.clone(), successor_handle);
+    gateway
+        .write()
+        .set_user_data(
+            &id,
+            serde_json::Map::from_iter([("keep".into(), serde_json::json!("successor"))]),
+        )
+        .unwrap();
+    let (records, mut received) = mpsc::channel(1);
+    old.reporter = Some(CallReporter {
+        server: server.clone(),
+        context: old.context.clone(),
+        call_record_sender: Some(records),
+    });
+    old.cleanup().await;
+    drop(
+        received
+            .try_recv()
+            .expect("failed handoff still reports the old CDR"),
+    );
+    assert_eq!(
+        gateway.read().get_user_data(&id).get("keep"),
+        Some(&serde_json::json!("successor"))
+    );
+    drop(successor);
 }

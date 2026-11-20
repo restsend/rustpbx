@@ -15,6 +15,7 @@ struct LegData {
     transport: Option<MediaTransport>,
     answer: Option<String>,
     has_video: bool,
+    trunk: bool,
     tasks: Vec<JoinHandle<()>>,
     conference_bridge: Option<ConferenceBridgeHandle>,
 }
@@ -45,6 +46,7 @@ impl LegRegistry {
                 transport: None,
                 answer: None,
                 has_video: false,
+                trunk: false,
                 tasks: Vec::new(),
                 conference_bridge: None,
             },
@@ -135,6 +137,16 @@ impl LegRegistry {
         if let Some(data) = self.legs.get_mut(&id) {
             data.answer = Some(answer);
         }
+    }
+
+    pub(super) fn mark_trunk(&mut self, id: &LegId) {
+        if let Some(data) = self.legs.get_mut(id) {
+            data.trunk = true;
+        }
+    }
+
+    pub(super) fn is_trunk(&self, id: &LegId) -> bool {
+        self.legs.get(id).is_some_and(|data| data.trunk)
     }
 
     pub fn leg_has_video(&self, id: &LegId) -> bool {
@@ -244,6 +256,7 @@ impl LegRegistry {
                     transport: None,
                     answer: None,
                     has_video: false,
+                    trunk: false,
                     tasks: Vec::new(),
                     conference_bridge: None,
                 },

@@ -137,6 +137,21 @@ impl AgentRegistry for MemoryRegistry {
         vec![]
     }
 
+    async fn select_agent_with_exclusions(
+        &self,
+        required_skills: &[String],
+        strategy: RoutingStrategy,
+        _policy: Option<&str>,
+        _call_id: &str,
+        _priority: i32,
+        excluded_agent_ids: &[String],
+    ) -> Option<AgentRecord> {
+        let mut candidates = self.find_available_agents(required_skills).await;
+        candidates.retain(|agent| !excluded_agent_ids.contains(&agent.agent_id));
+        let mut rr_counter = self.rr_counter.write().await;
+        select_best_agent(candidates, strategy, &mut rr_counter)
+    }
+
     async fn release_unanswered_reservation(&self, agent_id: &str, call_id: &str) -> bool {
         let Some(mut agent) = self.agents.get_mut(agent_id) else {
             return false;

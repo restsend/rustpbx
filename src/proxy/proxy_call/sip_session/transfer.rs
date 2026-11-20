@@ -420,6 +420,21 @@ enum BlindTransferRoute {
     },
 }
 
+pub(super) struct RoutedJump {
+    route_point: String,
+    params: HashMap<String, String>,
+    preserve_on_failure: bool,
+    hints: Option<crate::config::DialplanHints>,
+}
+
+enum RoutePointHandoff {
+    Application,
+    Forward(
+        rsipstack::dialog::invitation::InviteOption,
+        Option<crate::config::DialplanHints>,
+    ),
+}
+
 /// Parse a raw transfer target string into a typed `TransferTarget`.
 ///
 /// Delegates prefix dispatch to [`TransferEndpoint::parse`] and enriches the
@@ -723,13 +738,39 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         headers: HashMap<String, String>,
     ) -> Result<()> {
+        self.handle_transfer_with_timeouts(
+            leg_id,
+            target,
+            attended,
+            disposition,
+            callee_state_rx,
+            headers,
+            Default::default(),
+        )
+        .await
+    }
+
+    pub(super) async fn handle_transfer_with_timeouts(
+        &mut self,
+        leg_id: LegId,
+        target: String,
+        attended: bool,
+        disposition: TransferDisposition,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
+        timeouts: crate::call::domain::TransferTimeouts,
+    ) -> Result<()> {
         if disposition == TransferDisposition::AwaitResult {
-            self.meta.pending_transfer_outcome =
-                Some(crate::call::domain::TransferOutcome::NotConnected);
+            self.meta.pending_transfer = Some(
+                crate::proxy::proxy_call::call_meta::PendingTransfer::new(timeouts),
+            );
         }
 
-        let result = self
-            .handle_transfer_inner(
+        let has_timeouts = timeouts.connect_timeout_ms.is_some() || timeouts.max_duration_ms.is_some();
+        let result = if has_timeouts && !matches!(parse_transfer_target(&target), TransferTarget::Sip { .. }) {
+            Err(anyhow!("Transfer deadlines require a SIP target"))
+        } else {
+            self.handle_transfer_inner(
                 leg_id,
                 target,
                 attended,
@@ -737,26 +778,28 @@ impl SipSession {
                 callee_state_rx,
                 headers,
             )
-            .await;
+            .await
+        };
         if disposition == TransferDisposition::AwaitResult {
             if result.is_err() {
                 // Refine the pre-seeded NotConnected using any SIP status the
                 // inner path already stamped, or parse it from the error text.
                 if matches!(
-                    self.meta.pending_transfer_outcome,
+                    self.meta.pending_transfer.as_ref().map(|pending| pending.outcome),
                     Some(crate::call::domain::TransferOutcome::NotConnected) | None
                 ) {
                     if let Err(ref err) = result {
-                        self.meta.pending_transfer_outcome =
-                            Some(crate::call::domain::TransferOutcome::from_error_message(
-                                &err.to_string(),
-                            ));
+                        self.meta.set_transfer_outcome(
+                            crate::call::domain::TransferOutcome::from_error_message(&err.to_string()),
+                        );
                     }
                 }
                 self.deliver_pending_transfer_result();
-            } else {
-                self.meta.pending_transfer_outcome =
-                    Some(crate::call::domain::TransferOutcome::TargetEnded);
+            } else if let Some(pending) = self.meta.pending_transfer.as_mut() {
+                pending.outcome = crate::call::domain::TransferOutcome::TargetEnded;
+                pending.deadline = pending.timeouts.max_duration_ms.map(|ms| {
+                    tokio::time::Instant::now() + Duration::from_millis(ms.get())
+                });
             }
         }
         result
@@ -1238,7 +1281,9 @@ impl SipSession {
                 .await;
             return match result {
                 Ok(()) => {
-                    self.release_api_transfer_agent_leg(&agent_leg).await;
+                    if !self.pending_customer_transfer_release.as_ref().is_some_and(|p| p.routed_jump.is_some()) {
+                        self.release_api_transfer_agent_leg(&agent_leg).await;
+                    }
                     crate::call::runtime::CommandResult::success()
                 }
                 Err(e) => crate::call::runtime::CommandResult::failure(e.to_string()),
@@ -1379,33 +1424,47 @@ impl SipSession {
         // transfer-outcome emitters that live outside the session (REFER
         // NOTIFY listener, attended completion) can enrich their events, and
         // keep a copy for the in-session emission below.
-        let transfer_source = self.transfer_source_snapshot(&leg_id).await;
-        self.stash_transfer_source(transfer_source.clone());
-
         let parsed_target = parse_transfer_target(&target);
+        let mut transfer_source = self.transfer_source_snapshot(&leg_id).await;
+        if let TransferTarget::RoutePoint { params, .. } = &parsed_target
+            && params.get("_ivr_resume").is_some_and(|value| value == "1")
+            && let Some(node_id) = self.session_ext_get("ivr_node")
+        {
+            // The step executor can exit before the queued transfer is handled.
+            let source = transfer_source.get_or_insert_with(|| crate::rwi::TransferSource {
+                source_type: "ivr".to_string(),
+                name: None,
+                ivr_node_id: None,
+                agent_id: None,
+                agent_name: None,
+            });
+            source.source_type = "ivr".to_string();
+            source.name = self.session_ext_get("ivr");
+            source.ivr_node_id = Some(node_id);
+        }
+        self.stash_transfer_source(transfer_source.clone());
         // SIP targets emit their own events on dial / REFER success, and
         // bridge targets report through the REFER-NOTIFY channel
         // (`emit_refer_event` → TransferController).
         let emits_own_event = matches!(
             &parsed_target,
-            TransferTarget::Sip { .. } | TransferTarget::Bridge { .. }
+            TransferTarget::Sip { .. }
+                | TransferTarget::Bridge { .. }
+                | TransferTarget::RoutePoint { .. }
         );
         let target_type = transfer_target_type_str(&parsed_target).map(String::from);
-        let target_for_event = match &parsed_target {
-            TransferTarget::RoutePoint { name, .. } => format!("toivr:{name}"),
-            _ => {
-                // Canonical event form: a bare extension target (`"1003"`) is
-                // reported as `sip:1003` — URI-shaped like the B2BUA dial path.
-                let t = target.trim();
-                if target_type.as_deref() == Some("sip")
-                    && !t.contains('@')
-                    && !t.starts_with("sip:")
-                    && !t.starts_with("sips:")
-                {
-                    format!("sip:{t}")
-                } else {
-                    target.clone()
-                }
+        let target_for_event = {
+            // Canonical event form: a bare extension target (`"1003"`) is
+            // reported as `sip:1003` — URI-shaped like the B2BUA dial path.
+            let t = target.trim();
+            if target_type.as_deref() == Some("sip")
+                && !t.contains('@')
+                && !t.starts_with("sip:")
+                && !t.starts_with("sips:")
+            {
+                format!("sip:{t}")
+            } else {
+                target.clone()
             }
         };
 
@@ -1583,6 +1642,7 @@ impl SipSession {
             return Err(anyhow!("wait_for_result requires a SIP transfer target"));
         }
 
+        let previous_media_leg = self.app_media_leg.read().clone();
         // Outbound agent hand-off: when the transferor is the **caller** leg
         // (the agent on an agent-dialed call) and the successor is an
         // in-session application, the app must serve the OTHER party — the
@@ -1699,15 +1759,80 @@ impl SipSession {
                 let mut params = params;
                 self.inject_transfer_origin_params(&leg_id, &mut params)
                     .await;
-                let result = self
-                    .start_route_point_app(
+                let routed = self
+                    .route_point_handoff(
                         &name,
-                        params,
-                        headers,
+                        &params,
+                        &headers,
                         prepared_route,
                         disposition == TransferDisposition::PreserveOnFailure,
                     )
                     .await;
+                let result = match routed {
+                    Ok(RoutePointHandoff::Forward(option, hints)) => {
+                        let customer_leg = previous_media_leg.unwrap_or_else(|| {
+                            if self.context.dialplan.direction == crate::call::DialDirection::Outbound
+                                && self.legs.get(&LegId::from("callee")).is_some_and(|leg| {
+                                    matches!(leg.state, LegState::Connected | LegState::Hold)
+                                })
+                            {
+                                LegId::from("callee")
+                            } else {
+                                LegId::from("caller")
+                            }
+                        });
+                        let agent_leg = if leg_id != customer_leg {
+                            leg_id.clone()
+                        } else if customer_leg == LegId::from("caller") {
+                            self.resolve_transfer_leg()
+                        } else {
+                            LegId::from("caller")
+                        };
+                        let realm = self.server.proxy_config.load().select_realm("");
+                        let target = crate::call::build_sip_uri(&name, &realm);
+                        let base = crate::call::Location {
+                            aor: option.callee.clone(),
+                            ..Default::default()
+                        };
+                        let caller = option.caller.clone();
+                        let location = Self::forward_transfer_location(&base, option, hints.as_ref());
+                        let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
+                        let headers = headers
+                            .iter()
+                            .map(|(name, value)| rsipstack::sip::headers::make_header(name, value.clone()))
+                            .collect();
+                        let jump = RoutedJump {
+                            route_point: name.clone(),
+                            params: params.clone(),
+                            preserve_on_failure: disposition == TransferDisposition::PreserveOnFailure,
+                            hints,
+                        };
+                        let dial = self
+                            .handle_add_leg_routed(
+                                target.clone(), Some(target_leg.clone()), headers,
+                                Some(customer_leg.clone()), None, location, Some(caller),
+                            )
+                            .await;
+                        match dial {
+                            Ok(_) => {
+                                self.legs.mark_trunk(&target_leg);
+                                self.pending_customer_transfer_release = Some(PendingCustomerTransferRelease {
+                                    agent_leg,
+                                    customer_leg,
+                                    target_leg,
+                                    target_display: target,
+                                    transfer_source: self.stashed_transfer_source(),
+                                    attribution_handed_over: false,
+                                    routed_jump: Some(jump),
+                                });
+                                return Ok(());
+                            }
+                            Err(error) => self.fail_routed_jump(jump, error).await,
+                        }
+                    }
+                    Ok(RoutePointHandoff::Application) => Ok(()),
+                    Err(error) => Err(error),
+                };
                 if result.is_ok() {
                     self.bind_suspended_ivr_exec_to_current_app().await;
                     self.meta.ivr_flow_suspended = false;
@@ -1718,6 +1843,7 @@ impl SipSession {
                         ));
                         self.handle_remove_leg(leg_id, None).await?;
                     }
+                    self.emit_blind_transfer_app_event(&format!("toivr:{name}"), "route_point");
                 } else if let Err(error) = &result {
                     self.fail_suspended_ivr_handoff(
                         "handoff_start_failed",
@@ -1883,10 +2009,8 @@ impl SipSession {
                                 warn!(session_id = %self.id, status = %status, "REFER rejected");
                                 self.meta.transfer_return_app = None;
                                 if disposition == TransferDisposition::AwaitResult {
-                                    self.meta.pending_transfer_outcome = Some(
-                                        crate::call::domain::TransferOutcome::from_sip_status(
-                                            status,
-                                        ),
+                                    self.meta.set_transfer_outcome(
+                                        crate::call::domain::TransferOutcome::from_sip_status(status),
                                     );
                                 }
                                 return Err(anyhow!("REFER rejected with status {}", status));
@@ -1908,8 +2032,7 @@ impl SipSession {
                         .await;
                         self.meta.transfer_return_app = None;
                         if disposition == TransferDisposition::AwaitResult {
-                            self.meta.pending_transfer_outcome =
-                                Some(crate::call::domain::TransferOutcome::NoAnswer);
+                            self.meta.set_transfer_outcome(crate::call::domain::TransferOutcome::NoAnswer);
                         }
                         return Err(anyhow!("REFER timed out"));
                     }
@@ -2159,9 +2282,8 @@ impl SipSession {
             }
         }
         result.map_err(|(code, text, reason)| {
-            if self.meta.pending_transfer_outcome.is_some() {
-                self.meta.pending_transfer_outcome =
-                    Some(crate::call::domain::TransferOutcome::from_sip_status(code));
+            if self.meta.pending_transfer.is_some() {
+                self.meta.set_transfer_outcome(crate::call::domain::TransferOutcome::from_sip_status(code));
             }
             BlindTransferDialError {
                 code,
@@ -2373,6 +2495,7 @@ impl SipSession {
             Some(customer_leg.clone()),
             target_agent,
             location,
+            None,
         )
         .await?;
         // The transferring agent is released when the target ANSWERS
@@ -2391,6 +2514,7 @@ impl SipSession {
             target_display: target_display.clone(),
             transfer_source: source.clone(),
             attribution_handed_over: false,
+            routed_jump: None,
         });
         // The bridge defers until the target leg negotiates; LegConnected
         // re-runs it for the answered pair (the media pair is REGISTERED
@@ -2419,6 +2543,128 @@ impl SipSession {
             transfer_source: source.clone(),
         });
         Ok(())
+    }
+
+    pub(super) async fn complete_routed_jump(
+        &mut self,
+        mut pending: PendingCustomerTransferRelease,
+        answer_sdp: Option<String>,
+    ) -> Result<()> {
+        let jump = pending.routed_jump.take().expect("routed IVR jump");
+        let previous_bridge = self.bridge.clone();
+        let customer = &pending.customer_leg;
+        let target = &pending.target_leg;
+
+        // A 200 alone cannot complete the handoff. Both parties must still
+        // be available and the media bridge must use the negotiated target.
+        let ready = answer_sdp.is_some()
+            && self.legs.get_dialog(target).is_some_and(|dialog| !dialog.state().is_terminated())
+            && self.legs.get_dialog(customer).is_none_or(|dialog| !dialog.state().is_terminated())
+            && self.legs.media_leg(target).is_some_and(|peer| peer.negotiated().is_some())
+            && self.legs.media_leg(customer).is_some_and(|peer| peer.negotiated().is_some())
+            && self.legs.get(customer).is_some_and(|leg| {
+                matches!(leg.state, LegState::Connected | LegState::Hold)
+            });
+        if !ready {
+            let _ = self.handle_remove_leg(target.clone(), Some("missing_transfer_media".into())).await;
+            return self.fail_routed_jump(jump, anyhow!("Routed IVR jump has no usable SIP answer")).await;
+        }
+
+        if self.legs.get(customer).is_some_and(|leg| leg.state == LegState::Hold) {
+            self.handle_unhold(customer.clone()).await.ok();
+        }
+        if let Some(sdp) = answer_sdp {
+            self.legs.set_answer(target.clone(), sdp);
+        }
+        self.mark_leg_connected_if_not_held(target);
+        if !self.setup_bridge(customer.clone(), target.clone()).await
+            || !self.bridge().is_some_and(|bridge| bridge.is_bridged())
+        {
+            self.bridge = previous_bridge;
+            let _ = self.handle_remove_leg(target.clone(), Some("transfer_bridge_failed".into())).await;
+            return self.fail_routed_jump(jump, anyhow!("Could not bridge the routed IVR jump")).await;
+        }
+
+        self.track_routed_leg_hints(jump.hints);
+        self.meta.transfer_return_app = None;
+        self.meta.transfer_in_progress = false;
+        self.meta.ivr_flow_suspended = false;
+        self.meta.ever_connected_callee = true;
+        self.mark_transferred_with(Some(
+            serde_json::json!({ "target": pending.target_display, "kind": "sip" }),
+        ));
+        self.sync_rtp_timeout_pause();
+
+        let transition_id = jump.params.get("handoff_id").filter(|id| !id.is_empty());
+        let source_node = pending.transfer_source.as_ref().and_then(|source| source.ivr_node_id.as_ref());
+        if let Some(id) = transition_id {
+            self.extensions.write().insert(crate::rwi::event::IvrJumpResult {
+                id: id.clone(),
+                target: pending.target_display.clone(),
+                node: source_node.cloned().unwrap_or_default(),
+                answered_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+        let transfer = crate::rwi::CallTransferred {
+            call_id: self.context.session_id.to_string(),
+            transfer_target: Some(pending.target_display.clone()),
+            transfer_target_type: Some("sip".to_string()),
+            transfer_source: pending.transfer_source,
+        };
+        if let Some(id) = transition_id {
+            self.emit_typed_rwi_event(&crate::rwi::event::IvrJumpTransferred {
+                transfer,
+                handoff_id: id,
+            });
+        } else {
+            self.emit_typed_rwi_event(&transfer);
+        }
+        self.emit_suspended_flow_session_end(crate::call::app::ivr::provider::SessionEndReason {
+            reason: crate::call::app::ivr::provider::SessionEndTag::Transfer,
+            detail: Some(pending.target_display.clone()),
+        })
+        .await;
+
+        // Send the result to the requester before releasing the old leg.
+        self.complete_suspended_ivr_exec(Ok(pending.target_display)).await;
+        if pending.agent_leg != *customer
+            && self.legs.get(&pending.agent_leg).is_some_and(|leg| {
+                matches!(leg.state, LegState::Connected | LegState::Hold)
+            })
+        {
+            self.release_api_transfer_agent_leg(&pending.agent_leg).await;
+        }
+        self.clear_agent_attribution();
+        Ok(())
+    }
+
+    pub(super) async fn release_routed_jump_hints(&self, jump: RoutedJump) {
+        self.release_unused_route_hints(jump.hints).await;
+    }
+
+    async fn release_unused_route_hints(&self, hints: Option<crate::config::DialplanHints>) {
+        if let Some(hints) = hints
+            && !hints.concurrency_holds.is_empty()
+            && let Some(limiter) = self.server.frequency_limiter.as_ref()
+        {
+            crate::call::policy::PolicyGuard::release_concurrency_holds(&hints.concurrency_holds, limiter.as_ref()).await;
+        }
+    }
+
+    async fn fail_routed_jump(&mut self, jump: RoutedJump, error: anyhow::Error) -> Result<()> {
+        self.release_unused_route_hints(jump.hints).await;
+        self.meta.transfer_in_progress = false;
+        self.sync_rtp_timeout_pause();
+        let result = self.try_route_point_fallback_or_terminate(
+            error, &format!("toivr:{}", jump.route_point), &jump.params, jump.preserve_on_failure,
+        ).await;
+        if let Err(error) = &result {
+            self.fail_suspended_ivr_handoff("handoff_start_failed", error.to_string()).await;
+        } else {
+            self.bind_suspended_ivr_exec_to_current_app().await;
+            self.meta.ivr_flow_suspended = false;
+        }
+        result
     }
 
     /// Consume the pending customer-transfer release if `leg_id` is its
@@ -2515,6 +2761,10 @@ impl SipSession {
         pending: PendingCustomerTransferRelease,
         reason: &str,
     ) {
+        if let Some(jump) = pending.routed_jump {
+            let _ = self.fail_routed_jump(jump, anyhow!("{reason}")).await;
+            return;
+        }
         warn!(
             session_id = %self.id,
             target = %pending.target_display,
@@ -2600,20 +2850,7 @@ impl SipSession {
     ) -> Result<BlindTransferRoute> {
         match routed_target {
             Some(crate::config::RouteResult::Forward(option, hints)) => {
-                let mut routed = location.clone();
-                routed.aor = option.callee.clone();
-                routed.destination = option.destination.clone();
-                routed.credential = option.credential.clone();
-                routed.headers = option.headers.clone();
-                routed.contact_raw = Some(option.callee.to_string());
-                routed.outbound_trunk = hints
-                    .as_ref()
-                    .and_then(|hints| {
-                        hints
-                            .extensions
-                            .get::<crate::call::OutboundTrunkContext>()
-                    })
-                    .cloned();
+                let routed = Self::forward_transfer_location(location, option, hints.as_ref());
                 Ok(BlindTransferRoute::Dial(routed, hints))
             }
             Some(crate::config::RouteResult::NotHandled(_, hints)) => {
@@ -2651,6 +2888,23 @@ impl SipSession {
                 reason.unwrap_or_default()
             )),
         }
+    }
+
+    fn forward_transfer_location(
+        location: &crate::call::Location,
+        option: rsipstack::dialog::invitation::InviteOption,
+        hints: Option<&crate::config::DialplanHints>,
+    ) -> crate::call::Location {
+        let mut routed = location.clone();
+        routed.contact_raw = Some(option.callee.to_string());
+        routed.aor = option.callee;
+        routed.destination = option.destination;
+        routed.credential = option.credential;
+        routed.headers = option.headers;
+        routed.outbound_trunk = hints
+            .and_then(|hints| hints.extensions.get::<crate::call::OutboundTrunkContext>())
+            .cloned();
+        routed
     }
 
     /// Hang up the B leg replaced by a blind transfer (the party the caller
@@ -3135,14 +3389,14 @@ impl SipSession {
         }
     }
 
-    async fn start_route_point_app(
+    async fn route_point_handoff(
         &mut self,
         route_point: &str,
-        variables: HashMap<String, String>,
-        transfer_headers: HashMap<String, String>,
+        variables: &HashMap<String, String>,
+        transfer_headers: &HashMap<String, String>,
         prepared_route: Option<crate::config::RouteResult>,
         preserve_on_failure: bool,
-    ) -> Result<()> {
+    ) -> Result<RoutePointHandoff> {
         let caller = self
             .context
             .dialplan
@@ -3150,7 +3404,7 @@ impl SipSession {
             .clone()
             .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
         let mut route_context = self
-            .transfer_app_route_context(route_point, variables.clone(), &transfer_headers)
+            .transfer_app_route_context(route_point, variables.clone(), transfer_headers)
             .await;
         let routed = if let Some(route) = prepared_route {
             Some(route)
@@ -3164,7 +3418,7 @@ impl SipSession {
                 .await?
         };
 
-        match routed {
+        let result = match routed {
             Some(crate::config::RouteResult::Application {
                 option,
                 app_name,
@@ -3178,11 +3432,12 @@ impl SipSession {
                     option.headers.as_deref().unwrap_or_default(),
                 );
                 let transfer_headers = transfer_headers
-                    .into_iter()
-                    .map(|(name, value)| rsipstack::sip::Header::Other(name, value))
+                    .iter()
+                    .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
                     .collect::<Vec<_>>();
                 route_context.sip_headers =
                     crate::call::app::merge_sip_headers(&routed_headers, &transfer_headers);
+                let source_trace = self.take_suspended_jump_trace();
                 if let Err(error) = self
                     .ensure_app_running_with_route_context(
                         &app_name,
@@ -3193,15 +3448,22 @@ impl SipSession {
                     )
                     .await
                 {
+                    if let Some(trace) = source_trace {
+                        self.extensions.write().insert(
+                            crate::call::app::ivr::executor::SuspendedJumpTrace(trace),
+                        );
+                    }
                     return self
                         .try_route_point_fallback_or_terminate(
                             error,
                             &format!("toivr:{route_point}"),
-                            &variables,
+                            variables,
                             preserve_on_failure,
                         )
-                        .await;
+                        .await
+                        .map(|()| RoutePointHandoff::Application);
                 }
+                self.publish_local_jump_trace(source_trace);
                 Ok(())
             }
             Some(crate::config::RouteResult::Abort(code, reason)) => {
@@ -3220,13 +3482,19 @@ impl SipSession {
                 )
                 .await
             }
+            Some(crate::config::RouteResult::Forward(option, hints))
+                if option.destination.is_some()
+                    && variables.get("_ivr_resume").is_some_and(|value| value == "1") =>
+            {
+                return Ok(RoutePointHandoff::Forward(option, hints));
+            }
             Some(crate::config::RouteResult::Forward(_, hints))
             | Some(crate::config::RouteResult::NotHandled(_, hints)) => {
                 self.track_routed_leg_hints(hints);
                 self.try_route_point_fallback_or_terminate(
                     anyhow!("route point did not resolve to an application"),
                     &format!("toivr:{route_point}"),
-                    &variables,
+                    variables,
                     preserve_on_failure,
                 )
                 .await
@@ -3236,7 +3504,7 @@ impl SipSession {
                 self.try_route_point_fallback_or_terminate(
                     anyhow!("route point resolved to an unsupported queue"),
                     &format!("toivr:{route_point}"),
-                    &variables,
+                    variables,
                     preserve_on_failure,
                 )
                 .await
@@ -3245,12 +3513,13 @@ impl SipSession {
                 self.try_route_point_fallback_or_terminate(
                     anyhow!("route point was not handled"),
                     &format!("toivr:{route_point}"),
-                    &variables,
+                    variables,
                     preserve_on_failure,
                 )
                 .await
             }
-        }
+        };
+        result.map(|()| RoutePointHandoff::Application)
     }
 
     async fn try_route_point_fallback_or_terminate(
@@ -3260,12 +3529,21 @@ impl SipSession {
         variables: &HashMap<String, String>,
         preserve_on_failure: bool,
     ) -> Result<()> {
+        let source_trace = self.take_suspended_jump_trace();
         match self
             .try_ivr_fallback_after_start_failure(error, route_point, variables)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.publish_local_jump_trace(source_trace);
+                Ok(())
+            }
             Err(error) => {
+                if let Some(trace) = source_trace {
+                    self.extensions.write().insert(
+                        crate::call::app::ivr::executor::SuspendedJumpTrace(trace),
+                    );
+                }
                 // A failed API handoff leaves the original conversation intact.
                 // Terminal IVR-internal transfers retain their existing policy.
                 if preserve_on_failure {
@@ -3279,6 +3557,12 @@ impl SipSession {
                 )
                 .await
             }
+        }
+    }
+
+    fn publish_local_jump_trace(&self, trace: Option<crate::rwi::IvrStepTrace>) {
+        if let (Some(trace), Some(gateway)) = (trace, self.server.rwi_gateway.as_ref()) {
+            gateway.read().fan_out(&self.context.session_id, &trace);
         }
     }
 

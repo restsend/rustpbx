@@ -300,6 +300,37 @@ pub trait BusinessStatusProvider: Send + Sync {
 #[async_trait]
 pub trait PresencePublishHook: Send + Sync {
     async fn on_publish(&self, identity: &str, state: &PresenceState, body: &[u8]) -> bool;
+
+    /// Addons can return a committed business result for an opted-in publication.
+    async fn confirm_publish(
+        &self,
+        identity: &str,
+        state: &PresenceState,
+        body: &[u8],
+    ) -> PresencePublishConfirmation {
+        PresencePublishConfirmation {
+            response: None,
+            consumed: self.on_publish(identity, state, body).await,
+            renew_lease: false,
+        }
+    }
+}
+
+pub struct PresencePublishConfirmation {
+    pub response: Option<Vec<u8>>,
+    pub consumed: bool,
+    pub renew_lease: bool,
+}
+
+const PRESENCE_RESULT_HEADER: &str = "X-Restsend-Presence-Result";
+const PRESENCE_RESULT_TYPE: &str = "application/vnd.restsend.presence-result+json";
+
+pub(crate) fn requests_presence_result(request: &rsipstack::sip::Request) -> bool {
+    request.method == rsipstack::sip::Method::Publish
+        && request.headers.iter().any(|header| {
+            matches!(header, rsipstack::sip::Header::Other(name, value)
+                if name.eq_ignore_ascii_case(PRESENCE_RESULT_HEADER) && value.trim() == "snapshot-v1")
+        })
 }
 
 /// Decision for a REGISTER recovering from Offline (pure, unit-tested): prefer
@@ -1578,6 +1609,7 @@ impl PresenceModule {
 
     async fn handle_publish(&self, tx: &mut Transaction, cookie: &TransactionCookie) -> Result<()> {
         let auth_user = cookie.get_user();
+        let authenticated = auth_user.is_some();
         let from = tx.original.from_header()?.typed()?;
 
         // If authenticated, use the authenticated username to avoid spoofing
@@ -1719,32 +1751,57 @@ impl PresenceModule {
         // mirror (CC does exactly that for agent presence).
         let publish_body = tx.original.body.clone();
         let mut consumed = false;
+        let wants_confirmation =
+            authenticated && expires > 0 && requests_presence_result(&tx.original);
+        let mut confirmation = None;
         for hook in self.manager.publish_hooks() {
-            consumed |= hook.on_publish(&identity, &current, &publish_body).await;
+            if wants_confirmation {
+                let result = hook
+                    .confirm_publish(&identity, &current, &publish_body)
+                    .await;
+                consumed |= result.consumed;
+                if result.renew_lease {
+                    let lock = self.manager.publication_lock(&identity);
+                    let _guard = lock.lock().await;
+                    self.manager
+                        .update_publication_expiry(&identity, current.expires_at);
+                }
+                if confirmation.is_none() {
+                    confirmation = result.response;
+                }
+            } else {
+                consumed |= hook.on_publish(&identity, &current, &publish_body).await;
+            }
         }
-        if consumed {
-            // The addon owns this publication (e.g. ring-timeout ack). It is
-            // not a manual state: acknowledge SIP but do not mirror/store it.
-            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
-            return Ok(());
+        if !consumed {
+            let old_state = self.manager.get_state(&identity);
+
+            // Addon admission precedes persistence and NOTIFY, so a rejected
+            // automatic client request cannot overwrite the authoritative mirror.
+            if let Some(hub) = &self.server.cluster_event_hub {
+                hub.emit_presence_change(&identity, Some(&old_state), &current)
+                    .await;
+            } else {
+                let publication_lock = self.manager.publication_lock(&identity);
+                let _publication = publication_lock.lock().await;
+                self.manager
+                    .update_state(&identity, current.clone(), &EventSource::Local)
+                    .await;
+            }
         }
-
-        let old_state = self.manager.get_state(&identity);
-
-        // Addon admission precedes persistence and NOTIFY, so a rejected
-        // automatic client request cannot overwrite the authoritative mirror.
-        if let Some(hub) = &self.server.cluster_event_hub {
-            hub.emit_presence_change(&identity, Some(&old_state), &current)
-                .await;
+        if let Some(body) = confirmation {
+            tx.reply_with(
+                rsipstack::sip::StatusCode::OK,
+                vec![rsipstack::sip::Header::ContentType(
+                    PRESENCE_RESULT_TYPE.into(),
+                )],
+                Some(body),
+            )
+            .await
+            .ok();
         } else {
-            let publication_lock = self.manager.publication_lock(&identity);
-            let _publication = publication_lock.lock().await;
-            self.manager
-                .update_state(&identity, current.clone(), &EventSource::Local)
-                .await;
+            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
         }
-
-        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
 
         Ok(())
     }

@@ -232,12 +232,13 @@ async fn delegated_takeover_keeps_replaces_on_the_home_proxy_hop() {
         None,
         Some(crate::call::ReferReplacesContext {
             header: "replaced-call@h;to-tag=ttt;from-tag=fff".to_string(),
-            delegate_via_home_proxy: true,
+            consult_owner: Some("consult-owner.example.test:35062".try_into().unwrap()),
+            target_via_registration_home: false,
         }),
     )
     .await;
 
-    let (option, callee_uri, _call_id, routed_via_home_proxy) = session
+    let (option, _callee_uri, _call_id, routed_via_home_proxy) = session
         .build_target_invite_option(&delegated_location(), None, None)
         .await
         .expect("invite option");
@@ -247,9 +248,15 @@ async fn delegated_takeover_keeps_replaces_on_the_home_proxy_hop() {
         "the delegated hop must carry the ORIGINAL Replaces verbatim"
     );
     assert!(routed_via_home_proxy, "delegation routes via the home proxy");
-    assert!(
-        callee_uri.host_with_port.to_string().contains("peer.example.test"),
-        "delegation must keep the hop on the peer's home proxy, got {callee_uri}"
+    assert_eq!(
+        option.callee.to_string(),
+        "sip:1002@consult-owner.example.test:35062",
+        "the consultation owner, not the target's registration node, must handle Replaces"
+    );
+    assert_eq!(
+        option.destination.unwrap().addr.to_string(),
+        "consult-owner.example.test:35062",
+        "the transport must send to the owner even when the registration locator prefers another node"
     );
 }
 
@@ -264,7 +271,8 @@ async fn direct_takeover_carries_replaces_and_skips_home_proxy() {
         Some("192.0.2.44".parse().unwrap()),
         Some(crate::call::ReferReplacesContext {
             header: "real-call@h;to-tag=rrr;from-tag=sss".to_string(),
-            delegate_via_home_proxy: false,
+            consult_owner: None,
+            target_via_registration_home: false,
         }),
         None,
     )

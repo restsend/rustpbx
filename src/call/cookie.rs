@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub enum SpamResult {
     #[default]
     Nice,
@@ -20,7 +20,7 @@ impl SpamResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TransactionCookieInner {
     user: Option<SipUser>,
     spam_result: SpamResult,
@@ -45,7 +45,17 @@ impl From<&TransactionKey> for TransactionCookie {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct AlreadyAdmitted;
+
 impl TransactionCookie {
+    /// Reuse ingress matching context for a successor of an already admitted call.
+    pub(crate) fn for_established_call(&self) -> Self {
+        let mut inner = self.inner.read().map(|inner| inner.clone()).unwrap_or_default();
+        inner.extensions.insert(AlreadyAdmitted);
+        Self { inner: Arc::new(RwLock::new(inner)) }
+    }
+
     pub fn set_user(&self, user: SipUser) {
         if let Ok(mut inner) = self.inner.write() {
             inner.user = Some(user);
@@ -167,10 +177,8 @@ pub struct TrunkContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferReplacesContext {
     pub header: String,
-    /// True when this INVITE is being DELEGATED to the peer node that owns
-    /// the replaced session (the takeover will run THERE): the outbound
-    /// home-proxy hop must carry the Replaces header verbatim (the peer's
-    /// gate consumes it and runs the local takeover) instead of the usual
-    /// direct-to-registration routing.
-    pub delegate_via_home_proxy: bool,
+    /// SIP address of the consultation owner for an intermediate cluster hop.
+    pub consult_owner: Option<rsipstack::sip::HostWithPort>,
+    /// The target-facing dialog was resolved on the registration node.
+    pub target_via_registration_home: bool,
 }

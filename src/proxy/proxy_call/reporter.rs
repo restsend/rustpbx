@@ -340,7 +340,9 @@ impl CallReporter {
         }
 
         let mut record = CallRecord {
-            call_id: self.context.session_id.clone(),
+            call_id: snapshot.extensions.get::<crate::call::TransferredRecordIdentity>()
+                .map(|identity| identity.0.clone())
+                .unwrap_or_else(|| self.context.session_id.clone()),
             session_id: Some(
                 snapshot
                     .root_session_id
@@ -435,7 +437,9 @@ fn collect_recording_artifacts(
             if size == 0 {
                 continue;
             }
-            let mut extra = HashMap::new();
+            let mut extra: HashMap<String, serde_json::Value> = seg.metadata.iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .collect();
             extra.insert(
                 "session_id".to_string(),
                 serde_json::Value::String(root_session.to_string()),
@@ -979,8 +983,12 @@ mod tests {
         std::fs::write(&wav, b"wavdata").unwrap();
 
         let mut snapshot = empty_snapshot();
+        snapshot
+            .metadata
+            .insert("agent_id".into(), serde_json::json!("next-agent"));
         snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
             unique_id: None,
+            metadata: HashMap::from([("agent_id".into(), "original-agent".into())]),
             path: wav.to_string_lossy().into_owned(),
             size: 7,
             segment_type: "ivr".into(),
@@ -995,6 +1003,11 @@ mod tests {
         let (recorder, meta) = collect_recording_artifacts(&snapshot, "root-sess", false, None);
 
         assert_eq!(recorder.len(), 1);
+        assert_eq!(
+            recorder[0].extra.as_ref().unwrap()["agent_id"],
+            "original-agent"
+        );
+        assert_eq!(meta["agent_id"], "next-agent");
         assert_eq!(recorder[0].track_id, "segment:ivr:ab");
         assert_eq!(
             recorder[0]
@@ -1042,6 +1055,7 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
             unique_id: None,
+            metadata: Default::default(),
             path: "/tmp/missing-segment.wav".into(),
             size: 0,
             segment_type: "ivr".into(),

@@ -15,6 +15,12 @@ pub trait ActionProvider: Send + Sync {
         "unknown"
     }
 
+    /// Whether this provider's action requests advertise SIP-trunk IVR jumps
+    /// and expect the final jump snapshot on the root hangup event.
+    fn advertises_sip_trunk_jump(&self) -> bool {
+        false
+    }
+
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode>;
 
     /// Request a recovery action after a node failed to execute.
@@ -277,6 +283,7 @@ impl Default for RetryConfig {
                 },
                 ignore_prompt_dtmf: false,
                 wait_for_result: false,
+                transfer_timeouts: None,
                 next: None,
                 step_id: None,
                 step_name: None,
@@ -442,7 +449,9 @@ impl StepProvider {
     ) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
         // Serialize once — the same bytes go into the debug log and the body.
-        let body_str = serde_json::to_string(ctx).unwrap_or_default();
+        let mut body = serde_json::to_value(ctx)?;
+        body["jump_ivr_trunk"] = serde_json::Value::Bool(true);
+        let body_str = body.to_string();
         for attempt in 0..retry.max_retries {
             let start = std::time::Instant::now();
             debug!(
@@ -523,6 +532,10 @@ impl StepProvider {
 impl ActionProvider for StepProvider {
     fn name(&self) -> &str {
         "step"
+    }
+
+    fn advertises_sip_trunk_jump(&self) -> bool {
+        true
     }
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
@@ -876,9 +889,11 @@ mod tests {
         let hits_for_handler = hits.clone();
         let app = axum::Router::new().route(
             "/step",
-            axum::routing::post(move || {
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
                 let hits = hits_for_handler.clone();
                 async move {
+                    assert_eq!(body["session_id"], "retry-test-session");
+                    assert_eq!(body["jump_ivr_trunk"], true);
                     hits.fetch_add(1, Ordering::SeqCst);
                     status
                 }

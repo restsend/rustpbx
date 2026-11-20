@@ -486,15 +486,8 @@ pub(super) fn map_suspended_flow_end(
 }
 
 /// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow that
-/// died while suspended (caller hangup during a bridge/queue hand-off, or a
-/// JumpIvr target that failed to start). The step-IVR executor suppresses its
-/// own session_end trace for resumable hand-offs, so this synthetic event
-/// guarantees consumers still see exactly one session_end per logical flow —
-/// carrying the REAL end reason instead of a premature `transfer`. Node
-/// context comes from the bridge trace context when the suspension was a
-/// voip_bridge. `app_execution_id` is the SUSPENDED execution's identity
-/// (resolved by the caller from the executor's stash); `None` omits the
-/// field — never guessed, never taken from `extra`.
+/// ended while suspended. A route-point jump retains its original step
+/// identity and metadata, including when a SIP trunk answers without another IVR.
 pub(super) fn emit_suspended_flow_session_end(
     session_id: &str,
     caller: &str,
@@ -504,6 +497,7 @@ pub(super) fn emit_suspended_flow_session_end(
     sip_headers: Option<std::collections::HashMap<String, String>>,
     end_reason: crate::call::app::ivr::provider::SessionEndReason,
     app_execution_id: Option<u64>,
+    jump_trace: Option<crate::rwi::IvrStepTrace>,
 ) {
     let Some(gw) = rwi_gateway.as_ref() else {
         // The end fact itself is not lost (the CDR still records the hangup),
@@ -516,51 +510,46 @@ pub(super) fn emit_suspended_flow_session_end(
         );
         return;
     };
-    let ctx = bridge_trace_context.lock().clone();
-    // Single clock capture (see forward_dtmf_event): one `now` serves as the
-    // end stamp and as the start fallback so `end >= start` always holds.
-    // The executor-stamped `_rst_step_start_time` provides the real start.
     let now = chrono::Utc::now().to_rfc3339();
-    let step_start = ctx
-        .as_ref()
-        .and_then(|c| c.step_start_time.clone())
-        .unwrap_or_else(|| now.clone());
-    let duration_ms = crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
-    let ev = crate::rwi::IvrStepTrace {
-        call_id: session_id.to_string(),
-        session_id: session_id.to_string(),
-        // Bridge-suspended flows take the identity stashed in the bridge
-        // context (same source as the DTMF traces for this node); other
-        // suspensions fall back to the executor's session-var stash.
-        app_execution_id: ctx
-            .as_ref()
-            .and_then(|c| c.app_execution_id)
-            .or(app_execution_id),
-        caller: caller.to_string(),
-        callee: callee.to_string(),
-        // Bridge-suspended flows carry the executor-stashed step index;
-        // non-bridge suspensions (queue / jump without node context) keep 0,
-        // consistent with the other absent context fields.
-        step_index: ctx.as_ref().and_then(|c| c.step_index).unwrap_or(0),
-        trigger: crate::rwi::TriggerInfo::new("session_end"),
-        action_type: if ctx.is_some() { "Bridge" } else { "Transfer" }.to_string(),
-        action_json: None,
-        duration_ms,
-        error: None,
-        step_id: ctx.as_ref().and_then(|c| c.step_id.clone()),
-        step_name: ctx.as_ref().and_then(|c| c.step_name.clone()),
-        step_start_time: Some(step_start),
-        step_end_time: Some(now),
-        extra: ctx.as_ref().and_then(|c| c.extra.clone()),
-        sip_headers,
-        end_reason: Some(end_reason.reason),
-        end_detail: end_reason.detail,
-        next_node_id: None,
-        next_step_id: None,
-        end: Some(true),
-    }
-    // Completion contract: both stamps present on every emitted entry.
-    .with_completion_stamps();
+    let mut ev = jump_trace.unwrap_or_else(|| {
+        let ctx = bridge_trace_context.lock();
+        let ctx = ctx.as_ref();
+        crate::rwi::IvrStepTrace {
+            call_id: session_id.to_string(),
+            session_id: session_id.to_string(),
+            app_execution_id: ctx.and_then(|c| c.app_execution_id).or(app_execution_id),
+            caller: caller.to_string(),
+            callee: callee.to_string(),
+            step_index: ctx.and_then(|c| c.step_index).unwrap_or(0),
+            trigger: crate::rwi::TriggerInfo::new("session_end"),
+            action_type: if ctx.is_some() { "Bridge" } else { "Transfer" }.to_string(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: ctx.and_then(|c| c.step_id.clone()),
+            step_name: ctx.and_then(|c| c.step_name.clone()),
+            step_start_time: ctx.and_then(|c| c.step_start_time.clone()),
+            step_end_time: None,
+            extra: ctx.and_then(|c| c.extra.clone()),
+            sip_headers,
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        }
+    });
+    ev.duration_ms = crate::call::app::ivr::trace::duration_ms_between(
+        ev.step_start_time.as_deref(),
+        &now,
+    );
+    ev.step_end_time = Some(now);
+    ev.trigger = crate::rwi::TriggerInfo::new("session_end");
+    ev.action_json = None;
+    ev.end_reason = Some(end_reason.reason);
+    ev.end_detail = end_reason.detail;
+    ev.end = Some(true);
+    let ev = ev.with_completion_stamps();
     gw.read().fan_out(session_id, &ev);
 }
 

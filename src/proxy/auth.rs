@@ -341,9 +341,13 @@ impl ProxyModule for AuthModule {
             }
         }
 
-        // Only authenticate INVITE and REGISTER requests (out-of-dialog)
+        // A versioned PUBLISH receipt can disclose account state. Authenticate
+        // opt-in requests with the configured token backends. Unauthenticated
+        // PUBLISH retains historical SIP behavior and receives no receipt.
+        let presence_result = super::presence::requests_presence_result(&tx.original);
         if tx.original.method != rsipstack::sip::Method::Invite
             && tx.original.method != rsipstack::sip::Method::Register
+            && !presence_result
         {
             return Ok(ProxyAction::Continue);
         }
@@ -377,6 +381,9 @@ impl ProxyModule for AuthModule {
 
         if cookie.is_spam() {
             return Ok(ProxyAction::Abort);
+        }
+        if presence_result {
+            return Ok(ProxyAction::Continue);
         }
 
         let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();

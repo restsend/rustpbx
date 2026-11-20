@@ -115,26 +115,33 @@ pub(crate) fn bind_ivr_exec(extensions: &SessionExtensions, app_execution_id: u6
     true
 }
 
-/// Convert a suspended logical flow into a terminal failure without losing
-/// values collected before the hand-off.
-pub(crate) fn fail_suspended_ivr_exec(extensions: &SessionExtensions, reason: &str) -> bool {
+/// Finalize the suspended invocation while retaining its completed segments.
+pub(crate) fn finish_suspended_ivr_exec(
+    extensions: &SessionExtensions,
+    outcome: Result<String, &str>,
+) -> bool {
     let mut guard = extensions.write();
-    if !guard
-        .get::<IvrExecState>()
-        .is_some_and(|state| state.app_execution_id.is_none())
-    {
+    let Some(state) = guard
+        .get_mut::<IvrExecState>()
+        .filter(|state| state.app_execution_id.is_none())
+    else {
         return false;
-    }
-    guard.insert(IvrExecResult {
-        app_execution_id: None,
-        status: "failed".to_string(),
-        reason: reason.to_string(),
-        routing_target: None,
-        collected: HashMap::new(),
-        trace: Vec::new(),
-        duration_ms: 0,
-        completion_time: chrono::Utc::now().to_rfc3339(),
-    });
+    };
+    let (status, reason, target) = match outcome {
+        Ok(target) => {
+            // A successful SIP handoff replaced the held peer.
+            state.held_leg = None;
+            ("transferred", "transfer", Some(target))
+        }
+        Err(reason) => ("failed", reason, None),
+    };
+    guard.insert(crate::call::app::ivr::exec::build_ivr_exec_result(
+        status,
+        reason,
+        target,
+        HashMap::new(),
+        0,
+    ));
     true
 }
 

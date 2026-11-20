@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
@@ -103,6 +104,13 @@ pub enum LegPurpose {
     Consult,
 }
 
+/// Optional deadlines for a synchronous SIP transfer; omitted values preserve existing policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferTimeouts {
+    pub connect_timeout_ms: Option<NonZeroU64>,
+    pub max_duration_ms: Option<NonZeroU64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferOutcome {
@@ -110,6 +118,8 @@ pub enum TransferOutcome {
     NotConnected,
     /// Target connected and later ended (caller may resume IVR).
     TargetEnded,
+    /// Connected target was ended by its configured segment-duration limit.
+    MaxDuration,
     /// CPA: callee busy / rejected the call (SIP 486/600/603…).
     Busy,
     /// CPA: ring timeout / temporarily unavailable (SIP 408/480…).
@@ -260,6 +270,8 @@ pub enum CallCommand {
         leg_id: LegId,
         target: String,
         headers: HashMap<String, String>,
+        #[serde(default)]
+        timeouts: TransferTimeouts,
     },
 
     /// Customer-anchored blind transfer (CC `POST /cc/calls/{id}/transfer`).
@@ -663,13 +675,10 @@ pub enum CallCommand {
     /// suppresses the CDR row — the replacement session inherits the root
     /// session id and carries the transferred call's record.
     #[serde(skip)]
-    SuppressCallRecord,
-
-    /// REFER-Replaces chain: the relayed replacement never reached a final
-    /// REFER NOTIFY within the watchdog window. The session releases the
-    /// pending state and fails the transfer with the referrer kept intact.
-    #[serde(skip)]
-    RelayedReferTimeout,
+    SuppressCallRecord {
+        recordings: crate::call::RecordingHandoff,
+        reply: oneshot::Sender<bool>,
+    },
 
     /// REFER-Replaces takeover: resolve the replaced session's dialog toward
     /// the transfer target. The target UA faces THIS dialog, so the Replaces
@@ -712,6 +721,7 @@ pub enum CallCommand {
     BindTransferPartner {
         cmd_tx: CallCommandTx,
         partner_session: String,
+        root_session_id: String,
         their_leg: LegId,
     },
 

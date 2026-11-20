@@ -1621,35 +1621,37 @@ async fn test_jwt_auth_module_integration_no_401() {
     });
     let token = generate_hs256_jwt(&claims, "test-jwt-secret");
 
-    let request = super::common::create_test_request(
-        rsipstack::sip::Method::Register,
-        "newuser",
-        None,
-        "rustpbx.com",
-        Some(300),
-    );
-
-    let mut request = request;
-    request
-        .headers
-        .push(Header::Other("X-Auth-Token".to_string(), token));
-
-    let (mut tx, _) = create_transaction(request).await;
-    let result = module
-        .on_transaction_begin(
-            CancellationToken::new(),
-            &mut tx,
-            TransactionCookie::default(),
-        )
-        .await
-        .unwrap();
-
-    // Should continue (authenticated via JWT), NOT abort with 401
-    assert_eq!(
-        format!("{:?}", result),
-        format!("{:?}", ProxyAction::Continue),
-        "REGISTER with valid JWT should pass through without 401"
-    );
+    for (method, opted_in, valid_token, authenticated) in [
+        (rsipstack::sip::Method::Register, false, true, true),
+        (rsipstack::sip::Method::Publish, true, true, true),
+        (rsipstack::sip::Method::Publish, true, false, false),
+        (rsipstack::sip::Method::Publish, false, true, false),
+    ] {
+        let mut request =
+            super::common::create_test_request(method, "newuser", None, "rustpbx.com", Some(300));
+        if valid_token {
+            request
+                .headers
+                .push(Header::Other("X-Auth-Token".into(), token.clone()));
+        }
+        if opted_in {
+            request.headers.push(Header::Other(
+                "X-Restsend-Presence-Result".into(),
+                "snapshot-v1".into(),
+            ));
+        }
+        let (mut tx, _) = create_transaction(request).await;
+        let cookie = TransactionCookie::default();
+        let result = module
+            .on_transaction_begin(CancellationToken::new(), &mut tx, cookie.clone())
+            .await
+            .unwrap();
+        assert!(matches!(result, ProxyAction::Continue));
+        assert_eq!(
+            cookie.get_user().map(|u| u.username).as_deref(),
+            authenticated.then_some("newuser"),
+        );
+    }
 }
 
 #[tokio::test]

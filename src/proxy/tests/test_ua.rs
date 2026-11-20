@@ -57,6 +57,7 @@ pub struct TestUa {
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store received offer SDP per dialog from incoming INVITE
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    received_replaces: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real WebRTC PeerConnection used when `config.webrtc` is set.
@@ -207,6 +208,7 @@ impl TestUa {
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            received_replaces: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
             webrtc_rx,
@@ -220,6 +222,10 @@ impl TestUa {
 
     /// Start the UA with simplified initialization
     pub async fn start(&mut self) -> Result<()> {
+        self.start_with_user_agent(None).await
+    }
+
+    pub async fn start_with_user_agent(&mut self, user_agent: Option<&str>) -> Result<()> {
         let transport_layer = TransportLayer::new(self.cancel_token.clone());
         let local_addr = format!("127.0.0.1:{}", self.config.local_port).parse::<SocketAddr>()?;
 
@@ -230,7 +236,11 @@ impl TestUa {
                 .map_err(|e| e.into_anyhow())?;
         transport_layer.add_transport(connection.into());
 
-        let endpoint = EndpointBuilder::new()
+        let mut builder = EndpointBuilder::new();
+        if let Some(user_agent) = user_agent {
+            builder.with_user_agent(user_agent);
+        }
+        let endpoint = builder
             .with_cancel_token(self.cancel_token.clone())
             .with_transport_layer(transport_layer)
             .build();
@@ -270,6 +280,7 @@ impl TestUa {
             let contact_clone = self.contact_uri.clone().unwrap();
             let cancel_token = self.cancel_token.clone();
             let received_sdps_clone = self.received_offer_sdps.clone();
+            let received_replaces = self.received_replaces.clone();
 
             crate::utils::spawn(async move {
                 Self::process_incoming_request(
@@ -279,6 +290,7 @@ impl TestUa {
                     contact_clone,
                     cancel_token,
                     received_sdps_clone,
+                    received_replaces,
                 )
                 .await
                 .ok();
@@ -935,6 +947,16 @@ impl TestUa {
         refer_to: &str,
         sdp_offer: Option<String>,
     ) -> Result<DialogId> {
+        self.execute_referred_with_max_forwards(refer_to, sdp_offer, 70)
+            .await
+    }
+
+    pub async fn execute_referred_with_max_forwards(
+        &self,
+        refer_to: &str,
+        sdp_offer: Option<String>,
+        max_forwards: u32,
+    ) -> Result<DialogId> {
         // Split the Refer-To into the target URI and the Replaces query.
         let (target, query) = match refer_to.split_once('?') {
             Some((t, q)) => (t.to_string(), q.to_string()),
@@ -999,6 +1021,7 @@ impl TestUa {
             "Replaces".into(),
             replaces,
         ));
+        extra_headers.push(rsipstack::sip::Header::MaxForwards(max_forwards.into()));
         let (content_type, offer) = match sdp_offer {
             Some(sdp) => (Some("application/sdp".to_string()), Some(sdp.into_bytes())),
             None => (None, None),
@@ -1247,6 +1270,10 @@ impl TestUa {
         self.cancel_token.cancel();
     }
 
+    pub async fn received_replaces(&self, id: &DialogId) -> Option<String> {
+        self.received_replaces.lock().await.get(id).cloned()
+    }
+
     async fn process_incoming_request(
         dialog_layer: Arc<DialogLayer>,
         mut incoming: TransactionReceiver,
@@ -1254,6 +1281,7 @@ impl TestUa {
         contact: rsipstack::sip::Uri,
         cancel_token: CancellationToken,
         received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+        received_replaces: Arc<Mutex<HashMap<DialogId, String>>>,
     ) -> Result<()> {
         loop {
             select! {
@@ -1286,6 +1314,13 @@ impl TestUa {
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
                                 ) {
+                                    if let Some(header) = tx.original.headers.iter()
+                                        .find(|header| header.name().eq_ignore_ascii_case("Replaces"))
+                                    {
+                                        received_replaces.lock().await.insert(
+                                            dialog.id(), header.value().to_string(),
+                                        );
+                                    }
                                     // Store SDP for later retrieval
                                     if let Some(sdp_str) = sdp {
                                         let dialog_id = dialog.id();
@@ -2191,46 +2226,73 @@ mod tests {
         bob.register().await.unwrap();
         sleep(Duration::from_millis(100)).await;
 
-        {
-            let alice_arc = alice.clone();
-            let caller_handle = crate::utils::spawn({
-                let a = alice_arc.clone();
-                async move {
-                        let offer = create_test_sdp("192.168.1.100", 5004, true);
-                        a.make_call("bob", Some(offer)).await
-                    }
-            });
-            // Wait for call establishment
-            let incoming_id = next_incoming_call(&mut bob, 1000)
-                .await
-                .expect("bob should receive IncomingCall");
-            {
-                let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
-                bob.answer_call(&incoming_id, Some(answer_sdp)).await.ok();
-
-                sleep(Duration::from_millis(200)).await;
-
-                // Simulate DTMF INFO messages
-                println!("Simulating DTMF INFO messages: 1, 2, 3, #");
-                // In a real implementation, this would send SIP INFO messages with DTMF content
-                // For testing purposes, we verify the call is still active
-
-                let dtmf_digits = ["1", "2", "3", "#"];
-                for digit in &dtmf_digits {
-                    println!("  DTMF digit: {}", digit);
-                    sleep(Duration::from_millis(100)).await;
-                    // Process any events during DTMF simulation (callee side is sufficient)
-                    bob.process_dialog_events().await.ok();
-                }
-
-                if let Ok(join_res) =
-                    tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                    && let Ok(Ok(id)) = join_res
-                {
-                    alice_arc.hangup(&id).await.ok();
-                }
+        let caller = crate::utils::spawn({
+            let alice = alice.clone();
+            async move {
+                alice
+                    .make_call("bob", Some(create_test_sdp("192.168.1.100", 5004, true)))
+                    .await
             }
+        });
+        let incoming_id = next_incoming_call(&mut bob, 1000)
+            .await
+            .expect("bob should receive IncomingCall");
+        bob.answer_call(
+            &incoming_id,
+            Some(create_test_sdp("192.168.1.200", 5006, true)),
+        )
+        .await
+        .unwrap();
+        let caller_id = tokio::time::timeout(Duration::from_secs(5), caller)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        // Drive the actual INFO transaction through the PBX and its peer UA.
+        for digit in ["1", "2", "3", "#"] {
+            let sending = crate::utils::spawn({
+                let alice = alice.clone();
+                let id = caller_id.clone();
+                async move { alice.send_dtmf_info(&id, digit).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    for event in bob.process_dialog_events().await.unwrap() {
+                        if let TestUaEvent::DtmfInfo(id, got) = event {
+                            assert_eq!(id, incoming_id);
+                            assert_eq!(got, digit);
+                            return;
+                        }
+                    }
+                    sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("peer must receive the real DTMF INFO");
+            tokio::time::timeout(Duration::from_secs(5), sending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         }
+        alice.hangup(&caller_id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if bob
+                    .process_dialog_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, TestUaEvent::CallTerminated(id) if *id == incoming_id))
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("peer must observe termination after INFO and BYE");
 
         alice.stop();
         bob.stop();

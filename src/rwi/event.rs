@@ -458,6 +458,51 @@ pub struct CallTransferred {
 }
 rwi_event!(CallTransferred, "call_transferred");
 
+/// An answered SIP handoff that originated in a route-point jump.
+#[derive(Serialize)]
+pub(crate) struct IvrJumpTransferred<'a> {
+    #[serde(flatten)]
+    pub transfer: CallTransferred,
+    pub handoff_id: &'a str,
+}
+
+impl RwiEventSpec for IvrJumpTransferred<'_> {
+    const TYPE: &'static str = CallTransferred::TYPE;
+
+    fn call_id(&self) -> Option<&str> {
+        self.transfer.call_id()
+    }
+}
+
+/// Last answered SIP-trunk IVR jump, retained for the root hangup callback.
+/// An empty result means the call advertised the protocol and no correlated jump answered.
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct IvrJumpResult {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub answered_at: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RootHangupWithIvrJump {
+    #[serde(flatten)]
+    pub hangup: CallHangup,
+    pub ivr_jump_result: IvrJumpResult,
+}
+
+impl RwiEventSpec for RootHangupWithIvrJump {
+    const TYPE: &'static str = CallHangup::TYPE;
+
+    fn call_id(&self) -> Option<&str> {
+        self.hangup.call_id()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferAccepted {
     pub call_id: String,

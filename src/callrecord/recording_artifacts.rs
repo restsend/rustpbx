@@ -121,6 +121,10 @@ pub struct RecordingSegment {
     /// artifact across real-time and CDR-pipeline events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_id: Option<String>,
+    /// Session context captured when this segment started. Later call stages
+    /// must not change the attribution of an already completed recording.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// In-flight recording bookkeeping owned by `SipSession`.
@@ -148,6 +152,7 @@ pub struct ActiveRecording {
     /// recording events / CDR registration. Used by the outbound
     /// pre-answer ringback segment: kept only when the call is NOT answered.
     pub discard: bool,
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Build `{session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav` under `root`.
@@ -358,6 +363,28 @@ fn sanitize_component(raw: &str, fallback: &str) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn recording_segment_reads_legacy_and_preserves_frozen_context() {
+        let legacy = serde_json::json!({
+            "path": "call.wav", "size": 16044, "segmentType": "agent",
+            "segmentId": "segment-1", "durationSecs": 1.0
+        });
+        let mut segment: RecordingSegment = serde_json::from_value(legacy).unwrap();
+        assert!(segment.metadata.is_empty());
+        assert!(
+            serde_json::to_value(&segment)
+                .unwrap()
+                .get("metadata")
+                .is_none()
+        );
+        segment
+            .metadata
+            .insert("agent_id".into(), "original-agent".into());
+        let persisted = serde_json::to_value(&segment).unwrap();
+        let loaded: RecordingSegment = serde_json::from_value(persisted).unwrap();
+        assert_eq!(loaded.metadata["agent_id"], "original-agent");
+    }
 
     #[test]
     fn recording_source_classifies_known_tags() {

@@ -552,6 +552,9 @@ pub struct ActionNode {
     pub ignore_prompt_dtmf: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub wait_for_result: bool,
+    /// Optional deadlines for an awaited SIP transfer, never forwarded as SIP URI headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_timeouts: Option<crate::call::domain::TransferTimeouts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Box<ActionNode>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -571,6 +574,7 @@ impl ActionNode {
             action,
             ignore_prompt_dtmf: false,
             wait_for_result: false,
+            transfer_timeouts: None,
             next: None,
             step_id: None,
             step_name: None,
@@ -584,6 +588,7 @@ impl ActionNode {
             action,
             ignore_prompt_dtmf: false,
             wait_for_result: false,
+            transfer_timeouts: None,
             next: Some(Box::new(next)),
             step_id: None,
             step_name: None,

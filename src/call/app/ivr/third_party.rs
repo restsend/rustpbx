@@ -317,6 +317,7 @@ impl ThirdPartyTreeProvider {
             action,
             ignore_prompt_dtmf: false,
             wait_for_result: false,
+            transfer_timeouts: None,
             next,
             step_id: None,
             step_name: None,

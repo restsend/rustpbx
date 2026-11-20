@@ -2850,8 +2850,14 @@ impl CallApp for QueueApp {
         // agent in Ringing until the DB stale sweep. Record every agent
         // reserved for this call NOW so `release_phantom_agents` (on_exit /
         // connect) always covers them.
-        if let Some(ref registry) = self.agent_registry {
+        if let Some(registry) = self.agent_registry.clone() {
             for agent_id in registry.agents_ringing_for_call(&self.call_id).await {
+                if self.caller_agent_id.as_deref() == Some(agent_id.as_str()) {
+                    registry.release_unanswered_reservation(&agent_id, &self.call_id).await;
+                    info!(call_id = %self.call_id, agent_id = %agent_id,
+                        "Queue: excluded caller from pre-app reservation");
+                    continue;
+                }
                 info!(
                     agent = %agent_id,
                     "Queue: adopting pre-app reservation into attempted set"
@@ -2906,12 +2912,13 @@ impl CallApp for QueueApp {
             let strategy = self.config.routing_strategy;
 
             if let Some(agent) = registry
-                .select_agent_with_priority(
+                .select_agent_with_exclusions(
                     skills,
                     strategy,
                     None,
                     &self.call_id,
                     crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                    &self.dispatch_exclusions(),
                 )
                 .await
             {
@@ -3000,6 +3007,13 @@ impl CallApp for QueueApp {
                 let mut filtered = Vec::with_capacity(agents.len());
                 for agent in agents {
                     let uri = agent.aor.to_string();
+                    if let Some(caller) = self.caller_agent_id.as_ref()
+                        && self.agent_id_for_uri(&uri).await == *caller
+                    {
+                        info!(call_id = %self.call_id, agent = %uri,
+                            "Queue: parallel dial excludes caller agent");
+                        continue;
+                    }
                     if matches!(
                         Self::agent_availability(registry.as_ref(), &uri, &self.call_id).await,
                         Some(false)

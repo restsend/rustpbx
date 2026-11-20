@@ -11,7 +11,7 @@ use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::CallSessionBuilder;
 use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
-    matcher::{RouteResourceLookup, match_invite},
+    matcher::{RouteResourceLookup, match_invite_for_call},
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -19,6 +19,7 @@ use audio_codec::CodecType;
 use chrono::Utc;
 use glob::Pattern;
 use rsipstack::dialog::DialogId;
+use rsipstack::dialog::dialog::Dialog;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::{Transport, prelude::HeadersExt};
@@ -290,7 +291,7 @@ impl RouteInvite for DefaultRouteInvite {
                 });
             }
         }
-        match_invite(
+        match_invite_for_call(
             if trunks_snapshot.is_empty() {
                 None
             } else {
@@ -307,6 +308,9 @@ impl RouteInvite for DefaultRouteInvite {
             source_trunk.as_ref(),
             self.routing_state.clone(),
             direction,
+            cookie
+                .get_extension::<crate::call::cookie::AlreadyAdmitted>()
+                .is_some(),
         )
         .await
     }
@@ -2065,20 +2069,47 @@ impl CallModule {
             // The ownership registry uses the replaced dialog's bare Call-ID.
             let mut old_handle = registry.get_handle_by_dialog(&replaces_call_id);
 
-            // Cross-node delegation: the replaced (consult) dialog may be
-            // homed on a PEER node — the consulting agent's client REGISTERs
-            // through its own node, so the consult dialog lives there while
-            // the transferee's INVITE(Replaces) arrives at the transferee's
-            // home node (production 2026-11-14: transfer dropped the whole
-            // call, both agents hung up, the customer stayed on a dead call).
-            // When a peer owns the dialog, delegate instead of 481: fall
-            // through to NORMAL routing — the shared database locator finds
-            // the target's registration on the peer, and the INVITE (with its
-            // Replaces header intact) lands on the peer, whose local takeover
-            // gate then matches and bridges the transfer. This node becomes a
-            // B2BUA hop (transferee ↔ this node ↔ peer ↔ target), which the
-            // media path tolerates. Single-node deployments never enter this
-            // branch (the dialog is always local).
+            let server = &self.inner.server;
+            let dialog_layer = &self.inner.dialog_layer;
+
+            // A peer that resolved the target-facing dialog sends its exact
+            // Replaces triple to the node holding the target's SIP flow.
+            // Reverse tags identify our outbound dialog to that endpoint.
+            if crate::proxy::proxy_call::sip_session::SipSession::from_cluster_peer(server, &cookie)
+                && let Some(dialog) = dialog_layer.get_dialog(&DialogId {
+                    call_id: replaces_call_id.clone(),
+                    local_tag: replaces_from_tag.clone(),
+                    remote_tag: replaces_to_tag.clone(),
+                })
+                && dialog.state().is_confirmed()
+                && let Some(contact) = dialog.remote_contact()
+                && let Some(home) = server.cluster_self_addr.as_ref()
+            {
+                let locations = server.locator.lookup(&contact).await?;
+                if let Some(target) = locations.into_iter().find(|location| {
+                    location.aor == contact
+                        && location.home_proxy.as_ref().is_some_and(|node| node.addr == home.addr)
+                        && location.registered_aor.as_ref().and_then(|aor| aor.user())
+                            == tx.original.uri().user()
+                }) {
+                    let mut dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
+                        Ok(dialplan) => dialplan,
+                        Err(error) => return self.reply_route_error(tx, &cookie, error).await,
+                    };
+                    dialplan.flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![target]));
+                    dialplan.extensions.insert(ReferReplacesContext {
+                        header: format!(
+                            "{replaces_call_id};to-tag={replaces_to_tag};from-tag={replaces_from_tag}"
+                        ),
+                        consult_owner: None,
+                        target_via_registration_home: false,
+                    });
+                    return self.build_and_serve_dialplan(tx, cookie, dialplan).await;
+                }
+            }
+
+            // The lookup key belongs to the consultation, independently of
+            // where the target registered.
             let mut delegated_cross_node = false;
             if old_handle.is_none() {
                 // The replaced dialog's OTHER face may live here: in a B2BUA
@@ -2171,12 +2202,18 @@ impl CallModule {
                             // ride the context on the transaction cookie;
                             // build_target_invite_option reads it from there
                             // and keeps the Replaces header on the hop.
-                            cookie.insert_extension(crate::call::ReferReplacesContext {
+                            let sip_addr = owner_node.strip_prefix("UDP ").unwrap_or(owner_node);
+                            let Ok(consult_owner) = sip_addr.try_into() else {
+                                tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await?;
+                                return Ok(());
+                            };
+                            cookie.insert_extension(ReferReplacesContext {
                                 header: format!(
                                     "{};to-tag={};from-tag={}",
                                     replaces_call_id, replaces_to_tag, replaces_from_tag
                                 ),
-                                delegate_via_home_proxy: true,
+                                consult_owner: Some(consult_owner),
+                                target_via_registration_home: false,
                             });
                             delegated_cross_node = true;
                         } else {
@@ -2307,24 +2344,37 @@ impl CallModule {
                             Err(_) => None,
                         }
                     };
-                    // Cluster hop target leg (`remote_registered`): the dialog
-                    // this node sees is the call↔peer hop, NOT what the target
-                    // UA holds. RFC 3891 matching happens against the dialog
-                    // the TARGET UA owns — resolve it cross-node from the peer
-                    // whose cluster child serves the target, then stamp with
-                    // THAT. Query failure falls back to the hop-dialog stamp
-                    // (the relayed REFER watchdog / room cascade still
-                    // completes the transfer; production 2026-11-15 showed a
-                    // hop-dialog stamp is always 486/486-busy at the target).
-                    let peer_dialog = if target_dialog_info
+                    // The existing leg may end on a cluster hop. Only the
+                    // final registration node can supply the UA-facing dialog.
+                    let target_via_registration_home = target_dialog_info
                         .as_ref()
-                        .is_some_and(|info| info.remote_registered)
+                        .is_some_and(|info| info.remote_registered);
+                    let peer_dialog = if let Some(hop) = target_dialog_info
+                        .as_ref()
+                        .filter(|info| info.remote_registered)
                     {
-                        let root = target_dialog_info
-                            .as_ref()
-                            .map(|info| info.root_session_id.clone())
-                            .unwrap_or_default();
-                        let peers = self.inner.server.cluster_peers.clone();
+                        let hop_uri = match dialog_layer.get_dialog(&DialogId {
+                            call_id: hop.call_id.clone(),
+                            local_tag: hop.local_tag.clone(),
+                            remote_tag: hop.remote_tag.clone(),
+                        }) {
+                            Some(Dialog::Invite(dialog)) => {
+                                dialog.initial_request().uri().clone()
+                            }
+                            _ => {
+                                tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await?;
+                                return Ok(());
+                            }
+                        };
+                        // The original INVITE identifies the node that owns the
+                        // answered leg, even after a newer registration wins routing.
+                        let home = hop_uri.host_with_port.to_string();
+                        let peers: Vec<_> = server
+                            .cluster_peers
+                            .iter()
+                            .filter(|peer| home == format!("{}:{}", peer.addr, peer.sip_port))
+                            .cloned()
+                            .collect();
                         let ami_path = self
                             .inner
                             .server
@@ -2350,17 +2400,45 @@ impl CallModule {
                                 client,
                                 &peers,
                                 &ami_path,
-                                &root,
+                                &hop.root_session_id,
                                 &target_user,
                                 self_ident.as_deref(),
+                                Some(&hop.call_id),
                             )
                             .await;
                         if peer_dialog.is_none() {
                             warn!(
-                                %old_session_id,
-                                "Cross-node target dialog query failed — stamping the hop dialog (cascade fallback still completes the transfer)"
+                                session_id = %old_session_id,
+                                call_id = %replaces_call_id,
+                                "Transfer target dialog unavailable on its registration node"
                             );
+                            tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await?;
+                            return Ok(());
                         }
+                        let on_consultation_home = |location: &Location| {
+                            location.home_proxy.as_ref().is_some_and(|node| {
+                                node.addr == hop_uri.host_with_port
+                            })
+                        };
+                        let mut target = dialplan
+                            .get_all_targets()
+                            .into_iter()
+                            .flatten()
+                            .find(|location| on_consultation_home(location))
+                            .cloned();
+                        if target.is_none() {
+                            target = server
+                                .locator
+                                .lookup(&hop_uri)
+                                .await?
+                                .into_iter()
+                                .find(on_consultation_home);
+                        }
+                        let Some(target) = target else {
+                            tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await?;
+                            return Ok(());
+                        };
+                        dialplan.flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![target]));
                         peer_dialog
                     } else {
                         None
@@ -2370,17 +2448,6 @@ impl CallModule {
                             target_dialog_info,
                             peer_dialog,
                         );
-                    if target_dialog_info
-                        .as_ref()
-                        .is_some_and(|info| info.remote_registered)
-                    {
-                        // Still a hop after resolution — log so production
-                        // traces can tell the degraded stamp apart.
-                        info!(
-                            %old_session_id,
-                            "Transfer target stamp degraded to the cluster hop dialog"
-                        );
-                    }
                     let replaces_header = match &target_dialog_info {
                         // Target-side dialog resolved (locally or cross-node):
                         // to-tag = the dialog's To tag (the target's tag = our
@@ -2404,7 +2471,8 @@ impl CallModule {
                     }
                     dialplan.extensions.insert(ReferReplacesContext {
                         header: replaces_header,
-                        delegate_via_home_proxy: false,
+                        consult_owner: None,
+                        target_via_registration_home,
                     });
                     // Session-id inheritance: the replacement session adopts
                     // the ROOT session id of the logical call (the original
@@ -2422,24 +2490,29 @@ impl CallModule {
                                 .and_then(|meta| meta.session_id.clone())
                         })
                         .unwrap_or_else(|| old_session_id.clone());
-                    dialplan.session_id = Some(root_session_id.clone());
-                    // CDR suppression: the replaced (consult) session must
-                    // not produce its own CDR row — the replacement session
-                    // carries the transferred call's record under the root
-                    // session id.
-                    if replaced_confirmed
-                        && let Err(error) = old_handle
-                            .send_command_async(crate::call::domain::CallCommand::SuppressCallRecord)
-                            .await
-                    {
-                        warn!(%old_session_id, %error, "Failed to mark the replaced session CDR-suppressed");
+                    // A pending takeover must have its own runtime identity.
+                    // Only a confirmed recording handoff can assume the old CDR.
+                    if replaced_confirmed && conf_id.is_none() {
+                        if dialplan.session_id.as_deref() == Some(old_session_id.as_str())
+                            || dialplan.session_id.as_deref() == Some(root_session_id.as_str())
+                        {
+                            dialplan.session_id = Some(crate::call::session_id::generate());
+                        }
+                    } else {
+                        dialplan.session_id = Some(root_session_id.clone());
                     }
-
                     let server = self.inner.server.clone();
                     let max_forwards = Self::extract_max_forwards(tx);
                     if max_forwards == 0 {
                         tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
                         return Ok(());
+                    }
+                    if replaced_confirmed && conf_id.is_none() {
+                        dialplan.extensions.insert(crate::call::ReplacedSessionRecord {
+                            handle: old_handle.clone(),
+                            recordings: Default::default(),
+                            root_session_id: root_session_id.clone(),
+                        });
                     }
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
@@ -2453,7 +2526,7 @@ impl CallModule {
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
-                    if !new_session_id.is_empty() {
+                    if result.is_ok() && (conf_id.is_some() || !replaced_confirmed) && !new_session_id.is_empty() {
                         let reg = registry.clone();
                         // The release wait key: the conference seat
                         // replacement tracks the new session's own call-id;
@@ -2465,6 +2538,7 @@ impl CallModule {
                         } else {
                             new_session_id.clone()
                         };
+                        let replacement_instance = reg.get_handle(&wait_sid).map(|handle| handle.instance_token());
                         let sid = new_session_id.clone();
                         crate::utils::spawn(async move {
                             let fired = reg
@@ -2474,7 +2548,8 @@ impl CallModule {
                                     std::time::Duration::from_secs(30),
                                 )
                                 .await;
-                            if fired {
+                            if fired && replacement_instance.is_some() && reg.get_handle(&wait_sid)
+                                .is_some_and(|handle| Some(handle.instance_token()) == replacement_instance) {
                                 info!(session_id = %wait_sid, "New Replaces call answered; executing conference seat replacement");
 
                                 if let Some(ref conf) = conf_id {
@@ -2896,12 +2971,266 @@ impl CallModule {
         Ok(true)
     }
 
+    /// Relay a re-INVITE from a locally registered replacement WS flow to
+    /// the original dialog's SIP listener. Older owners already implement this
+    /// listener; no AMI capability or shared-schema upgrade is required.
+    async fn try_relay_ws_reinvite_to_owner(
+        &self,
+        tx: &mut Transaction,
+        dialog_id: &DialogId,
+    ) -> Result<bool> {
+        use rsipstack::sip::{Header, Method, SipMessage, StatusCode, ToTypedHeader};
+        use rsipstack::transaction::TransactionTimer;
+        use rsipstack::transaction::key::TransactionKey;
+        use rsipstack::transaction::transaction::TransactionEvent;
+        use rsipstack::transport::SipAddr;
+
+        let server = &self.inner.server;
+        if tx.original.method != Method::Invite
+            || dialog_id.local_tag.is_empty()
+            || dialog_id.remote_tag.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(source) = tx.connection.as_ref().and_then(|c| c.get_remote_addr()) else {
+            return Ok(false);
+        };
+        // Only an endpoint's registered WS flow can initiate a relay. A peer
+        // hop never relays again, including stale-directory and delayed events.
+        if !matches!(source.r#type, Some(Transport::Ws | Transport::Wss)) {
+            return Ok(false);
+        }
+        // A selected outbound line can replace From with its caller ID.
+        // Contact retains the registered binding identity across reconnects.
+        let contact = tx.original.contact_header()?.typed()?.uri;
+        let locations = match server.locator.lookup(&contact).await {
+            Ok(locations) => locations,
+            Err(_) => {
+                tx.reply(StatusCode::ServiceUnavailable).await?;
+                return Ok(true);
+            }
+        };
+        let registered = locations.into_iter().any(|loc| {
+            loc.aor == contact
+                && loc.registered_aor.is_some()
+                && loc.destination.as_ref() == Some(&source)
+                && loc.home_proxy.as_ref().is_some_and(|home| {
+                    server
+                        .cluster_self_addr
+                        .as_ref()
+                        .is_some_and(|local| local.addr == home.addr)
+                })
+        });
+        if !registered {
+            return Ok(false);
+        }
+        let owner = match server
+            .session_registry
+            .lookup_owner_checked(&dialog_id.call_id)
+            .await
+        {
+            Ok(owner) => owner,
+            Err(_) => {
+                tx.reply(StatusCode::ServiceUnavailable).await?;
+                return Ok(true);
+            }
+        };
+        // Both current and older owners publish this existing dialog alias
+        // before dialing. A missing alias is an explicit failure; never guess
+        // an owner from a phone-supplied Request-URI or fan out to peers.
+        let Some(owner) = owner else {
+            tx.reply(StatusCode::CallTransactionDoesNotExist).await?;
+            return Ok(true);
+        };
+        let destination = server.cluster_peers.iter().find_map(|peer| {
+            let addr = rsipstack::sip::HostWithPort::try_from(
+                format!("{}:{}", peer.addr, peer.sip_port).as_str(),
+            )
+            .ok()?;
+            let destination = SipAddr {
+                r#type: Some(Transport::Udp),
+                addr,
+            };
+            if server
+                .cluster_self_addr
+                .as_ref()
+                .is_some_and(|local| local.addr == destination.addr)
+            {
+                return None;
+            }
+            let matches_owner =
+                owner == destination.to_string() || owner == destination.addr.to_string();
+            matches_owner.then_some(destination)
+        });
+        let Some(destination) = destination else {
+            tx.reply(StatusCode::ServiceUnavailable).await?;
+            return Ok(true);
+        };
+        if Self::extract_max_forwards(tx) <= 1 {
+            tx.reply(StatusCode::TooManyHops).await?;
+            return Ok(true);
+        }
+        let Some(home) = server.cluster_self_addr.as_ref() else {
+            return Ok(false);
+        };
+        let (connection, _) = server
+            .endpoint
+            .inner
+            .transport_layer
+            .lookup(&destination, None)
+            .await?;
+        let mut request = tx.original.clone();
+        request
+            .headers
+            .retain(|h| !matches!(h, Header::MaxForwards(_)));
+        request.headers.push(Header::MaxForwards(
+            (Self::extract_max_forwards(tx) - 1).into(),
+        ));
+        let via = server.endpoint.inner.get_via(Some(home.clone()), None)?;
+        request.headers = std::iter::once(Header::from(via))
+            .chain(request.headers.iter().cloned())
+            .collect::<Vec<_>>()
+            .into();
+        let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
+        let mut relay = Transaction::new_client(
+            key,
+            request,
+            server.endpoint.inner.clone(),
+            Some(connection.clone()),
+        );
+        relay.destination = Some(destination.clone());
+        relay.send().await?;
+        info!(call_id = %dialog_id.call_id, leg_id = %dialog_id, owner = %destination,
+            "Relaying re-INVITE from replacement WebSocket flow");
+        // Keep both transactions until the endpoint's matching ACK. This
+        // forwards retransmitted 2xx responses without manufacturing an ACK,
+        // and preserves the original dialog's CSeq and negotiation ownership.
+        let outcome = async {
+            let deadline = tokio::time::sleep(server.endpoint.inner.option.t1x64);
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = deadline.as_mut() => return Err(anyhow!("dialog owner re-INVITE or ACK timed out")),
+                    event = relay.tu_receiver.recv() => {
+                        // rsipstack 0.6 receive() automatically ACKs final
+                        // INVITE responses. Consume the registered TU events
+                        // directly: only the originating phone owns this ACK.
+                        let mut response = match event {
+                            Some(TransactionEvent::Received(SipMessage::Response(response), _)) => response,
+                            Some(TransactionEvent::Timer(TransactionTimer::TimerA(key, duration))) => {
+                                if relay.timer_a.is_none() { continue; }
+                                connection.send(SipMessage::Request(relay.original.clone()), Some(&destination)).await?;
+                                let next = (duration * 2).min(server.endpoint.inner.option.t1x64);
+                                relay.timer_a = Some(server.endpoint.inner.timers.timeout(next,
+                                    TransactionTimer::TimerA(key, next)));
+                                continue;
+                            }
+                            Some(TransactionEvent::Timer(TransactionTimer::TimerB(_))) => {
+                                if relay.timer_b.is_none() { continue; }
+                                return Err(anyhow!("dialog owner re-INVITE timed out"));
+                            }
+                            None | Some(TransactionEvent::Terminate(_)) => return Ok::<_, anyhow::Error>(()),
+                            _ => continue,
+                        };
+                        if let Some(timer) = relay.timer_a.take() { server.endpoint.inner.timers.cancel(timer); }
+                        if let Some(timer) = relay.timer_b.take() { server.endpoint.inner.timers.cancel(timer); }
+                        let had_final = relay.last_response.as_ref().is_some_and(|last| last.status_code.code() >= 200);
+                        if had_final && response.status_code.code() < 200 { continue; }
+                        if !had_final && response.status_code.code() >= 200 {
+                            deadline.as_mut().reset(tokio::time::Instant::now() + server.endpoint.inner.option.t1x64);
+                        }
+                        relay.last_response = Some(response.clone());
+                        let rejected = response.status_code.code() >= 300;
+                        if rejected {
+                            // Non-2xx ACK is hop-by-hop, unlike the phone's
+                            // end-to-end 2xx ACK. The stored ACK also absorbs
+                            // retransmitted rejection responses after Drop.
+                            relay.state = rsipstack::transaction::TransactionState::Completed;
+                            relay.send_ack(Some(connection.clone())).await?;
+                        }
+                        let vias: Vec<_> = tx.original.headers.iter()
+                            .filter(|h| matches!(h, Header::Via(_))).cloned().collect();
+                        response.headers = vias.into_iter().chain(response.headers.iter()
+                            .filter(|h| !matches!(h, Header::Via(_))).cloned()).collect::<Vec<_>>().into();
+                        if tx.last_response.as_ref().is_some_and(|last| last.status_code.code() >= 200) {
+                            // 0.6 does not permit Completed -> Completed.
+                            // A retransmitted final response rides the same WS
+                            // flow without transitioning the server again.
+                            tx.connection.as_ref().ok_or_else(|| anyhow!("missing registered WS flow"))?
+                                .send(SipMessage::Response(response), tx.destination.as_ref()).await?;
+                        } else {
+                            tx.respond(response).await?;
+                        }
+                        if rejected { return Ok(()); }
+                    }
+                    message = tx.receive() => {
+                        let Some(SipMessage::Request(mut ack)) = message else { return Ok(()); };
+                        if ack.method != Method::Ack { continue; }
+                        let via = server.endpoint.inner.get_via(Some(home.clone()), None)?;
+                        let forwards = ack.max_forwards_header().ok()
+                            .and_then(|h| h.value().parse::<u32>().ok()).unwrap_or(70);
+                        ack.headers.retain(|h| !matches!(h, Header::MaxForwards(_)));
+                        ack.headers.push(Header::MaxForwards(forwards.saturating_sub(1).into()));
+                        ack.headers = std::iter::once(Header::from(via))
+                            .chain(ack.headers.iter().cloned()).collect::<Vec<_>>().into();
+                        connection.send(SipMessage::Request(ack.clone()), Some(&destination)).await?;
+                        relay.last_ack = Some(ack);
+                        let cancel = server.cancel_token.clone();
+                        let retention = server.endpoint.inner.option.t1x64;
+                        // The phone already ACKed: keep only this transaction
+                        // alive to replay that exact ACK if its UDP hop was
+                        // lost. Do not hold the call actor or resolve the old
+                        // Contact again during this bounded protocol window.
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                _ = cancel.cancelled() => {},
+                                _ = tokio::time::timeout(retention, async {
+                                    while let Some(event) = relay.tu_receiver.recv().await {
+                                        if let TransactionEvent::Received(SipMessage::Response(response), _) = event
+                                            && (200..300).contains(&response.status_code.code())
+                                            && let Some(ack) = relay.last_ack.as_ref()
+                                        {
+                                            let _ = connection.send(SipMessage::Request(ack.clone()), Some(&destination)).await;
+                                        }
+                                    }
+                                }) => {},
+                            }
+                            // 0.6's finished-transaction ACK routing re-resolves
+                            // Contact. Our fixed-owner window above owns this
+                            // replay; do not leave an incorrectly routed cache.
+                            relay.last_ack.take();
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+        }.await;
+        match outcome {
+            Ok(()) => {}
+            Err(error) => {
+                warn!(call_id = %dialog_id.call_id, leg_id = %dialog_id, %error,
+                    "Replacement WebSocket re-INVITE relay failed");
+                if tx
+                    .last_response
+                    .as_ref()
+                    .is_none_or(|r| r.status_code.code() < 200)
+                {
+                    tx.reply(StatusCode::from(504_u16)).await?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
+                if self.try_relay_ws_reinvite_to_owner(tx, &dialog_id).await? {
+                    return Ok(());
+                }
                 if self.try_deliver_peer_bye_to_local_ws(tx, &dialog_id).await? {
                     return Ok(());
                 }

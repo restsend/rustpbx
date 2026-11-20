@@ -113,6 +113,7 @@ pub async fn query_transfer_target_dialog_on_peers(
     root_session_id: &str,
     target_user: &str,
     self_ident: Option<&str>,
+    consult_hop_call_id: Option<&str>,
 ) -> Option<crate::call::domain::TransferTargetDialog> {
     // `self_ident` is this node's registry id (`addr:sip_port`); a peer entry
     // pointing back at THIS node would answer from the local terminal
@@ -131,6 +132,7 @@ pub async fn query_transfer_target_dialog_on_peers(
     let body = serde_json::json!({
         "root_session_id": root_session_id,
         "target_user": target_user,
+        "consult_hop_call_id": consult_hop_call_id,
     });
     for peer in peers {
         let url = format!(
@@ -147,7 +149,10 @@ pub async fn query_transfer_target_dialog_on_peers(
         else {
             continue;
         };
-        if !status.is_success() {
+        if !status.is_success()
+            || (consult_hop_call_id.is_some()
+                && value.get("target_facing_replaces").and_then(|v| v.as_bool()) != Some(true))
+        {
             continue;
         }
         let dialog = serde_json::from_value::<crate::call::domain::TransferTargetDialog>(
@@ -730,10 +735,17 @@ mod tests {
             "",
             "root-1",
             "1004",
-            None
+            None,
+            None,
         )
         .await;
         assert_eq!(got, Some(real));
+        let legacy = spawn_target_query_peer(PeerAnswer::Dialog(
+            target_dialog("legacy@h", "PL", "PR", false, "root-1"),
+        )).await;
+        assert_eq!(query_transfer_target_dialog_on_peers(
+            &client, &[legacy], "", "root-1", "1004", None, Some("consult-hop@h"),
+        ).await, None, "a legacy node must never receive the target-facing replacement INVITE");
 
         // Self-ident filtering: a peer entry pointing back at THIS node is
         // skipped — self-answers from the local terminal handler are poison
@@ -745,6 +757,7 @@ mod tests {
             "root-1",
             "1004",
             Some("10.0.0.7:5060"),
+            None,
         )
         .await;
         assert_eq!(got, None, "self peer must be skipped without any HTTP");
@@ -765,10 +778,11 @@ mod tests {
                 "/ami",
                 "root-1",
                 "1004",
-                None
+                None,
+                None,
             )
             .await,
-            None
+            None,
         );
         // Callee-fallback (non endpoint-matched) answer: poison — None.
         let fallback = spawn_target_query_peer(PeerAnswer::Dialog(fallback_dialog("root-1"))).await;
@@ -779,10 +793,11 @@ mod tests {
                 "",
                 "root-1",
                 "1004",
-                None
+                None,
+                None,
             )
             .await,
-            None
+            None,
         );
         // 404 (no local dialog): None.
         let missing = spawn_target_query_peer(PeerAnswer::NotFound).await;
@@ -793,10 +808,11 @@ mod tests {
                 "/ami",
                 "root-1",
                 "1004",
-                None
+                None,
+                None,
             )
             .await,
-            None
+            None,
         );
         // No peers: None without any HTTP.
         assert_eq!(
@@ -806,10 +822,11 @@ mod tests {
                 "/ami",
                 "root-1",
                 "1004",
-                None
+                None,
+                None,
             )
             .await,
-            None
+            None,
         );
     }
 

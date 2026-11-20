@@ -70,6 +70,25 @@ pub async fn match_invite(
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
 ) -> Result<RouteResult> {
+    match_invite_for_call(
+        trunks, routes, resource_lookup, option, origin, source_trunk,
+        routing_state, direction, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn match_invite_for_call(
+    trunks: Option<&HashMap<String, TrunkConfig>>,
+    routes: Option<&Vec<RouteRule>>,
+    resource_lookup: Option<&dyn RouteResourceLookup>,
+    option: InviteOption,
+    origin: &rsipstack::sip::Request,
+    source_trunk: Option<&SourceTrunk>,
+    routing_state: Arc<RoutingState>,
+    direction: &DialDirection,
+    ingress_already_admitted: bool,
+) -> Result<RouteResult> {
     match_invite_impl(
         trunks,
         routes,
@@ -80,6 +99,7 @@ pub async fn match_invite(
         routing_state,
         direction,
         MatchMode::Execute,
+        ingress_already_admitted,
         None,
     )
     .await
@@ -107,6 +127,7 @@ pub async fn match_invite_with_trace(
         routing_state,
         direction,
         MatchMode::Execute,
+        false,
         Some(trace),
     )
     .await
@@ -133,6 +154,7 @@ pub async fn inspect_invite(
         routing_state,
         direction,
         MatchMode::Inspect,
+        false,
         None,
     )
     .await
@@ -149,6 +171,7 @@ async fn match_invite_impl(
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
     mode: MatchMode,
+    ingress_already_admitted: bool,
     mut trace: Option<&mut RouteTrace>,
 ) -> Result<RouteResult> {
     let mut option = option;
@@ -166,7 +189,8 @@ async fn match_invite_impl(
     // Enforce the `max_cps` / `max_concurrent` columns of the SIP trunk the
     // INVITE arrived on, before any routing decision is made. A reject here
     // returns 503 for either CPS or concurrent-call capacity.
-    if let Some(source) = source_trunk
+    if !ingress_already_admitted
+        && let Some(source) = source_trunk
         && let Some(trunk) = trunks.and_then(|trunks| trunks.get(&source.name))
     {
         if let Some(limiter) = &trunk.cps_limiter {
