@@ -369,6 +369,7 @@ impl SipSession {
                         && accepted_cap.matches_relay_capability(target_cap)
                 })?;
                 let mut cap = source_cap.clone();
+                cap.fmtp = accepted_cap.fmtp.clone();
                 if accepted_cap.rtx_payload_type != target_cap.rtx_payload_type
                     || accepted_cap.rtx_payload_type.is_none()
                 {

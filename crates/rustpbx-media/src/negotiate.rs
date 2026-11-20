@@ -856,6 +856,7 @@ impl MediaNegotiator {
                 let offered_codec = NegotiatedVideoCodec::from(offered_cap.clone());
                 let matched = offered_codec.relay_peer(peer, true)?;
                 let mut cap = offered_cap.clone();
+                cap.fmtp = matched.fmtp.clone();
                 if matched.rtx_payload_type.is_none() {
                     cap.rtx_payload_type = None;
                 }
@@ -930,6 +931,11 @@ impl MediaNegotiator {
                 };
                 used[idx] = true;
                 let mut cap = offered_cap.clone();
+                // Adopt the peer answer's negotiated fmtp (e.g. H.264 level and
+                // sprop-parameter-sets per RFC 6184 §8.2.2, including `None`
+                // when the peer omitted fmtp) rather than echoing the caller's
+                // own offer parameters back as the callee's stream.
+                cap.fmtp = accepted_cap.fmtp.clone();
                 if !accepted_has_rtx {
                     cap.rtx_payload_type = None;
                 }
@@ -987,19 +993,23 @@ impl MediaNegotiator {
         caps: &[rustrtc::config::VideoCapability],
     ) -> anyhow::Result<String> {
         let mut desc = SessionDescription::parse(sdp_type, sdp)?;
-        // The session's own mux posture, captured before the mutable video
-        // borrow: BUNDLE grouping, or any audio m-line with `a=rtcp-mux`.
-        let session_mux_posture = desc.session.attributes.iter().any(|a| {
-            a.key == "group" && a.value.as_deref().is_some_and(|v| v.starts_with("BUNDLE"))
-        }) || desc.media_sections.iter().any(|section| {
-            section.kind == rustrtc::MediaKind::Audio
-                && section.attributes.iter().any(|a| a.key == "rtcp-mux")
-        });
+        let bundle_mids: HashSet<String> = desc
+            .session
+            .attributes
+            .iter()
+            .filter(|a| a.key == "group")
+            .filter_map(|a| a.value.as_deref())
+            .filter(|v| v.starts_with("BUNDLE"))
+            .flat_map(|v| v.split_whitespace().skip(1))
+            .map(str::to_string)
+            .collect();
         if let Some(video_section) = desc
             .media_sections
             .iter_mut()
             .find(|section| section.kind == MediaKind::Video)
         {
+            let video_in_bundle =
+                !video_section.mid.is_empty() && bundle_mids.contains(&video_section.mid);
             let ordered_caps = caps.to_vec();
 
             if !ordered_caps.iter().any(|cap| cap.rtx_payload_type.is_some()) {
@@ -1007,8 +1017,34 @@ impl MediaNegotiator {
             }
 
             if ordered_caps.is_empty() {
+                let rejected_mid = video_section.mid.clone();
                 video_section.port = 0;
                 video_section.direction = rustrtc::Direction::Inactive;
+                video_section
+                    .attributes
+                    .retain(|attr| attr.key != "bundle-only");
+                if !rejected_mid.is_empty() {
+                    for attr in &mut desc.session.attributes {
+                        if attr.key == "group"
+                            && let Some(val) = attr.value.as_deref()
+                            && val.starts_with("BUNDLE")
+                        {
+                            let kept: Vec<&str> = val
+                                .split_whitespace()
+                                .skip(1)
+                                .filter(|token| *token != rejected_mid)
+                                .collect();
+                            attr.value = if kept.is_empty() {
+                                None
+                            } else {
+                                Some(format!("BUNDLE {}", kept.join(" ")))
+                            };
+                        }
+                    }
+                    desc.session
+                        .attributes
+                        .retain(|attr| !(attr.key == "group" && attr.value.is_none()));
+                }
                 return Ok(desc.to_sdp_string());
             }
 
@@ -1029,11 +1065,25 @@ impl MediaNegotiator {
             // mux posture says BUNDLE/mux, restore the video m-line to an
             // answerable state: a real port placeholder and `a=rtcp-mux`.
             // Plain-RTP sessions without mux are left untouched.
-            if session_mux_posture {
-                if video_section.port == 0 {
-                    // SDP placeholder port for ICE-managed media (RFC 3264
-                    // §6; the real transport comes from ICE candidates).
-                    video_section.port = 9;
+            if video_in_bundle {
+                let is_bundle_only_offer = sdp_type == SdpType::Offer
+                    && video_section.port == 0
+                    && video_section
+                        .attributes
+                        .iter()
+                        .any(|attr| attr.key == "bundle-only");
+                if !is_bundle_only_offer {
+                    if video_section.port == 0 {
+                        // SDP placeholder port for ICE-managed media (RFC 3264
+                        // §6; the real transport comes from ICE candidates).
+                        video_section.port = 9;
+                    }
+                    if video_section.port != 0 {
+                        // RFC 9143 §7.3.3: `a=bundle-only` is only valid with port 0.
+                        video_section
+                            .attributes
+                            .retain(|attr| attr.key != "bundle-only");
+                    }
                 }
                 if !video_section
                     .attributes
@@ -1865,6 +1915,125 @@ a=fmtp:96 profile-level-id=42801F; packetization-mode=0\r\n";
         let accepted = MediaNegotiator::accepted_video_capabilities(&offered, &constrained, None);
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].payload_type, 100);
+    }
+
+    #[test]
+    fn accepted_h264_adopts_peer_answer_fmtp_level_and_sprop() {
+        let offered = vec![video_cap(
+            102,
+            "H264",
+            Some("profile-level-id=42e01f;packetization-mode=1;sprop-parameter-sets=CALLER_SPS,CALLER_PPS"),
+            &[],
+        )];
+        let callee_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 102\r\n\
+a=sendrecv\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 profile-level-id=42e01e;packetization-mode=1;sprop-parameter-sets=CALLEE_SPS,CALLEE_PPS\r\n";
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, callee_answer, None);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].payload_type, 102);
+        assert_eq!(
+            accepted[0].fmtp.as_deref(),
+            Some("profile-level-id=42e01e;packetization-mode=1;sprop-parameter-sets=CALLEE_SPS,CALLEE_PPS")
+        );
+
+        // Callee omitting fmtp (SIP H.264 default: Baseline 4200xx, mode=0) must clear caller's fmtp.
+        let offered_default = vec![video_cap(
+            102,
+            "H264",
+            Some("profile-level-id=42001f;sprop-parameter-sets=CALLER_SPS,CALLER_PPS"),
+            &[],
+        )];
+        let callee_no_fmtp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 102\r\n\
+a=sendrecv\r\n\
+a=rtpmap:102 H264/90000\r\n";
+        let accepted_default =
+            MediaNegotiator::accepted_video_capabilities(&offered_default, callee_no_fmtp, None);
+        assert_eq!(accepted_default.len(), 1);
+        assert_eq!(accepted_default[0].fmtp, None);
+
+        // Existing-video re-INVITE intersection also adopts peer's negotiated fmtp.
+        let peer_video = MediaNegotiator::extract_video_codecs(callee_answer);
+        let intersected = MediaNegotiator::intersect_video_capabilities(&offered, &peer_video);
+        assert_eq!(intersected.len(), 1);
+        assert_eq!(
+            intersected[0].fmtp.as_deref(),
+            Some("profile-level-id=42e01e;packetization-mode=1;sprop-parameter-sets=CALLEE_SPS,CALLEE_PPS")
+        );
+    }
+
+    #[test]
+    fn rewrite_video_capabilities_keeps_bundle_signaling_consistent() {
+        let bundle_only_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
+m=video 0 UDP/TLS/RTP/SAVPF 96\r\n\
+a=mid:1\r\n\
+a=bundle-only\r\n\
+a=rtpmap:96 H264/90000\r\n";
+        let caps = [video_cap(96, "H264", Some("profile-level-id=42e01f;packetization-mode=1"), &[])];
+        let active = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer,
+            bundle_only_sdp,
+            &caps,
+        )
+        .unwrap();
+        assert!(active.contains("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"));
+        assert!(!active.contains("a=bundle-only"));
+        assert!(active.contains("a=group:BUNDLE 0 1\r\n"));
+
+        // An Offer with `m=video 0` + `a=bundle-only` keeps both (RFC 9143 §7.2).
+        let offer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            bundle_only_sdp,
+            &caps,
+        )
+        .unwrap();
+        assert!(offer.contains("m=video 0 UDP/TLS/RTP/SAVPF 96\r\n"));
+        assert!(offer.contains("a=bundle-only\r\n"));
+
+        // Unbundled SIP video must not inherit `a=rtcp-mux` from audio.
+        let unbundled_sip = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 5000 RTP/AVP 0\r\n\
+a=rtcp-mux\r\n\
+m=video 5002 RTP/AVP 96\r\n\
+a=rtcp:5003\r\n\
+a=rtpmap:96 H264/90000\r\n";
+        let unbundled = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer,
+            unbundled_sip,
+            &caps,
+        )
+        .unwrap();
+        let video_part = unbundled.split("m=video ").nth(1).unwrap();
+        assert!(!video_part.contains("a=rtcp-mux"));
+
+        let rejected = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer,
+            bundle_only_sdp,
+            &[],
+        )
+        .unwrap();
+        assert!(rejected.contains("m=video 0 UDP/TLS/RTP/SAVPF"));
+        assert!(!rejected.contains("a=bundle-only"));
+        assert!(rejected.contains("a=group:BUNDLE 0\r\n"));
+        assert!(!rejected.contains("a=group:BUNDLE 0 1"));
     }
 
     #[test]
