@@ -127,7 +127,7 @@ chrono-tz = "0.10.4"
 audio-codec = "0.4.14"
 rsipstack = "0.8.5"
 # Published fork keeps vendor APIs and adds correlated, rate-limited boundary logs.
-rustrtc = "0.6.5"
+rustrtc = "0.6.7"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
