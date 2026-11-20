@@ -16,6 +16,7 @@ struct RwiWebhookSender {
     client: reqwest::Client,
     retries: u32,
     track_queue_latency: bool,
+    require_event_ack: bool,
 }
 
 impl RwiWebhookSender {
@@ -29,6 +30,7 @@ impl RwiWebhookSender {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             retries: config.retries.unwrap_or(0),
             track_queue_latency: config.track_queue_latency.unwrap_or(false),
+            require_event_ack: config.require_event_ack.unwrap_or(false),
         }
     }
 
@@ -271,10 +273,12 @@ async fn run_rwi_webhook_handler(
             continue;
         }
 
-        let wire_event_type = entry
+        // The confirmed event name and ACK requirement are one receiver contract.
+        let confirmed = entry
             .delivery
             .as_ref()
-            .map_or(event_type, |delivery| delivery.wire_event_type);
+            .filter(|_| sender.require_event_ack);
+        let wire_event_type = confirmed.map_or(event_type, |delivery| delivery.wire_event_type);
         let payload = json!({
             "rwi": "1.0",
             // Idempotency key: re-sent unchanged on every retry attempt so
@@ -297,7 +301,7 @@ async fn run_rwi_webhook_handler(
                     .status_code
                     .map(|c| (200..300).contains(&c))
                     .unwrap_or(false);
-                let success = http_success && (entry.delivery.is_none() || record.acknowledged);
+                let success = http_success && (confirmed.is_none() || record.acknowledged);
                 if let Some(delivery) = &entry.delivery {
                     delivery.complete(success);
                 }
@@ -338,7 +342,7 @@ async fn run_rwi_webhook_handler(
                         event_type,
                         call_id,
                         status_code = record.status_code.unwrap_or(0),
-                        ack_required = entry.delivery.is_some(),
+                        ack_required = confirmed.is_some(),
                         ack_matches = record.acknowledged,
                         latency_ms = record.latency_ms,
                         body = %record.body,
@@ -385,6 +389,7 @@ pub async fn send_test_event(
         timeout_ms: Some(5000),
         retries: Some(2),
         track_queue_latency: None,
+        require_event_ack: None,
     });
     let test_payload = json!({
         "rwi": "1.0",
@@ -454,6 +459,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_webhook_requires_matching_event_acknowledgement() {
+        check_durable_webhook(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_durable_webhook_keeps_legacy_wire_contract_by_default() {
+        check_durable_webhook(false).await;
+    }
+
+    async fn check_durable_webhook(require_ack: bool) {
         use axum::http::StatusCode;
 
         let (outgoing, mut incoming) = tokio::sync::mpsc::unbounded_channel();
@@ -461,7 +475,6 @@ mod tests {
             "/hook",
             axum::routing::post(
                 move |axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    outgoing.send(body["event_type"].clone()).unwrap();
                     let (status, acknowledgement) = match body["event_id"].as_str().unwrap() {
                         "plain-200" => (StatusCode::OK, None),
                         "mismatched" => (StatusCode::OK, Some("another-event")),
@@ -469,6 +482,7 @@ mod tests {
                         "accepted" => (StatusCode::OK, Some("accepted")),
                         id => panic!("unexpected event ID {id}"),
                     };
+                    outgoing.send(body).unwrap();
                     let mut headers = axum::http::HeaderMap::new();
                     if let Some(acknowledgement) = acknowledgement {
                         headers.insert("x-rwi-event-ack", acknowledgement.parse().unwrap());
@@ -481,33 +495,32 @@ mod tests {
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut gateway = crate::rwi::RwiGateway::new();
+        let mut config = format!(
+            "url = {url:?}\nevents = [\"agent_unregistered\"]\ntimeout_ms = 2000\n"
+        );
+        if require_ack {
+            config.push_str("require_event_ack = true\n");
+        }
         gateway.set_webhook_tx(start_rwi_webhook_handler(
-            LocatorWebhookConfig {
-                url,
-                events: vec!["call_ringing".into()],
-                headers: None,
-                timeout_ms: Some(2000),
-                retries: None,
-                track_queue_latency: None,
-            },
+            toml::from_str(&config).unwrap(),
             WEBHOOK_CHANNEL_SIZE,
         ));
 
         for (event_id, accepted) in [
-            ("plain-200", false),
-            ("mismatched", false),
+            ("plain-200", !require_ack),
+            ("mismatched", !require_ack),
             ("failed", false),
             ("accepted", true),
         ] {
             let receipt = gateway
                 .enqueue_confirmed_webhook(
                     crate::rwi::RwiEvent {
-                        event_type: "call_ringing",
-                        call_id: Some("call-ack".into()),
-                        payload: json!({"call_id": "call-ack"}),
+                        event_type: "agent_unregistered",
+                        call_id: None,
+                        payload: json!({"agent_id": "agent-test", "state_revision": 7}),
                     },
                     event_id.into(),
-                    "confirmed_call_ringing",
+                    "confirmed_agent_unregistered",
                     chrono::Utc::now(),
                 )
                 .unwrap();
@@ -519,7 +532,17 @@ mod tests {
                 accepted,
                 "unexpected receipt for {event_id}"
             );
-            assert_eq!(incoming.try_recv().unwrap(), "confirmed_call_ringing");
+            let delivered = incoming.try_recv().unwrap();
+            assert_eq!(delivered["event_id"], event_id);
+            assert_eq!(
+                delivered["event_type"],
+                if require_ack {
+                    "confirmed_agent_unregistered"
+                } else {
+                    "agent_unregistered"
+                }
+            );
+            assert!(incoming.try_recv().is_err());
         }
         server.abort();
     }
@@ -534,6 +557,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -587,6 +611,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         };
 
         restart_rwi_webhook_handler(&gateway, Some(mk_config(server_a.url())));
@@ -637,6 +662,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -696,6 +722,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -741,6 +768,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -847,6 +875,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
             track_queue_latency: None,
+            require_event_ack: None,
         });
 
         let payload = json!({"event_type": "test", "call_id": "c1"});
@@ -877,6 +906,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         });
 
         // 1800 bytes of '请' (3 bytes each): byte 1024 falls inside a char,
@@ -916,6 +946,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
             track_queue_latency: None,
+            require_event_ack: None,
         });
 
         let payload = json!({"event_type": "test"});
@@ -1006,6 +1037,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(3),
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1043,6 +1075,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(3),
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1078,6 +1111,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;

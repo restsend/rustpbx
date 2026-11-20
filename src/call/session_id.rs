@@ -40,6 +40,23 @@ use std::sync::RwLock;
 
 use rsipstack::sip::{Header, HeadersExt, Request};
 
+pub(crate) const CONSULT_PARENT_HEADER: &str = "X-CC-Consult-Parent";
+pub(crate) const CONSULT_SESSION_HEADER: &str = "X-CC-Consult-Session";
+
+/// Additive consultation identity for cluster delivery. Callers must first
+/// verify the source is a cluster peer with a declared child-leg intent.
+pub(crate) fn extract_peer_consultation_ids(request: &Request) -> Option<(String, String)> {
+    let get = |name: &str| {
+        request.headers.iter().find_map(|header| match header {
+            Header::Other(key, value) if key.eq_ignore_ascii_case(name) => normalize_custom(value),
+            _ => None,
+        })
+    };
+    let parent = get(CONSULT_PARENT_HEADER)?;
+    let child = get(CONSULT_SESSION_HEADER)?;
+    (child != parent).then_some((parent, child))
+}
+
 /// Outgoing `Session-ID` header wire format.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]

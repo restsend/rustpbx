@@ -256,6 +256,7 @@ async fn test_transcript_final_webhook_filtering() {
             timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
+            require_event_ack: None,
         },
         WEBHOOK_CHANNEL_SIZE,
     );

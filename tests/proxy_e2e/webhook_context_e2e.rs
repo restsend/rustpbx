@@ -81,6 +81,7 @@ async fn webhook_context_sip_headers_and_user_data_full_chain() {
                 timeout_ms: Some(5000),
                 retries: None,
                 track_queue_latency: None,
+                require_event_ack: None,
             },
             rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
         ));

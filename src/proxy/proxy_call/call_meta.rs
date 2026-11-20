@@ -33,6 +33,10 @@ pub struct CallMeta {
     /// network boundary via the RFC 7433 `User-to-User` header
     /// (`purpose=call-center`, see `call::uui`).
     pub root_session_id: Option<String>,
+    /// Verified business parent of a device-dialed consultation.
+    pub consult_parent_session_id: Option<String>,
+    /// Originator's consultation ID for business events on the receiving node.
+    pub consult_session_id: Option<String>,
     /// Declared dial intent inherited from the dispatching node when this
     /// session terminates a child-leg INVITE of another node's logical call
     /// (`"agent"` / `"consult"` / `"transfer"` — the UUI `leg=` parameter,

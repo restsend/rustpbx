@@ -2359,10 +2359,7 @@ pub(crate) async fn update_proxy_settings(
         if webhook.url.is_empty() {
             remove_rwi_webhook = true;
         } else {
-            match serialize_to_item(&webhook, "rwi_webhook") {
-                Ok(item) => rwi_webhook_value = Some(item),
-                Err(resp) => return resp,
-            }
+            rwi_webhook_value = Some(webhook);
         }
     }
 
@@ -2428,8 +2425,18 @@ pub(crate) async fn update_proxy_settings(
     }
 
     // Write rwi_webhook at root level (after table borrow is done)
-    if let Some(value) = rwi_webhook_value {
-        doc["rwi_webhook"] = value;
+    if let Some(mut webhook) = rwi_webhook_value {
+        // Older clients omit this setting when saving the same endpoint.
+        if webhook.require_event_ack.is_none()
+            && let Some(previous) = doc.get("rwi_webhook").and_then(Item::as_table_like)
+            && previous.get("url").and_then(Item::as_str).map(str::trim) == Some(webhook.url.trim())
+        {
+            webhook.require_event_ack = previous.get("require_event_ack").and_then(Item::as_bool);
+        }
+        match serialize_to_item(&webhook, "rwi_webhook") {
+            Ok(item) => doc["rwi_webhook"] = item,
+            Err(resp) => return resp,
+        }
         modified = true;
     }
     if remove_rwi_webhook {

@@ -657,7 +657,6 @@ impl SipSession {
                 return Err(anyhow!("Caller left before transfer completed"));
             }
             let remote_participant = LegId::from(format!("{}-{}", owner.session_id(), remote_leg));
-            manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
             // Bind the cross-session hold path: after the transferor
             // departs, each session's in-session bridged peer is the
             // retired consult dialog — hold/unhold for the room peer must
@@ -667,19 +666,26 @@ impl SipSession {
                 .cmd_tx
                 .clone()
                 .ok_or_else(|| anyhow!("Session command queue is closed"))?;
-            owner
-                .send_command(crate::call::domain::CallCommand::BindTransferPartner {
-                    cmd_tx,
-                    partner_session: self.id.to_string(),
-                    root_session_id: self.root_session_id_str(),
-                    their_leg: local_leg.clone(),
-                })
-                .map_err(|e| anyhow!("Failed to bind transfer partner: {e}"))?;
-            self.transfer_partner = Some(super::TransferPartnerBinding {
-                cmd_tx: owner.command_sender(),
-                partner_session: owner.session_id().to_string(),
-                their_leg: remote_leg.clone(),
+            let partner_commands = owner.command_sender();
+            // Do not commit teardown ownership if the peer cannot accept
+            // the binding. No fallible send remains after the commit.
+            let permit = partner_commands
+                .clone()
+                .try_reserve_owned()
+                .map_err(|e| anyhow!("Failed to reserve transfer partner command: {e}"))?;
+            manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+            permit.send(crate::call::domain::CallCommand::BindTransferPartner {
+                cmd_tx,
+                partner_session: self.id.to_string(),
+                root_session_id: self.root_session_id_str(),
+                direction: self.context.dialplan.direction,
+                their_leg: local_leg.clone(),
             });
+            self.bind_transfer_partner(
+                partner_commands,
+                owner.session_id().to_string(),
+                remote_leg.clone(),
+            );
             info!(
                 session_id = %self.id,
                 peer_session = %owner.session_id(),
@@ -695,28 +701,10 @@ impl SipSession {
         if let Err(error) = &result {
             // R2: roll back atomically — customer restored held with the
             // agent, both sessions stay up, no zombie room.
-            let manager = self.server.conference_server.manager_raw().clone();
-            let mut rolled_back_leg = None;
-            if self.conference.as_ref().is_some_and(|attachment| attachment.conference_id == room) {
-                let leg = self.conference.as_ref().unwrap().leg_id.clone();
-                if let Err(error) = self.leave_conference_leg(&leg).await {
-                    warn!(%error, %leg, "Failed to detach transfer room participant");
-                }
-                rolled_back_leg = Some(leg);
-            }
             if let Err(error) = manager.destroy_conference(&room).await {
-                warn!(%error, "Failed to destroy incomplete transfer room");
+                warn!(session_id = %self.id, %error, "Failed to destroy incomplete transfer room");
             }
-            if let Some(leg) = rolled_back_leg {
-                // Restore the held state media-only, then re-select the pair.
-                self.update_leg_state(&leg, crate::call::domain::LegState::Hold);
-                if let Err(error) = self.apply_hold_media(&leg, None).await {
-                    warn!(session_id = %self.id, %leg, %error, "Failed to restore hold media after transfer rollback");
-                }
-                self.update_media_path().await;
-                self.sync_rtp_timeout_pause();
-                info!(session_id = %self.id, %leg, room = %room.0, "Attended REFER rolled back; customer restored to held state");
-            }
+            self.rollback_attended_room(&room).await;
             warn!(session_id = %self.id, %error, "Transfer room fallback failed");
             return Err((500, error.to_string()));
         }

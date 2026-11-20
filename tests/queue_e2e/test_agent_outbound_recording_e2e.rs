@@ -92,7 +92,7 @@ struct OutboundHarness {
     _record_dir: tempfile::TempDir,
 }
 
-async fn start_harness(capture: &WebhookCapture) -> Result<OutboundHarness> {
+async fn start_harness(capture: &WebhookCapture, trunk_port: Option<u16>) -> Result<OutboundHarness> {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     rustpbx::addons::cc::migration::Migrator::up(&db, None).await.unwrap();
     let cc_registry = Arc::new(CcAgentRegistry::with_db(db));
@@ -124,6 +124,7 @@ async fn start_harness(capture: &WebhookCapture) -> Result<OutboundHarness> {
                 timeout_ms: Some(5000),
                 retries: None,
                 track_queue_latency: None,
+                require_event_ack: None,
             },
             rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
         ));
@@ -134,6 +135,27 @@ async fn start_harness(capture: &WebhookCapture) -> Result<OutboundHarness> {
     let mut proxy_config = proxy_config(&record_dir.path().to_string_lossy());
     proxy_config.ensure_user = Some(false);
     proxy_config.enable_latching = false;
+    if let Some(port) = trunk_port {
+        use rustpbx::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig};
+
+        proxy_config.media_proxy = rustpbx::config::MediaProxyMode::All;
+        proxy_config.routes = Some(vec![RouteRule {
+            name: "external-test-trunk".into(),
+            match_conditions: MatchConditions {
+                request_uri_user: Some("91.*".into()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                dest: Some(DestConfig::Single("external-test".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        proxy_config.trunks.insert("external-test".into(), TrunkConfig {
+            dest: format!("sip:127.0.0.1:{port}"),
+            ..Default::default()
+        });
+    }
 
     let users = vec![
         SipUser {
@@ -241,7 +263,7 @@ async fn test_agent_outbound_originate_records_agent_segment_impl() -> Result<()
     let _ = tracing_subscriber::fmt().try_init();
 
     let capture = WebhookCapture::start().await;
-    let harness = start_harness(&capture).await?;
+    let harness = start_harness(&capture, None).await?;
     let epoch = Instant::now();
 
     // ── Customer UA + media: answers the click-to-dial INVITE ─────────────
@@ -551,6 +573,140 @@ async fn test_agent_outbound_originate_records_agent_segment_impl() -> Result<()
         "segment_type must be agent: {segments:?}"
     );
 
+    harness.server.stop();
+    Ok(())
+}
+
+#[test]
+fn authenticated_external_consult_records_and_uploads_under_original_call() {
+    run_with_big_stack(external_consult_recording());
+}
+
+async fn external_consult_recording() -> Result<()> {
+    use rustpbx::addons::cc::agent::AgentStatus;
+    use rustpbx::callrecord::{CallRecordHook, recording_upload::RecordingUploadHook};
+    use rustpbx::config::RecordingType;
+
+    let capture = WebhookCapture::start().await;
+    let trunk_port = portpicker::pick_unused_port().ok_or_else(|| anyhow!("no free SIP port"))?;
+    let harness = start_harness(&capture, Some(trunk_port)).await?;
+    let mut desk = make_ua(harness.server.proxy_addr, AGENT);
+    desk.start().await?;
+    desk.register().await?;
+    let mut trunk = TestUa::new(TestUaConfig {
+        username: "trunk".into(),
+        password: "password".into(),
+        realm: "127.0.0.1".into(),
+        local_port: trunk_port,
+        proxy_addr: harness.server.proxy_addr,
+        webrtc: false,
+    });
+    trunk.start().await?;
+    let desk_rtp = UdpSocket::bind("127.0.0.1:0").await?;
+    let trunk_rtp = UdpSocket::bind("127.0.0.1:0").await?;
+    let desk_sdp = crate::common::test_ua::create_test_sdp(
+        "127.0.0.1", desk_rtp.local_addr()?.port(), false,
+    );
+    let answer_trunk = || async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                for event in trunk.process_dialog_events().await? {
+                    if let TestUaEvent::IncomingCall(dialog, Some(offer)) = event {
+                        let peer = extract_media_endpoint(&offer)
+                            .ok_or_else(|| anyhow!("missing anchored RTP endpoint"))?;
+                        let answer = create_test_sdp_answer(
+                            &offer, "127.0.0.1", trunk_rtp.local_addr()?.port(),
+                        );
+                        trunk.answer_call(&dialog, Some(answer)).await?;
+                        return Ok::<_, anyhow::Error>((dialog, peer));
+                    }
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.map_err(|_| anyhow!("external trunk did not receive INVITE"))?
+    };
+
+    let (parent, _) = tokio::try_join!(
+        desk.make_call("919001", Some(desk_sdp.clone())), answer_trunk(),
+    )?;
+    let parent_busy = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(agent) = harness.cc_registry.get_agent(AGENT).await
+                && let AgentStatus::Busy { call_id, .. } = agent.status
+            {
+                assert_eq!(agent.current_calls, 1);
+                return call_id;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await?;
+    let held_sdp = desk_sdp.replace("a=sendrecv", "a=inactive");
+    assert!(held_sdp.contains("a=inactive"), "offer must put the original call on hold");
+    desk.send_reinvite(&parent, Some(held_sdp)).await?;
+    let (consult, (_, rtp_endpoint)) = tokio::try_join!(
+        desk.make_call_with_headers("919002", Some(desk_sdp), vec![(
+            "User-to-User".into(),
+            "self-dial;encoding=ascii;purpose=call-center;leg=consult".into(),
+        )]),
+        answer_trunk(),
+    )?;
+    for seq in 1..=50 {
+        let packet = RtpPacket::new(0, seq, u32::from(seq) * 160, 0x3333, vec![CUSTOMER_TONE_BYTE; 160]);
+        trunk_rtp.send_to(&packet.encode(), rtp_endpoint).await?;
+        sleep(Duration::from_millis(20)).await;
+    }
+    desk.hangup(&consult).await?;
+    let mut records = harness.server.cdr_capture
+        .wait_for_records(1, Duration::from_secs(8)).await
+        .ok_or_else(|| anyhow!("consult CDR absent while original remains connected"))?;
+    assert_eq!(records.len(), 1);
+    let child = &mut records[0];
+    assert_ne!(child.call_id, parent_busy);
+    assert_eq!(child.session_id.as_deref(), Some(parent_busy.as_str()));
+    assert_eq!(child.recorder.len(), 1, "exactly one consultant recording");
+    let artifact = &child.recorder[0];
+    let unique_id = artifact.unique_id.clone().expect("recording identity");
+    let mut wav = rustpbx::media::wav_reader::WavReader::open(&artifact.path)?;
+    let samples = wav.samples().collect::<Result<Vec<_>, _>>()?;
+    assert!(rms(&samples) > 500.0, "consult recording must contain trunk audio");
+
+    let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let upload_url = format!("http://{}/recording", sink.local_addr()?);
+    let sink_task = tokio::spawn(async move {
+        axum::serve(sink, axum::Router::new().route("/recording",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                assert!(body.windows(4).any(|chunk| chunk == b"RIFF"));
+                "https://recordings.example/consult.wav"
+            }),
+        )).await
+    });
+    let (upload, _, _) = RecordingUploadHook::new(RecordingPolicy {
+        enabled: Some(true),
+        recording_type: Some(RecordingType::Http),
+        path: Some(harness._record_dir.path().to_string_lossy().into_owned()),
+        url: Some(upload_url),
+        ..Default::default()
+    })?;
+    let mut events = harness.gateway.read().subscribe_events();
+    upload.with_rwi_gateway(harness.gateway.clone())
+        .on_record_completed(std::slice::from_mut(child)).await?;
+    let metadata = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = events.recv().await?;
+            if record.event.event_type == "recording_metadata_available" {
+                return Ok::<_, anyhow::Error>(record.event.payload);
+            }
+        }
+    }).await??;
+    assert_eq!(metadata["call_id"], child.call_id);
+    assert_eq!(metadata["session_id"], parent_busy);
+    assert_eq!(metadata["metadata"]["unique_id"], unique_id);
+    assert_eq!(metadata["metadata"]["download_url"], "https://recordings.example/consult.wav");
+    sink_task.abort();
+    let agent = harness.cc_registry.get_agent(AGENT).await.unwrap();
+    assert!(matches!(agent.status, AgentStatus::Busy { call_id, .. } if call_id == parent_busy));
+    assert_eq!(agent.current_calls, 1);
+    desk.hangup(&parent).await?;
     harness.server.stop();
     Ok(())
 }

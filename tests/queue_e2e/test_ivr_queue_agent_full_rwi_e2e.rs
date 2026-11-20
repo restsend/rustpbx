@@ -254,6 +254,7 @@ async fn start_harness(capture: &WebhookCapture) -> Result<FullChainHarness> {
                 timeout_ms: Some(5000),
                 retries: None,
                 track_queue_latency: None,
+                require_event_ack: None,
             },
             rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
         ));

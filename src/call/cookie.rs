@@ -48,6 +48,10 @@ impl From<&TransactionKey> for TransactionCookie {
 #[derive(Clone)]
 pub(crate) struct AlreadyAdmitted;
 
+/// Set only after a SIP authentication backend validates the request.
+#[derive(Clone)]
+pub(crate) struct AuthenticatedSipUser;
+
 impl TransactionCookie {
     /// Reuse ingress matching context for a successor of an already admitted call.
     pub(crate) fn for_established_call(&self) -> Self {

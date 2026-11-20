@@ -122,6 +122,13 @@ pub struct OriginatingAgentSnapshot(pub crate::call::app::agent_registry::AgentR
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NormalizedHangupBy(pub String);
 
+/// Active parent verified from the authenticated agent's occupied call.
+#[derive(Clone)]
+pub struct VerifiedConsultationParent {
+    pub binding_session_id: String,
+    pub root_session_id: String,
+}
+
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
 pub struct CallSessionContext {
@@ -178,9 +185,9 @@ pub struct CallSessionContext {
     /// agent differs from the session attribution: a customer-anchored blind
     /// transfer hands the SESSION attribution to the target only at the
     /// answer edge, while the target leg's ring/connect events and the
-    /// transferor's departure must resolve to their own leg's agent. Filled
-    /// only for transfer-target legs (`transfer-*`); `None` keeps the
-    /// session-attribution resolution everywhere else.
+    /// transferor's departure must resolve to their own leg's agent.
+    /// Terminal transfer-room callbacks carry the agent on the retained leg.
+    /// `None` leaves identity resolution to the session attribution.
     pub leg_agent_id: Option<String>,
 }
 

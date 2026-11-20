@@ -703,7 +703,10 @@ pub enum CallCommand {
     },
 
     #[serde(skip)]
-    ConferenceEnded { conference_id: String },
+    ConferenceEnded {
+        conference_id: String,
+        transfer_committed: bool,
+    },
 
     /// Ask the owning session to attach the peer of an established SIP dialog.
     #[serde(skip)]
@@ -722,6 +725,7 @@ pub enum CallCommand {
         cmd_tx: CallCommandTx,
         partner_session: String,
         root_session_id: String,
+        direction: crate::call::DialDirection,
         their_leg: LegId,
     },
 

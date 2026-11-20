@@ -113,6 +113,7 @@ pub(super) struct PendingCustomerTransferRelease {
 pub(super) struct ConferenceAttachment {
     pub leg_id: LegId,
     pub conference_id: crate::call::runtime::ConferenceId,
+    pub pre_transfer_state: Option<LegState>,
 }
 
 /// Client-side local 3-way room (restsend `consult-state=merged` marker).
@@ -129,6 +130,9 @@ pub(super) struct LocalThreeWayRoom {
     pub members: Vec<(LegId, Option<String>)>,
 }
 
+#[derive(Clone)]
+struct EndedConferenceAgent((String, uuid::Uuid));
+
 /// Cross-session hold path for the attended-transfer room. After the
 /// transferor departs, the in-session bridged peer is the retired consult
 /// dialog — the real peer leg lives in the partner session. Hold/unhold for
@@ -139,6 +143,8 @@ pub(crate) struct TransferPartnerBinding {
     pub cmd_tx: crate::call::domain::CallCommandTx,
     pub partner_session: String,
     pub their_leg: LegId,
+    retained_agent: Option<(String, uuid::Uuid)>,
+    retained_transfer: Option<(LegId, crate::rwi::proto::RetainedTransfer)>,
 }
 
 /// A REFER relayed to the transferee UA, awaiting the replacement outcome
@@ -1769,6 +1775,18 @@ impl SipSession {
             }
             ConstructMode::Uac => (None, None, None),
         };
+        let peer_consultation_ids = match mode {
+            ConstructMode::Uas { server_dialog } if child_leg_role.is_some() => {
+                crate::call::session_id::extract_peer_consultation_ids(
+                    &server_dialog.initial_request(),
+                )
+            }
+            _ => None,
+        };
+        let consult_parent_session_id = peer_consultation_ids
+            .as_ref()
+            .map(|(parent, _)| parent.clone());
+        let consult_session_id = peer_consultation_ids.map(|(_, child)| child);
         let call_info = CallInfo {
             session_id: session_id_str.clone(),
             caller: original_caller.clone(),
@@ -1859,6 +1877,8 @@ impl SipSession {
                     }),
                     ConstructMode::Uac => None,
                 },
+                consult_parent_session_id: consult_parent_session_id.clone(),
+                consult_session_id: consult_session_id.clone(),
                 ..Default::default()
             };
             // A device-dialed transfer leg also marks the ROOT session's
@@ -1894,6 +1914,8 @@ impl SipSession {
 
         let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::default();
         meta.root_session_id = root_session_id;
+        meta.consult_parent_session_id = consult_parent_session_id;
+        meta.consult_session_id = consult_session_id;
         meta.child_leg_role = child_leg_role;
         meta.dial_leg_role = dial_leg_role;
         let owns_statistics = crate::proxy::proxy_call::session_hooks::owns_statistics_at_birth(
@@ -3920,6 +3942,8 @@ impl SipSession {
                         .clone()
                         .unwrap_or_else(|| session_id.clone()),
                 ),
+                consult_parent_session_id: self.meta.consult_parent_session_id.clone(),
+                consult_session_id: self.meta.consult_session_id.clone(),
                 caller: Some(self.context.original_caller.clone()),
                 callee: Some(self.context.original_callee.clone()),
                 caller_name: extract_sip_username(&self.context.original_caller),
@@ -4046,6 +4070,46 @@ impl SipSession {
         ctx
     }
 
+    pub(super) fn bind_transfer_partner(
+        &mut self,
+        cmd_tx: crate::call::domain::CallCommandTx,
+        partner_session: String,
+        their_leg: LegId,
+    ) {
+        // Terminal room notifications can detach or remove this leg before cleanup.
+        let retained_agent = self.conference_leg_agent();
+        self.transfer_partner = Some(TransferPartnerBinding {
+            cmd_tx,
+            partner_session,
+            their_leg,
+            retained_agent,
+            retained_transfer: None,
+        });
+        if let Some(room) = self.conference.as_ref() {
+            if self.legs.get(&room.leg_id).is_some_and(|leg| leg.state == LegState::Hold) {
+                self.apply_hold_recording_routes();
+            } else {
+                self.restore_recording_routes();
+            }
+        }
+    }
+
+    fn conference_leg_agent(&self) -> Option<(String, uuid::Uuid)> {
+        let room = self.conference.as_ref()?;
+        let leg = self.legs.get(&room.leg_id)?;
+        let agent_id = leg.agent_id.as_ref().filter(|id| !id.is_empty())?;
+        Some((agent_id.clone(), leg.lifecycle_id))
+    }
+
+    pub(super) fn remember_ended_conference_agent(&self) {
+        if self.transfer_partner.is_none()
+            && self.conference.as_ref().is_some_and(|room| room.pre_transfer_state.is_some())
+            && let Some(agent) = self.conference_leg_agent()
+        {
+            self.extensions.write().insert(EndedConferenceAgent(agent));
+        }
+    }
+
     /// Fire `on_call_ringing` for the leg that produced the provisional response.
     ///
     /// Used by paths that dial a leg outside the regular `dial_sequential`
@@ -4131,9 +4195,13 @@ impl SipSession {
         Some(ctx)
     }
 
-    async fn notify_transferred_agent_disconnected(&mut self, leg: &LegId) {
+    async fn notify_transferred_agent_disconnected(&mut self, leg: &LegId, retained_room_leg: bool) {
         if let Some(ctx) = self.transferred_agent_context(leg) {
-            self.freeze_served_agent_attribution(leg);
+            // The retained agent's callback uses its own attribution.
+            // The terminal CDR still belongs to the serving agent.
+            if !retained_room_leg {
+                self.freeze_served_agent_attribution(leg);
+            }
             for hook in self.server.session_hooks.iter() {
                 hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
             }
@@ -4276,6 +4344,11 @@ impl SipSession {
     /// agent. Leg-scoped RWI events for the caller leg then carry
     /// `leg_role: "agent"`. Idempotent; no-op for non-agent callers.
     async fn stamp_caller_agent_identity(&mut self) {
+        // On the target's home node the caller dialog is the dispatch hop.
+        // Only the dialed target is a local agent participant.
+        if self.meta.child_leg_role.is_some() {
+            return;
+        }
         let caller_id = LegId::from("caller");
         if self
             .legs
@@ -4311,6 +4384,19 @@ impl SipSession {
     /// Capture the parent before lifecycle hooks update the target's presence.
     async fn initialize_agent_consultation(&mut self) {
         use crate::call::app::agent_registry::PresenceState;
+        let marked_consult = self.meta.dial_leg_role.as_deref() == Some("consult")
+            && self.context.dialplan.direction != DialDirection::Inbound;
+        if marked_consult
+            && (self
+                .context
+                .cookie
+                .get_extension::<crate::call::cookie::AuthenticatedSipUser>()
+                .is_none()
+                || self.context.cookie.get_extension::<TrunkContext>().is_some()
+                || Self::from_cluster_peer(&self.server, &self.context.cookie))
+        {
+            return;
+        }
         let Some(user) = self.context.cookie.get_user() else {
             return;
         };
@@ -4343,7 +4429,11 @@ impl SipSession {
         if parent == self.context.session_id {
             return;
         }
-        let Some(owner) = self.server.active_call_registry.get_handle(&parent) else {
+        let calls = &self.server.active_call_registry;
+        let Some(owner) = calls
+            .get_handle(&parent)
+            .or_else(|| calls.get_handle_by_call_id(&parent))
+        else {
             return;
         };
         let callee_id = match self.context.original_callee.parse::<rsipstack::sip::Uri>() {
@@ -4361,16 +4451,21 @@ impl SipSession {
             }
             _ => None,
         };
-        let Some(callee_id) = callee_id else {
-            return;
-        };
-        if callee_id == caller.agent_id {
+        if callee_id.as_ref() == Some(&caller.agent_id)
+            || (!marked_consult && callee_id.is_none())
+        {
             return;
         }
         if let Some(leg) = self.legs.get_mut(&LegId::from("caller")) {
             leg.agent_id = Some(caller.agent_id);
         }
-        Self::set_pinned_agent_id(&self.extensions, &callee_id);
+        let registered_consult_target = callee_id.is_some();
+        let originating_external_consult = !registered_consult_target
+            && self.context.dialplan.direction == DialDirection::Outbound
+            && matches!(&self.context.dialplan.flow, crate::call::DialplanFlow::Targets(_));
+        if let Some(callee_id) = callee_id {
+            Self::set_pinned_agent_id(&self.extensions, &callee_id);
+        }
         let root = self
             .server
             .rwi_gateway
@@ -4378,7 +4473,29 @@ impl SipSession {
             .and_then(|gw| gw.read().meta_store.get_sync(owner.session_id()))
             .and_then(|meta| meta.session_id)
             .unwrap_or_else(|| parent.clone());
-        self.set_root_session_id(root);
+        if registered_consult_target {
+            // The existing direct agent-to-agent flow uses this root for
+            // hold/switch events and the attended-transfer control path.
+            self.set_root_session_id(root.clone());
+        }
+        if marked_consult {
+            if originating_external_consult {
+                self.extensions.write().insert(
+                    crate::proxy::proxy_call::session_hooks::VerifiedConsultationParent {
+                        binding_session_id: parent,
+                        root_session_id: root.clone(),
+                    },
+                );
+            }
+            self.meta.consult_parent_session_id = Some(root.clone());
+            if let Some(gw) = self.server.rwi_gateway.as_ref() {
+                let gw = gw.read();
+                if let Some(mut meta) = gw.meta_store.get_sync(&self.context.session_id) {
+                    meta.consult_parent_session_id = Some(root);
+                    gw.meta_store.insert(self.context.session_id.clone(), meta);
+                }
+            }
+        }
     }
 
     fn set_root_session_id(&mut self, root: String) {
@@ -4404,19 +4521,27 @@ impl SipSession {
     /// unvalidated user-part (or a missing registry) falls back to the
     /// session-level value.
     async fn leg_agent_id(&self, agent_uri: Option<&str>) -> Option<String> {
-        let session_level = self.pinned_agent_id();
+        self.resolve_leg_agent_id(agent_uri, self.pinned_agent_id())
+            .await
+    }
+
+    async fn resolve_leg_agent_id(
+        &self,
+        agent_uri: Option<&str>,
+        fallback: Option<String>,
+    ) -> Option<String> {
         let user = agent_uri
             .and_then(Self::uri_user_part)
-            .filter(|u| Some(u.as_str()) != session_level.as_deref());
+            .filter(|u| Some(u.as_str()) != fallback.as_deref());
         match (user, &self.server.agent_registry) {
             (Some(user), Some(registry)) => {
                 if registry.get_agent(&user).await.is_some() {
                     Some(user)
                 } else {
-                    session_level
+                    fallback
                 }
             }
-            _ => session_level,
+            _ => fallback,
         }
     }
     fn extract_sdp(body: &[u8]) -> Option<String> {
@@ -4793,9 +4918,9 @@ impl SipSession {
 
     /// RFC 7989 Session-ID local-uuid to stamp on outgoing legs.
     ///
-    /// Prefers the inherited root session id (one stable id across the whole
-    /// logical call — cluster peers and downstream legs re-attach to it),
-    /// falling back to this session's own id when it is the root. `None` for
+    /// Prefers the inherited root and falls back to the local session ID.
+    /// Consultations carry any additional IDs in separate peer headers.
+    /// `None` for
     /// P2P flows (`session_id_enabled == false`) or non-UUID-shaped legacy
     /// ids, which keep relying on the UUI (RFC 7433) correlation channel.
     fn session_id_for_outgoing_leg(&self) -> Option<String> {
@@ -4883,6 +5008,33 @@ impl SipSession {
             .get_extension::<crate::call::CallerPeerContext>()
             .and_then(|peer| peer.0.parse::<std::net::SocketAddr>().ok())
             .is_some_and(|peer| server.cluster_peer_ips.contains(&peer.ip()))
+    }
+
+    fn stamp_peer_consultation_ids(
+        &self,
+        headers: &mut Vec<rsipstack::sip::Header>,
+        route_via_home_proxy: bool,
+    ) {
+        use crate::call::session_id::{
+            CONSULT_PARENT_HEADER, CONSULT_SESSION_HEADER, normalize_custom, set_correlation_header,
+        };
+
+        // Keep existing Session-ID and UUI for older receivers and transfer
+        // queries. Only another configured PBX receives the additional IDs.
+        headers.retain(|header| {
+            !header.name().eq_ignore_ascii_case(CONSULT_PARENT_HEADER)
+                && !header.name().eq_ignore_ascii_case(CONSULT_SESSION_HEADER)
+        });
+        if route_via_home_proxy
+            && let Some(parent) = self.meta.consult_parent_session_id.as_deref().and_then(normalize_custom)
+            && let Some(child) = normalize_custom(
+                self.meta.consult_session_id.as_deref().unwrap_or(&self.context.session_id),
+            )
+            && parent != child
+        {
+            set_correlation_header(headers, CONSULT_PARENT_HEADER, &parent);
+            set_correlation_header(headers, CONSULT_SESSION_HEADER, &child);
+        }
     }
 
     async fn build_target_invite_option(
@@ -5311,6 +5463,10 @@ impl SipSession {
             .extensions
             .get::<OutboundTrunkContext>()
             .map(|trunk| trunk.name.clone());
+        self.stamp_peer_consultation_ids(
+            &mut headers,
+            route_via_home_proxy && refer_replaces_ctx.is_none(),
+        );
         self.stamp_outbound_correlation_header(
             &mut headers,
             target_trunk.as_deref().or(dialplan_trunk.as_deref()),
@@ -6006,7 +6162,7 @@ impl SipSession {
                     .as_ref()
                     .is_some_and(|room| room.leg_id.as_str() != "caller")
                 {
-                    self.notify_transferred_agent_disconnected(&LegId::from("caller"))
+                    self.notify_transferred_agent_disconnected(&LegId::from("caller"), false)
                         .await;
                 }
                 if self
@@ -7558,6 +7714,7 @@ impl SipSession {
             }
             return Err(anyhow!("Peer already belongs to another conference"));
         }
+        let pre_transfer_state = self.legs.get(&peer).map(|leg| leg.state);
         self.prepare_conference_leg(&peer).await?;
         let result = async {
             self.handle_join_mixer_leg(conference_id.clone(), peer.clone())
@@ -7575,6 +7732,7 @@ impl SipSession {
                 self.conference = Some(ConferenceAttachment {
                     leg_id: peer.clone(),
                     conference_id: room,
+                    pre_transfer_state,
                 });
             }
             Ok::<_, anyhow::Error>(())
@@ -7582,12 +7740,48 @@ impl SipSession {
         .await;
         if let Err(error) = result {
             self.leave_conference_leg(&peer).await.ok();
-            self.update_media_path().await;
-            self.sync_rtp_timeout_pause();
+            if let Some(previous) = pre_transfer_state {
+                self.restore_conference_peer(&peer, previous).await;
+            }
             return Err(error);
         }
         self.sync_rtp_timeout_pause();
         Ok(peer)
+    }
+
+    pub(super) async fn rollback_attended_room(
+        &mut self,
+        room: &crate::call::runtime::ConferenceId,
+    ) -> bool {
+        let Some((leg, previous)) = self.conference.as_ref()
+            .filter(|attachment| &attachment.conference_id == room)
+            .and_then(|attachment| Some((attachment.leg_id.clone(), attachment.pre_transfer_state?)))
+        else {
+            return false;
+        };
+        if let Err(error) = self.leave_conference_leg(&leg).await {
+            warn!(session_id = %self.id, %leg, %error, "Failed to detach transfer room participant");
+        }
+        self.restore_conference_peer(&leg, previous).await;
+        true
+    }
+
+    async fn restore_conference_peer(&mut self, leg: &LegId, previous: LegState) {
+        self.update_leg_state(leg, previous);
+        if previous == LegState::Hold {
+            if let Err(error) = self.apply_hold_media(leg, None).await {
+                warn!(session_id = %self.id, %leg, %error, "Failed to restore hold media after transfer rollback");
+            }
+            let restored = async {
+                let sdp = self.generate_sdp_for_side(leg, true)?;
+                self.send_reinvite_to_leg(leg, sdp).await
+            }.await;
+            if let Err(error) = restored {
+                warn!(session_id = %self.id, %leg, %error, "Failed to restore held dialog after transfer rollback");
+            }
+        }
+        self.update_media_path().await;
+        self.sync_rtp_timeout_pause();
     }
 
     pub(super) async fn prepare_conference_leg(&mut self, leg: &LegId) -> Result<()> {
@@ -7864,6 +8058,8 @@ impl SipSession {
                         .as_ref()
                         .is_some_and(|conference| &conference.leg_id == leg)
                 });
+                let retained_room_leg = conference_leg
+                    && self.conference.as_ref().is_some_and(|room| room.pre_transfer_state.is_some());
                 let conference_survives = if let Some(leg) = &terminated_leg {
                     self.detach_ended_conference_leg(leg).await
                 } else {
@@ -7878,7 +8074,7 @@ impl SipSession {
                             })
                     });
                 if let Some(leg) = terminated_leg.as_ref() {
-                    self.notify_transferred_agent_disconnected(leg).await;
+                    self.notify_transferred_agent_disconnected(leg, retained_room_leg).await;
                 }
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
@@ -10803,6 +10999,18 @@ impl SipSession {
         // leg-scoped RWI event for it carries `leg_role: "agent"`. Idempotent.
         self.stamp_caller_agent_identity().await;
         self.meta.connected_callee = callee.clone();
+        // Outbound sessions may pin the originating agent. That pin belongs
+        // to the caller leg and cannot stand in for the destination identity.
+        let pinned_callee = self.pinned_agent_id().filter(|pinned| {
+            self.legs
+                .get(&LegId::from("caller"))
+                .and_then(|leg| leg.agent_id.as_ref())
+                != Some(pinned)
+        });
+        let callee_agent_id = match callee.as_deref() {
+            Some(uri) => self.resolve_leg_agent_id(Some(uri), pinned_callee).await,
+            None => None,
+        };
         // PRD s25 S5（C2）：入呼应答腿盖章服务坐席身份 —— 直拨入呼不经
         // queue 派发的 LegConnected 盖章点，离场冻结
         //（`freeze_served_agent_attribution`）按腿自身身份定归属，缺章则
@@ -10810,14 +11018,12 @@ impl SipSession {
         //
         // OUTBOUND guard: on a direct softphone outbound the connected
         // callee leg is the CUSTOMER. The session pin names the ORIGINATING
-        // agent (the A/caller leg), and `leg_agent_id`'s session fallback
-        // would stamp that agent onto the customer leg — making the customer's
-        // own BYE look like an agent hangup (`hangup_by=agent`) and emitting
+        // agent (the A/caller leg). Stamping the customer leg would make its
+        // BYE look like an agent hangup (`hangup_by=agent`) and emitting
         // a bogus `leg_role:"agent"` teardown for it. Only inbound/A2A shapes
         // have the served agent on the callee leg.
         if self.context.dialplan.direction != crate::call::DialDirection::Outbound
-            && let Some(ref callee_uri) = callee
-            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
+            && let Some(agent) = callee_agent_id.as_ref()
             && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
             && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
             && let Some(leg) = self.legs.get_mut(&leg_id)
@@ -10829,14 +11035,13 @@ impl SipSession {
                 agent = %agent,
                 "inbound answer: served agent stamped on the connected leg"
             );
-            leg.agent_id = Some(agent);
+            leg.agent_id = Some(agent.clone());
         }
         // Pin the session attribution too (not just the leg): the CC hook's
         // priority-1 read drives the end-of-call CDR. Direct inbound calls
         // used to lean on the parties-based fallback, which breaks once a
         // later transfer replaces the parties (prd 2026-11-10).
-        if let Some(ref callee_uri) = callee
-            && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
+        if let Some(agent) = callee_agent_id
             && self.pinned_agent_id().is_none()
         {
             Self::set_pinned_agent_id(&self.extensions, &agent);
@@ -12237,6 +12442,7 @@ impl SipSession {
     }
 
     async fn cleanup(&mut self) {
+        self.remember_ended_conference_agent();
         if let Some(jump) = self.pending_customer_transfer_release.take().and_then(|pending| pending.routed_jump) {
             self.release_routed_jump_hints(jump).await;
         }
@@ -12468,7 +12674,17 @@ impl SipSession {
                 .answer_time
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0);
-            let ctx = self.session_hook_ctx();
+            let mut ctx = self.session_hook_ctx();
+            let ended_agent = self.extensions.read().get::<EndedConferenceAgent>().cloned();
+            if let Some((agent_id, generation)) = self
+                .transfer_partner
+                .as_ref()
+                .and_then(|partner| partner.retained_agent.as_ref())
+                .or_else(|| ended_agent.as_ref().map(|ended| &ended.0))
+            {
+                ctx.leg_agent_id = Some(agent_id.clone());
+                ctx.leg_generation = Some(*generation);
+            }
             let reason = self.meta.hangup_reason.clone();
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_ended(&ctx, reason.as_ref(), duration_secs)
@@ -13697,6 +13913,9 @@ impl SipSession {
                     );
                 }
             }
+            if let Some(parent) = self.meta.consult_parent_session_id.as_ref() {
+                meta.insert("consult_parent_session_id".into(), serde_json::json!(parent));
+            }
             // Session user data (set via REST `PUT .../userdata` or the RWI
             // `call.set_userdata` command) rides into the CDR under a
             // namespaced `user_data` key so it cannot collide with the flat
@@ -13721,7 +13940,11 @@ impl SipSession {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
             last_error: self.meta.last_error.clone(),
-            root_session_id: self.meta.root_session_id.clone(),
+            root_session_id: self
+                .meta
+                .consult_parent_session_id
+                .clone()
+                .or_else(|| self.meta.root_session_id.clone()),
             invite_final_status: self.meta.invite_final_status,
             hangup_reason: self.meta.hangup_reason.clone(),
             hangup_messages: self.recorded_hangup_messages(),
@@ -15184,6 +15407,7 @@ impl SipSession {
                 cmd_tx,
                 partner_session,
                 root_session_id,
+                direction,
                 their_leg,
             } => {
                 info!(
@@ -15192,11 +15416,20 @@ impl SipSession {
                     %their_leg,
                     "Transfer partner bound — hold/unhold routes cross-session"
                 );
-                self.transfer_partner = Some(TransferPartnerBinding {
-                    cmd_tx,
-                    partner_session,
-                    their_leg,
-                });
+                self.bind_transfer_partner(cmd_tx, partner_session, their_leg);
+                if let Some(partner) = self.transfer_partner.as_mut()
+                    && let Some((agent_id, _)) = partner.retained_agent.as_ref()
+                    && let Some(room) = self.conference.as_ref()
+                {
+                    partner.retained_transfer = Some((
+                        room.leg_id.clone(),
+                        crate::rwi::proto::RetainedTransfer {
+                            root_session_id: root_session_id.clone(),
+                            direction: direction.to_string(),
+                            agent_id: agent_id.clone(),
+                        },
+                    ));
+                }
                 self.set_root_session_id(root_session_id);
                 if let Some(leg) = self.conference.as_ref().map(|room| room.leg_id.clone()) {
                     let headers = vec![rsipstack::sip::Header::UserToUser("consult-state=talk".into())];
@@ -15362,7 +15595,7 @@ impl SipSession {
                 CommandResult::success()
             }
 
-            CallCommand::ConferenceEnded { conference_id } => {
+            CallCommand::ConferenceEnded { conference_id, transfer_committed } => {
                 if self
                     .conference
                     .as_ref()
@@ -15370,6 +15603,11 @@ impl SipSession {
                 {
                     return CommandResult::success();
                 }
+                let room = crate::call::runtime::ConferenceId::from(conference_id.as_str());
+                if !transfer_committed && self.rollback_attended_room(&room).await {
+                    return CommandResult::success();
+                }
+                self.remember_ended_conference_agent();
                 let attachment = self.conference.take().unwrap();
                 drop(
                     self.legs
@@ -15381,9 +15619,7 @@ impl SipSession {
                 self.server
                     .conference_server
                     .manager_raw()
-                    .destroy_conference(&crate::call::runtime::ConferenceId::from(
-                        conference_id.as_str(),
-                    ))
+                    .destroy_conference(&room)
                     .await
                     .ok();
                 info!(session_id = %self.id, %conference_id, leg = %attachment.leg_id,
@@ -17069,6 +17305,23 @@ impl SipSession {
     pub(crate) fn emit_typed_rwi_event<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
         if let Some(ref gw) = self.server.rwi_gateway {
             let g = gw.read();
+            if matches!(E::TYPE, "call_held" | "call_unheld" | "call_hangup")
+                && let Some((leg, retained)) = self
+                    .transfer_partner.as_ref()
+                    .and_then(|partner| partner.retained_transfer.as_ref())
+            {
+                let mut flat = crate::rwi::RwiEvent::from_spec(event, None);
+                let leg_id = flat.payload.get("leg_id").and_then(serde_json::Value::as_str);
+                if flat.payload["leg_role"] == "agent"
+                    && leg_id.is_none_or(|id| id == leg.as_str())
+                {
+                    // Snapshot before caching so old consultation events do
+                    // not acquire this state when replayed after the handoff.
+                    flat.payload["retained_transfer"] = serde_json::json!(retained);
+                }
+                g.send_flat_to_owner(&flat);
+                return;
+            }
             g.send_to_owner(event);
         }
     }
@@ -17900,9 +18153,8 @@ impl SipSession {
                 _ => "consult",
             };
             // Preserve logical correlation without changing SIP dialog IDs.
-            let uui_root = self.meta.root_session_id.as_deref().unwrap_or(&base);
             headers.push(crate::call::uui::build_uui_header(
-                uui_root,
+                self.meta.root_session_id.as_deref().unwrap_or(&base),
                 None,
                 None,
                 None,
@@ -17922,6 +18174,7 @@ impl SipSession {
             .outbound_trunk
             .as_ref()
             .map(|trunk| trunk.name.clone());
+        self.stamp_peer_consultation_ids(&mut headers, route_via_home_proxy);
         self.stamp_outbound_correlation_header(
             &mut headers,
             dynamic_trunk.as_deref(),
@@ -19135,7 +19388,9 @@ impl SipSession {
                 // bridge's hold gate — the gate replaces the mixer feed with
                 // hold music in place, so a leg-level hold source would only
                 // fight it.
-                if !room_hold {
+                if room_hold {
+                    self.apply_hold_recording_routes();
+                } else {
                     self.apply_hold_media(&leg_id, music).await?;
                 }
                 Ok(())
@@ -19217,11 +19472,14 @@ impl SipSession {
     /// property of `hold_recording_*_without_private_speech` is preserved.
     pub(crate) fn apply_hold_recording_routes(&self) {
         let caller_id = LegId::from("caller");
+        let retained_leg = self.conference.as_ref()
+            .filter(|_| self.transfer_partner.is_some())
+            .map(|room| &room.leg_id);
         for (id, leg) in self.legs.iter() {
             let Some(media) = self.media_leg(id) else {
                 continue;
             };
-            if leg.state == LegState::Hold {
+            if leg.state == LegState::Hold && retained_leg.is_none_or(|retained| retained == id) {
                 // Held party: drop their mic (ingress), keep the music they
                 // hear (egress) on their own lane so the recording timeline
                 // mirrors their experience (voice → MOH → voice).
@@ -19237,21 +19495,25 @@ impl SipSession {
         }
     }
 
-    /// Bridged audio is already in the caller's negotiated format. Disable
-    /// every other tap, including the previously selected transfer peer.
+    /// Capture bridged audio at the caller tap, or the retained room leg
+    /// after an attended handoff. Disable all other taps.
     pub(crate) fn restore_recording_routes(&self) {
+        use crate::media::media_recorder::CaptureChannel::{Callee, Caller};
+        let recorded_leg = self.conference.as_ref()
+            .filter(|_| self.transfer_partner.is_some())
+            .map(|room| room.leg_id.clone())
+            .unwrap_or_else(|| LegId::from("caller"));
         for (id, _) in self.legs.iter() {
-            if id.as_str() != "caller"
-                && let Some(leg) = self.media_leg(id)
-            {
-                leg.ingress_tap().set_capture_route(None, None);
+            if let Some(leg) = self.media_leg(id) {
+                let route = if *id != recorded_leg {
+                    (None, None)
+                } else if id.as_str() == "caller" {
+                    (Some(Caller), Some(Callee))
+                } else {
+                    (Some(Callee), Some(Caller))
+                };
+                leg.ingress_tap().set_capture_route(route.0, route.1);
             }
-        }
-        if let Some(caller) = self.media_leg(&LegId::from("caller")) {
-            caller.ingress_tap().set_capture_route(
-                Some(crate::media::media_recorder::CaptureChannel::Caller),
-                Some(crate::media::media_recorder::CaptureChannel::Callee),
-            );
         }
     }
 

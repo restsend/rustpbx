@@ -1378,6 +1378,10 @@ pub struct LocatorWebhookConfig {
     /// explicitly.
     #[serde(default)]
     pub track_queue_latency: Option<bool>,
+    /// Require a matching ACK for durable RWI events and use their confirmed
+    /// wire types. Enable only on receivers that support both. Defaults to HTTP 2xx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_event_ack: Option<bool>,
 }
 
 /// Global recovery for Step IVR when the external provider cannot continue.

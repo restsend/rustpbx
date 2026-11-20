@@ -3,7 +3,7 @@ use super::{
     dialog_auth_cache::{AuthCacheKey, DialogAuthCache},
     server::SipServerRef,
 };
-use crate::call::cookie::SpamResult;
+use crate::call::cookie::{AuthenticatedSipUser, SpamResult};
 use crate::call::user::SipUser;
 use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
@@ -357,6 +357,7 @@ impl ProxyModule for AuthModule {
                 Ok(Some(mut user)) => {
                     user.merge_with(&tx_user);
                     cookie.set_user(user);
+                    cookie.insert_extension(AuthenticatedSipUser);
 
                     // Cache the authenticated dialog for in-dialog requests
                     if let (Some(ref cache), Some(source_addr)) =
@@ -404,6 +405,7 @@ impl ProxyModule for AuthModule {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
                     cookie.set_user(user);
+                    cookie.insert_extension(AuthenticatedSipUser);
 
                     // Cache the authenticated dialog for in-dialog requests
                     if let (Some(ref cache), Some(source_addr)) =

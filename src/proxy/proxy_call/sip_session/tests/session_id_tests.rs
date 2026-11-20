@@ -192,21 +192,8 @@ async fn inherited_delivery_session_opts(
     device_custom_roots: bool,
     from_trunk: bool,
 ) -> SipSession {
-    use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::config::ProxyConfig;
-    use crate::proxy::tests::common::{
-        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
-    };
+    use crate::proxy::tests::common::create_test_request;
 
-    let gateway = crate::rwi::gateway::RwiGateway::new();
-    let mut proxy_config = ProxyConfig::default();
-    proxy_config.session_id_device_custom_root = device_custom_roots;
-    let (mut server, _) = create_test_server_with_rwi_gateway(
-        proxy_config,
-        Arc::new(parking_lot::RwLock::new(gateway)),
-    )
-    .await;
-    Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.44".parse().unwrap()];
     let mut request = create_test_request(
         rsipstack::sip::Method::Invite,
         "alice",
@@ -228,16 +215,45 @@ async fn inherited_delivery_session_opts(
             id, None, None, None, role,
         ));
     }
+    delivery_session_from_request(
+        request,
+        Some("1234567890abcdef1234567890abcdef"),
+        enabled,
+        from_peer,
+        use_media_proxy,
+        device_custom_roots,
+        from_trunk,
+    )
+    .await
+}
+
+async fn delivery_session_from_request(
+    request: rsipstack::sip::Request,
+    local_id: Option<&str>,
+    enabled: bool,
+    from_peer: bool,
+    use_media_proxy: bool,
+    device_custom_roots: bool,
+    from_trunk: bool,
+) -> SipSession {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::tests::common::{create_test_server_with_rwi_gateway, create_transaction};
+
+    let mut proxy_config = ProxyConfig::default();
+    proxy_config.session_id_device_custom_root = device_custom_roots;
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        proxy_config,
+        Arc::new(parking_lot::RwLock::new(crate::rwi::gateway::RwiGateway::new())),
+    )
+    .await;
+    Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.44".parse().unwrap()];
     let (tx, _) = create_transaction(request.clone()).await;
     let (state_tx, _state_rx) = mpsc::unbounded_channel();
     let dialog = server
         .dialog_layer
         .get_or_create_server_invite(&tx, state_tx, None, None)
         .expect("server dialog");
-    let local_id = "1234567890abcdef1234567890abcdef";
-    let dialplan = Dialplan::new(local_id.into(), request, DialDirection::Inbound)
-        .with_caller("sip:alice@example.test".parse().unwrap())
-        .with_session_id_enabled(enabled);
     let cookie = TransactionCookie::default();
     if from_peer {
         cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
@@ -249,8 +265,20 @@ async fn inherited_delivery_session_opts(
             did_numbers: vec![],
         });
     }
+    let local_id = local_id.map(str::to_owned).unwrap_or_else(|| {
+        crate::proxy::call::CallModule::resolve_inbound_session_id(
+            &server,
+            &cookie,
+            &request,
+            &dialog.id().call_id,
+            enabled,
+        )
+    });
+    let dialplan = Dialplan::new(local_id.clone(), request, DialDirection::Inbound)
+        .with_caller("sip:alice@example.test".parse().unwrap())
+        .with_session_id_enabled(enabled);
     let context = CallContext {
-        session_id: local_id.into(),
+        session_id: local_id,
         dialplan: Arc::new(dialplan),
         cookie,
         start_time: Instant::now(),
@@ -916,6 +944,125 @@ async fn session_id_rfc_generic_target_preserves_short_root_and_existing_uui() {
         } else {
             assert_eq!(uui_headers.len(), 1);
         }
+    }
+}
+
+#[tokio::test]
+async fn consultation_peer_wire_preserves_routing_and_carries_trusted_business_ids() {
+    use crate::proxy::tests::common::create_test_request;
+    use rsipstack::sip::{
+        Header, Method,
+        headers::{CallId, SessionId},
+    };
+
+    const PARENT: &str = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+    const PARENT_HEADER: &str = "X-CC-Consult-Parent";
+    const CHILD_HEADER: &str = "X-CC-Consult-Session";
+    let mut origin = inherited_session_id_session(PARENT, Some(PARENT)).await;
+    let child = origin.context.session_id.clone();
+    origin.meta.consult_parent_session_id = Some(PARENT.into());
+    let callee = LegId::from("callee");
+    let mut leg = Leg::new(callee.clone());
+    leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    origin.legs.insert(callee.clone(), leg);
+    let target_aor: rsipstack::sip::Uri = "sip:bob@example.test".parse().unwrap();
+    let target = crate::call::Location {
+        aor: target_aor.clone(),
+        registered_aor: Some(target_aor),
+        home_proxy: Some(SipAddr::new(
+            rsipstack::sip::Transport::Udp,
+            rsipstack::sip::HostWithPort::try_from("192.0.2.44:5060").unwrap(),
+        )),
+        ..Default::default()
+    };
+    let (option, _, dialog_id, via_peer) = origin
+        .build_target_invite_option(&target, None, None)
+        .await
+        .expect("consultation INVITE");
+    assert!(via_peer);
+    assert_eq!(option.session_id.as_deref(), Some(PARENT));
+    let uui = header_value_of(&option, crate::call::uui::UUI_HEADER_NAME)
+        .and_then(|value| crate::call::uui::parse_uui(&value))
+        .expect("SIP UUI agent marker");
+    assert_eq!(uui.session_id, PARENT);
+    assert_eq!(uui.leg.as_deref(), Some("agent"));
+    assert_eq!(
+        header_value_of(&option, PARENT_HEADER).as_deref(),
+        Some(PARENT)
+    );
+    assert_eq!(
+        header_value_of(&option, CHILD_HEADER).as_deref(),
+        Some(child.as_str())
+    );
+
+    for (trusted, with_hints) in [(true, true), (true, false), (false, true)] {
+        let mut request = create_test_request(Method::Invite, "alice", None, "example.test", None);
+        request.uri = option.callee.clone();
+        request
+            .headers
+            .0
+            .retain(|header| !header.name().eq_ignore_ascii_case("Call-ID"));
+        request.headers.push(CallId::new(dialog_id.clone()).into());
+        request.headers.push(Header::from(SessionId::new(format!(
+            "{};remote={}",
+            option.session_id.as_deref().unwrap(),
+            SessionId::NIL,
+        ))));
+        request.headers.extend(
+            option
+                .headers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|header| {
+                    with_hints
+                        || ![PARENT_HEADER, CHILD_HEADER]
+                            .iter()
+                            .any(|name| header.name().eq_ignore_ascii_case(name))
+                })
+                .cloned()
+                .collect(),
+        );
+        let mut receiver = delivery_session_from_request(request, None, true, trusted, false, false, false).await;
+        let expected_parent = (trusted && with_hints).then_some(PARENT);
+        let expected_consult = (trusted && with_hints).then_some(child.as_str());
+        let ctx = receiver.session_hook_ctx();
+        assert_eq!(ctx.logical_session_id(), PARENT);
+        assert_eq!(ctx.owns_statistics, !trusted);
+        if trusted {
+            assert_eq!(receiver.context.session_id, PARENT);
+        } else {
+            assert_ne!(receiver.context.session_id, PARENT);
+            assert_ne!(receiver.context.session_id, child);
+        }
+        let mut events = receiver
+            .server
+            .rwi_gateway
+            .as_ref()
+            .unwrap()
+            .read()
+            .subscribe_events();
+        receiver.legs.insert(callee.clone(), Leg::new(callee.clone()));
+        assert!(receiver.update_leg_state(&callee, LegState::Ringing));
+        let event = events.try_recv().expect("callee ringing event").event;
+        assert_eq!(event.event_type, "call_ringing");
+        assert_eq!(
+            event.call_id.as_deref(),
+            Some(receiver.context.session_id.as_str())
+        );
+        assert_eq!(event.payload["session_id"], PARENT);
+        assert_eq!(
+            event.payload["consult_parent_session_id"].as_str(),
+            expected_parent
+        );
+        assert_eq!(
+            event.payload["consult_session_id"].as_str(),
+            expected_consult
+        );
+        assert_eq!(
+            event.payload["leg_role"],
+            if trusted { "agent" } else { "callee" }
+        );
     }
 }
 

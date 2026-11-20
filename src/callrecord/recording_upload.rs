@@ -1598,7 +1598,20 @@ impl RecordingUploadHook {
             call_id: record.call_id.clone(),
             metadata,
         };
-        gw_ref.broadcast_event(&crate::rwi::RwiEvent::from_spec(&event, None));
+        // Finalization can run after the live metadata has been removed.
+        // The persisted CDR preserves the consult's business parent while
+        // call_id and the segment's unique_id still identify the child.
+        let mut event = crate::rwi::RwiEvent::from_spec(&event, None);
+        if let Some(parent) = record
+            .details
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("consult_parent_session_id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            event.payload["session_id"] = json!(parent);
+        }
+        gw_ref.broadcast_event(&event);
     }
 }
 
@@ -1615,6 +1628,7 @@ const EVENT_METADATA_EXCLUDED_KEYS: &[&str] = &[
     "self_ip",
     "media_quality",
     "session_id",
+    "consult_parent_session_id",
 ];
 
 /// Pure builder for per-segment `recording_metadata_available` payloads.
@@ -3526,10 +3540,17 @@ mod tests {
         };
         let mut record = CallRecord {
             call_id: "segmented-call".into(),
+            session_id: Some("original-call".into()),
             start_time: now,
             end_time: now + chrono::Duration::seconds(30),
             recorder: vec![mk_media(0, "ivr"), mk_media(1, "agent")],
-            details: CallDetails::default(),
+            details: CallDetails {
+                metadata: Some(HashMap::from([(
+                    "consult_parent_session_id".into(),
+                    json!("original-call"),
+                )])),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -3550,6 +3571,11 @@ mod tests {
                         continue;
                     }
                     if entry.event.event_type == "recording_metadata_available" {
+                        assert_eq!(
+                            entry.event.payload["session_id"], "original-call",
+                            "the upload must retain the original call after live metadata is gone"
+                        );
+                        assert_eq!(entry.event.payload["call_id"], "segmented-call");
                         let full = entry.event.payload["metadata"]["full"].as_bool();
                         if full == Some(true) {
                             aggregate += 1;

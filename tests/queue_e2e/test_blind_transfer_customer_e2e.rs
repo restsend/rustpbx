@@ -227,6 +227,7 @@ async fn start_harness(trunk_dest_port: u16) -> Result<Harness> {
                 timeout_ms: Some(5000),
                 retries: None,
                 track_queue_latency: None,
+                require_event_ack: None,
             },
             rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
         ));

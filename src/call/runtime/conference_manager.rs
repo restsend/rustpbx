@@ -418,12 +418,16 @@ impl ConferenceManager {
         if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
             token.cancel();
         }
+        let transfer_committed = room.host_leg_id.is_some();
         for (leg_id, participant) in room.participants {
             self.leg_to_conference.remove(&leg_id);
             self.participant_channels.remove(&leg_id);
             self.participant_output_rxs.remove(&leg_id);
             if let Some(commands) = participant.session_commands {
-                let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
+                let command = CallCommand::ConferenceEnded {
+                    conference_id: conf_id.0.clone(),
+                    transfer_committed,
+                };
                 // A room can be destroyed from an owning session's command handler.
                 // Never wait here for that same bounded queue to drain.
                 if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
@@ -552,7 +556,10 @@ impl ConferenceManager {
         }
 
         if let Some(commands) = owner_commands {
-            let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
+            let command = CallCommand::ConferenceEnded {
+                conference_id: conf_id.0.clone(),
+                transfer_committed: true,
+            };
             if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
                 crate::utils::spawn(async move { let _ = commands.send(command).await; });
             }
@@ -1480,6 +1487,7 @@ mod tests {
         assert!(manager.get_conference(&room).await.is_none());
         assert!(matches!(events.try_recv().unwrap(), CallCommand::ConferenceEnded {
             conference_id,
+            transfer_committed: false,
         } if conference_id == room.0));
     }
 
@@ -1504,6 +1512,7 @@ mod tests {
                 assert!(manager.get_conference(&room).await.is_some(), "owner ends its room");
                 assert!(matches!(a_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
                     conference_id,
+                    transfer_committed: true,
                 } if conference_id == room.0));
             }
             manager.remove_participant(&room, &a).await.unwrap();
@@ -1511,6 +1520,7 @@ mod tests {
             if caller_leaves {
                 assert!(matches!(c_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
                     conference_id,
+                    transfer_committed: true,
                 } if conference_id == room.0));
             }
         }

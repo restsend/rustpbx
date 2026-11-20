@@ -251,6 +251,7 @@ impl SipSession {
             )?;
             self.conference = Some(ConferenceAttachment {
                 leg_id: leg_id.clone(), conference_id: room.id,
+                pre_transfer_state: None,
             });
         }
         if self
@@ -279,8 +280,9 @@ impl SipSession {
     /// A member leaving never disconnects the other conference participants.
     pub(super) async fn detach_ended_conference_leg(&mut self, leg: &LegId) -> bool {
         if self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg) {
+            self.remember_ended_conference_agent();
             if let Err(error) = self.leave_conference_leg(leg).await {
-                warn!(%leg, %error, "Failed to detach conference participant");
+                warn!(session_id = %self.id, %leg, %error, "Failed to detach conference participant");
             }
             if self.conference.is_none() { self.cancel_token.cancel(); }
         }

@@ -30,6 +30,10 @@ pub struct EventCallContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult_parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callee_name: Option<String>,
@@ -69,6 +73,14 @@ pub struct EventCallContext {
     pub root: Option<RootCallInfo>,
 }
 
+/// Identifies the original customer call after the consultation target takes it over.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RetainedTransfer {
+    pub root_session_id: String,
+    pub direction: String,
+    pub agent_id: String,
+}
+
 /// Type alias for RWI event sender (used by the cc addon's agent event fanout).
 pub type RwiEventTx = tokio::sync::mpsc::UnboundedSender<RwiEvent>;
 
@@ -86,6 +98,10 @@ pub struct CallMeta {
     /// (inbound root Call-ID, generated root for originates, inherited by
     /// transfer/consult children). See `call::uui`.
     pub session_id: Option<String>,
+    /// Verified original call, separate from the physical consultation ID.
+    pub consult_parent_session_id: Option<String>,
+    /// Originator's consultation ID on events emitted from the target node.
+    pub consult_session_id: Option<String>,
     pub caller: Option<String>,
     pub callee: Option<String>,
     pub caller_name: Option<String>,
@@ -118,6 +134,8 @@ impl From<CallMeta> for EventCallContext {
     fn from(m: CallMeta) -> Self {
         EventCallContext {
             session_id: m.session_id,
+            consult_parent_session_id: m.consult_parent_session_id,
+            consult_session_id: m.consult_session_id,
             caller: m.caller,
             callee: m.callee,
             caller_name: m.caller_name,

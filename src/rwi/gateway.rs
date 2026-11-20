@@ -886,7 +886,7 @@ impl RwiGateway {
             .is_some_and(|tx| tx.receiver_count() > 0)
     }
 
-    /// Enqueue an event with a caller-provided wire type and require an application acknowledgement.
+    /// Enqueue a durable event with a stable ID and an alternate wire type for ACK mode.
     pub(crate) fn enqueue_confirmed_webhook(
         &self,
         event: RwiEvent,
@@ -1130,6 +1130,12 @@ impl RwiGateway {
         };
         let flat = RwiEvent::from_spec(event, None);
         self.dispatch(&cid, &flat, DispatchTarget::Owner(&cid));
+    }
+
+    pub(crate) fn send_flat_to_owner(&self, event: &RwiEvent) {
+        if let Some(call_id) = event.call_id.as_ref() {
+            self.dispatch(call_id, event, DispatchTarget::Owner(call_id));
+        }
     }
 
     /// Send an event to the owner of an explicit `call_id` regardless of the
