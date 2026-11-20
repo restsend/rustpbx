@@ -182,6 +182,7 @@ pub struct LegInner {
     /// Egress pipeline — always alive; the source is switched via the command
     /// channel. For [`EgressSource::RewriteRelay`] the pacing loop parks.
     egress: EgressPipeline,
+    ingress_volume_config: std::sync::OnceLock<(crate::quality_stats::QualityStatsConfig, String)>,
     /// Whether the current egress source is [`EgressSource::RewriteRelay`].
     /// Tracked so the Leg knows when to tear down/rebuild the PC's rewrite
     /// bridge on mode switches (EgressSource is not Clone). Shared with the
@@ -253,6 +254,10 @@ pub struct LegInner {
     comfort_noise: bool,
     comfort_noise_level_db: f32,
     pub(crate) packet_diagnostics: Mutex<Option<crate::packet_diagnostics::LegPacketDiagnostics>>,
+    /// Fixed diagnostic ownership, independent of selected bridge membership.
+    pub(crate) quality_sampler: Mutex<Option<crate::media_bridge::LegQualitySampler>>,
+    // Official RTC clears transceivers on close; retain their terminal audio counters.
+    terminal_audio_observation: Mutex<Option<(u64, Option<u32>)>>,
 }
 
 /// Outbound RFC 2833 telephone-event send state.
@@ -477,6 +482,7 @@ impl LegInner {
             pc,
             tap,
             egress,
+            ingress_volume_config: std::sync::OnceLock::new(),
             was_relay,
             negotiated: Mutex::new(None),
             advertised_addr: Mutex::new(None),
@@ -495,6 +501,8 @@ impl LegInner {
             ingress_stall_forwarder_armed: std::sync::atomic::AtomicBool::new(false),
             ingress_quiet_expected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             packet_diagnostics: Mutex::new(None),
+            quality_sampler: Mutex::new(None),
+            terminal_audio_observation: Mutex::new(None),
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
             comfort_noise,
@@ -549,6 +557,10 @@ impl LegInner {
         if cfg.quality_stats.enabled {
             leg.tap.enable_audio_packet_samples();
         }
+        if cfg.volume_stats.enabled && let Some(session) = &cfg.call_id {
+            leg.ingress_volume_config
+                .get_or_init(|| (cfg.quality_stats.clone(), session.clone()));
+        }
         leg.egress.set_volume_stats(
             cfg.volume_stats.enabled,
             cfg.quality_stats.clone(),
@@ -576,6 +588,15 @@ impl LegInner {
                 Arc::clone(&leg.ingress_quiet_expected),
             );
             *leg.ingress_stall_task.lock() = Some(handle);
+        }
+        if cfg.quality_stats.enabled
+            && let Some(session_id) = cfg.call_id.as_ref().filter(|id| !id.trim().is_empty())
+        {
+            *leg.quality_sampler.lock() = Some(crate::media_bridge::LegQualitySampler::start(
+                &leg,
+                session_id.clone(),
+                cfg.quality_stats.clone(),
+            ));
         }
         Self::start_packet_diagnostics(&leg, cfg);
         Ok(leg)
@@ -905,6 +926,14 @@ impl LegInner {
     /// the PC's rewrite bridge (transport-level, ICE exclusively owned); all
     /// other sources go to the always-alive [`EgressPipeline`].
     pub async fn set_egress_source(&self, source: EgressSource) -> Result<()> {
+        self.set_egress_source_with_ingress(source, None).await
+    }
+
+    pub(crate) async fn set_egress_source_with_ingress(
+        &self,
+        source: EgressSource,
+        input_leg: Option<&LegInner>,
+    ) -> Result<()> {
         let kind = match &source {
             EgressSource::RewriteRelay { .. } => "relay",
             EgressSource::Silence => "silence",
@@ -1023,7 +1052,13 @@ impl LegInner {
 
         // Forward to the pipeline. For RewriteRelay the pacing loop parks
         // (tick skipped); for everything else it produces frames.
-        self.egress.set_source(source).await
+        let ingress = input_leg.and_then(|leg| {
+            let (config, session) = leg.ingress_volume_config.get()?;
+            Some(crate::volume_stats::VolumeSampler::ingress(
+                config.clone(), (session.clone(), leg.id.to_string()),
+            ))
+        });
+        self.egress.set_source_with_ingress(source, ingress).await
     }
 
     /// Subscribe to decoded ingress audio without depending on bridge slots.
@@ -1043,6 +1078,12 @@ impl LegInner {
             .map(|pair| pair.remote.address.to_string());
         crate::leg_stats::LegQualityReport {
             side,
+            leg_id: self.id.to_string(),
+            egress_mode: Some(if self.egress_is_relay() {
+                crate::media_health::MediaEgressMode::DirectRtpForwarding
+            } else {
+                crate::media_health::MediaEgressMode::PcmPacing
+            }),
             packet_diagnostics: self.packet_diagnostic_snapshot(),
             pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
                 leg_id: self.id.to_string(),
@@ -1240,10 +1281,36 @@ impl LegInner {
         self.egress.finalize_volume().await
     }
 
+    pub(crate) fn audio_transport_observation(&self) -> (u64, Option<u32>) {
+        if let Some(observation) = *self.terminal_audio_observation.lock() {
+            return observation;
+        }
+        let transceivers = self.pc.get_transceivers();
+        let sent = transceivers.iter()
+            .filter(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .filter_map(|t| t.sender())
+            .map(|sender| sender.packets_sent() as u64)
+            .sum();
+        let received_ssrc = transceivers.iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .and_then(|t| t.receiver())
+            .map(|receiver| receiver.ssrc());
+        (sent, received_ssrc)
+    }
+
+    pub(crate) fn owns_quality_sampler(&self) -> bool {
+        self.quality_sampler.lock().is_some()
+    }
+
     /// Stop the leg: cancel the egress pipeline and close the PeerConnection.
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
+        let observation = self.audio_transport_observation();
+        self.terminal_audio_observation.lock().get_or_insert(observation);
+        if let Some(owner) = self.quality_sampler.lock().as_mut() {
+            owner.finish(self);
+        }
         if let Some(state) = self.packet_diagnostics.lock().as_mut() {
             state.finish(self);
         }
@@ -1553,6 +1620,7 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
     config.rtp_buffer_capacity = 100;
     // Correlate rustrtc media/ICE logs with the call (see LegConfig::call_id).
     config.label = cfg.call_id.clone();
+    config.media_error_log_interval = Duration::from_millis(cfg.quality_stats.log_interval_ms);
     config.runtime_handle = tokio::runtime::Handle::try_current().ok();
     config.media_capabilities = Some(rustrtc::config::MediaCapabilities {
         audio: cfg.codecs.iter().map(audio_capability_from_codec).collect(),
@@ -2051,7 +2119,10 @@ mod tests {
         assert!(a.negotiated().is_none());
         // Observer is installed: stats start at zero.
         assert_eq!(a.stats().ingress_packets, 0);
-        assert!(serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].is_null());
+        let initial_quality = serde_json::to_value(a.quality_report("A")).unwrap();
+        assert_eq!(initial_quality["legId"], "a");
+        assert_eq!(initial_quality["egressMode"], "pcm_pacing");
+        assert!(initial_quality["pcmEgress"].is_null());
         a.play(Box::new(crate::audio_source::ToneAudioSource::new(
             440, Duration::from_secs(1), 8000,
         ).unwrap()), true, None).await.unwrap();
@@ -2091,7 +2162,9 @@ mod tests {
             video_payload_types: Vec::new(), on_arm_failed: None,
         }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
-        let direct = serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].clone();
+        let direct_quality = serde_json::to_value(a.quality_report("A")).unwrap();
+        assert_eq!(direct_quality["legId"], "a");
+        let direct = direct_quality["pcmEgress"].clone();
         assert!(direct["volume"]["observed_ms"].as_u64().unwrap() < 250);
         assert!(a.volume_summary(Duration::from_secs(2)).is_none(),
             "a parked direct source has no current PCM window");
@@ -2146,6 +2219,9 @@ mod tests {
             peer_pc: relay_b.pc().clone(), options: Default::default(), rules: Vec::new(),
             video_payload_types: Vec::new(), on_arm_failed: None,
         }).await.unwrap();
+        let relay_quality = serde_json::to_value(relay_a.quality_report("A")).unwrap();
+        assert_eq!(relay_quality["legId"], "caller");
+        assert_eq!(relay_quality["egressMode"], "direct_rtp_forwarding");
         let rows = relay_logs.lock();
         for message in ["leg egress source switch", "fast-path relay armed"] {
             let row = rows.iter().rev().find(|row| row["message"] == message)

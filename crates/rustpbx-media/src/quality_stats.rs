@@ -1,7 +1,6 @@
-//! Bounded sliding statistics for already observed transport counters and RTCP reports.
+//! Complete interval statistics for observed transport counters and RTCP reports.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,7 +8,9 @@ use std::time::{Duration, Instant};
 pub struct QualityStatsConfig {
     pub enabled: bool,
     pub sample_interval_ms: u64,
+    /// Lookback for live health/volume queries; unpublished log statistics never expire.
     pub window_ms: u64,
+    /// Periodic log cadence. Each emission consumes all observations since the previous emission.
     pub log_interval_ms: u64,
 }
 
@@ -96,67 +97,91 @@ pub struct WindowSummary {
     pub reports: [ReportSummary; 2],
 }
 
-struct Sample {
-    at: Instant,
-    elapsed: Duration,
-    rates: [f64; 3],
-    gap: Option<SampleGap>,
+#[derive(Default)]
+struct Accumulator {
+    min: f64,
+    max: f64,
+    sum: f64,
+    weight: f64,
+    count: usize,
 }
 
-#[derive(Clone, Copy)]
-enum SampleGap {
-    Delayed,
-    CounterReset,
-}
+impl Accumulator {
+    fn observe(&mut self, value: f64, weight: f64) {
+        if !value.is_finite() || weight <= 0.0 {
+            return;
+        }
+        if self.count == 0 {
+            self.min = value;
+            self.max = value;
+        }
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        self.sum += value * weight;
+        self.weight += weight;
+        self.count += 1;
+    }
 
-struct Report {
-    coalesced: u64,
-    at: Instant,
-    side: usize,
-    values: [Option<f64>; 3],
+    fn take(&mut self) -> Option<Range> {
+        let value = std::mem::take(self);
+        (value.count > 0).then(|| Range {
+            min: value.min,
+            max: value.max,
+            avg: value.sum / value.weight,
+            sample_count: value.count,
+        })
+    }
 }
 
 pub(crate) struct QualityWindow {
-    window: Duration,
     sample_interval: Duration,
-    samples: VecDeque<Sample>,
-    reports: VecDeque<Report>,
+    start: Option<Instant>,
+    observed: Duration,
+    rates: [Accumulator; 3],
+    reports: [[Accumulator; 3]; 2],
+    coalesced: [u64; 2],
+    sampling_gaps: usize,
+    counter_resets: usize,
 }
 
 impl QualityWindow {
-    pub(crate) fn new(window: Duration, sample_interval: Duration) -> Self {
+    pub(crate) fn new(sample_interval: Duration) -> Self {
         Self {
-            window,
             sample_interval,
-            samples: VecDeque::new(),
-            reports: VecDeque::new(),
+            start: None,
+            observed: Duration::ZERO,
+            rates: Default::default(),
+            reports: Default::default(),
+            coalesced: [0; 2],
+            sampling_gaps: 0,
+            counter_resets: 0,
         }
     }
+
+    fn include(&mut self, at: Instant) {
+        self.start = Some(self.start.map_or(at, |start| start.min(at)));
+    }
+
     pub(crate) fn observe(&mut self, at: Instant, elapsed: Duration, counters: [u64; 3]) {
-        self.prune(at);
         if elapsed.is_zero() {
             return;
         }
-        if self.samples.len() == 241 {
-            self.samples.pop_front();
+        self.include(at.checked_sub(elapsed).unwrap_or(at));
+        self.observed += elapsed;
+        self.sampling_gaps += usize::from(elapsed > self.sample_interval * 2);
+        // A delayed sample still measures the complete counter delta. Retain its
+        // actual duration rather than discarding it or inventing a two-second rate.
+        for (range, count) in self.rates.iter_mut().zip(counters) {
+            range.observe(count as f64 / elapsed.as_secs_f64(), elapsed.as_secs_f64());
         }
-        self.samples.push_back(Sample {
-            at,
-            elapsed,
-            rates: counters.map(|count| count as f64 / elapsed.as_secs_f64()),
-            gap: (elapsed > self.sample_interval * 2).then_some(SampleGap::Delayed),
-        });
     }
+
     pub(crate) fn reset(&mut self, at: Instant) {
-        self.samples.clear();
-        self.reports.clear();
-        self.samples.push_back(Sample {
-            at,
-            elapsed: Duration::ZERO,
-            rates: [0.0; 3],
-            gap: Some(SampleGap::CounterReset),
-        });
+        // A counter baseline reset must not erase observations awaiting publication.
+        self.include(at);
+        self.counter_resets += 1;
     }
+
     pub(crate) fn report(
         &mut self,
         at: Instant,
@@ -164,144 +189,46 @@ impl QualityWindow {
         values: [Option<f64>; 3],
         observations: u64,
     ) {
-        self.prune(at);
-        if self.reports.len() == 482 {
-            self.reports.pop_front();
+        self.include(at);
+        for (range, value) in self.reports[side].iter_mut().zip(values) {
+            if let Some(value) = value {
+                range.observe(value, 1.0);
+            }
         }
-        self.reports.push_back(Report {
-            at,
-            side,
-            values,
-            coalesced: observations.saturating_sub(1),
-        });
-    }
-    fn prune(&mut self, now: Instant) {
-        let cutoff = now.checked_sub(self.window).unwrap_or(now);
-        while self
-            .samples
-            .front()
-            .is_some_and(|sample| sample.at <= cutoff)
-        {
-            self.samples.pop_front();
-        }
-        self.reports.retain(|report| report.at > cutoff);
-    }
-    #[doc(hidden)]
-    pub(crate) fn samples_len(&self) -> usize {
-        self.samples.len()
+        self.coalesced[side] += observations.saturating_sub(1);
     }
 
     pub(crate) fn summary(&mut self, now: Instant) -> Option<WindowSummary> {
-        self.prune(now);
-        let cutoff = now.checked_sub(self.window).unwrap_or(now);
-        let weighted: Vec<_> = self
-            .samples
-            .iter()
-            .filter_map(|sample| {
-                let start = sample.at.checked_sub(sample.elapsed).unwrap_or(sample.at);
-                // Counter deltas do not reveal packet timing within a sampled interval.
-                // Exclude a straddling interval instead of inventing proportional counts.
-                (sample.gap.is_none() && start >= cutoff && sample.at <= now)
-                    .then(|| (sample, sample.elapsed.as_secs_f64()))
-            })
-            .collect();
-        let sampling_gaps = self
-            .samples
-            .iter()
-            .filter(|sample| sample.gap.is_some())
-            .count();
-        let partial_samples = self
-            .samples
-            .iter()
-            .filter(|sample| {
-                sample.gap.is_none()
-                    && sample
-                        .at
-                        .checked_sub(sample.elapsed)
-                        .is_some_and(|start| start < cutoff)
-            })
-            .count();
-        // Partial intervals cannot establish rates, but their coverage and
-        // independently observed RTCP reports must not disappear.
-        if weighted.is_empty()
-            && sampling_gaps == 0
-            && partial_samples == 0
-            && self.reports.is_empty()
-        {
-            return None;
-        }
-        let counter_resets = self
-            .samples
-            .iter()
-            .filter(|sample| matches!(sample.gap, Some(SampleGap::CounterReset)))
-            .count();
-        let rate = |index: usize| {
-            range(
-                weighted
-                    .iter()
-                    .map(|(sample, weight)| (sample.rates[index], *weight)),
-            )
-        };
-        let report = |side| {
-            let value = |index: usize| {
-                range(
-                    self.reports
-                        .iter()
-                        .filter(|report| report.side == side)
-                        .filter_map(|report| report.values[index].map(|value| (value, 1.0))),
-                )
-            };
+        let start = self.start.take()?;
+        let reports = [0, 1].map(|side| {
+            let [jitter_ms, rtt_ms, loss_percent] =
+                self.reports[side].each_mut().map(Accumulator::take);
             ReportSummary {
-                coalesced_reports: self
-                    .reports
-                    .iter()
-                    .filter(|report| report.side == side)
-                    .map(|report| report.coalesced)
-                    .sum(),
                 side: if side == 0 { "caller" } else { "callee" },
                 direction: "egress",
-                jitter_ms: value(0),
-                rtt_ms: value(1),
-                loss_percent: value(2),
+                jitter_ms,
+                rtt_ms,
+                loss_percent,
+                coalesced_reports: std::mem::take(&mut self.coalesced[side]),
             }
-        };
+        });
+        let [
+            rx_packets_per_second,
+            tx_packets_per_second,
+            recording_queue_drops_per_second,
+        ] = self.rates.each_mut().map(Accumulator::take);
         Some(WindowSummary {
-            window_ms: self.window.as_millis() as u64,
-            sampling_gaps,
-            partial_samples,
-            counter_resets,
-            observed_ms: (weighted.iter().map(|(_, weight)| *weight).sum::<f64>() * 1000.0).round()
-                as u64,
-            rx_packets_per_second: rate(0),
-            tx_packets_per_second: rate(1),
-            recording_queue_drops_per_second: rate(2),
-            reports: [report(0), report(1)],
+            window_ms: now.saturating_duration_since(start).as_millis().max(1) as u64,
+            observed_ms: std::mem::take(&mut self.observed).as_millis() as u64,
+            rx_packets_per_second,
+            tx_packets_per_second,
+            recording_queue_drops_per_second,
+            reports,
+            partial_samples: 0,
+            sampling_gaps: std::mem::take(&mut self.sampling_gaps),
+            counter_resets: std::mem::take(&mut self.counter_resets),
         })
     }
-}
-
-fn range(values: impl Iterator<Item = (f64, f64)>) -> Option<Range> {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut weighted_sum = 0.0;
-    let mut total_weight = 0.0;
-    let mut sample_count = 0;
-    for (value, weight) in values {
-        if !value.is_finite() || weight <= 0.0 {
-            continue;
-        }
-        min = min.min(value);
-        max = max.max(value);
-        weighted_sum += value * weight;
-        total_weight += weight;
-        sample_count += 1;
-    }
-    (sample_count > 0).then(|| Range {
-        min,
-        max,
-        avg: weighted_sum / total_weight,
-        sample_count,
-    })
 }
 
 #[cfg(test)]
@@ -309,9 +236,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sliding_window_excludes_old_samples_and_weights_elapsed_time() {
+    fn diagnostic_windows_process_every_observation_once_despite_late_emission() {
         let start = Instant::now();
-        let mut window = QualityWindow::new(Duration::from_secs(2), Duration::from_millis(500));
+        let mut window = QualityWindow::new(Duration::from_millis(500));
+        // Two counter samples and two RTCP reports in a single two-second group.
         window.observe(
             start + Duration::from_millis(500),
             Duration::from_millis(500),
@@ -323,109 +251,101 @@ mod tests {
             [10, 20, 0],
         );
         window.report(
+            start + Duration::from_millis(500),
+            0,
+            [Some(2.0), None, Some(0.0)],
+            1,
+        );
+        window.report(
             start + Duration::from_secs(1),
             0,
-            [Some(0.0), None, Some(0.0)],
+            [Some(6.0), None, Some(10.0)],
             2,
         );
-        window.observe(
-            start + Duration::from_secs(2),
-            Duration::from_secs(1),
-            [40, 80, 2],
-        );
-        let summary = window.summary(start + Duration::from_secs(2)).unwrap();
+        // Logging was delayed past the nominal window: none of those observations may expire.
+        let summary = window
+            .summary(start + Duration::from_secs(5))
+            .expect("unpublished data must survive");
+        assert_eq!(summary.window_ms, 5000);
+        assert_eq!(summary.observed_ms, 1000);
         assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().min, 20.0);
         assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().max, 200.0);
-        assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().avg, 75.0);
-        assert_eq!(summary.observed_ms, 2000);
+        assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().avg, 110.0);
+        assert_eq!(summary.tx_packets_per_second.as_ref().unwrap().avg, 70.0);
+        assert_eq!(
+            summary
+                .recording_queue_drops_per_second
+                .as_ref()
+                .unwrap()
+                .avg,
+            5.0
+        );
         assert_eq!(
             summary.reports[0].jitter_ms.as_ref().unwrap().sample_count,
-            1
+            2
         );
-        assert!(summary.reports[0].rtt_ms.is_none());
+        assert_eq!(summary.reports[0].jitter_ms.as_ref().unwrap().avg, 4.0);
         assert_eq!(summary.reports[0].coalesced_reports, 1);
-        window.observe(
-            start + Duration::from_secs(3),
-            Duration::from_secs(1),
-            [100, 0, 0],
-        );
-        let summary = window.summary(start + Duration::from_secs(3)).unwrap();
-        assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().min, 40.0);
-        assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().max, 100.0);
-        assert_eq!(summary.rx_packets_per_second.as_ref().unwrap().avg, 70.0);
+        assert!(summary.reports[0].rtt_ms.is_none());
         assert!(
-            summary.reports[0].jitter_ms.is_none(),
-            "old report is not a fresh sample"
+            window.summary(start + Duration::from_secs(7)).is_none(),
+            "empty groups are not zero-valued data or a repeat"
         );
-        let partial = window.summary(start + Duration::from_millis(3250)).unwrap();
-        assert_eq!(partial.partial_samples, 1);
-        assert_eq!(partial.observed_ms, 1000);
-        assert_eq!(partial.rx_packets_per_second.as_ref().unwrap().avg, 100.0);
+        // A late observation covers the missing groups. Preserve its actual elapsed time and all deltas.
+        window.observe(
+            start + Duration::from_secs(8),
+            Duration::from_secs(7),
+            [140, 70, 7],
+        );
+        let late = window.summary(start + Duration::from_secs(8)).unwrap();
+        assert_eq!(late.window_ms, 7000);
+        assert_eq!(late.observed_ms, 7000);
+        assert_eq!(late.sampling_gaps, 1);
+        assert_eq!(late.rx_packets_per_second.unwrap().avg, 20.0);
+        assert!(
+            late.reports[0].jitter_ms.is_none(),
+            "reports from a published group must not repeat"
+        );
+        assert!(window.summary(start + Duration::from_secs(10)).is_none());
+    }
+
+    #[test]
+    fn diagnostic_windows_preserve_pending_data_across_resets_and_distinguish_zero_from_absence() {
+        let start = Instant::now();
+        let mut window = QualityWindow::new(Duration::from_millis(500));
+        assert!(window.summary(start + Duration::from_secs(2)).is_none());
+        window.observe(
+            start + Duration::from_millis(2500),
+            Duration::from_millis(500),
+            [20, 10, 2],
+        );
+        window.report(
+            start + Duration::from_millis(2500),
+            0,
+            [Some(4.0), None, None],
+            1,
+        );
+        window.reset(start + Duration::from_secs(3));
+        window.observe(
+            start + Duration::from_millis(3500),
+            Duration::from_millis(500),
+            [0, 0, 0],
+        );
+        let summary = window.summary(start + Duration::from_secs(4)).unwrap();
+        assert_eq!(summary.observed_ms, 1000);
+        assert_eq!(summary.counter_resets, 1);
+        assert_eq!(summary.rx_packets_per_second.unwrap().avg, 20.0);
+        assert_eq!(summary.reports[0].jitter_ms.as_ref().unwrap().avg, 4.0);
+        assert!(summary.reports[1].loss_percent.is_none());
         assert!(window.summary(start + Duration::from_secs(6)).is_none());
-        window.observe(
-            start + Duration::from_secs(6),
-            Duration::from_secs(3),
-            [9000, 0, 0],
-        );
-        let gap = window.summary(start + Duration::from_secs(6)).unwrap();
-        assert!(
-            gap.rx_packets_per_second.is_none(),
-            "a long sampler pause is not a rate spike"
-        );
-        assert_eq!(gap.sampling_gaps, 1);
         window.observe(
             start + Duration::from_millis(6500),
             Duration::from_millis(500),
             [0, 0, 0],
         );
-        let observed_zero = window.summary(start + Duration::from_millis(6500)).unwrap();
-        assert_eq!(
-            observed_zero.rx_packets_per_second.unwrap().avg,
-            0.0,
-            "successfully sampled unchanged counters are observed zero, not missing data"
-        );
-        window.reset(start + Duration::from_secs(7));
-        let reset = window.summary(start + Duration::from_secs(7)).unwrap();
-        assert_eq!(reset.counter_resets, 1);
-        assert!(reset.rx_packets_per_second.is_none());
-
-        let results: Vec<_> = [(500, 501), (7500, 10_000)]
-            .into_iter()
-            .map(|(interval_ms, elapsed_ms)| {
-                let interval = Duration::from_millis(interval_ms);
-                let mut window = QualityWindow::new(interval, interval);
-                let at = start + Duration::from_millis(elapsed_ms);
-                window.observe(at, Duration::from_millis(elapsed_ms), [100, 50, 5]);
-                let partial = window.summary(at);
-                window.report(at, 0, [Some(4.0), Some(17.0), Some(1.0)], 2);
-                let with_report = window.summary(at);
-                assert!(window.summary(at + interval).is_none());
-                (interval_ms, elapsed_ms, partial, with_report)
-            })
-            .collect();
-        let missing: Vec<_> = results
-            .iter()
-            .filter(|(_, _, partial, report)| partial.is_none() || report.is_none())
-            .map(|(interval, elapsed, _, _)| (*interval, *elapsed))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "straddling samples must remain visible: {missing:?}"
-        );
-        for (_, _, partial, with_report) in results {
-            for summary in [partial.as_ref().unwrap(), with_report.as_ref().unwrap()] {
-                assert_eq!(summary.partial_samples, 1);
-                assert_eq!(summary.observed_ms, 0);
-                assert_eq!(summary.sampling_gaps, 0);
-                assert!(summary.rx_packets_per_second.is_none());
-                assert!(summary.tx_packets_per_second.is_none());
-                assert!(summary.recording_queue_drops_per_second.is_none());
-            }
-            let report = &with_report.unwrap().reports[0];
-            assert_eq!(report.jitter_ms.as_ref().unwrap().avg, 4.0);
-            assert_eq!(report.rtt_ms.as_ref().unwrap().avg, 17.0);
-            assert_eq!(report.loss_percent.as_ref().unwrap().avg, 1.0);
-            assert_eq!(report.coalesced_reports, 1);
-        }
+        let zero = window.summary(start + Duration::from_secs(7)).unwrap();
+        assert_eq!(zero.rx_packets_per_second.unwrap().avg, 0.0);
+        assert_eq!(zero.observed_ms, 500);
+        assert_eq!(zero.counter_resets, 0);
     }
 }

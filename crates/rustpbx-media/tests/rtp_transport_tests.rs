@@ -266,7 +266,15 @@ async fn negotiate(test_peer: &TestPeer, leg: &LegInner) {
     // ── Offer side (TestPeer) ──
     let _ = test_peer.pc.create_offer().await.unwrap();
     test_peer.pc.wait_for_gathering_complete().await;
-    let offer = test_peer.pc.create_offer().await.unwrap();
+    let mut offer = test_peer.pc.create_offer().await.unwrap();
+    if MediaTransport::from_rtc_config(&test_peer.pc.config()) != MediaTransport::WebRtc {
+        // Official RTC can negotiate BUNDLE for SIP too. Model the legacy SIP
+        // peer explicitly so audio/video tests exercise separate transports.
+        let sdp = offer.to_sdp_string().lines()
+            .filter(|line| !line.starts_with("a=group:BUNDLE"))
+            .collect::<Vec<_>>().join("\r\n") + "\r\n";
+        offer = SessionDescription::parse(SdpType::Offer, &sdp).unwrap();
+    }
     test_peer.pc.set_local_description(offer.clone()).unwrap();
     let offer_sdp = offer.to_sdp_string();
 
@@ -1868,6 +1876,107 @@ fn relay_ssrc(h: &TestMediaHarness, side: LegSide) -> u32 {
     h.mb.leg(side).unwrap().outbound_audio_ssrc()
 }
 
+/// Real RTC errors must use the leg configuration and retain its searchable identity.
+#[tokio::test]
+async fn configured_transport_errors_keep_searchable_call_and_leg() {
+    use std::sync::{Arc, Mutex};
+    use tracing::Instrument;
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || Sink(sink.clone()))
+        .finish();
+    let _interest_registry = tracing::Dispatch::new(tracing_subscriber::registry());
+    let _logs = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    let mut legs = Vec::new();
+    for (id, interval) in [("pbx-diag-2s", 2000), ("pbx-diag-5s", 5000)] {
+        let mut config = rustpbx_media::leg::LegConfig::rtp_pcmu();
+        config.call_id = Some(id.into());
+        config.quality_stats.log_interval_ms = interval;
+        let leg = LegInner::new("caller", &config, None).unwrap();
+        let peer = TestPeer::new(
+            MediaTransport::Rtp,
+            MediaNegotiator::codec_info_for_type(CodecType::PCMU),
+        );
+        negotiate(&peer, &leg).await;
+        let transport = leg
+            .pc()
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .unwrap()
+            .sender()
+            .unwrap()
+            .transport()
+            .unwrap();
+        legs.push((leg, peer, transport));
+    }
+    let unrelated = tracing::info_span!(
+        "another_call",
+        session_id = "unrelated-session",
+        leg_id = "callee"
+    );
+    for (_, _, transport) in &legs {
+        for _ in 0..2 {
+            transport
+                .feed_packet(vec![0x80, 0].into(), "127.0.0.1:9".parse().unwrap())
+                .instrument(unrelated.clone())
+                .await;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    for (_, _, transport) in &legs {
+        for _ in 0..2 {
+            transport
+                .feed_packet(vec![0x80, 0].into(), "127.0.0.1:9".parse().unwrap())
+                .instrument(unrelated.clone())
+                .await;
+        }
+    }
+    let rows = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    let errors: Vec<_> = rows
+        .lines()
+        .filter(|r| r.contains("stage=\"rtp_parse_failed\""))
+        .collect();
+    assert_eq!(
+        errors.iter().filter(|r| r.contains("pbx-diag-2s")).count(),
+        2,
+        "{rows}"
+    );
+    assert_eq!(
+        errors.iter().filter(|r| r.contains("pbx-diag-5s")).count(),
+        1,
+        "{rows}"
+    );
+    for row in errors {
+        assert!(
+            row.contains("session_id=")
+                && row.contains("leg_id=caller")
+                && row.contains("direction=\"peer_to_local\""),
+            "{row}"
+        );
+        assert!(!row.contains("unrelated-session"), "{row}");
+    }
+    for (leg, _, _) in &legs {
+        leg.stop();
+    }
+}
+
 /// Outbound RFC 2833 telephone-event (DTMF) from a leg must reach the facing
 /// peer on the negotiated telephone-event payload type, with start (E=0) and
 /// end (E=1) packets per digit.
@@ -3339,6 +3448,8 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
     let mut ts = 10_000u32;
     let mut voiced_samples = 0u64;
     let mut total_samples = 0u64;
+    let mut first_voiced_offset = None;
+    let mut last_voiced_end = 0u64;
     let mut late = 0usize;
 
     // Interleave: send each frame on the jittered cadence, then drain the A
@@ -3361,6 +3472,8 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
                     let pcm = decoder.decode(&frame.data);
                     total_samples += pcm.len() as u64;
                     if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
+                        first_voiced_offset.get_or_insert(total_samples - pcm.len() as u64);
+                        last_voiced_end = total_samples;
                         voiced_samples += pcm.len() as u64;
                     }
                 }
@@ -3378,7 +3491,9 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
                 let pcm = decoder.decode(&frame.data);
                 total_samples += pcm.len() as u64;
                 if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
-                    voiced_samples += pcm.len() as u64;
+                    first_voiced_offset.get_or_insert(total_samples - pcm.len() as u64);
+                        last_voiced_end = total_samples;
+                        voiced_samples += pcm.len() as u64;
                 }
             }
             _ => tokio::time::sleep(Duration::from_millis(5)).await,
@@ -3389,12 +3504,17 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
     // hole ratio stays tiny (≤ 5%). The old blocking-per-tick pull punched a
     // silent slot per late frame (~20% holes) — that is the regression this
     // test pins. No input frame may be lost either.
-    let ratio = voiced_samples as f64 / total_samples.max(1) as f64;
+    // Bound the speech interval by observed voiced frames. The explicit
+    // 300 ms idle drain is not a mid-stream dropout; silence BETWEEN voiced
+    // frames remains in the denominator.
+    let speech_samples = last_voiced_end.saturating_sub(first_voiced_offset.unwrap_or(0));
+    let ratio = voiced_samples as f64 / speech_samples.max(1) as f64;
     assert!(
         ratio >= 0.90,
         "jittered feed produced {:.1}% voiced audio ({voiced_samples}/{total_samples} samples) —          late frames must merge into the accumulator, not punch silent slots",
         ratio * 100.0
     );
+    assert!(voiced_samples >= 120 * 160 * 95 / 100, "jitter handling must retain the fed speech");
     assert!(
         total_samples >= 120 * 160,
         "output lost frames: got {total_samples} samples, fed {}",

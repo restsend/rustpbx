@@ -72,6 +72,11 @@ impl LegRtcpSnapshot {
 pub struct LegQualityReport {
     /// Which side of the bridge ("A" = caller, "B" = callee).
     pub side: &'static str,
+    /// Actual media-leg identity, including when no PCM was produced.
+    pub leg_id: String,
+    /// Selected output pipeline; this does not imply packets reached the peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_mode: Option<crate::media_health::MediaEgressMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packet_diagnostics: Option<crate::packet_diagnostics::LegPacketSnapshot>,
     /// Last observed PCM window, retained across source replacement and teardown.

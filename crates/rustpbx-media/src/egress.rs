@@ -184,7 +184,7 @@ enum EgressCmd {
         config: crate::quality_stats::QualityStatsConfig,
         identity: Option<(String, String)>,
     },
-    SetSource(EgressSource),
+    SetSource(EgressSource, Option<crate::volume_stats::VolumeSampler>),
     UpdateCodec(EgressCodec),
     /// Continue the paced timeline after rewrite relay released the wire.
     /// Next emitted frame uses `last_wire_ts + one ptime`, resumes the wire
@@ -238,7 +238,7 @@ impl EgressPipeline {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
             transcode_armed: false,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
@@ -277,9 +277,18 @@ impl EgressPipeline {
 
     /// Switch the active source (applied between ticks; never drops a frame
     /// mid-encode). Returns Err if the pipeline has stopped.
+    #[cfg(test)]
     pub async fn set_source(&self, source: EgressSource) -> Result<()> {
+        self.set_source_with_ingress(source, None).await
+    }
+
+    pub(crate) async fn set_source_with_ingress(
+        &self,
+        source: EgressSource,
+        ingress: Option<crate::volume_stats::VolumeSampler>,
+    ) -> Result<()> {
         self.cmd_tx
-            .send(EgressCmd::SetSource(source))
+            .send(EgressCmd::SetSource(source, ingress))
             .await
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
@@ -418,9 +427,8 @@ struct EgressTask {
     /// Remaining grace ticks while draining a finished non-looping Media
     /// source. 0 = idle.
     eof_tail_remaining: u32,
-    /// TEMP probe: 1 Hz RMS trace of the transcode pipeline output (production
-    /// incident 2026-11-13 — resume noise on a rebuilt transcode bridge).
-    transcode_probe_tick: usize,
+    /// Volume of the current peer input after decoding and before resampling.
+    ingress_volume: Option<crate::volume_stats::VolumeSampler>,
     /// Jitter absorber for TranscodePeer: buffering until two full frames of
     /// decoded PCM are on hand, then consuming one frame per tick. Frames
     /// arriving a tick late merge into the buffer instead of punching CN
@@ -520,13 +528,16 @@ impl EgressTask {
                     Some(EgressCmd::FinalizeVolume(completed)) => {
                         // Terminal CDR capture owns the final window; later ticks cannot overwrite it.
                         if let Some(mut volume) = self.volume.take() { volume.finish(); }
+                        if let Some(mut volume) = self.ingress_volume.take() { volume.finish(); }
                         let _ = completed.send(());
                     }
                     Some(EgressCmd::VolumeStats { enabled, config, identity }) => {
                         self.volume = enabled.then(|| crate::volume_stats::VolumeSampler::new(config, self.volume_sink.clone(), identity));
                         if !enabled { *self.volume_sink.lock() = Default::default(); }
                     }
-                    Some(EgressCmd::SetSource(s)) => {
+                    Some(EgressCmd::SetSource(s, ingress)) => {
+                        if let Some(mut volume) = self.ingress_volume.take() { volume.finish(); }
+                        self.ingress_volume = ingress;
                         if let Some(volume) = self.volume.as_mut() { volume.reset(); }
                         let was_relay = matches!(&self.source, EgressSource::RewriteRelay { .. });
                         let will_relay = matches!(&s, EgressSource::RewriteRelay { .. });
@@ -642,6 +653,12 @@ impl EgressTask {
                             "egress pacing fell behind; dropped the remaining backlog"
                         );
                     }
+                    if let Some(volume) = self.volume.as_mut() {
+                        volume.advance(now);
+                    }
+                    if let Some(volume) = self.ingress_volume.as_mut() {
+                        volume.advance(now);
+                    }
                     if let Some(frame) = self.next_frame().await {
                         let clear_marker = self.marker_pending;
                         let stamp_ts = frame.rtp_timestamp;
@@ -663,6 +680,7 @@ impl EgressTask {
             }
         }
         if let Some(volume) = self.volume.as_mut() { volume.finish(); }
+        if let Some(volume) = self.ingress_volume.as_mut() { volume.finish(); }
     }
 
     /// Produce exactly one frame for this tick. Sources that have no data fall
@@ -763,6 +781,7 @@ impl EgressTask {
                 peer,
                 decoder,
                 source_audio_payload_type,
+                src_sample_rate,
                 primed,
                 ..
             } => {
@@ -780,7 +799,6 @@ impl EgressTask {
                 let frame_samples = self.pcm_buf.len();
                 let mut drained_any = false;
                 let mut dtmf_input: Option<AudioFrame> = None;
-                let mut decode_probe_rms: Option<(f64, usize, Option<u8>)> = None;
                 std::future::poll_fn(|cx| {
                     loop {
                         // Cap first: trim the oldest surplus even when no new
@@ -803,17 +821,9 @@ impl EgressTask {
                                     .payload_type
                                     .is_none_or(|pt| pt == *source_audio_payload_type)
                                 {
-                                    self.transcode_probe_tick =
-                                        self.transcode_probe_tick.wrapping_add(1);
                                     let mut pcm = decoder.decode(&input.data);
-                                    if self.transcode_probe_tick.is_multiple_of(50) {
-                                        let rms = (pcm.iter()
-                                            .map(|v| (*v as i64) * (*v as i64))
-                                            .sum::<i64>() as f64
-                                            / pcm.len().max(1) as f64)
-                                            .sqrt();
-                                        decode_probe_rms =
-                                            Some((rms, pcm.len(), input.payload_type));
+                                    if let Some(volume) = self.ingress_volume.as_mut() {
+                                        volume.observe(&pcm, *src_sample_rate);
                                     }
                                     if let Some(rs) = &mut self.resampler {
                                         pcm = rs.resample(&pcm);
@@ -838,12 +848,6 @@ impl EgressTask {
                     }
                 })
                 .await;
-                if let Some((rms, samples, pt)) = decode_probe_rms {
-                    eprintln!(
-                        "TX-PROBE: decoded rms={rms:.0} samples={samples} pt={pt:?} pending={}",
-                        self.transcode_pending.len(),
-                    );
-                }
                 if let Some(input) = dtmf_input {
                     match self.build_dtmf_frame(&input) {
                         Some(frame) => frame,
@@ -940,7 +944,7 @@ impl EgressTask {
 
     fn encode_observed_pcm(&mut self) -> Bytes {
         if let Some(volume) = self.volume.as_mut() {
-            volume.observe(&self.pcm_buf);
+            volume.observe(&self.pcm_buf, self.codec.codec.samplerate());
         }
         self.encoder.encode(&self.pcm_buf).into()
     }
@@ -1136,7 +1140,6 @@ mod tests {
         let volume = pipe.volume_summary(Duration::from_secs(2)).unwrap();
         assert!(volume.sample_count > 0);
         assert_eq!(volume.rms, 0.0);
-        assert_eq!(volume.peak, 0);
         assert_eq!(volume.attenuation_dbov, 127, "observed silence is distinct from unavailable PCM");
         pipe.set_volume_stats(false, config, None)
             .unwrap();
@@ -1185,7 +1188,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -1241,7 +1244,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         let first = task.next_frame().await.expect("first frame");
@@ -1317,7 +1320,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         // The relay left the wire at ts 777_600 with the receiver having
@@ -1390,7 +1393,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1472,7 +1475,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1568,7 +1571,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1818,7 +1821,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1969,7 +1972,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -2052,7 +2055,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -2301,7 +2304,7 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         };
 
         let speech_ref: Bytes = create_encoder(CodecType::PCMU)
@@ -2449,7 +2452,7 @@ mod transcode_drain_tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
+            ingress_volume: None,
         }
     }
 
@@ -2467,6 +2470,46 @@ mod transcode_drain_tests {
             source_addr: None,
             raw_packet: None,
         })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transcode_pacing_publishes_ingress_volume_when_input_stops() {
+        use tracing::instrument::WithSubscriber;
+
+        let logs = crate::volume_stats::tests::Logs::default();
+        let captured = logs.0.clone();
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 16);
+        in_sender.try_send(pcmu_frame(20, 0, 1)).unwrap();
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        task.ingress_volume = Some(crate::volume_stats::VolumeSampler::ingress(
+            crate::quality_stats::QualityStatsConfig {
+                sample_interval_ms: 500,
+                log_interval_ms: 2000,
+                ..Default::default()
+            },
+            ("paused-call".into(), "peer".into()),
+        ));
+        let cancel = CancellationToken::new();
+        let pacing = tokio::spawn(
+            task.run(cmd_rx, Duration::from_millis(20), cancel.clone())
+                .with_subscriber(logs),
+        );
+
+        tokio::time::sleep(Duration::from_millis(1990)).await;
+        assert!(captured.lock().is_empty(), "do not emit before the reporting boundary");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        {
+            let values = captured.lock();
+            assert_eq!(values.len(), 1, "publish with the route still active and no new PCM");
+            assert_eq!(values[0]["sample_count"], 160, "do not count generated silence");
+        }
+        drop(in_sender);
+        drop(cmd_tx);
+        cancel.cancel();
+        pacing.await.unwrap();
+        assert_eq!(captured.lock().len(), 1, "do not duplicate the published window");
     }
 
     /// THE regression: a 10 ms-ptime peer feeding a 20 ms ptime leg must come
@@ -2702,12 +2745,14 @@ mod transcode_drain_tests {
         let silence = task.next_frame().await.expect("post-primed silence");
         assert_eq!(silence.payload_type, Some(8));
         assert_eq!(task.transcode_pending.len(), 160);
+        in_sender.try_send(pcmu_frame(20, 160, 1)).unwrap();
+        for _ in 0..2 {
+            assert!(task.next_frame().await.is_some());
+        }
+        assert_eq!(task.transcode_pending.len(), 0);
     }
 
-    /// THE padded-path regression: a lone 10 ms frame on a 20 ms leg is
-    /// emitted zero-padded and CONSUMED — the partial must never surface
-    /// again inside a later frame (pre-fix, every input segment was played
-    /// twice: once padded, once folded into the next full frame).
+    /// Partial peer frames must remain ordered and appear once after jitter prebuffering.
     #[tokio::test(start_paused = true)]
     async fn padded_partial_frame_is_not_repeated() {
         let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);

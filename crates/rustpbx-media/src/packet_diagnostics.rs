@@ -1,6 +1,6 @@
 //! Application-owned snapshots from existing RTP observers and transport stats.
-//! Lower-level socket/decrypt/drop outcomes are correlated transport logs, not
-//! a second packet-counter API. No task, callback or history is installed here.
+//! Lower-level socket/decrypt/drop totals are not exposed by official rustrtc.
+//! No task, callback or history is installed here.
 use crate::leg::{Leg, LegInner};
 use rustrtc::stats::StatsProvider;
 use serde::Serialize;
@@ -115,7 +115,7 @@ impl LegPacketDiagnostics {
             session_id = %self.session_id, root_session_id = %self.root_session_id,
             leg_id = %leg.id(), direction = "peer_to_pbx_and_pbx_to_peer", event = "final",
             elapsed_ms = self.started.elapsed().as_millis() as u64,
-            lower_level_evidence = "media.transport and media.transport_drop logs",
+            lower_level_evidence = "rustrtc ICE/RTP logs; raw socket/decrypt/drop totals are unmeasured",
             snapshot = %serde_json::to_string(&snapshot).unwrap_or_default(), "media.packet_stages");
         self.latest = Some(snapshot);
     }
