@@ -139,6 +139,58 @@ impl ActiveFileRollingWriteGuard {
     }
 }
 
+fn file_log_writer(
+    appender: ActiveFileRollingWriter,
+) -> (
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+) {
+    // Disk backpressure must never park media or signalling workers.
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(true)
+        .finish(ActiveFileRollingWriteGuard::from_writer(appender))
+}
+
+fn report_file_log_drops(
+    errors: &tracing_appender::non_blocking::ErrorCounter,
+    previously_sampled: &mut usize,
+) {
+    let total = errors.dropped_lines();
+    let dropped = total.saturating_sub(*previously_sampled);
+    *previously_sampled = total;
+    if dropped > 0 {
+        warn!(
+            event = "logging.file_queue_overflow",
+            dropped_lines = dropped,
+            dropped_lines_total = total,
+            "File log queue overflow; records dropped to keep call processing responsive"
+        );
+    }
+    // Use the library's cumulative count, including a warning dropped above.
+    // Absolute updates also retain startup drops when the metrics recorder starts later.
+    metrics::counter!("rustpbx_file_log_dropped_lines_total")
+        .absolute(errors.dropped_lines() as u64);
+}
+
+async fn await_app_with_file_log_reporting<F: std::future::Future>(
+    app: F,
+    errors: Option<&tracing_appender::non_blocking::ErrorCounter>,
+    tick: &mut tokio::time::Interval,
+    previously_sampled: &mut usize,
+) -> F::Output {
+    tokio::pin!(app);
+    loop {
+        tokio::select! {
+            result = &mut app => return result,
+            _ = tick.tick(), if errors.is_some() => {
+                if let Some(errors) = errors {
+                    report_file_log_drops(errors, previously_sampled);
+                }
+            }
+        }
+    }
+}
+
 impl Write for ActiveFileRollingWriteGuard {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut inner = self.inner.lock();
@@ -512,13 +564,14 @@ fn main() -> Result<()> {
     }
     let mut file_layer = None;
     let mut guard_holder = None;
+    let mut file_log_errors = None;
     let mut fmt_layer = None;
     if let Some(ref log_file) = config.log_file {
         let log_path = PathBuf::from(log_file);
         let mode = LogRotationMode::from_config(&config.log_rotation);
         let appender = ActiveFileRollingWriter::new(log_path, mode)?;
-        let (non_blocking, guard) =
-            tracing_appender::non_blocking(ActiveFileRollingWriteGuard::from_writer(appender));
+        let (non_blocking, guard) = file_log_writer(appender);
+        file_log_errors = Some(non_blocking.error_counter());
         guard_holder = Some(guard);
         file_layer = Some(
             tracing_subscriber::fmt::layer()
@@ -558,6 +611,10 @@ fn main() -> Result<()> {
     }
 
     let _ = guard_holder; // keep the guard alive
+
+    let mut file_log_tick = tokio::time::interval(Duration::from_secs(15));
+    file_log_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previously_sampled_log_drops = 0;
 
     // Route panics (including tokio worker threads) into tracing while keeping
     // the default stderr output. Must be installed after the subscriber is set.
@@ -668,7 +725,12 @@ fn main() -> Result<()> {
 
             info!("starting rustpbx on {}", state.config().http_addr);
             let router = create_router(state.clone());
-            let mut app_future = Box::pin(rustpbx::app::run(state.clone(), router));
+            let mut app_future = Box::pin(await_app_with_file_log_reporting(
+                rustpbx::app::run(state.clone(), router),
+                file_log_errors.as_ref(),
+                &mut file_log_tick,
+                &mut previously_sampled_log_drops,
+            ));
 
             #[cfg(unix)]
             let mut sigterm_stream = {
@@ -807,6 +869,9 @@ fn main() -> Result<()> {
         break;
     }
 
+        if let Some(ref errors) = file_log_errors {
+            report_file_log_drops(errors, &mut previously_sampled_log_drops);
+        }
         Ok(())
     })?; // end of sip_runtime.block_on
 
@@ -883,4 +948,171 @@ async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn file_log_reporting_keeps_polling_app_until_completion() {
+        for logging_enabled in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let appender = ActiveFileRollingWriter::new(
+                directory.path().join("main-loop.log"),
+                LogRotationMode::Never,
+            )
+            .unwrap();
+            let (writer, guard) = file_log_writer(appender);
+            let errors = writer.error_counter();
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            let mut previously_sampled = 0;
+            let started = tokio::time::Instant::now();
+            let result = await_app_with_file_log_reporting(
+                async {
+                    tokio::time::sleep(Duration::from_secs(46)).await;
+                    Err::<(), _>("app exit result")
+                },
+                logging_enabled.then_some(&errors),
+                &mut tick,
+                &mut previously_sampled,
+            )
+            .await;
+            assert_eq!(result, Err("app exit result"));
+            assert_eq!(started.elapsed(), Duration::from_secs(46));
+            drop(writer);
+            drop(guard);
+        }
+    }
+
+    #[test]
+    fn file_log_queue_saturation_keeps_runtime_responsive_and_counts_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("saturated.log");
+        let appender = ActiveFileRollingWriter::new(&path, LogRotationMode::Never).unwrap();
+        let inner = appender.inner.clone();
+        let blocked = inner.lock();
+        let (mut writer, guard) = file_log_writer(appender);
+        let errors = writer.error_counter();
+        let count = tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT + 1000;
+        let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let logging = tokio::spawn(async move {
+                    for index in 0..count {
+                        writer
+                            .write_all(
+                                format!(
+                                    "session_id=queue-test-session event={index} content=complete\n"
+                                )
+                                .as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                heartbeat_tx.send(()).unwrap();
+                logging.await.unwrap();
+            });
+        });
+        let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(blocked);
+        producer.join().unwrap();
+        drop(guard);
+        assert!(
+            responsive,
+            "log queue saturation must not stall the Tokio runtime"
+        );
+        let dropped = errors.dropped_lines();
+        assert!(
+            dropped > 0,
+            "saturation must be counted rather than blocking"
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(
+            lines.len() + dropped,
+            count,
+            "every record must be written or counted as dropped"
+        );
+        let mut previous = None;
+        for line in lines {
+            let index: usize = line
+                .split("event=")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(previous.is_none_or(|last| index > last));
+            previous = Some(index);
+            assert_eq!(
+                line,
+                format!("session_id=queue-test-session event={index} content=complete")
+            );
+        }
+
+        let report_path = directory.path().join("overflow-report.log");
+        let report_file = File::create(&report_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || report_file.try_clone().unwrap())
+            .finish();
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        tracing::subscriber::with_default(subscriber, || {
+            metrics::with_local_recorder(&recorder, || {
+                let mut previously_sampled = 0;
+                report_file_log_drops(&errors, &mut previously_sampled);
+                report_file_log_drops(&errors, &mut previously_sampled);
+            });
+        });
+        let reports = fs::read_to_string(report_path).unwrap();
+        assert_eq!(
+            reports.lines().count(),
+            1,
+            "unchanged totals must not repeat warnings"
+        );
+        assert!(reports.contains("logging.file_queue_overflow"));
+        assert!(reports.contains(&format!("dropped_lines={dropped}")));
+        assert!(reports.contains(&format!("dropped_lines_total={dropped}")));
+        let values = snapshotter.snapshot().into_vec();
+        let (_, _, _, value) = values
+            .iter()
+            .find(|(key, _, _, _)| key.key().name() == "rustpbx_file_log_dropped_lines_total")
+            .expect("dropped records must be visible to the metrics recorder");
+        assert_eq!(
+            value,
+            &metrics_util::debugging::DebugValue::Counter(dropped as u64)
+        );
+    }
+
+    #[test]
+    fn file_log_queue_flushes_complete_records_without_overload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("normal.log");
+        let appender = ActiveFileRollingWriter::new(&path, LogRotationMode::Never).unwrap();
+        let inner = appender.inner.clone();
+        let blocked = inner.lock();
+        let (mut writer, guard) = file_log_writer(appender);
+        let errors = writer.error_counter();
+        let mut expected = String::new();
+        for index in 0..100 {
+            let record = format!("session_id=normal-test-session event={index} content=complete\n");
+            writer.write_all(record.as_bytes()).unwrap();
+            expected.push_str(&record);
+        }
+        assert_eq!(errors.dropped_lines(), 0);
+        drop(blocked);
+        drop(writer);
+        drop(guard);
+        assert_eq!(fs::read_to_string(path).unwrap(), expected);
+    }
 }
