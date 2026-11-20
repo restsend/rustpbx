@@ -2198,7 +2198,7 @@ fn wire_rtcp_sender_forward(
                 packet = rx.recv() => {
                     use rustrtc::rtp::{
                         FirRequest, FullIntraRequest, GenericNack, PictureLossIndication,
-                        RtcpPacket,
+                        ReceiverReport, RtcpPacket,
                     };
 
                     let Ok(packet) = packet else { break };
@@ -2210,13 +2210,14 @@ fn wire_rtcp_sender_forward(
                     if !dst_tap.has_ingress_ssrc_for_pts(target, &dst_pts) {
                         continue;
                     }
-                    let forwarded = match packet {
-                        RtcpPacket::PictureLossIndication(pli) => {
+                    let (sender_ssrc, forwarded) = match packet {
+                        RtcpPacket::PictureLossIndication(pli) => (
+                            pli.sender_ssrc,
                             RtcpPacket::PictureLossIndication(PictureLossIndication {
                                 sender_ssrc: pli.sender_ssrc,
                                 media_ssrc: target,
-                            })
-                        }
+                            }),
+                        ),
                         RtcpPacket::FullIntraRequest(fir) => {
                             let Some(request) = fir
                                 .requests
@@ -2225,26 +2226,39 @@ fn wire_rtcp_sender_forward(
                             else {
                                 continue;
                             };
-                            RtcpPacket::FullIntraRequest(FullIntraRequest {
-                                sender_ssrc: fir.sender_ssrc,
-                                requests: vec![FirRequest {
-                                    ssrc: target,
-                                    sequence_number: request.sequence_number,
-                                }],
-                            })
+                            (
+                                fir.sender_ssrc,
+                                RtcpPacket::FullIntraRequest(FullIntraRequest {
+                                    sender_ssrc: fir.sender_ssrc,
+                                    requests: vec![FirRequest {
+                                        ssrc: target,
+                                        sequence_number: request.sequence_number,
+                                    }],
+                                }),
+                            )
                         }
                         RtcpPacket::GenericNack(nack) => {
                             let lost_packets = timeline.translate_nack(target, &nack.lost_packets);
                             if lost_packets.is_empty() { continue; }
-                            RtcpPacket::GenericNack(GenericNack {
-                                sender_ssrc: nack.sender_ssrc,
-                                media_ssrc: target,
-                                lost_packets,
-                            })
+                            (
+                                nack.sender_ssrc,
+                                RtcpPacket::GenericNack(GenericNack {
+                                    sender_ssrc: nack.sender_ssrc,
+                                    media_ssrc: target,
+                                    lost_packets,
+                                }),
+                            )
                         }
                         _ => continue,
                     };
-                    if dst_tx.send_rtcp(&[forwarded]).await.is_err() {
+                    // RFC 3550 §6.1: prepend an empty Receiver Report so the
+                    // forwarded feedback is a valid compound RTCP packet for
+                    // SIP peers that did not negotiate RFC 5506 `a=rtcp-rsize`.
+                    let rr = RtcpPacket::ReceiverReport(ReceiverReport {
+                        sender_ssrc,
+                        report_blocks: Vec::new(),
+                    });
+                    if dst_tx.send_rtcp(&[rr, forwarded]).await.is_err() {
                         break;
                     }
                 }

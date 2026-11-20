@@ -1675,34 +1675,8 @@ async fn wait_and_arm_rewrite_relay(
 
     source_pc.clear_rtp_rewrite_bridge();
 
-    let mut video_source_for_pli = None;
     for (kind, source, target, rules) in resolved {
-        if kind == rustrtc::MediaKind::Video {
-            video_source_for_pli = Some(source.clone());
-        }
         source.bridge_media_rewrite_rules(kind, target, options, rules, timelines.clone());
-    }
-
-    // Request an immediate keyframe from the video sender to recover any
-    // initial SPS/PPS + IDR packets dropped before the bridge was armed.
-    if let Some(video_source) = video_source_for_pli {
-        let (sender_ssrc, media_ssrc) = source_pc
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Video)
-            .map(|t| {
-                let sender_ssrc = t.sender_ssrc().unwrap_or(0);
-                let media_ssrc = t.receiver().map(|r| r.ssrc()).unwrap_or(0);
-                (sender_ssrc, media_ssrc)
-            })
-            .unwrap_or((0, 0));
-        let pli = rustrtc::rtp::RtcpPacket::PictureLossIndication(
-            rustrtc::rtp::PictureLossIndication {
-                sender_ssrc,
-                media_ssrc,
-            },
-        );
-        let _ = video_source.send_rtcp(&[pli]).await;
     }
 
     debug!(

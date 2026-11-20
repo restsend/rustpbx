@@ -916,11 +916,12 @@ impl MediaNegotiator {
                     ));
                 }
                 for feedback in &cap.rtcp_fbs {
-                    // The SIP endpoint's rate feedback describes a different
-                    // path. The browser's rate feedback is handled locally.
-                    if feedback == "transport-cc"
-                        || (browser_transport && matches!(feedback.as_str(), "goog-remb" | "ccm tmmbr"))
-                    {
+                    // Only advertise video feedback mechanisms that rustpbx
+                    // relays across legs (NACK, PLI, FIR); hop-specific rate
+                    // feedback like `ccm tmmbr`, `goog-remb`, and `trr-int` is
+                    // stripped on all legs (`transport-cc` is added below for
+                    // WebRTC legs only).
+                    if !matches!(feedback.as_str(), "nack" | "nack pli" | "ccm fir") {
                         continue;
                     }
                     video_section.attributes.push(Attribute::new(
@@ -1470,7 +1471,8 @@ a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extension
         let sip = sdp.split("a=extmap:").next().unwrap().replace("UDP/TLS/RTP/SAVPF", "RTP/AVP");
         let offer = MediaNegotiator::rewrite_video_capabilities(SdpType::Offer, &sip, &caps).unwrap();
         assert!(!offer.contains("transport-cc"));
-        assert!(offer.contains("a=rtcp-fb:97 ccm tmmbr\r\n"));
+        assert!(!offer.contains("ccm tmmbr"));
+        assert!(offer.contains("a=rtcp-fb:97 nack pli\r\n"));
     }
 
     #[test]
