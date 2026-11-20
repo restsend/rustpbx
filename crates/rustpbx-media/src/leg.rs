@@ -906,11 +906,25 @@ impl LegInner {
         Ok(self.pc.create_answer().await?)
     }
 
+    fn offer_description(&self) -> Option<SessionDescription> {
+        self.pc
+            .local_description()
+            .filter(|description| description.sdp_type == SdpType::Offer)
+            .or_else(|| {
+                self.pc
+                    .remote_description()
+                    .filter(|description| description.sdp_type == SdpType::Offer)
+            })
+    }
+
     /// Sync the sender's codec/PT to the negotiated answer. The profile is
     /// extracted from the answer SDP: the local answer we just produced
     /// (as UAS), or the remote answer we applied (as UAC).
     async fn sync_answer_profile(&self, answer: &str, remote: &str) -> Result<()> {
-        let profile = negotiate::MediaNegotiator::extract_leg_profile(answer);
+        let profile = negotiate::MediaNegotiator::extract_leg_profile_with_offer(
+            answer,
+            self.offer_description().as_ref(),
+        );
 
         self.sync_negotiated_profile(&profile).await?;
 
@@ -1184,7 +1198,10 @@ impl LegInner {
     /// re-INVITEs. Keeps `MediaBridge::bridge()` and egress in sync with the
     /// SDP returned to the remote peer.
     pub async fn apply_profile_from_sdp(&self, sdp: &str) -> Result<()> {
-        let profile = negotiate::MediaNegotiator::extract_leg_profile(sdp);
+        let profile = negotiate::MediaNegotiator::extract_leg_profile_with_offer(
+            sdp,
+            self.offer_description().as_ref(),
+        );
         self.sync_negotiated_profile(&profile).await
     }
 

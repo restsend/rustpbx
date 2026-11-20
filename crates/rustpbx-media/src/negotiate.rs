@@ -231,9 +231,50 @@ pub struct NegotiatedVideoCodec {
     pub rtx_payload_type: Option<u8>,
 }
 
+fn same_fmtp_params(a: Option<&str>, b: Option<&str>) -> bool {
+    let normalize = |raw: Option<&str>| -> Vec<String> {
+        let mut params: Vec<String> = raw
+            .unwrap_or_default()
+            .split(';')
+            .map(|part| part.trim().to_ascii_lowercase())
+            .filter(|part| !part.is_empty())
+            .collect();
+        params.sort();
+        params
+    };
+    normalize(a) == normalize(b)
+}
+
 impl NegotiatedVideoCodec {
     pub(crate) fn can_relay_to(&self, peer: &Self) -> bool {
         self.matches_relay_format(&peer.name, peer.clock_rate, peer.fmtp.as_deref())
+    }
+
+    /// Select the peer codec used for video relay. Among otherwise equivalent
+    /// primary formats, prefer a peer payload that also negotiated RTX.
+    pub fn relay_peer<'a>(&self, peer: &'a [Self], can_send_rtx: bool) -> Option<&'a Self> {
+        let mut compatible = peer.iter().filter(|codec| self.can_relay_to(codec));
+        let primary = compatible
+            .clone()
+            .find(|codec| {
+                codec.payload_type == self.payload_type
+                    && same_fmtp_params(codec.fmtp.as_deref(), self.fmtp.as_deref())
+            })
+            .or_else(|| {
+                compatible
+                    .clone()
+                    .find(|codec| same_fmtp_params(codec.fmtp.as_deref(), self.fmtp.as_deref()))
+            })
+            .or_else(|| compatible.clone().next())?;
+        if can_send_rtx && self.rtx_payload_type.is_some() && primary.rtx_payload_type.is_none() {
+            return compatible
+                .find(|codec| {
+                    codec.rtx_payload_type.is_some()
+                        && same_fmtp_params(codec.fmtp.as_deref(), primary.fmtp.as_deref())
+                })
+                .or(Some(primary));
+        }
+        Some(primary)
     }
 
     /// Check whether this answer uses the offered codec's wire format.
@@ -691,6 +732,20 @@ impl MediaNegotiator {
         }
     }
 
+    /// Extract a negotiated leg profile from an SDP answer, keeping only
+    /// video RTX payload types whose `(rtx_pt -> primary_pt)` association was
+    /// also present in the leg's SDP offer.
+    pub fn extract_leg_profile_with_offer(
+        answer_sdp: &str,
+        offer: Option<&SessionDescription>,
+    ) -> NegotiatedLegProfile {
+        let mut profile = Self::extract_leg_profile(answer_sdp);
+        if profile.video.iter().any(|codec| codec.rtx_payload_type.is_some()) {
+            Self::retain_offered_video_rtx(&mut profile.video, offer);
+        }
+        profile
+    }
+
     /// Extract the video codecs advertised in an SDP (offer or answer), in SDP
     /// order. Unlike [`Self::extract_codec_params`] (which drops unknown codec
     /// names through the audio-only [`CodecType`] conversion), video codec
@@ -767,28 +822,118 @@ impl MediaNegotiator {
         caps
     }
 
+    /// Keep only RTX payloads accepted with the same repair and primary PT
+    /// association in this leg's offer and answer.
+    pub fn retain_offered_video_rtx(
+        answered: &mut [NegotiatedVideoCodec],
+        offer: Option<&SessionDescription>,
+    ) {
+        let offered_apt: Vec<_> = offer.into_iter()
+            .flat_map(|desc| desc.media_sections.iter().filter(|section| {
+                section.kind == MediaKind::Video
+                    && !desc.is_media_rejected(section)
+                    && section.direction != rustrtc::Direction::Inactive
+            }))
+            .map(|section| section.video_rtx_apt_map())
+            .collect();
+        for codec in answered {
+            codec.rtx_payload_type = codec.rtx_payload_type.filter(|rtx_pt| {
+                offered_apt.iter().any(|apt| apt.get(rtx_pt) == Some(&codec.payload_type))
+            });
+        }
+    }
+
+    /// Intersect an offered video capability list against a peer leg's
+    /// negotiated video codecs, preserving the offered payload types and
+    /// keeping RTX only when the matched peer codec also negotiated RTX.
+    pub fn intersect_video_capabilities(
+        offered: &[rustrtc::config::VideoCapability],
+        peer: &[NegotiatedVideoCodec],
+    ) -> Vec<rustrtc::config::VideoCapability> {
+        offered
+            .iter()
+            .filter_map(|offered_cap| {
+                let offered_codec = NegotiatedVideoCodec::from(offered_cap.clone());
+                let matched = offered_codec.relay_peer(peer, true)?;
+                let mut cap = offered_cap.clone();
+                if matched.rtx_payload_type.is_none() {
+                    cap.rtx_payload_type = None;
+                }
+                Some(cap)
+            })
+            .collect()
+    }
+
     /// Return the original offered capabilities accepted by a peer's SDP
     /// answer. Preserve the offer-side payload types because the caller uses
     /// this result to build the corresponding answer on the other leg.
     pub fn accepted_video_capabilities(
         offered: &[rustrtc::config::VideoCapability],
         peer_answer_sdp: &str,
+        peer_offer: Option<&SessionDescription>,
     ) -> Vec<rustrtc::config::VideoCapability> {
-        let accepted = Self::extract_video_codecs(peer_answer_sdp);
+        let mut accepted = Self::extract_video_codecs(peer_answer_sdp);
+        Self::retain_offered_video_rtx(&mut accepted, peer_offer);
+        // When `peer_offer` was built by remapping `offered` in-place (1-to-1
+        // order and length), resolve each answered PT in `peer_offer`'s own
+        // PT namespace so remapped PTs never collide with `offered` PTs.
+        let peer_offered: Vec<NegotiatedVideoCodec> = peer_offer
+            .map(|desc| Self::extract_video_codecs(&desc.to_sdp_string()))
+            .unwrap_or_default();
+        let positional_map = peer_offered.len() == offered.len()
+            && peer_offered
+                .iter()
+                .zip(offered.iter())
+                .all(|(peer_cap, offered_cap)| peer_cap.matches_relay_capability(offered_cap));
+
+        let mut used = vec![false; offered.len()];
         accepted
             .iter()
             .filter_map(|accepted_cap| {
-                let mut compatible = offered
-                    .iter()
-                    .filter(|offered_cap| accepted_cap.matches_relay_capability(offered_cap));
-                compatible
-                    .clone()
-                    .find(|offered_cap| offered_cap.payload_type == accepted_cap.payload_type)
-                    .or_else(|| {
-                        compatible.clone().find(|offered_cap| offered_cap.fmtp == accepted_cap.fmtp)
-                    })
-                    .or_else(|| compatible.next())
-                    .cloned()
+                let accepted_has_rtx = accepted_cap.rtx_payload_type.is_some();
+                let (idx, offered_cap) = if positional_map
+                    && let Some(idx) = peer_offered
+                        .iter()
+                        .position(|cap| cap.payload_type == accepted_cap.payload_type)
+                    && !used[idx]
+                    && accepted_cap.matches_relay_capability(&offered[idx])
+                {
+                    (idx, &offered[idx])
+                } else {
+                    let available = offered.iter().enumerate().filter(|&(idx, offered_cap)| {
+                        !used[idx] && accepted_cap.matches_relay_capability(offered_cap)
+                    });
+                    let pick = |match_rtx_posture: bool| {
+                        let pool = available.clone().filter(move |&(_, cap)| {
+                            !match_rtx_posture
+                                || (cap.rtx_payload_type.is_some() == accepted_has_rtx)
+                        });
+                        pool.clone()
+                            .find(|&(_, cap)| {
+                                cap.payload_type == accepted_cap.payload_type
+                                    && same_fmtp_params(
+                                        cap.fmtp.as_deref(),
+                                        accepted_cap.fmtp.as_deref(),
+                                    )
+                            })
+                            .or_else(|| {
+                                pool.clone().find(|&(_, cap)| {
+                                    same_fmtp_params(
+                                        cap.fmtp.as_deref(),
+                                        accepted_cap.fmtp.as_deref(),
+                                    )
+                                })
+                            })
+                            .or_else(|| pool.clone().next())
+                    };
+                    pick(true).or_else(|| pick(false))?
+                };
+                used[idx] = true;
+                let mut cap = offered_cap.clone();
+                if !accepted_has_rtx {
+                    cap.rtx_payload_type = None;
+                }
+                Some(cap)
             })
             .collect()
     }
@@ -856,6 +1001,10 @@ impl MediaNegotiator {
             .find(|section| section.kind == MediaKind::Video)
         {
             let ordered_caps = caps.to_vec();
+
+            if !ordered_caps.iter().any(|cap| cap.rtx_payload_type.is_some()) {
+                video_section.strip_fid_ssrcs();
+            }
 
             if ordered_caps.is_empty() {
                 video_section.port = 0;
@@ -1489,7 +1638,7 @@ m=video 5000 RTP/AVP 110\r\n\
 a=sendrecv\r\n\
 a=rtpmap:110 VP8/90000\r\n";
 
-        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, peer_answer);
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, peer_answer, None);
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].codec_name, "VP8");
         assert_eq!(accepted[0].payload_type, 98);
@@ -1498,7 +1647,192 @@ a=rtpmap:110 VP8/90000\r\n";
             .replace("m=video 5000", "m=video 0")
             .replace("a=sendrecv", "a=inactive");
         assert!(
-            MediaNegotiator::accepted_video_capabilities(&offered, &rejected_answer).is_empty()
+            MediaNegotiator::accepted_video_capabilities(&offered, &rejected_answer, None).is_empty()
+        );
+    }
+
+    #[test]
+    fn relay_answer_retains_only_jointly_negotiated_rtx() {
+        let offered = [video_cap_with_rtx(102, 103, "H264", None, &["nack", "nack pli", "ccm fir"])];
+        let peer_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 110 111\r\n\
+a=rtpmap:110 H264/90000\r\n\
+a=rtpmap:111 rtx/90000\r\n\
+a=fmtp:111 apt=110\r\n";
+        let peer_offer_desc = SessionDescription::parse(SdpType::Offer, peer_offer).unwrap();
+        let mutually_accepted = MediaNegotiator::accepted_video_capabilities(
+            &offered, peer_offer, Some(&peer_offer_desc),
+        );
+        assert_eq!(mutually_accepted[0].payload_type, 102);
+        assert_eq!(mutually_accepted[0].rtx_payload_type, Some(103));
+
+        // Some endpoints retain stale rtpmap/fmtp after removing the repair PT
+        // from m=video. The offer alone does not negotiate the repair format.
+        let declined = peer_offer.replace("RTP/AVP 110 111", "RTP/AVP 110");
+        let accepted_primary = MediaNegotiator::accepted_video_capabilities(
+            &offered, &declined, Some(&peer_offer_desc),
+        );
+        assert_eq!(accepted_primary[0].rtx_payload_type, None);
+
+        let draft = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5002 RTP/AVP 102 103\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=rtpmap:103 rtx/90000\r\n\
+a=fmtp:103 apt=102\r\n\
+a=ssrc-group:FID 123 456\r\n\
+a=ssrc:123 cname:video\r\n\
+a=ssrc:456 cname:video\r\n";
+        let answer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer, draft, &accepted_primary,
+        ).unwrap();
+        assert!(answer.contains("m=video 5002 RTP/AVP 102\r\n"));
+        assert!(answer.contains("a=ssrc:123 cname:video"));
+        assert!(answer.contains("a=rtcp-fb:102 nack\r\n"));
+        assert!(answer.contains("a=rtcp-fb:102 nack pli\r\n"));
+        assert!(answer.contains("a=rtcp-fb:102 ccm fir\r\n"));
+        assert!(!answer.contains("a=ssrc:456"));
+        assert!(!answer.contains("a=ssrc-group:FID"));
+        assert!(!answer.contains("rtx/90000"));
+        assert!(!answer.contains("apt=102"));
+
+        let answer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer, draft, &mutually_accepted,
+        ).unwrap();
+        assert!(answer.contains("m=video 5002 RTP/AVP 102 103\r\n"));
+        assert!(answer.contains("a=ssrc-group:FID 123 456"));
+        assert!(answer.contains("a=fmtp:103 apt=102"));
+    }
+
+    #[test]
+    fn accepted_video_capabilities_preserves_rtx_across_pt_remap() {
+        let fmtp = Some("profile-level-id=42e01f;packetization-mode=1");
+        let offered = [
+            video_cap_with_rtx(96, 120, "H264", fmtp, &["nack", "nack pli", "ccm fir"]),
+            video_cap(97, "H264", fmtp, &["nack", "nack pli", "ccm fir"]),
+        ];
+        // Callee remapped caller PT 96 -> 97 with RTX 121 and answered PT 97 + RTX 121.
+        let callee_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 97 121\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=fmtp:97 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:121 rtx/90000\r\n\
+a=fmtp:121 apt=97\r\n";
+        let callee_offer = SessionDescription::parse(SdpType::Offer, callee_sdp).unwrap();
+        let accepted = MediaNegotiator::accepted_video_capabilities(
+            &offered,
+            callee_sdp,
+            Some(&callee_offer),
+        );
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].payload_type, 96);
+        assert_eq!(accepted[0].rtx_payload_type, Some(120));
+
+        // When callee accepts both remapped formats (PT 97+RTX 121 and PT 98 without RTX),
+        // the caller answer must not duplicate PT 96 and must preserve both caller entries.
+        let both_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 97 121 98\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=fmtp:97 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:121 rtx/90000\r\n\
+a=fmtp:121 apt=97\r\n\
+a=rtpmap:98 H264/90000\r\n\
+a=fmtp:98 profile-level-id=42e01f;packetization-mode=1\r\n";
+        let both_offer = SessionDescription::parse(SdpType::Offer, both_sdp).unwrap();
+        let both_accepted = MediaNegotiator::accepted_video_capabilities(
+            &offered,
+            both_sdp,
+            Some(&both_offer),
+        );
+        assert_eq!(both_accepted.len(), 2);
+        assert_eq!(both_accepted[0].payload_type, 96);
+        assert_eq!(both_accepted[0].rtx_payload_type, Some(120));
+        assert_eq!(both_accepted[1].payload_type, 97);
+        assert_eq!(both_accepted[1].rtx_payload_type, None);
+
+        // Reversed answer order (non-RTX PT 98 before RTX PT 97) still maps each uniquely.
+        let reversed_sdp = both_sdp.replace("RTP/AVP 97 121 98", "RTP/AVP 98 97 121");
+        let reversed_accepted = MediaNegotiator::accepted_video_capabilities(
+            &offered,
+            &reversed_sdp,
+            Some(&both_offer),
+        );
+        assert_eq!(reversed_accepted.len(), 2);
+        assert_eq!(reversed_accepted[0].payload_type, 97);
+        assert_eq!(reversed_accepted[0].rtx_payload_type, None);
+        assert_eq!(reversed_accepted[1].payload_type, 96);
+        assert_eq!(reversed_accepted[1].rtx_payload_type, Some(120));
+
+        // When both caller entries had RTX and BUNDLE remapped (96->97, 97->98),
+        // callee keeping RTX only on 98 must attach RTX to caller 97 (not 96).
+        let both_rtx_offered = [
+            video_cap_with_rtx(96, 120, "H264", fmtp, &["nack", "nack pli", "ccm fir"]),
+            video_cap_with_rtx(97, 121, "H264", fmtp, &["nack", "nack pli", "ccm fir"]),
+        ];
+        let remapped_offer_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 97 120 98 121\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=fmtp:97 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:120 rtx/90000\r\n\
+a=fmtp:120 apt=97\r\n\
+a=rtpmap:98 H264/90000\r\n\
+a=fmtp:98 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:121 rtx/90000\r\n\
+a=fmtp:121 apt=98\r\n";
+        let selective_answer_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 97 98 121\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=fmtp:97 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:98 H264/90000\r\n\
+a=fmtp:98 profile-level-id=42e01f;packetization-mode=1\r\n\
+a=rtpmap:121 rtx/90000\r\n\
+a=fmtp:121 apt=98\r\n";
+        let remapped_offer = SessionDescription::parse(SdpType::Offer, remapped_offer_sdp).unwrap();
+        let selective = MediaNegotiator::accepted_video_capabilities(
+            &both_rtx_offered,
+            selective_answer_sdp,
+            Some(&remapped_offer),
+        );
+        assert_eq!(selective.len(), 2);
+        assert_eq!(selective[0].payload_type, 96);
+        assert_eq!(selective[0].rtx_payload_type, None);
+        assert_eq!(selective[1].payload_type, 97);
+        assert_eq!(selective[1].rtx_payload_type, Some(121));
+
+        // Even with a 1-to-1 remapped offer, an incompatible H.264 answer
+        // (packetization-mode=0 for offered mode=1) must be rejected.
+        let incompatible_answer = selective_answer_sdp
+            .replace("packetization-mode=1", "packetization-mode=0");
+        assert!(
+            MediaNegotiator::accepted_video_capabilities(
+                &both_rtx_offered,
+                &incompatible_answer,
+                Some(&remapped_offer),
+            )
+            .is_empty()
         );
     }
 
@@ -1517,18 +1851,18 @@ m=video 5000 RTP/AVP 96\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 H264/90000\r\n\
 a=fmtp:96 profile-level-id=42801F; packetization-mode=0\r\n";
-        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, answer);
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, answer, None);
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].payload_type, 98);
 
         let unsupported = answer.replace("42801F", "64001f");
-        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &unsupported).is_empty());
+        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &unsupported, None).is_empty());
 
         let invalid = answer.replace("42801F", "invalid");
-        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &invalid).is_empty());
+        assert!(MediaNegotiator::accepted_video_capabilities(&offered, &invalid, None).is_empty());
 
         let constrained = answer.replace("42801F; packetization-mode=0", "4d801f; packetization-mode=1");
-        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, &constrained);
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, &constrained, None);
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].payload_type, 100);
     }
@@ -1806,7 +2140,7 @@ a=bundle-only\r\n";
         let offered = MediaNegotiator::video_caps_for_config(
             &video, &["H264".to_string(), "VP8".to_string()],
         );
-        assert_eq!(MediaNegotiator::accepted_video_capabilities(&offered, sdp).len(), 2);
+        assert_eq!(MediaNegotiator::accepted_video_capabilities(&offered, sdp, None).len(), 2);
 
         for rejected in [
             sdp.replace("a=bundle-only\r\n", ""),

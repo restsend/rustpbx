@@ -5992,7 +5992,7 @@ a=fmtp:102 profile-level-id=42801F;packetization-mode=1\r\n";
         &crate::config::default_video_codecs(),
     );
     let accepted_video_caps =
-        MediaNegotiator::accepted_video_capabilities(&caller_video_caps, callee_answer);
+        MediaNegotiator::accepted_video_capabilities(&caller_video_caps, callee_answer, None);
     let answer = MediaNegotiator::rewrite_video_capabilities(
         rustrtc::SdpType::Answer,
         generated_answer,

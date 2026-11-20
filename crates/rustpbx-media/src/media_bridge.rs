@@ -21,12 +21,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::negotiate::TransportMode;
 use anyhow::{Result, anyhow};
 use audio_codec::create_decoder;
+use rustrtc::rtx::RtxSenderConfig;
+use rustrtc::transports::rtp::RtpRtxRewrite;
 use rustrtc::{MediaKind, RtpRewriteBridgeOptions, RtpRewriteRule, media::MediaStreamTrack};
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +59,11 @@ impl LegSide {
 
 pub use crate::leg::{PlaybackHandle, PlaybackResult};
 
+struct BridgedLeg {
+    profile: NegotiatedLegProfile,
+    video_rtx: Option<VideoRelayRtx>,
+}
+
 /// Per-session 2-party media bridge.
 pub struct MediaBridge {
     session_id: String,
@@ -84,9 +91,8 @@ pub struct MediaBridge {
     /// Live count of RTCP-relay forwarder tasks (observability / leak
     /// regression tests). Incremented on spawn, decremented on task exit.
     rtcp_forwarder_count: Arc<AtomicUsize>,
-    /// Profiles used by the last successful bridge activation. A payload
-    /// type change alone can require new relay rules or a new decoder input.
-    last_bridged: Option<(NegotiatedLegProfile, NegotiatedLegProfile)>,
+    /// Profiles and RTX streams used by the last successful bridge activation.
+    last_bridged: Option<[BridgedLeg; 2]>,
     /// Snapshot of the current legs, readable from the background 5s stats
     /// task without borrowing `&mut self`. Kept in sync by `replace_leg` /
     /// `teardown`.
@@ -431,11 +437,25 @@ impl MediaBridge {
         let (Some(ca), Some(cb)) = (pa.audio.as_ref(), pb.audio.as_ref()) else {
             return Ok(());
         };
+        let direct_audio = ca.codec == cb.codec && !self.force_transcode;
+        let pair_supports_rtx = direct_audio
+            && pa.video.iter().any(|codec| codec.rtx_payload_type.is_some())
+            && pb.video.iter().any(|codec| codec.rtx_payload_type.is_some());
+        let [a_rtx, b_rtx] = if pair_supports_rtx {
+            [VideoRelayRtx::from_leg(&la), VideoRelayRtx::from_leg(&lb)]
+        } else {
+            [None, None]
+        };
         if self.route_active
             && self
                 .last_bridged
                 .as_ref()
-                .is_some_and(|(last_a, last_b)| last_a == &pa && last_b == &pb)
+                .is_some_and(|[last_a, last_b]| {
+                    last_a.profile == pa
+                        && last_b.profile == pb
+                        && last_a.video_rtx == a_rtx
+                        && last_b.video_rtx == b_rtx
+                })
         {
             return Ok(());
         }
@@ -463,7 +483,7 @@ impl MediaBridge {
             );
         }
 
-        if ca.codec == cb.codec && !self.force_transcode {
+        if direct_audio {
             // ── fast-path: transport-level zero-copy relay ──
             debug!(session = %self.session_id, codec = ?ca.codec, "MBRIDGE fast-path relay"); // Rewrite the forwarded packet's header to the destination leg's
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
@@ -555,6 +575,7 @@ impl MediaBridge {
                 b_video_ssrc,
                 a_video_mid,
                 b_video_mid,
+                [a_rtx.as_ref(), b_rtx.as_ref()],
             );
             let mut routes_a_to_b = vec![(rustrtc::MediaKind::Audio, audio_a_to_b)];
             if !video_a_to_b.is_empty() {
@@ -671,7 +692,16 @@ impl MediaBridge {
         }
 
         self.route_active = true;
-        self.last_bridged = Some((pa, pb));
+        self.last_bridged = Some([
+            BridgedLeg {
+                profile: pa,
+                video_rtx: a_rtx,
+            },
+            BridgedLeg {
+                profile: pb,
+                video_rtx: b_rtx,
+            },
+        ]);
         self.detached_for_playback = false;
         *self.health.route_activated_at.lock() = Some(std::time::Instant::now());
         Ok(())
@@ -1971,6 +2001,7 @@ fn audio_relay_rules(
         out_payload_type: out_pt,
         sdes_mid_extension_id: mid_id,
         sdes_mid: mid_val.clone(),
+        rtx: None,
     }];
     if let Some((src_pt, dst_pt)) = dtmf_map {
         rules.push(RtpRewriteRule {
@@ -1979,9 +2010,44 @@ fn audio_relay_rules(
             out_payload_type: Some(dst_pt),
             sdes_mid_extension_id: mid_id,
             sdes_mid: mid_val,
+            rtx: None,
         });
     }
     rules
+}
+
+struct VideoRelayRtx {
+    source_ssrcs: Option<(u32, u32)>,
+    sender: Option<(u32, Arc<AtomicU16>)>,
+}
+
+impl PartialEq for VideoRelayRtx {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_ssrcs == other.source_ssrcs
+            && match (&self.sender, &other.sender) {
+                (Some((ssrc, counter)), Some((other_ssrc, other_counter))) => {
+                    ssrc == other_ssrc && Arc::ptr_eq(counter, other_counter)
+                }
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl VideoRelayRtx {
+    fn from_leg(leg: &Leg) -> Option<Self> {
+        let transceiver = leg
+            .pc()
+            .get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == MediaKind::Video)?;
+        let source_ssrcs = transceiver.remote_fid_ssrcs();
+        let sender = transceiver
+            .sender_rtx_ssrc()
+            .filter(|&ssrc| ssrc != 0)
+            .zip(transceiver.sender().map(|sender| sender.rtx_sequence_counter()));
+        Some(Self { source_ssrcs, sender })
+    }
 }
 
 /// Build the video payload-type rewrite rules for the fast-path relay.
@@ -1989,16 +2055,15 @@ fn audio_relay_rules(
 /// The relay must match every supported video payload type a leg may actually send,
 /// not just the first common profile. Each WebRTC peer picks its own send
 /// profile (offerer vs answerer, hardware vs software encoder), so a leg may
-/// send any negotiated H264 variant. An unmatched
-/// video PT falls through to the audio catch-all rule and gets stamped with
-/// the audio SSRC, which the peer drops: a persistent one-way video failure
-/// (the peer sending on the covered PT still works, the other side is black).
+/// send any negotiated H264 variant. Each video rule is scoped to its source
+/// payload type so a packet uses the corresponding destination codec.
 ///
 /// For each video codec on leg A we add a rule matching that PT and rewriting
 /// it to the peer leg's PT for the same (name, fmtp) codec, stamped with the
 /// destination leg's video sender SSRC; the mirror covers B→A. BUNDLE payload
-/// collisions are prevented while constructing the bundled leg's SDP, so this
-/// function only maps the video codecs negotiated independently on each leg.
+/// collisions are prevented while constructing the bundled leg's SDP. An RTX
+/// repair is associated with the same primary rule so the repair can use the
+/// primary stream's sequence and timestamp mapping.
 fn video_relay_rules(
     a: &[NegotiatedVideoCodec],
     b: &[NegotiatedVideoCodec],
@@ -2006,19 +2071,8 @@ fn video_relay_rules(
     b_video_ssrc: u32,
     a_video_mid: Option<(u8, std::sync::Arc<str>)>,
     b_video_mid: Option<(u8, std::sync::Arc<str>)>,
+    [a_rtx, b_rtx]: [Option<&VideoRelayRtx>; 2],
 ) -> (Vec<RtpRewriteRule>, Vec<RtpRewriteRule>) {
-    fn match_peer<'x>(
-        codec: &NegotiatedVideoCodec,
-        peer: &'x [NegotiatedVideoCodec],
-    ) -> Option<&'x NegotiatedVideoCodec> {
-        let mut compatible = peer.iter().filter(|c| codec.can_relay_to(c));
-        compatible
-            .clone()
-            .find(|c| c.fmtp == codec.fmtp && c.payload_type == codec.payload_type)
-            .or_else(|| compatible.clone().find(|c| c.fmtp == codec.fmtp))
-            .or_else(|| compatible.next())
-    }
-
     let mid_fields = |m: &Option<(u8, std::sync::Arc<str>)>| {
         m.as_ref()
             .map(|m| (m.0, m.1.to_string()))
@@ -2028,32 +2082,40 @@ fn video_relay_rules(
     let (b_mid_id, b_mid) = mid_fields(&b_video_mid);
     let (a_mid_id, a_mid) = mid_fields(&a_video_mid);
 
-    let mut a_to_b = Vec::new();
-    for va in a {
-        if let Some(vb) = match_peer(va, b) {
-            a_to_b.push(RtpRewriteRule {
-                match_payload_type: Some(va.payload_type),
-                out_ssrc: b_video_ssrc,
-                out_payload_type: Some(vb.payload_type),
-                sdes_mid_extension_id: b_mid_id,
-                sdes_mid: b_mid.clone(),
-            });
-        }
-    }
-
-    let mut b_to_a = Vec::new();
-    for vb in b {
-        if let Some(va) = match_peer(vb, a) {
-            b_to_a.push(RtpRewriteRule {
-                match_payload_type: Some(vb.payload_type),
-                out_ssrc: a_video_ssrc,
-                out_payload_type: Some(va.payload_type),
-                sdes_mid_extension_id: a_mid_id,
-                sdes_mid: a_mid.clone(),
-            });
-        }
-    }
-
+    let [a_to_b, b_to_a] = [
+        (a, b, b_video_ssrc, b_mid_id, b_mid, a_rtx, b_rtx),
+        (b, a, a_video_ssrc, a_mid_id, a_mid, b_rtx, a_rtx),
+    ]
+    .map(|(source, target, out_ssrc, mid_id, mid, source_rtx, target_rtx)| {
+        let target_sender = target_rtx.and_then(|rtx| rtx.sender.as_ref());
+        source
+            .iter()
+            .filter_map(|source_codec| {
+                let target_codec = source_codec.relay_peer(target, target_sender.is_some())?;
+                let rtx = source_codec
+                    .rtx_payload_type
+                    .zip(target_codec.rtx_payload_type)
+                    .zip(target_sender)
+                    .map(|((source_pt, target_pt), (ssrc, sequence))| RtpRtxRewrite {
+                        source_payload_type: source_pt,
+                        source_ssrcs: source_rtx.and_then(|rtx| rtx.source_ssrcs),
+                        destination: RtxSenderConfig {
+                            rtx_ssrc: *ssrc,
+                            rtx_payload_type: target_pt,
+                        },
+                        sequence: sequence.clone(),
+                    });
+                Some(RtpRewriteRule {
+                    match_payload_type: Some(source_codec.payload_type),
+                    out_ssrc,
+                    out_payload_type: Some(target_codec.payload_type),
+                    sdes_mid_extension_id: mid_id,
+                    sdes_mid: mid.clone(),
+                    rtx,
+                })
+            })
+            .collect()
+    });
     (a_to_b, b_to_a)
 }
 
@@ -3603,7 +3665,7 @@ mod tests {
         let (a_to_b, b_to_a) = video_relay_rules(
             &a, &b, 0xA0A0A0A0, // a_video_ssrc
             0xB0B0B0B0, // b_video_ssrc
-            None, None,
+            None, None, [None, None],
         );
 
         let a_to_b_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = a_to_b
@@ -3654,7 +3716,8 @@ mod tests {
         let a = vec![vcap("VP8", 96, None)];
         let b = vec![vcap("vp8", 110, None)];
 
-        let (a_to_b, b_to_a) = video_relay_rules(&a, &b, 0xA0A0A0A0, 0xB0B0B0B0, None, None);
+        let (a_to_b, b_to_a) =
+            video_relay_rules(&a, &b, 0xA0A0A0A0, 0xB0B0B0B0, None, None, [None, None]);
 
         assert_eq!(a_to_b.len(), 1);
         assert_eq!(a_to_b[0].match_payload_type, Some(96));
@@ -3667,6 +3730,53 @@ mod tests {
     }
 
     #[test]
+    fn video_relay_rules_prefer_rtx_for_an_identical_format() {
+        let fmtp = "profile-level-id=42e01f;packetization-mode=1";
+        let mut source = vcap("H264", 96, Some(fmtp));
+        source.rtx_payload_type = Some(97);
+        let mut other_level = vcap("H264", 110, Some("profile-level-id=42e015;packetization-mode=1"));
+        other_level.rtx_payload_type = Some(111);
+        let mut same_format = vcap("H264", 112, Some(fmtp));
+        same_format.rtx_payload_type = Some(113);
+        let a = [source];
+        let b = [vcap("H264", 96, Some(fmtp)), other_level, same_format];
+        let a_rtx = VideoRelayRtx {
+            source_ssrcs: Some((10, 11)),
+            sender: None,
+        };
+        let b_rtx = VideoRelayRtx {
+            source_ssrcs: None,
+            sender: Some((22, Arc::new(AtomicU16::new(500)))),
+        };
+        let rtx = [Some(&a_rtx), Some(&b_rtx)];
+        let (a_to_b, _) = video_relay_rules(&a, &b, 1, 2, None, None, rtx);
+        assert_eq!(a_to_b[0].out_payload_type, Some(112));
+        let repair = a_to_b[0].rtx.as_ref().expect("equivalent codec supports RTX");
+        assert_eq!(repair.source_payload_type, 97);
+        assert_eq!(repair.source_ssrcs, Some((10, 11)));
+        assert_eq!(repair.destination.rtx_payload_type, 113);
+        assert_eq!(repair.destination.rtx_ssrc, 22);
+
+        let (a_to_b, _) = video_relay_rules(&a, &b[..2], 1, 2, None, None, rtx);
+        assert_eq!(a_to_b[0].out_payload_type, Some(96));
+        assert!(a_to_b[0].rtx.is_none());
+
+        // Reordered equivalent fmtp parameters on the peer must still select
+        // the matching RTX-capable format rather than falling back to the
+        // non-RTX entry.
+        let mut reordered = vcap(
+            "H264",
+            114,
+            Some("packetization-mode=1; profile-level-id=42E01F"),
+        );
+        reordered.rtx_payload_type = Some(115);
+        let b_reordered = [vcap("H264", 110, Some("profile-level-id=42e015;packetization-mode=1")), reordered];
+        let (a_to_b, _) = video_relay_rules(&a, &b_reordered, 1, 2, None, None, rtx);
+        assert_eq!(a_to_b[0].out_payload_type, Some(114));
+        assert_eq!(a_to_b[0].rtx.as_ref().unwrap().destination.rtx_payload_type, 115);
+    }
+
+    #[test]
     fn video_relay_rules_map_reused_rtp_pt_to_bundled_pt() {
         let rtp_video = vec![vcap("H264", 96, Some("profile-level-id=42801F"))];
         let webrtc_video = vec![
@@ -3676,7 +3786,7 @@ mod tests {
         ];
 
         let (rtp_to_webrtc, webrtc_to_rtp) =
-            video_relay_rules(&rtp_video, &webrtc_video, 1, 2, None, None);
+            video_relay_rules(&rtp_video, &webrtc_video, 1, 2, None, None, [None, None]);
 
         assert_eq!(rtp_to_webrtc.len(), 1);
         assert_eq!(rtp_to_webrtc[0].match_payload_type, Some(96));

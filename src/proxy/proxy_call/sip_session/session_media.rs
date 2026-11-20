@@ -280,6 +280,7 @@ impl SipSession {
             .zip(target_video_caps.iter().cloned())
             .collect();
 
+        target_leg.pc().set_video_capabilities(target_video_caps.clone());
         crate::media::leg::ensure_video_sender_for_pc(target_leg.pc(), &target_video_caps[0])?;
         if let Some(transceiver) = target_leg
             .pc()
@@ -362,13 +363,19 @@ impl SipSession {
         let peer_accepted_video = MediaNegotiator::extract_video_codecs(&peer_answer_sdp);
         let accepted_caps: Vec<_> = source_target_video_caps
             .iter()
-            .filter(|(_, target_cap)| {
-                peer_accepted_video.iter().any(|accepted_cap| {
+            .filter_map(|(source_cap, target_cap)| {
+                let accepted_cap = peer_accepted_video.iter().find(|accepted_cap| {
                     accepted_cap.payload_type == target_cap.payload_type
                         && accepted_cap.matches_relay_capability(target_cap)
-                })
+                })?;
+                let mut cap = source_cap.clone();
+                if accepted_cap.rtx_payload_type != target_cap.rtx_payload_type
+                    || accepted_cap.rtx_payload_type.is_none()
+                {
+                    cap.rtx_payload_type = None;
+                }
+                Some(cap)
             })
-            .map(|(source_cap, _)| source_cap.clone())
             .collect();
         let accepted_codec_names: Vec<_> = accepted_caps
             .iter()
@@ -777,9 +784,11 @@ impl SipSession {
                                 "MediaBridge caller answer",
                             );
                             let caller_video_caps = self.video_caps_from_sdp(caller_offer);
+                            let callee_offer = callee.pc().local_description();
                             let accepted_video_caps = MediaNegotiator::accepted_video_capabilities(
                                 &caller_video_caps,
                                 callee_sdp_value,
+                                callee_offer.as_ref(),
                             );
                             let answer = MediaNegotiator::rewrite_video_capabilities(
                                 rustrtc::SdpType::Answer,

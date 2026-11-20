@@ -3521,3 +3521,148 @@ async fn video_feedback_translates_nack_gaps_and_keyframe_targets() {
     }).await.expect("translated feedback reaches original producer");
     h.close();
 }
+
+#[tokio::test]
+async fn video_relay_translates_rtx_repairs_between_negotiated_streams() {
+    use rustrtc::rtp::{GenericNack, RtcpPacket, RtpHeader, RtpPacket};
+    use rustrtc::rtx::{RtxSenderConfig, decode_osn, wrap_rtx_packet};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct Capture {
+        primary_pt: u8,
+        repair_pt: u8,
+        packets: mpsc::UnboundedSender<RtpPacket>,
+    }
+
+    impl RtpObserver for Capture {
+        fn on_ingress(&self, packet: &RtpPacket, _: std::net::SocketAddr) {
+            if [self.primary_pt, self.repair_pt].contains(&packet.header.payload_type) {
+                let _ = self.packets.send(packet.clone());
+            }
+        }
+    }
+
+    for (transport_a, transport_b) in [
+        (TransportMode::WebRtc, TransportMode::Rtp),
+        (TransportMode::WebRtc, TransportMode::WebRtc),
+        (TransportMode::Rtp, TransportMode::Rtp),
+    ] {
+        let mut caps_a = h264_caps(96);
+        caps_a[0].rtx_payload_type = Some(97);
+        caps_a[0].rtcp_fbs.push("nack".into());
+        let mut caps_b = h264_caps(110);
+        caps_b[0].rtx_payload_type = Some(111);
+        caps_b[0].rtcp_fbs.push("nack".into());
+        let mut h = create_video_harness(transport_a, transport_b, caps_a, caps_b).await;
+        h.assert_relay(true);
+
+        for (source, target, target_side, src_pt, src_rtx_pt, dst_pt, dst_rtx_pt) in [
+            (&h.test_a, &h.test_b, LegSide::B, 96, 97, 110, 111),
+            (&h.test_b, &h.test_a, LegSide::A, 110, 111, 96, 97),
+        ] {
+            let video = |pc: &PeerConnection| {
+                pc.get_transceivers()
+                    .into_iter()
+                    .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Video)
+                    .unwrap()
+            };
+            let source_video = video(&source.pc);
+            let source_sender = source_video.sender().unwrap();
+            let target_sender = video(&target.pc).sender().unwrap();
+            let source_transport = source_sender.transport().unwrap();
+            let target_transport = target_sender.transport().unwrap();
+            let target_leg = h.mb.leg(target_side).unwrap();
+            let target_video = video(target_leg.pc());
+            let target_primary_ssrc = target_video.sender().unwrap().ssrc();
+            let target_rtx_ssrc = target_video.sender_rtx_ssrc().unwrap();
+            let source_rtx = RtxSenderConfig {
+                rtx_ssrc: source_video.sender_rtx_ssrc().unwrap(),
+                rtx_payload_type: src_rtx_pt,
+            };
+            let (capture, mut received) = mpsc::unbounded_channel();
+            target.pc.add_observer(Arc::new(Capture {
+                primary_pt: dst_pt,
+                repair_pt: dst_rtx_pt,
+                packets: capture,
+            }));
+            let mut upstream_feedback = source_sender.subscribe_rtcp();
+            let mut primary = Vec::new();
+            let packet = |seq: u16| {
+                let mut header = RtpHeader::new(
+                    src_pt,
+                    seq,
+                    9_000 + u32::from(seq - 100) * 3_600,
+                    source_sender.ssrc(),
+                );
+                header.marker = true;
+                RtpPacket::new(header, vec![0x65, 1, 2, seq as u8])
+            };
+            for seq in [100, 102, 104] {
+                source_transport.send_rtp(packet(seq)).await.unwrap();
+                let received = tokio::time::timeout(Duration::from_secs(2), received.recv())
+                    .await
+                    .expect("primary crosses the relay")
+                    .unwrap();
+                assert_eq!(received.header.payload_type, dst_pt);
+                assert_eq!(received.header.ssrc, target_primary_ssrc);
+                primary.push(received.header);
+            }
+
+            let start = primary[0].sequence_number;
+            assert_eq!(primary[2].sequence_number, start.wrapping_add(4));
+            target_transport
+                .send_rtcp(&[RtcpPacket::GenericNack(GenericNack {
+                    sender_ssrc: target_sender.ssrc(),
+                    media_ssrc: target_primary_ssrc,
+                    lost_packets: vec![start.wrapping_add(1), start.wrapping_add(3)],
+                })])
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let RtcpPacket::GenericNack(nack) = upstream_feedback.recv().await.unwrap()
+                        && nack.lost_packets == [101, 103]
+                    {
+                        assert_eq!(nack.media_ssrc, source_sender.ssrc());
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("NACK is translated into the original sequence space");
+
+            let mut repair_sequences = Vec::new();
+            for (original, repair_seq) in [(101, 50), (103, 53)] {
+                let repair = wrap_rtx_packet(&packet(original), &source_rtx, repair_seq);
+                source_transport.send_rtp(repair).await.unwrap();
+                let received = tokio::time::timeout(Duration::from_secs(2), received.recv())
+                    .await
+                    .expect("RTX crosses the relay")
+                    .unwrap();
+                assert_eq!(received.header.payload_type, dst_rtx_pt);
+                assert_eq!(received.header.ssrc, target_rtx_ssrc);
+                assert_eq!(
+                    decode_osn(&received.payload),
+                    Some(start.wrapping_add(original - 100))
+                );
+                assert_eq!(
+                    received.header.timestamp,
+                    primary[0].timestamp.wrapping_add(u32::from(original - 100) * 3_600)
+                );
+                assert!(received.header.marker);
+                assert_eq!(&received.payload[2..], packet(original).payload.as_ref());
+                repair_sequences.push(received.header.sequence_number);
+            }
+            assert_eq!(repair_sequences[1], repair_sequences[0].wrapping_add(1));
+            source_transport.send_rtp(packet(105)).await.unwrap();
+            let next = tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .expect("primary relay remains active after RTX")
+                .unwrap();
+            assert_eq!(next.header.sequence_number, start.wrapping_add(5));
+            assert_eq!(next.header.timestamp, primary[0].timestamp.wrapping_add(5 * 3_600));
+        }
+        h.close();
+    }
+}

@@ -9223,6 +9223,12 @@ if self
             .media_sections
             .iter()
             .any(|section| section.kind == rustrtc::MediaKind::Video);
+        if has_video
+            && let Some(caps) = video_caps
+            && !caps.is_empty()
+        {
+            pc.set_video_capabilities(caps.to_vec());
+        }
         pc.set_remote_description(offer)
             .await
             .map_err(|e| anyhow!("Failed to apply re-INVITE offer: {}", e))?;
@@ -9308,15 +9314,10 @@ if self
                     .is_some_and(|peer_profile| {
                         let peer_video = peer_profile.video;
                         if let Some(caps) = offered_video_caps.as_mut() {
-                            let matching: Vec<_> = caps
-                                .iter()
-                                .filter(|offered_cap| {
-                                    peer_video.iter().any(|peer_cap| {
-                                        peer_cap.matches_relay_capability(offered_cap)
-                                    })
-                                })
-                                .cloned()
-                                .collect();
+                            let matching = MediaNegotiator::intersect_video_capabilities(
+                                caps,
+                                &peer_video,
+                            );
                             if !matching.is_empty() {
                                 *caps = matching;
                                 return true;
