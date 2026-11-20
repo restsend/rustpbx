@@ -597,33 +597,51 @@ async fn read_archived_jsonl_flow(
     detail_requested: bool,
     client: &reqwest::Client,
 ) -> Result<Value, Response> {
-    let bytes_result: anyhow::Result<Vec<u8>> =
-        if location.starts_with("http://") || location.starts_with("https://") {
-            match client.get(location).send().await {
-                Ok(response) => match response.error_for_status() {
-                    Ok(response) => response
-                        .bytes()
-                        .await
-                        .map(|bytes| bytes.to_vec())
-                        .map_err(|err| anyhow::Error::from(err.without_url())),
-                    Err(err) => Err(anyhow::Error::from(err.without_url())),
-                },
-                Err(err) => Err(anyhow::Error::from(err.without_url())),
-            }
+    let remote_error = |phase, err: reqwest::Error| {
+        let status = if err.is_timeout() {
+            StatusCode::GATEWAY_TIMEOUT
+        } else if err.status() == Some(StatusCode::NOT_FOUND) {
+            StatusCode::NOT_FOUND
         } else {
-            tokio::fs::read(location).await.map_err(anyhow::Error::from)
+            StatusCode::BAD_GATEWAY
         };
+        (phase, status, anyhow::Error::from(err.without_url()))
+    };
+    let bytes_result = if location.starts_with("http://") || location.starts_with("https://") {
+        match client.get(location).send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response.bytes().await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|err| remote_error("body", err)),
+                Err(err) => Err(remote_error("http-status", err)),
+            },
+            Err(err) => Err(remote_error("request", err)),
+        }
+    } else {
+        tokio::fs::read(location).await.map_err(|err| {
+            let status = if err.kind() == std::io::ErrorKind::NotFound {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            ("file", status, anyhow::Error::from(err))
+        })
+    };
     let bytes = match bytes_result {
         Ok(bytes) => bytes,
-        Err(err) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "message": format!("Archived sipflow JSONL not found: {err}"),
-                    "path": location,
-                })),
-            )
-                .into_response());
+        Err((phase, status, err)) => {
+            // The caller may disconnect before a slow upstream fails. Preserve
+            // the cause here, without leaking a presigned URL into logs or JSON.
+            let cause = format!("{err:#}");
+            warn!(call_id = %record.call_id, leg = leg_role(record),
+                direction = %record.direction, phase, status = status.as_u16(),
+                error = %cause, "Archived SIP flow read failed");
+            return Err((status, Json(json!({
+                "message": "Archived sipflow JSONL read failed",
+                "call_id": record.call_id,
+                "phase": phase,
+                "reason": cause,
+            }))).into_response());
         }
     };
 
@@ -3726,6 +3744,21 @@ mod tests {
 
     #[tokio::test]
     async fn serve_archived_jsonl_flow_reads_http_url() {
+        #[derive(Clone)]
+        struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false).without_time().with_max_level(tracing::Level::WARN)
+            .with_writer(move || LogWriter(output.clone())).finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let db = setup_db().await;
         let state = create_console_state(db.clone()).await;
         let dir = tempfile::tempdir().unwrap();
@@ -3769,7 +3802,8 @@ mod tests {
             .route("/peer.jsonl", get(move || {
                 let body = callee.clone();
                 async move { body }
-            }));
+            }))
+            .route("/unavailable.jsonl", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -3812,17 +3846,68 @@ mod tests {
                 assert!(messages.iter().any(|item| item["raw_message"].as_str().unwrap().starts_with("SIP/2.0 200")));
             }
         }
-        let mut broken = model.metadata.clone().unwrap();
-        broken["sipflow_fragments"]["missing"] = json!(format!("http://{address}/missing.jsonl"));
-        let mut updated: call_record::ActiveModel = model.into();
-        updated.metadata = Set(Some(broken));
-        let updated = updated.update(&db).await.unwrap();
-        let response = download_call_record_sip_flow(
-            AxumPath(updated.id.to_string()),
-            Query(SipFlowRequestQuery { detail: true, scope: Some("session".into()), ..Default::default() }),
-            State(state), AuthRequired(superuser()),
-        ).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused = closed.local_addr().unwrap();
+        drop(closed);
+        let truncated = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let truncated_address = truncated.local_addr().unwrap();
+        let truncated_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = truncated.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\npartial").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        for (location, expected, phase) in [
+            (format!("http://{address}/missing.jsonl"), StatusCode::NOT_FOUND, "http-status"),
+            (format!("http://{address}/unavailable.jsonl?X-Amz-Signature=fixture"), StatusCode::BAD_GATEWAY, "http-status"),
+            (format!("http://{refused}/flow.jsonl"), StatusCode::BAD_GATEWAY, "request"),
+            (format!("http://{truncated_address}/flow.jsonl?X-Amz-Signature=fixture"), StatusCode::BAD_GATEWAY, "body"),
+        ] {
+            let mut broken = model.metadata.clone().unwrap();
+            broken["sipflow_fragments"]["failure"] = json!(location);
+            let mut updated: call_record::ActiveModel = model.clone().into();
+            updated.metadata = Set(Some(broken));
+            let updated = updated.update(&db).await.unwrap();
+            let response = download_call_record_sip_flow(
+                AxumPath(updated.id.to_string()),
+                Query(SipFlowRequestQuery { detail: true, scope: Some("session".into()), ..Default::default() }),
+                State(state.clone()), AuthRequired(superuser()),
+            ).await;
+            assert_eq!(response.status(), expected);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["phase"], phase);
+            assert!(!String::from_utf8_lossy(&body).contains(&location),
+                "archive failures must not expose the download URL");
+        }
+        truncated_task.await.unwrap();
+        // This fixture never sends response headers. Its explicit test-client
+        // deadline exercises timeout classification without changing production budgets.
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_address = stalled.local_addr().unwrap();
+        let stalled_task = tokio::spawn(async move {
+            let (_stream, _) = stalled.accept().await.unwrap();
+            futures::future::pending::<()>().await;
+        });
+        let bounded = crate::http_util::build_keepalive_client(
+            Some(std::time::Duration::from_millis(20)), None,
+        ).unwrap();
+        let response = serve_archived_jsonl_flow(&model,
+            &format!("http://{stalled_address}/flow.jsonl?X-Amz-Signature=fixture"), true, &bounded).await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["phase"], "request");
+        assert!(!String::from_utf8_lossy(&body).contains("X-Amz-Signature"));
+        stalled_task.abort();
+        let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        for phase in ["http-status", "request", "body"] {
+            assert!(log.lines().any(|line| line.contains("call_id=remote-jsonl-call")
+                && line.contains(&format!("phase=\"{phase}\""))), "{log}");
+        }
+        assert!(!log.contains("X-Amz-Signature"), "download signatures must not be logged");
         task.abort();
     }
 
