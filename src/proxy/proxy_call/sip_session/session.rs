@@ -136,6 +136,14 @@ struct RoutedConsultationOrigin {
     connected: bool,
 }
 
+struct RoutedConsultationDataJoin {
+    parent_session_id: String,
+    session_id: String,
+    originating_agent_id: String,
+    peer_dialog_ids: HashSet<String>,
+    sip_headers: HashMap<String, String>,
+}
+
 #[derive(Clone)]
 struct EndedConferenceAgent((String, uuid::Uuid));
 
@@ -256,7 +264,7 @@ pub struct SipSession {
     /// leg with the report). The session-level teardown must not re-claim
     /// the role then — and MUST claim it otherwise, including ring-timeout
     /// teardowns where no leg ever connected (no leg-scoped report exists).
-    child_role_hangup_reported: std::sync::atomic::AtomicBool,
+    pub(super) child_role_hangup_reported: std::sync::atomic::AtomicBool,
 
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
@@ -274,6 +282,8 @@ pub struct SipSession {
     /// Business attribution at the owner of the retained agent's physical leg.
     retained_transfer: Option<(LegId, crate::rwi::proto::RetainedTransfer)>,
     routed_consultation_origin: Option<RoutedConsultationOrigin>,
+    routed_consultation_data_join: Option<RoutedConsultationDataJoin>,
+    consultation_peer_dialog_id: Option<String>,
 
     /// REFER-Replaces chain: a REFER relayed to the transferee UA whose
     /// replacement outcome is still pending. While armed, the transferee's
@@ -1786,6 +1796,15 @@ impl SipSession {
             }
             _ => None,
         };
+        let consultation_peer_dialog_id = match mode {
+            ConstructMode::Uas { server_dialog }
+                if child_leg_role.as_deref() == Some("agent")
+                    && peer_consultation_ids.is_some()
+                    && crate::call::session_id::peer_consultation_uses_data_join(
+                        &server_dialog.initial_request(),
+                    ) => Some(server_dialog.id().call_id),
+            _ => None,
+        };
         let consult_parent_session_id = peer_consultation_ids
             .as_ref()
             .map(|(parent, _)| parent.clone());
@@ -2013,6 +2032,8 @@ impl SipSession {
             transfer_partner: None,
             retained_transfer: None,
             routed_consultation_origin: None,
+            routed_consultation_data_join: None,
+            consultation_peer_dialog_id,
             pending_relayed_refer: None,
             registry_instance: sip_handle.instance_token(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
@@ -4554,6 +4575,68 @@ impl SipSession {
         }
     }
 
+    fn emit_consultation_outcome(
+        &self,
+        join: &RoutedConsultationDataJoin,
+        retained: Option<(&str, &crate::rwi::proto::RetainedTransfer, &crate::rwi::TransferSource)>,
+    ) {
+        let physical = &self.context.session_id;
+        self.emit_typed_rwi_event(&crate::rwi::event::CallConsultationOutcome {
+            call_id: physical,
+            session_id: physical,
+            consult_session_id: &join.session_id,
+            consult_parent_session_id: &join.parent_session_id,
+            consultation_outcome: if retained.is_some() { "retained" } else { "closed" },
+            sip_headers: &join.sip_headers,
+            consultation_peer_dialog_id: retained.map(|(dialog, _, _)| dialog),
+            agent_id: retained.map(|(_, transfer, _)| transfer.agent_id.as_str()),
+            retained_transfer: retained.map(|(_, transfer, _)| transfer),
+            transfer_source: retained.map(|(_, _, source)| source),
+        });
+    }
+
+    fn report_retained_consultation(
+        &mut self,
+        leg: &LegId,
+        root: &str,
+        direction: &str,
+        transferor: Option<&str>,
+        original_parties: Option<&crate::rwi::proto::RootCallInfo>,
+    ) {
+        let Some(dialog) = self.legs.get_dialog(leg).map(|dialog| dialog.id().call_id) else {
+            return;
+        };
+        let Some(join) = self.routed_consultation_data_join.take_if(
+            |join| join.peer_dialog_ids.contains(&dialog),
+        ) else {
+            return;
+        };
+        let transferor = transferor.unwrap_or(&join.originating_agent_id);
+        if let Some((agent, _)) = self.conference_leg_agent()
+            && transferor == join.originating_agent_id
+            && transferor != agent
+            && root == join.parent_session_id
+        {
+            let retained = crate::rwi::proto::RetainedTransfer {
+                root_session_id: root.to_owned(),
+                direction: direction.to_owned(),
+                agent_id: agent,
+                root: original_parties.cloned(),
+            };
+            let source = crate::rwi::TransferSource {
+                source_type: "agent".into(),
+                agent_id: Some(transferor.to_owned()),
+                ..Default::default()
+            };
+            self.emit_consultation_outcome(&join, Some((&dialog, &retained, &source)));
+        } else {
+            // The room retained this dialog. Missing or conflicting attribution
+            // cannot be reported as an ordinary consultation at cleanup.
+            warn!(session_id = %self.id, %dialog,
+                  "Retained consultation attribution is missing or conflicts with the originating consultation");
+        }
+    }
+
     fn set_root_session_id(&mut self, root: String) {
         self.meta.root_session_id = Some(root.clone());
         if let Some(gw) = &self.server.rwi_gateway {
@@ -4621,63 +4704,22 @@ impl SipSession {
         headers: Vec<rsipstack::sip::Header>,
         body: Option<Vec<u8>>,
     ) -> Result<Option<rsipstack::sip::Response>> {
-        let result = tokio::time::timeout(
-            Self::MID_DIALOG_TIMEOUT,
-            self.send_mid_dialog_request_to_side_inner(side, method, headers, body),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "mid-dialog request timed out after {}s",
-                Self::MID_DIALOG_TIMEOUT.as_secs()
-            )
-        })?;
-        result
-    }
-
-    async fn send_mid_dialog_request_to_side_inner(
-        &mut self,
-        side: DialogSide,
-        method: rsipstack::sip::Method,
-        headers: Vec<rsipstack::sip::Header>,
-        body: Option<Vec<u8>>,
-    ) -> Result<Option<rsipstack::sip::Response>> {
         let leg_id = match side {
             DialogSide::Caller => LegId::from("caller"),
             DialogSide::Callee => LegId::from("callee"),
         };
-        self.send_mid_dialog_request_to_leg_inner(&leg_id, method, headers, body)
+        self.send_mid_dialog_request_to_leg(&leg_id, method, headers, body)
             .await
     }
 
-    async fn send_mid_dialog_request_to_leg(
-        &mut self,
+    fn send_mid_dialog_request_to_leg(
+        &self,
         leg_id: &LegId,
         method: rsipstack::sip::Method,
         headers: Vec<rsipstack::sip::Header>,
         body: Option<Vec<u8>>,
-    ) -> Result<Option<rsipstack::sip::Response>> {
-        tokio::time::timeout(
-            Self::MID_DIALOG_TIMEOUT,
-            self.send_mid_dialog_request_to_leg_inner(leg_id, method, headers, body),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "mid-dialog request timed out after {}s",
-                Self::MID_DIALOG_TIMEOUT.as_secs()
-            )
-        })?
-    }
-
-    async fn send_mid_dialog_request_to_leg_inner(
-        &mut self,
-        leg_id: &LegId,
-        method: rsipstack::sip::Method,
-        headers: Vec<rsipstack::sip::Header>,
-        body: Option<Vec<u8>>,
-    ) -> Result<Option<rsipstack::sip::Response>> {
-        let mut dialog = if leg_id.as_str() == "caller" {
+    ) -> impl Future<Output = Result<Option<rsipstack::sip::Response>>> + Send + 'static + use<> {
+        let dialog = if leg_id.as_str() == "caller" {
             self.caller_dialog.clone().map(Dialog::Invite)
         } else {
             self.legs.get_dialog(leg_id).cloned()
@@ -4691,18 +4733,30 @@ impl SipSession {
                 })
                 .flatten()
         })
-        .ok_or_else(|| anyhow!("No dialog found for leg {}", leg_id))?;
+        .ok_or_else(|| anyhow!("No dialog found for leg {}", leg_id));
 
-        match (method, &mut dialog) {
-            (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
-                .reinvite(Some(headers), body)
-                .await
-                .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
-            (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
-                .update(Some(headers), body)
-                .await
-                .map_err(|e| anyhow!("UPDATE failed: {}", e)),
-            (other, _) => Err(anyhow!("Dialog does not support {} request", other)),
+        async move {
+            let mut dialog = dialog?;
+            tokio::time::timeout(Self::MID_DIALOG_TIMEOUT, async {
+                match (method, &mut dialog) {
+                    (rsipstack::sip::Method::Invite, Dialog::Invite(d)) => d
+                        .reinvite(Some(headers), body)
+                        .await
+                        .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
+                    (rsipstack::sip::Method::Update, Dialog::Invite(d)) => d
+                        .update(Some(headers), body)
+                        .await
+                        .map_err(|e| anyhow!("UPDATE failed: {}", e)),
+                    (other, _) => Err(anyhow!("Dialog does not support {} request", other)),
+                }
+            })
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "mid-dialog request timed out after {}s",
+                    Self::MID_DIALOG_TIMEOUT.as_secs()
+                )
+            })?
         }
     }
 
@@ -5070,7 +5124,7 @@ impl SipSession {
         &self,
         headers: &mut Vec<rsipstack::sip::Header>,
         route_via_home_proxy: bool,
-    ) {
+    ) -> Option<(String, String)> {
         use crate::call::session_id::{
             CONSULT_PARENT_HEADER, CONSULT_SESSION_HEADER, normalize_custom, set_correlation_header,
         };
@@ -5090,7 +5144,42 @@ impl SipSession {
         {
             set_correlation_header(headers, CONSULT_PARENT_HEADER, &parent);
             set_correlation_header(headers, CONSULT_SESSION_HEADER, &child);
+            return Some((parent, child));
         }
+        None
+    }
+
+    fn stamp_agent_consultation_data_join(
+        &mut self,
+        headers: &mut Vec<rsipstack::sip::Header>,
+        route_via_home_proxy: bool,
+        purpose: Option<crate::call::domain::LegPurpose>,
+        call_id: &str,
+    ) -> Option<rsipstack::sip::Param> {
+        let consultation_ids = self.stamp_peer_consultation_ids(headers, route_via_home_proxy);
+        if matches!(purpose, Some(crate::call::domain::LegPurpose::Agent))
+            && let Some(origin) = self.routed_consultation_origin.as_ref()
+            && let Some((parent, child)) = consultation_ids
+        {
+            let join = self.routed_consultation_data_join.get_or_insert_with(|| {
+                let initial = self.caller_dialog.as_ref().map(|dialog| dialog.initial_request());
+                RoutedConsultationDataJoin {
+                    parent_session_id: parent,
+                    session_id: child,
+                    originating_agent_id: origin.agent_id.clone(),
+                    peer_dialog_ids: HashSet::new(),
+                    sip_headers: Self::routed_sip_headers(
+                        &self.context,
+                        initial.as_ref().unwrap_or(&self.context.dialplan.original),
+                    ),
+                }
+            });
+            join.peer_dialog_ids.insert(call_id.to_owned());
+            return Some(rsipstack::sip::Param::Other(
+                crate::call::session_id::CONSULT_DATA_JOIN_PARAM.into(), None,
+            ));
+        }
+        None
     }
 
     async fn build_target_invite_option(
@@ -5519,7 +5608,7 @@ impl SipSession {
             .extensions
             .get::<OutboundTrunkContext>()
             .map(|trunk| trunk.name.clone());
-        self.stamp_peer_consultation_ids(
+        let _ = self.stamp_peer_consultation_ids(
             &mut headers,
             route_via_home_proxy && refer_replaces_ctx.is_none(),
         );
@@ -13041,6 +13130,20 @@ impl SipSession {
                 );
             }
         }
+        if let Some(join) = self.routed_consultation_data_join.take() {
+            // The actor can no longer process a BindTransferPartner command.
+            // Revoke any tentative room member before closing the data join.
+            if let Some(leg) = self.conference.as_ref().map(|room| room.leg_id.clone()) {
+                if let Err(error) = self.leave_conference_leg(&leg).await {
+                    warn!(session_id = %self.id, %leg, %error,
+                          "Cannot close consultation data join after room detach failed");
+                } else {
+                    self.emit_consultation_outcome(&join, None);
+                }
+            } else {
+                self.emit_consultation_outcome(&join, None);
+            }
+        }
         // Failed setup can leave a factory-created room without participants.
         if let Some(focus) = self
             .context
@@ -15632,6 +15735,10 @@ impl SipSession {
                     let direction = direction.to_string();
                     let mut headers = vec![Header::UserToUser("consult-state=talk".into())];
                     if self.legs.get(&leg).is_some_and(|leg| leg.remote_registered) {
+                        self.report_retained_consultation(
+                            &leg, &root_session_id, &direction, transferor_agent.as_deref(),
+                            original_parties.as_ref(),
+                        );
                         // The dispatcher owns the room, but the registration
                         // node owns the agent leg and its lifecycle events.
                         if let (Some(root), Some(consult), Some(transferor)) = (
@@ -15660,22 +15767,27 @@ impl SipSession {
                     if let Some(reply) = completion.take() {
                         let _ = reply.send(Ok(()));
                     }
-                    let result = self.send_mid_dialog_request_to_leg(
+                    let update = self.send_mid_dialog_request_to_leg(
                         &leg, rsipstack::sip::Method::Update, headers, None,
-                    ).await;
-                    match result {
-                        Ok(Some(response)) if (200..300).contains(&response.status_code.code()) => {}
-                        result => {
-                            warn!(
-                                session_id = %self.id,
-                                leg_id = %leg,
-                                direction = "pbx_to_peer",
-                                status = ?result.as_ref().ok().and_then(|r| r.as_ref()).map(|r| r.status_code.code()),
-                                error = ?result.err(),
-                                "Failed to deliver attended transfer commit to the retained participant"
-                            );
+                    );
+                    let session_id = self.id.clone();
+                    // The transaction owns its dialog and must leave this
+                    // session free to handle hold and hangup commands.
+                    crate::utils::spawn(async move {
+                        match update.await {
+                            Ok(Some(response)) if (200..300).contains(&response.status_code.code()) => {}
+                            result => {
+                                warn!(
+                                    %session_id,
+                                    leg_id = %leg,
+                                    direction = "pbx_to_peer",
+                                    status = ?result.as_ref().ok().and_then(|r| r.as_ref()).map(|r| r.status_code.code()),
+                                    error = ?result.err(),
+                                    "Failed to deliver attended transfer commit to the retained participant"
+                                );
+                            }
                         }
-                    }
+                    });
                 }
                 if let Some(reply) = completion {
                     let _ = reply.send(Err("The retained participant is no longer attached".into()));
@@ -17536,17 +17648,30 @@ impl SipSession {
     pub(crate) fn emit_typed_rwi_event<E: crate::rwi::RwiEventSpec>(&self, event: &E) {
         if let Some(ref gw) = self.server.rwi_gateway {
             let g = gw.read();
-            if matches!(E::TYPE, "call_held" | "call_unheld" | "call_hangup")
-                && let Some((leg, retained)) = self.retained_transfer.as_ref()
-            {
+            let retained = self.retained_transfer.as_ref().filter(|_| {
+                matches!(E::TYPE, "call_held" | "call_unheld" | "call_hangup")
+            });
+            let peer_dialog = self.consultation_peer_dialog_id.as_deref().filter(|_| {
+                matches!(E::TYPE, "call_answered" | "call_hangup" | "call_transfer_retained")
+            });
+            if retained.is_some() || peer_dialog.is_some() {
                 let mut flat = crate::rwi::RwiEvent::from_spec(event, None);
                 let leg_id = flat.payload.get("leg_id").and_then(serde_json::Value::as_str);
-                if flat.payload["leg_role"] == "agent"
-                    && leg_id.is_none_or(|id| id == leg.as_str())
-                {
-                    // Snapshot before caching so old consultation events do
-                    // not acquire this state when replayed after the handoff.
-                    flat.payload["retained_transfer"] = serde_json::json!(retained);
+                if flat.payload["leg_role"] == "agent" {
+                    let peer_dialog = peer_dialog.filter(|_| leg_id.is_none_or(|id| id == "callee"));
+                    let retained = retained.filter(|(leg, _)| leg_id.is_none_or(|id| id == leg.as_str()));
+                    if let Some(dialog) = peer_dialog {
+                        flat.payload["consultation_peer_dialog_id"] = serde_json::json!(dialog);
+                        flat.payload["consult_parent_session_id"] =
+                            serde_json::json!(self.meta.consult_parent_session_id);
+                        flat.payload["consult_session_id"] =
+                            serde_json::json!(self.meta.consult_session_id);
+                    }
+                    if let Some((_, retained)) = retained {
+                        // Snapshot before caching so old consultation events do
+                        // not acquire this state when replayed after the handoff.
+                        flat.payload["retained_transfer"] = serde_json::json!(retained);
+                    }
                 }
                 g.send_flat_to_owner(&flat);
                 return;
@@ -18403,7 +18528,9 @@ impl SipSession {
             .outbound_trunk
             .as_ref()
             .map(|trunk| trunk.name.clone());
-        self.stamp_peer_consultation_ids(&mut headers, route_via_home_proxy);
+        let join = self.stamp_agent_consultation_data_join(
+            &mut headers, route_via_home_proxy, purpose, &bleg_call_id,
+        );
         self.stamp_outbound_correlation_header(
             &mut headers,
             dynamic_trunk.as_deref(),
@@ -18413,6 +18540,7 @@ impl SipSession {
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),
+            caller_params: join.into_iter().collect(),
             contact: contact.clone(),
             content_type: Some("application/sdp".to_string()),
             offer: Some(sdp_offer.into_bytes()),

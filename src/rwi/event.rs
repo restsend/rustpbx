@@ -500,6 +500,34 @@ impl RwiEventSpec for CallConsultationOrigin<'_> {
     }
 }
 
+/// The dispatcher decided whether an original remote consultation leg
+/// continued in its attended-transfer room.
+#[derive(Serialize)]
+pub(crate) struct CallConsultationOutcome<'a> {
+    pub call_id: &'a str,
+    pub session_id: &'a str,
+    pub consult_session_id: &'a str,
+    pub consult_parent_session_id: &'a str,
+    pub consultation_outcome: &'static str,
+    pub sip_headers: &'a std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consultation_peer_dialog_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_transfer: Option<&'a crate::rwi::proto::RetainedTransfer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_source: Option<&'a TransferSource>,
+}
+
+impl RwiEventSpec for CallConsultationOutcome<'_> {
+    const TYPE: &'static str = "call_consultation_outcome";
+
+    fn call_id(&self) -> Option<&str> {
+        Some(self.call_id)
+    }
+}
+
 /// An answered SIP handoff that originated in a route-point jump.
 #[derive(Serialize)]
 pub(crate) struct IvrJumpTransferred<'a> {

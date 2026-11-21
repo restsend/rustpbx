@@ -38,10 +38,34 @@
 
 use std::sync::RwLock;
 
-use rsipstack::sip::{Header, HeadersExt, Request};
+use rsipstack::sip::{Header, HeadersExt, Param, Request, ToTypedHeader};
 
 pub(crate) const CONSULT_PARENT_HEADER: &str = "X-CC-Consult-Parent";
 pub(crate) const CONSULT_SESSION_HEADER: &str = "X-CC-Consult-Session";
+pub(crate) const CONSULT_DATA_JOIN_PARAM: &str = "cc-consult-data-join-v1";
+
+/// A peer's generated From can opt into the data join. A custom header would
+/// also be copied from a registration by older dispatchers, which cannot
+/// produce the matching outcome.
+pub(crate) fn peer_consultation_uses_data_join(request: &Request) -> bool {
+    let mut from_headers = request.headers.iter().filter(|header| {
+        header.name().eq_ignore_ascii_case("From") || header.name().eq_ignore_ascii_case("f")
+    });
+    let Some(Header::From(from)) = from_headers.next() else {
+        return false;
+    };
+    if from_headers.next().is_some() {
+        return false;
+    }
+    let Ok(from) = from.typed() else {
+        return false;
+    };
+    let mut markers = from.params.iter().filter(|param| {
+        matches!(param, Param::Other(name, _) if name.value().eq_ignore_ascii_case(CONSULT_DATA_JOIN_PARAM))
+    });
+    matches!(markers.next(), Some(Param::Other(_, None))) && markers.next().is_none()
+}
+
 pub(crate) const ATTENDED_COMMIT_HEADER: &str = "X-CC-Attended-Commit";
 
 /// Additive consultation identity for cluster delivery. Callers must first

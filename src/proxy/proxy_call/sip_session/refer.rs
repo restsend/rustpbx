@@ -571,23 +571,38 @@ impl SipSession {
             };
             // An agent-home child owns only the departing seat. The
             // dispatcher retains the customer's independent hangup reason.
-            if self.meta.child_leg_role.as_deref() == Some("agent")
+            let owns_departing_seat = self.meta.child_leg_role.as_deref() == Some("agent")
                 && transferor_leg
                     .as_ref()
-                    .is_some_and(|leg| leg.as_str() == "callee")
-            {
+                    .is_some_and(|leg| leg.as_str() == "callee");
+            if owns_departing_seat {
                 self.meta
                     .hangup_reason
                     .get_or_insert(crate::callrecord::CallRecordHangupReason::ByRefer);
             }
             self.stash_transfer_source(source.clone());
             self.mark_transferred_with(Some(serde_json::json!({"target": target_uri, "kind": "sip"})));
-            self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+            let transfer = crate::rwi::CallTransferred {
                 call_id: self.context.session_id.clone(),
                 transfer_target: Some(target_uri),
                 transfer_target_type: Some("sip".into()),
                 transfer_source: source,
-            });
+            };
+            if let Some(gateway) = self.server.rwi_gateway.as_ref() {
+                let mut event = crate::rwi::RwiEvent::from_spec(&transfer, None);
+                // Advertise the fallback only when this actor still owns the
+                // departing seat's corresponding REFER hangup.
+                if owns_departing_seat
+                    && matches!(self.meta.hangup_reason, Some(crate::callrecord::CallRecordHangupReason::ByRefer))
+                    && !self.child_role_hangup_reported.load(std::sync::atomic::Ordering::Relaxed)
+                    && transfer.transfer_source.as_ref().is_some_and(|source| {
+                        source.source_type == "agent" && source.agent_id.is_some()
+                    })
+                {
+                    event.payload["release_companion"] = serde_json::Value::Bool(true);
+                }
+                gateway.read().send_flat_to_owner(&event);
+            }
         }
         if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(source_dialog) {
             if let Err(error) = Self::notify_refer_bounded(

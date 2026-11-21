@@ -13,32 +13,113 @@ mod packet_diagnostics_tests;
 mod transfer_target_dialog_tests;
 
 #[tokio::test]
-async fn attended_partner_binding_succeeds_without_a_peer_response() {
-    use crate::proxy::tests::common::create_test_request;
-    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+async fn attended_partner_hangs_up_while_the_peer_update_is_pending() {
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    use rsipstack::dialog::invitation::InviteOption;
+    use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
+    use rsipstack::transport::udp::UdpConnection;
+    use tokio::net::UdpSocket;
+    use tokio::time::timeout;
 
+    let gateway = crate::rwi::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(), Arc::new(parking_lot::RwLock::new(gateway)),
+    ).await;
     let request = create_test_request(
-        rsipstack::sip::Method::Invite, "transferor", None, "example.test", None,
+        Method::Invite, "transferor", None, "example.test", None,
     );
-    let dialplan = crate::call::Dialplan::new(
+    let mut dialplan = crate::call::Dialplan::new(
         "consult-call".into(), request, crate::call::DialDirection::Outbound,
     );
-    let (mut session, handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    dialplan.routed_headers = Some(vec![Header::Other(
+        "X-E2E-Scenario-ID".into(), "consult-scenario".into(),
+    )]);
+    let (mut session, handle, commands) =
+        build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+    session.meta.consult_parent_session_id = Some("root-call".into());
+    session.meta.consult_session_id = Some("consult-call".into());
+    session.routed_consultation_origin = Some(RoutedConsultationOrigin {
+        agent_id: "agent-a".into(), root_session_id: "root-call".into(), connected: true,
+    });
+    let mut headers = Vec::new();
+    let purpose = Some(crate::call::domain::LegPurpose::Agent);
+    assert!(session.stamp_agent_consultation_data_join(
+        &mut headers, false, purpose, "local-only",
+    ).is_none());
+    assert!(session.stamp_agent_consultation_data_join(
+        &mut headers, true, purpose, "old-attempt",
+    ).is_some());
+    let selected_call_id = "consult-call-r1";
+    let marker = session.stamp_agent_consultation_data_join(
+        &mut headers, true, purpose, selected_call_id,
+    ).expect("selected cross-node agent needs a data join marker");
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let peer_addr = peer.local_addr().unwrap();
+    let endpoint = server.endpoint.inner.clone();
+    for addr in endpoint.transport_layer.get_addrs() {
+        endpoint.transport_layer.del_transport(&addr);
+    }
+    let transport = UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+        .await
+        .unwrap();
+    let local_addr = transport.get_addr().addr.to_string();
+    endpoint.transport_layer.add_transport(transport.into());
+    let serving_endpoint = endpoint.clone();
+    let serving = tokio::spawn(async move { serving_endpoint.serve().await.unwrap() });
+    let target: rsipstack::sip::Uri = format!("sip:peer@{peer_addr}").parse().unwrap();
+    let origin: rsipstack::sip::Uri = format!("sip:dispatcher@{local_addr}").parse().unwrap();
+    let (dialog_tx, mut dialog_rx) = mpsc::unbounded_channel();
+    let dial = server.dialog_layer.do_invite(
+        InviteOption {
+            caller: origin.clone(),
+            caller_params: vec![marker],
+            callee: target.clone(),
+            contact: origin,
+            headers: Some(headers),
+            call_id: Some(selected_call_id.into()),
+            ..Default::default()
+        },
+        dialog_tx,
+    );
+    let mut packet = [0; 8192];
+    let answer = async {
+        let (size, source) = peer.recv_from(&mut packet).await.unwrap();
+        let SipMessage::Request(invite) = SipMessage::try_from(&packet[..size]).unwrap() else {
+            panic!("expected an INVITE on the peer transport");
+        };
+        assert_eq!(invite.method, Method::Invite);
+        assert!(crate::call::session_id::peer_consultation_uses_data_join(&invite));
+        let mut response = endpoint.make_response(&invite, StatusCode::OK, None);
+        response.headers.retain(|header| !matches!(header, Header::To(_)));
+        response.headers.push(Header::To(format!("<{target}>;tag=peer").into()));
+        response.headers.push(Header::Contact(format!("<{target}>").into()));
+        peer.send_to(response.to_string().as_bytes(), source).await.unwrap();
+    };
+    let (accepted, ()) = timeout(Duration::from_secs(3), async { tokio::join!(dial, answer) })
+        .await
+        .expect("peer SIP dialog must establish");
+    let (dialog, response) = accepted.unwrap();
+    assert_eq!(response.unwrap().status_code, StatusCode::OK);
+    while dialog_rx.try_recv().is_ok() {}
     let retained = LegId::from("target-agent");
+    let room = "transfer-room";
     let mut leg = Leg::new(retained.clone());
     leg.agent_id = Some("agent-b".into());
     leg.state = LegState::Connected;
     leg.remote_registered = true;
     session.legs.insert(retained.clone(), leg);
+    session.callee_dialogs.insert(dialog.id(), ());
+    session.legs.set_dialog(retained.clone(), Dialog::Invite(dialog));
+    session.caller_dialog = None;
     session.conference = Some(ConferenceAttachment {
         leg_id: retained,
-        conference_id: "transfer-room".into(),
+        conference_id: room.into(),
         pre_transfer_state: Some(LegState::Connected),
     });
-    let (completion, bound) = tokio::sync::oneshot::channel();
-    // No SIP dialog is installed on the remote leg, so notification cannot
-    // yield any peer response.
-    session.execute_command(CallCommand::BindTransferPartner {
+    let (completion, mut bound) = tokio::sync::oneshot::channel();
+    handle.send_command(CallCommand::BindTransferPartner {
         cmd_tx: handle.command_sender(),
         partner_session: "root-call".into(),
         root_session_id: "root-call".into(),
@@ -47,9 +128,65 @@ async fn attended_partner_binding_succeeds_without_a_peer_response() {
         original_parties: None,
         their_leg: LegId::from("caller"),
         completion: Some(completion),
-    }, None).await;
-    assert!(bound.await.unwrap().is_ok(), "the peer response must not gate the transfer");
-    assert!(session.conference.is_some());
+    }).unwrap();
+    let mut actor = tokio::spawn(async move {
+        let result = session.run_main_loop(None, dialog_rx, commands).await;
+        session.cleanup().await;
+        result
+    });
+    let update = timeout(Duration::from_secs(3), async {
+        loop {
+            let (size, _) = peer.recv_from(&mut packet).await.unwrap();
+            if let SipMessage::Request(request) = SipMessage::try_from(&packet[..size]).unwrap()
+                && request.method == Method::Update
+            {
+                break request;
+            }
+        }
+    }).await.expect("the retained peer must receive its UPDATE");
+    assert!(update.headers.iter().any(|header| {
+        header.name().eq_ignore_ascii_case(crate::call::session_id::ATTENDED_COMMIT_HEADER)
+    }));
+    assert!(bound.try_recv().unwrap().is_ok());
+    let outcome = std::iter::from_fn(|| events.try_recv().ok())
+        .map(|entry| entry.event)
+        .find(|event| event.event_type == "call_consultation_outcome")
+        .expect("the dispatcher decides attribution before the peer responds");
+    assert_eq!(outcome.payload["consultation_outcome"], "retained");
+    assert_eq!(outcome.payload["consult_parent_session_id"], "root-call");
+    assert_eq!(outcome.payload["consult_session_id"], "consult-call");
+    assert_eq!(outcome.payload["consultation_peer_dialog_id"], selected_call_id);
+    assert_eq!(outcome.payload["retained_transfer"]["agent_id"], "agent-b");
+    assert_eq!(outcome.payload["transfer_source"]["agent_id"], "agent-a");
+    assert_eq!(outcome.payload["sip_headers"]["X-E2E-Scenario-ID"], "consult-scenario");
+    // Deliberately withhold the UDP response. The room owner can hang up now.
+    handle.send_command(CallCommand::ConferenceEnded {
+        conference_id: room.into(),
+        transfer_committed: true,
+    }).unwrap();
+    let bye = timeout(Duration::from_secs(1), async {
+        loop {
+            let (size, source) = peer.recv_from(&mut packet).await.unwrap();
+            if let SipMessage::Request(request) = SipMessage::try_from(&packet[..size]).unwrap()
+                && request.method == Method::Bye
+            {
+                return (request, source);
+            }
+        }
+    }).await;
+    if let Ok((request, source)) = &bye {
+        let response = endpoint.make_response(request, StatusCode::OK, None);
+        peer.send_to(response.to_string().as_bytes(), source).await.unwrap();
+        let response = endpoint.make_response(&update, StatusCode::OK, None);
+        peer.send_to(response.to_string().as_bytes(), source).await.unwrap();
+        timeout(Duration::from_secs(3), &mut actor).await.unwrap().unwrap().unwrap();
+    }
+    actor.abort();
+    server.endpoint.shutdown();
+    serving.abort();
+    bye.expect("pending UPDATE must not delay the retained participant's BYE");
+    assert!(std::iter::from_fn(|| events.try_recv().ok())
+        .all(|entry| entry.event.event_type != "call_consultation_outcome"));
 }
 
 #[tokio::test]
@@ -345,6 +482,64 @@ async fn attended_room_teardown_reports_the_retained_agent_leg() {
             Some("original-agent"),
         );
     }
+}
+
+#[tokio::test]
+async fn attended_consultation_closes_only_after_detaching_its_tentative_participant() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let gateway = crate::rwi::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(), Arc::new(parking_lot::RwLock::new(gateway)),
+    ).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite, "transferor", None, "rustpbx.com", None,
+    );
+    let dialplan = Dialplan::new("consult".into(), request, DialDirection::Outbound);
+    let (mut session, handle, commands) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+    session.meta.consult_parent_session_id = Some("root-call".into());
+    session.meta.consult_session_id = Some("consult-call".into());
+    session.routed_consultation_origin = Some(RoutedConsultationOrigin {
+        agent_id: "agent-a".into(), root_session_id: "root-call".into(), connected: true,
+    });
+    assert!(session.stamp_agent_consultation_data_join(
+        &mut Vec::new(), true, Some(crate::call::domain::LegPurpose::Agent), "peer-dialog",
+    ).is_some());
+    let room = crate::call::runtime::ConferenceId::from("tentative-room");
+    let leg = LegId::from("callee");
+    let participant = session.participant_leg(&leg);
+    let manager = server.conference_server.manager_raw();
+    manager.create_conference(room.clone(), Some(2)).await.unwrap();
+    manager.add_participant(&room, participant.clone()).await.unwrap();
+    manager.bind_participant_session(&room, &participant, handle.command_sender()).unwrap();
+    session.conference = Some(ConferenceAttachment {
+        leg_id: leg, conference_id: room.clone(), pre_transfer_state: Some(LegState::Connected),
+    });
+    session.release_consultation_origin(Some("ByCaller"), Some("caller"));
+    assert!(std::iter::from_fn(|| events.try_recv().ok())
+        .all(|entry| entry.event.event_type != "call_consultation_outcome"));
+    assert_eq!(
+        manager.get_conference_id_for_leg(&participant).await.as_ref(),
+        Some(&room),
+    );
+
+    drop(commands);
+    session.cleanup().await;
+
+    assert!(manager.get_conference_id_for_leg(&participant).await.is_none());
+    assert!(manager.get_conference(&room).await.is_none_or(|room| room.participant_count() == 0));
+    let outcomes: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .map(|entry| entry.event)
+        .filter(|event| event.event_type == "call_consultation_outcome")
+        .collect();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].payload["consultation_outcome"], "closed");
+    assert_eq!(outcomes[0].payload["consult_parent_session_id"], "root-call");
+    assert_eq!(outcomes[0].payload["consult_session_id"], "consult-call");
+    assert!(outcomes[0].payload.get("consultation_peer_dialog_id").is_none());
 }
 
 #[tokio::test]
@@ -15276,6 +15471,18 @@ async fn attended_refer_marks_only_the_committed_agent_child_release() {
         session
             .finish_attended_refer(&transferor, "sip:target@rustpbx.com?Replaces=consult", status)
             .await;
+        let transfer = std::iter::from_fn(|| events.try_recv().ok())
+            .find(|entry| entry.event.event_type == "call_transferred");
+        if status == 200 {
+            let transfer = transfer.expect("successful REFER must publish the transfer");
+            assert_eq!(
+                transfer.event.payload.get("release_companion").and_then(|value| value.as_bool()),
+                child_role.map(|_| true),
+                "{child_role:?} {status}",
+            );
+        } else {
+            assert!(transfer.is_none());
+        }
         session
             .meta
             .hangup_reason
@@ -15289,6 +15496,10 @@ async fn attended_refer_marks_only_the_committed_agent_child_release() {
             .expect("session teardown event");
         assert_eq!(terminal["reason"], expected_reason, "{child_role:?} {status}");
         assert_eq!(terminal["hangup_by"], expected_initiator);
+        if expected_reason == "refer" {
+            assert_eq!(terminal["leg_role"], "agent");
+            assert_eq!(terminal["scope"], "leg");
+        }
     }
 }
 

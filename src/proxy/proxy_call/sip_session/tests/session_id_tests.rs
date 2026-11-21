@@ -12,13 +12,13 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     ));
     invite.headers.push(Header::Other(CONSULT_PARENT_HEADER.into(), "root-call".into()));
     invite.headers.push(Header::Other(CONSULT_SESSION_HEADER.into(), "consult-call".into()));
+    mark_consultation_data_join(&mut invite, 1);
     let mut session = delivery_session_from_request(
         invite, Some("consult-call"), true, true, false,
     ).await;
     let callee = LegId::from("callee");
     let mut leg = Leg::new(callee.clone());
     leg.agent_id = Some("agent-b".into());
-    leg.state = LegState::Connected;
     session.legs.insert(callee.clone(), leg);
     let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
     let origin_recording = "12345678-1234-4123-8123-123456789abc";
@@ -32,6 +32,10 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     )));
     let mut events = gateway.read().subscribe_events();
     let dialog = session.caller_dialog.as_ref().unwrap().id();
+    session.update_leg_state(&callee, LegState::Connected);
+    let answered = events.try_recv().unwrap().event;
+    assert_eq!(answered.event_type, "call_answered");
+    assert_eq!(answered.payload["consultation_peer_dialog_id"], dialog.call_id);
 
     for (root, marker, expected) in [
         (None, true, false),
@@ -81,6 +85,7 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
             assert_eq!(retained.payload["retained_transfer"]["root"]["caller_name"], "customer-number");
             assert_eq!(retained.payload["transfer_source"]["agent_id"], "agent-a");
             assert_eq!(retained.payload["recording_id"], retained_recording);
+            assert_eq!(retained.payload["consultation_peer_dialog_id"], dialog.call_id);
         }
     }
 
@@ -116,6 +121,59 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     assert_eq!(retained_releases[0]["retained_transfer"]["direction"], "inbound");
     assert_eq!(retained_releases[0]["retained_transfer"]["root"]["callee_name"], "original-access");
     assert_eq!(retained_releases[0]["recording_id"], retained_recording);
+    assert_eq!(retained_releases[0]["consultation_peer_dialog_id"], dialog.call_id);
+}
+
+fn mark_consultation_data_join(invite: &mut rsipstack::sip::Request, count: usize) {
+    use crate::call::session_id::CONSULT_DATA_JOIN_PARAM;
+    use rsipstack::sip::{Header, Param};
+    for header in invite.headers.iter_mut() {
+        if let Header::From(from) = header {
+            let mut from = from.typed().unwrap();
+            from.params.extend((0..count).map(|_| Param::Other(CONSULT_DATA_JOIN_PARAM.into(), None)));
+            *header = from.into();
+            return;
+        }
+    }
+    panic!("expected a generated From header");
+}
+
+#[tokio::test]
+async fn attended_consultation_data_join_requires_one_marker_from_trusted_peer() {
+    use crate::call::session_id::{CONSULT_PARENT_HEADER, CONSULT_SESSION_HEADER};
+    use crate::proxy::tests::common::create_test_request;
+    use rsipstack::sip::{Header, Method};
+
+    for (from_peer, marker_count, expected) in [
+        (true, 0, false), (true, 1, true), (true, 2, false), (false, 1, false),
+    ] {
+        let mut invite = create_test_request(Method::Invite, "dispatcher", None, "example.test", None);
+        invite.headers.push(crate::call::uui::build_uui_header(
+            "aabbccddeeff0011", None, None, None, Some("agent"),
+        ));
+        invite.headers.push(Header::Other(CONSULT_PARENT_HEADER.into(), "root-call".into()));
+        invite.headers.push(Header::Other(CONSULT_SESSION_HEADER.into(), "consult-call".into()));
+        // A location-supplied arbitrary extension header may pass through an
+        // old dispatcher, and cannot opt in without a generated From marker.
+        invite.headers.push(Header::Other("X-CC-Consult-Data-Join".into(), "1".into()));
+        mark_consultation_data_join(&mut invite, marker_count);
+        let mut session = delivery_session_from_request(
+            invite, Some("collided-call"), true, from_peer, false,
+        ).await;
+        let dialog = session.caller_dialog.as_ref().unwrap().id().call_id;
+        let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
+        let mut events = gateway.read().subscribe_events();
+        let callee = LegId::from("callee");
+        session.legs.insert(callee.clone(), Leg::new(callee.clone()));
+        session.update_leg_state(&callee, LegState::Connected);
+        let event = events.try_recv().unwrap().event;
+        assert_eq!(event.event_type, "call_answered");
+        assert_eq!(event.call_id.as_deref(), Some("collided-call"));
+        assert_eq!(
+            event.payload.get("consultation_peer_dialog_id").and_then(serde_json::Value::as_str),
+            expected.then_some(dialog.as_str()),
+        );
+    }
 }
 
 #[tokio::test]
