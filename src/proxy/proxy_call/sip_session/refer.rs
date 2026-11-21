@@ -656,7 +656,7 @@ impl SipSession {
         manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;
         self.meta.transfer_in_progress = true;
         self.sync_rtp_timeout_pause();
-        let confirmation_deadline = tokio::time::Instant::now() + RELAYED_REFER_TIMEOUT;
+        let binding_deadline = tokio::time::Instant::now() + RELAYED_REFER_TIMEOUT;
         let mut room_committed = false;
         let result: Result<()> = async {
             let local_leg = self.handle_join_conference_peer(room.0.clone(), source_dialog.clone()).await?;
@@ -704,7 +704,7 @@ impl SipSession {
                 .map_err(|e| anyhow!("Failed to reserve transfer partner command: {e}"))?;
             manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
             room_committed = true;
-            let (completion, confirmed) = tokio::sync::oneshot::channel();
+            let (completion, bound) = tokio::sync::oneshot::channel();
             permit.send(crate::call::domain::CallCommand::BindTransferPartner {
                 cmd_tx,
                 partner_session: self.id.to_string(),
@@ -720,8 +720,8 @@ impl SipSession {
                 owner.session_id().to_string(),
                 remote_leg.clone(),
             );
-            tokio::time::timeout_at(confirmation_deadline, confirmed)
-                .await.map_err(|_| anyhow!("Retained participant did not confirm the transfer"))??
+            tokio::time::timeout_at(binding_deadline, bound)
+                .await.map_err(|_| anyhow!("Local transfer partner binding did not complete"))??
                 .map_err(|error| anyhow!(error))?;
             info!(
                 session_id = %self.id,
@@ -737,10 +737,10 @@ impl SipSession {
         self.sync_rtp_timeout_pause();
         if let Err(error) = &result {
             if room_committed {
-                // The target may have applied the transfer before its ACK was
-                // lost. Preserve the committed room and report uncertainty.
+                // The local room already owns teardown. A binding error
+                // cannot safely roll that ownership back.
                 warn!(session_id = %self.id, room = %room.0, %error,
-                    "Attended transfer commit could not be confirmed");
+                    "Attended transfer local partner binding failed");
                 return Err((504, error.to_string()));
             }
             // R2: roll back atomically — customer restored held with the

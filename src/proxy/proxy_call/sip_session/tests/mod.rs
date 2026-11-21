@@ -13,44 +13,43 @@ mod packet_diagnostics_tests;
 mod transfer_target_dialog_tests;
 
 #[tokio::test]
-async fn attended_partner_requires_confirmation_only_from_a_capable_peer() {
+async fn attended_partner_binding_succeeds_without_a_peer_response() {
     use crate::proxy::tests::common::create_test_request;
     use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
 
-    for capable in [false, true] {
-        let request = create_test_request(
-            rsipstack::sip::Method::Invite, "transferor", None, "example.test", None,
-        );
-        let dialplan = crate::call::Dialplan::new(
-            "consult-call".into(), request, crate::call::DialDirection::Outbound,
-        );
-        let (mut session, handle, _commands) = build_session_with_cmd_rx(dialplan).await;
-        let retained = LegId::from("target-agent");
-        let mut leg = Leg::new(retained.clone());
-        leg.agent_id = Some("agent-b".into());
-        leg.state = LegState::Connected;
-        leg.remote_registered = true;
-        leg.attended_commit_ack = capable;
-        session.legs.insert(retained.clone(), leg);
-        session.conference = Some(ConferenceAttachment {
-            leg_id: retained,
-            conference_id: "transfer-room".into(),
-            pre_transfer_state: Some(LegState::Connected),
-        });
-        let (completion, confirmed) = tokio::sync::oneshot::channel();
-        session.execute_command(CallCommand::BindTransferPartner {
-            cmd_tx: handle.command_sender(),
-            partner_session: "root-call".into(),
-            root_session_id: "root-call".into(),
-            direction: crate::call::DialDirection::Inbound,
-            transferor_agent: Some("agent-a".into()),
-            original_parties: None,
-            their_leg: LegId::from("caller"),
-            completion: Some(completion),
-        }, None).await;
-        assert_eq!(confirmed.await.unwrap().is_ok(), !capable);
-        assert!(session.conference.is_some(), "an unknown result cannot undo a committed room");
-    }
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite, "transferor", None, "example.test", None,
+    );
+    let dialplan = crate::call::Dialplan::new(
+        "consult-call".into(), request, crate::call::DialDirection::Outbound,
+    );
+    let (mut session, handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    let retained = LegId::from("target-agent");
+    let mut leg = Leg::new(retained.clone());
+    leg.agent_id = Some("agent-b".into());
+    leg.state = LegState::Connected;
+    leg.remote_registered = true;
+    session.legs.insert(retained.clone(), leg);
+    session.conference = Some(ConferenceAttachment {
+        leg_id: retained,
+        conference_id: "transfer-room".into(),
+        pre_transfer_state: Some(LegState::Connected),
+    });
+    let (completion, bound) = tokio::sync::oneshot::channel();
+    // No SIP dialog is installed on the remote leg, so notification cannot
+    // yield any peer response.
+    session.execute_command(CallCommand::BindTransferPartner {
+        cmd_tx: handle.command_sender(),
+        partner_session: "root-call".into(),
+        root_session_id: "root-call".into(),
+        direction: crate::call::DialDirection::Inbound,
+        transferor_agent: Some("agent-a".into()),
+        original_parties: None,
+        their_leg: LegId::from("caller"),
+        completion: Some(completion),
+    }, None).await;
+    assert!(bound.await.unwrap().is_ok(), "the peer response must not gate the transfer");
+    assert!(session.conference.is_some());
 }
 
 #[tokio::test]

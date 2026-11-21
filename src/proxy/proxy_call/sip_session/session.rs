@@ -5823,27 +5823,24 @@ impl SipSession {
         // a body-less in-dialog UPDATE carrying a `User-to-User:
         // consult-state=…` marker header. Marked updates are relayed to the
         // opposite side of the dialog; unmarked ones fall through untouched.
-        if let Some(phase) = Self::consult_state_marker_from_headers(&request.headers) {
-            use crate::call::session_id::{ATTENDED_COMMIT_ACK_HEADER, ATTENDED_COMMIT_HEADER};
-
-            let peer_commit = request.headers.iter()
-                .any(|header| header.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
-            if peer_commit {
-                if side != DialogSide::Caller || leg_id.as_str() != "caller" || phase != "talk"
-                    || request.method != rsipstack::sip::Method::Update || !request.body.is_empty()
-                    || !self.accept_attended_commit(&request.headers)
-                {
-                    tx_handle.reply(StatusCode::Conflict).await?;
-                    return Ok(());
-                }
-                // Confirm the committed PBX state independently of delivery
-                // of the softphone's presentation marker.
-                let consult = self.meta.consult_session_id.as_deref()
-                    .ok_or_else(|| anyhow!("Retained transfer has no consultation ID"))?;
-                tx_handle.respond(StatusCode::OK, Some(vec![rsipstack::sip::Header::Other(
-                    ATTENDED_COMMIT_ACK_HEADER.into(), consult.into(),
-                )]), None).await?;
+        use crate::call::session_id::ATTENDED_COMMIT_HEADER;
+        let phase = Self::consult_state_marker_from_headers(&request.headers);
+        let peer_commit = request.headers.iter()
+            .any(|header| header.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
+        if peer_commit {
+            if side != DialogSide::Caller || leg_id.as_str() != "caller"
+                || phase.as_deref() != Some("talk")
+                || request.method != rsipstack::sip::Method::Update || !request.body.is_empty()
+                || !self.accept_attended_commit(&request.headers)
+            {
+                tx_handle.reply(StatusCode::Conflict).await?;
+                return Ok(());
             }
+            // The UPDATE transaction confirms the committed PBX state.
+            // Delivery of the softphone's presentation marker is separate.
+            tx_handle.reply(StatusCode::OK).await?;
+        }
+        if let Some(phase) = phase {
             let target_side = match side {
                 DialogSide::Caller => DialogSide::Callee,
                 _ => DialogSide::Caller,
@@ -8112,16 +8109,6 @@ impl SipSession {
         );
         match state {
             DialogState::Confirmed(dialog_id, response) => {
-                if response.headers.iter().any(|header| {
-                    header.name().eq_ignore_ascii_case(crate::call::session_id::ATTENDED_COMMIT_CAPABILITY_HEADER)
-                        && header.value() == "1"
-                })
-                    && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
-                    && let Some(leg) = self.legs.get_mut(&leg_id)
-                    && leg.remote_registered
-                {
-                    leg.attended_commit_ack = true;
-                }
                 if let Some(handle) = self
                     .server
                     .active_call_registry
@@ -11302,15 +11289,6 @@ impl SipSession {
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
-            if self.meta.child_leg_role.as_deref() == Some("agent")
-                && self.meta.consult_parent_session_id.is_some()
-                && self.meta.consult_session_id.is_some()
-                && Self::from_cluster_peer(&self.server, &self.context.cookie)
-            {
-                headers.push(rsipstack::sip::Header::Other(
-                    crate::call::session_id::ATTENDED_COMMIT_CAPABILITY_HEADER.into(), "1".into(),
-                ));
-            }
             if let Some(focus) = self
                 .context
                 .dialplan
@@ -15648,12 +15626,11 @@ impl SipSession {
                 self.bind_transfer_partner(cmd_tx, partner_session, their_leg);
                 self.set_root_session_id(root_session_id.clone());
                 if let Some(leg) = self.conference.as_ref().map(|room| room.leg_id.clone()) {
-                    use crate::call::session_id::{ATTENDED_COMMIT_ACK_HEADER, ATTENDED_COMMIT_HEADER, normalize_custom};
+                    use crate::call::session_id::{ATTENDED_COMMIT_HEADER, normalize_custom};
                     use rsipstack::sip::Header;
 
                     let direction = direction.to_string();
                     let mut headers = vec![Header::UserToUser("consult-state=talk".into())];
-                    let mut expected_ack = None;
                     if self.legs.get(&leg).is_some_and(|leg| leg.remote_registered) {
                         // The dispatcher owns the room, but the registration
                         // node owns the agent leg and its lifecycle events.
@@ -15669,7 +15646,6 @@ impl SipSession {
                                 commit.push_str(&serde_json::json!(parties).to_string());
                             }
                             headers.push(Header::Other(ATTENDED_COMMIT_HEADER.into(), commit));
-                            expected_ack = Some(consult);
                         }
                     } else if let Some((agent, _)) = self.conference_leg_agent() {
                         self.commit_retained_transfer(leg.clone(), crate::rwi::proto::RetainedTransfer {
@@ -15679,32 +15655,14 @@ impl SipSession {
                             root: original_parties,
                         }, transferor_agent);
                     }
-                    // A capability advertised on the confirmed PBX leg is
-                    // required before changing its REFER completion contract.
-                    let requires_ack = self.legs.get(&leg).is_some_and(|leg| leg.attended_commit_ack);
-                    if !requires_ack && let Some(reply) = completion.take() {
+                    // The local room binding completes REFER. Peer delivery
+                    // only propagates attribution and the handset marker.
+                    if let Some(reply) = completion.take() {
                         let _ = reply.send(Ok(()));
                     }
                     let result = self.send_mid_dialog_request_to_leg(
                         &leg, rsipstack::sip::Method::Update, headers, None,
                     ).await;
-                    if let Some(reply) = completion.take() {
-                        let confirmed = result.as_ref().ok().and_then(|response| response.as_ref())
-                            .is_some_and(|response| {
-                                (200..300).contains(&response.status_code.code())
-                                    && expected_ack.as_deref().is_some_and(|expected| {
-                                        response.headers.iter().any(|header| {
-                                            header.name().eq_ignore_ascii_case(ATTENDED_COMMIT_ACK_HEADER)
-                                                && header.value() == expected
-                                        })
-                                    })
-                            });
-                        let _ = reply.send(if confirmed {
-                            Ok(())
-                        } else {
-                            Err(format!("Retained PBX did not confirm leg {leg}"))
-                        });
-                    }
                     match result {
                         Ok(Some(response)) if (200..300).contains(&response.status_code.code()) => {}
                         result => {

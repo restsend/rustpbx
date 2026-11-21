@@ -33,14 +33,17 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     let mut events = gateway.read().subscribe_events();
     let dialog = session.caller_dialog.as_ref().unwrap().id();
 
-    for (root, expected) in [
-        (None, false),
-        (Some("unrelated-root"), false),
-        (Some("root-call"), true),
-        (Some("root-call"), false),
+    for (root, marker, expected) in [
+        (None, true, false),
+        (Some("root-call"), false, false),
+        (Some("unrelated-root"), true, false),
+        (Some("root-call"), true, true),
+        (Some("root-call"), true, false),
     ] {
         let mut update = create_test_request(Method::Update, "dispatcher", None, "example.test", None);
-        update.headers.push(Header::UserToUser("consult-state=talk".into()));
+        if marker {
+            update.headers.push(Header::UserToUser("consult-state=talk".into()));
+        }
         if let Some(root) = root {
             let original = r#"{"caller_name":"customer-number","callee_name":"original-access"}"#;
             update.headers.push(Header::Other(
@@ -58,12 +61,9 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
         if let Some(root) = root {
             let rsipstack::dialog::dialog::TransactionCommand::Respond { status, headers, .. } =
                 response.expect("a commit request requires a PBX response even without a handset");
-            if root == "root-call" {
+            if root == "root-call" && marker {
                 assert_eq!(status, StatusCode::OK);
-                assert!(headers.unwrap_or_default().iter().any(|header| {
-                    header.name().eq_ignore_ascii_case("X-CC-Attended-Commit-Ack")
-                        && header.value() == "consult-call"
-                }));
+                assert!(headers.unwrap_or_default().is_empty());
             } else {
                 assert_eq!(status, StatusCode::Conflict);
             }

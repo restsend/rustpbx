@@ -74,8 +74,6 @@ pub struct Leg {
     /// INVITE went out; never set on inbound caller legs.
     #[serde(default)]
     pub remote_registered: bool,
-    #[serde(skip)]
-    pub(crate) attended_commit_ack: bool,
 }
 
 impl Leg {
@@ -89,7 +87,6 @@ impl Leg {
             source_leg: None,
             purpose: None,
             remote_registered: false,
-            attended_commit_ack: false,
         }
     }
 

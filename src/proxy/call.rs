@@ -3240,14 +3240,17 @@ impl CallModule {
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         // The initial INVITE's peer identity is insufficient for an UPDATE.
         // Only the actual transport peer may supply the commit extension.
-        if tx.original.headers.iter().any(|h| h.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER))
+        let attended_commit = tx.original.headers.iter()
+            .any(|h| h.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
+        if attended_commit
             && (tx.original.method != rsipstack::sip::Method::Update
                 || !tx.connection.as_ref()
                     .and_then(|connection| connection.get_remote_addr())
                     .and_then(|source| source.addr.host.clone().try_into().ok())
                     .is_some_and(|ip: std::net::IpAddr| self.inner.server.cluster_peer_ips.contains(&ip)))
         {
-            tx.original.headers.retain(|h| !h.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
+            tx.reply(rsipstack::sip::StatusCode::Forbidden).await?;
+            return Ok(());
         }
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
@@ -3280,7 +3283,7 @@ impl CallModule {
                 if matches!(tx.original.method, rsipstack::sip::Method::Bye) {
                     info!(%dialog_id, "BYE with no matching dialog; replying 200 so peer clears");
                     let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;
-                } else if tx.original.method == rsipstack::sip::Method::Refer {
+                } else if tx.original.method == rsipstack::sip::Method::Refer || attended_commit {
                     tx.reply(rsipstack::sip::StatusCode::CallTransactionDoesNotExist).await?;
                 } else {
                     debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
@@ -3606,12 +3609,13 @@ mod tests {
     async fn attended_commit_header_requires_actual_cluster_transport() {
         use crate::call::session_id::ATTENDED_COMMIT_HEADER;
         use crate::proxy::tests::common::{create_test_request, create_transaction};
-        use rsipstack::sip::{Header, Method};
+        use rsipstack::sip::{Header, HostWithPort, Method, SipMessage};
+        use rsipstack::transport::{SipAddr, TransportEvent, channel::ChannelConnection};
 
-        for (method, peer, retained) in [
-            (Method::Update, "127.0.0.1", true),
-            (Method::Update, "192.0.2.44", false),
-            (Method::Invite, "127.0.0.1", false),
+        for (method, peer, status) in [
+            (Method::Update, "127.0.0.1", 481),
+            (Method::Update, "192.0.2.44", 403),
+            (Method::Invite, "127.0.0.1", 403),
         ] {
             let (mut server, config) = create_test_server().await;
             Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec![peer.parse().unwrap()];
@@ -3622,9 +3626,26 @@ mod tests {
                 ATTENDED_COMMIT_HEADER.into(), "root;consult;inbound;agent-a".into(),
             ));
             let (mut tx, _) = create_transaction(request).await;
+            let (_source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+            let source = SipAddr {
+                r#type: Some(Transport::Udp),
+                addr: HostWithPort {
+                    host: "127.0.0.1".parse().unwrap(),
+                    port: Some(5060.into()),
+                },
+            };
+            tx.connection = Some(
+                ChannelConnection::create_connection(source_rx, response_tx, source, None)
+                    .await.unwrap().into(),
+            );
             module.process_message(&mut tx).await.unwrap();
-            assert_eq!(tx.original.headers.iter().any(|h| h.name() == ATTENDED_COMMIT_HEADER), retained);
-            assert!(tx.original.headers.iter().any(|h| matches!(h, Header::UserToUser(_))));
+            let TransportEvent::Incoming(SipMessage::Response(response), _, _) =
+                response_rx.try_recv().expect("a commit must receive a final response")
+            else {
+                panic!("the commit transaction must send a SIP response");
+            };
+            assert_eq!(response.status_code.code(), status);
         }
     }
     use async_trait::async_trait;
