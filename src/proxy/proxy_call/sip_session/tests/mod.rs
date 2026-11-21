@@ -694,6 +694,95 @@ async fn attended_room_teardown_reports_the_retained_agent_leg() {
 }
 
 #[tokio::test]
+async fn routed_consultation_cleanup_reports_each_agent_from_its_own_leg() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    for (consultation, target_is_remote, cascade_leg) in [
+        (true, true, None),
+        (true, false, Some("callee")),
+        (false, true, Some("caller")),
+    ] {
+        let gateway = Arc::new(parking_lot::RwLock::new(crate::rwi::RwiGateway::new()));
+        let (server, _) =
+            create_test_server_with_rwi_gateway(Default::default(), gateway.clone()).await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "agent-a",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let dialplan = Dialplan::new("consult".into(), request, DialDirection::Outbound);
+        let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+        let caller = LegId::from("caller");
+        let callee = LegId::from("callee");
+        let caller_leg = session.legs.get_mut(&caller).expect("original caller");
+        caller_leg.agent_id = Some("agent-a".into());
+        caller_leg.state = LegState::Ended;
+        let mut target = Leg::new(callee.clone());
+        target.agent_id = Some("agent-b".into());
+        target.state = LegState::Connected;
+        target.remote_registered = target_is_remote;
+        session.legs.insert(callee, target);
+
+        if consultation {
+            session.meta.consult_parent_session_id = Some("root-call".into());
+            session.routed_consultation_origin = Some(RoutedConsultationOrigin {
+                agent_id: "agent-a".into(),
+                root_session_id: "root-call".into(),
+                connected: true,
+            });
+        }
+        session.session_ext_set(
+            "agent_id",
+            if consultation { "agent-b" } else { "agent-a" }.to_owned(),
+        );
+        session.sync_agent_context_to_rwi_meta();
+        session.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+        let mut events = gateway.read().subscribe_events();
+
+        session.cleanup().await;
+
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|entry| entry.event)
+            .collect();
+        let origins: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == "call_consultation_origin")
+            .collect();
+        assert_eq!(origins.len(), usize::from(consultation));
+        if let Some(origin) = origins.first() {
+            assert_eq!(origin.payload["agent_id"], "agent-a");
+            assert_eq!(origin.payload["consultation_stage"], "released");
+            assert_eq!(origin.payload["consult_parent_session_id"], "root-call");
+        }
+        let hangups: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == "call_hangup")
+            .collect();
+        let cascade_legs: Vec<_> = hangups
+            .iter()
+            .filter(|event| event.payload["scope"] == "leg")
+            .map(|event| event.payload["leg_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            cascade_legs,
+            cascade_leg.into_iter().collect::<Vec<_>>(),
+            "consultation={consultation}, target_is_remote={target_is_remote}"
+        );
+        assert_eq!(
+            hangups
+                .iter()
+                .filter(|event| event.payload["scope"] == "call")
+                .count(),
+            1,
+        );
+    }
+}
+
+#[tokio::test]
 async fn attended_consultation_closes_only_after_detaching_its_tentative_participant() {
     use crate::call::{DialDirection, Dialplan};
     use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};

@@ -13001,6 +13001,7 @@ impl SipSession {
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
+        let consultation_origin_owns_caller = self.routed_consultation_origin.is_some();
         self.release_consultation_origin(hangup_reason_str.as_deref(), hangup_by.as_deref());
 
         // Teardown-cascade leg events: attribution duplicates of the session
@@ -13033,6 +13034,11 @@ impl SipSession {
         // teardown.
         if self.meta.child_leg_role.is_none() {
             for (leg_id, leg_role) in self.cc_leg_teardowns() {
+                // The dedicated consultation release already identifies A.
+                // Generic enrichment would attribute A's caller leg to B.
+                if consultation_origin_owns_caller && leg_id == "caller" {
+                    continue;
+                }
                 info!(
                     session_id = %self.id,
                     %leg_id,
