@@ -591,9 +591,12 @@ impl RwiGateway {
 
     fn snapshot_recording_identity(&self, event: &RwiEvent) -> RwiEvent {
         let mut snapshot = event.clone();
+        let consultation_released = event.event_type == crate::rwi::event::CallConsultationOrigin::TYPE
+            && event.payload["consultation_stage"] == "released";
         if !matches!(event.event_type, "call_created" | "call_ringing" | "call_answered"
             | "call_hangup" | "call_held" | "call_unheld" | "call_transferred"
             | "call_transfer_retained")
+            && !consultation_released
         {
             return snapshot;
         }
@@ -1040,6 +1043,37 @@ impl RwiGateway {
         }
     }
 
+    pub(crate) fn blind_transfer_release(
+        &self,
+        transfer: &crate::rwi::CallTransferred,
+    ) -> Option<crate::rwi::event::BlindTransferRelease> {
+        let source = transfer.transfer_source.as_ref()?;
+        let agent = source.agent_id.as_deref()?.trim();
+        if agent.is_empty() || !matches!(source.source_type.as_str(), "agent" | "queue" | "refer") {
+            return None;
+        }
+        let flat = self.snapshot_recording_identity(&RwiEvent::from_spec(transfer, None));
+        let mut event = self.enrich_flat_event(&flat).payload;
+        let root = transfer.call_id.as_str();
+        let fields = event.as_object_mut()?;
+        if fields.get("session_id").and_then(serde_json::Value::as_str) != Some(root) {
+            return None;
+        }
+        // The inter-node SIP dialog only carries the data needed to reconstruct
+        // the release. Business user data is already replicated by the gateway.
+        fields.retain(|key, _| matches!(key.as_str(), "call_id" | "session_id" | "direction"
+            | "agent_id" | "queue_id" | "root" | "caller" | "callee" | "caller_name"
+            | "callee_name" | "transfer_source" | "transfer_target" | "transfer_target_type" | "node_ip"
+            | "recording_id"));
+        fields.insert("agent_id".into(), serde_json::json!(agent));
+        Some(crate::rwi::event::BlindTransferRelease {
+            id: uuid::Uuid::new_v4(),
+            at: Utc::now(),
+            root: root.to_owned(),
+            event,
+        })
+    }
+
     /// Preserve only business data before asynchronous delivery; other fields stay dispatch-time values.
     pub(crate) fn snapshot_user_data(&self, mut event: RwiEvent) -> RwiEvent {
         let root = event
@@ -1472,6 +1506,34 @@ mod tests {
         assert_eq!(v["transfer_source"]["source_type"], "agent");
         assert_eq!(v["transfer_source"]["agent_id"], "2002");
         assert_eq!(v["transfer_source"]["agent_name"], "Bob");
+    }
+
+    #[test]
+    fn blind_transfer_release_preserves_the_transferors_recording_identity() {
+        let mut gw = RwiGateway::new();
+        gw.set_recording_identity_lookup(Some(Arc::new(|call, agent, event| {
+            (call == "root" && agent == "2002" && event == "call_transferred")
+                .then(|| "recording-a".to_owned())
+        })));
+        gw.meta_store.insert("root".into(), crate::rwi::proto::CallMeta {
+            session_id: Some("root".into()),
+            agent_id: Some("2002".into()),
+            ..Default::default()
+        });
+        let transfer = crate::rwi::CallTransferred {
+            call_id: "root".into(),
+            transfer_target: Some("sip:1003@example.test".into()),
+            transfer_target_type: Some("sip".into()),
+            transfer_source: Some(crate::rwi::TransferSource {
+                source_type: "agent".into(),
+                agent_id: Some("2002".into()),
+                ..Default::default()
+            }),
+        };
+        let release = gw.blind_transfer_release(&transfer).unwrap();
+        assert_eq!(release.event["recording_id"], "recording-a");
+        assert!(release.event.get("sip_headers").is_none());
+        assert!(release.event.get("user_data").is_none());
     }
 
     /// Every call-scoped event — not just `call_transferred` — carries the

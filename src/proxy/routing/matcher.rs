@@ -584,6 +584,11 @@ async fn match_invite_impl(
                     &mut hints,
                     std::mem::take(&mut concurrent_call_lease),
                 );
+                if (rewrites.contains_key("from.user") || rewrites.contains_key("from.host"))
+                    && let Some(hints) = hints.as_mut()
+                {
+                    hints.rewritten_caller = Some(option.caller.clone());
+                }
                 return Ok(RouteResult::Forward(option, hints));
             }
             ActionType::Queue => {

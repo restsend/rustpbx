@@ -2342,6 +2342,7 @@ impl SipSession {
                                 target,
                                 headers,
                                 registered_location,
+                                None,
                             )
                             .await;
                     }
@@ -2362,8 +2363,11 @@ impl SipSession {
         };
         match routed {
             Ok(BlindTransferRoute::Dial(routed, hints)) => {
+                let caller = hints
+                    .as_ref()
+                    .and_then(|hints| hints.rewritten_caller.clone());
                 self.track_routed_leg_hints(hints);
-                self.dial_customer_transfer_leg(agent_leg, customer_leg, target, headers, routed)
+                self.dial_customer_transfer_leg(agent_leg, customer_leg, target, headers, routed, caller)
                     .await
             }
             Ok(BlindTransferRoute::Queue { queue, hints }) => {
@@ -2433,6 +2437,7 @@ impl SipSession {
         target: &str,
         headers: &HashMap<String, String>,
         location: crate::call::Location,
+        caller_override: Option<rsipstack::sip::Uri>,
     ) -> Result<()> {
         let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
         if let Err(error) = self.handle_unhold(customer_leg.clone()).await {
@@ -2495,24 +2500,16 @@ impl SipSession {
             Some(customer_leg.clone()),
             target_agent,
             location,
-            None,
+            caller_override,
         )
         .await?;
-        // The transferring agent is released when the target ANSWERS
-        // (`complete_pending_customer_transfer` from the leg's LegConnected),
-        // not at dial time: an immediate BYE races the target leg's setup on
-        // its home node — the cluster child teardown triggered by that BYE
-        // cancels a sibling dial still in setup (production 2026-11-14,
-        // cross-node single-step transfer died with 487 before the target
-        // rang). A failed dial restores the customer↔agent bridge instead
-        // (`abort_pending_customer_transfer`), so a failed transfer keeps
-        // the call alive.
+        // Keep the target's media and attribution pending through the dial.
         self.pending_customer_transfer_release = Some(PendingCustomerTransferRelease {
             agent_leg: agent_leg.clone(),
             customer_leg: customer_leg.clone(),
             target_leg: target_leg.clone(),
             target_display: target_display.clone(),
-            transfer_source: source.clone(),
+            transfer_source: None,
             attribution_handed_over: false,
             routed_jump: None,
         });
@@ -2535,13 +2532,35 @@ impl SipSession {
         // The ATTRIBUTION hand-over stays on the target's answer edge (the
         // CC hook reads the session pin when the leg connects — the target
         // leg has no agent stamp at dial time).
-        self.release_api_transfer_agent_leg(agent_leg).await;
-        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+        let transfer = crate::rwi::CallTransferred {
             call_id: self.context.session_id.to_string(),
-            transfer_target: Some(target_display.clone()),
+            transfer_target: Some(target_display),
             transfer_target_type: Some("sip".to_string()),
-            transfer_source: source.clone(),
-        });
+            transfer_source: source,
+        };
+        let blind_release = if self.legs.get(agent_leg).is_some_and(|leg| leg.remote_registered)
+            && let Some(dialog) = self.legs.get_dialog(agent_leg)
+            && let Some(gateway) = &self.server.rwi_gateway
+            && let Some(release) = gateway.read().blind_transfer_release(&transfer)
+            && let Ok(body) = serde_json::to_vec(&release)
+        {
+            use base64::Engine as _;
+
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body);
+            self.blind_release_byes.insert(dialog.id(), encoded);
+            Some(release)
+        } else {
+            None
+        };
+        self.release_api_transfer_agent_leg(agent_leg).await;
+        if let Some(blind_transfer_release) = blind_release {
+            self.emit_typed_rwi_event(&crate::rwi::event::BlindTransferDispatched {
+                transfer,
+                blind_transfer_release,
+            });
+        } else {
+            self.emit_typed_rwi_event(&transfer);
+        }
         Ok(())
     }
 
@@ -2687,10 +2706,8 @@ impl SipSession {
     /// Hand-over HALF of the deferred customer-transfer completion: move the
     /// session attribution to the target agent BEFORE the leg's answer events
     /// fire (the per-leg `call_answered` enrichment reads the session
-    /// attribution at emit time — the old dial-time release had already
-    /// re-pinned by that point). Leg/media state is untouched; the releasing
-    /// half (`finish_pending_customer_transfer`) runs once the answer edge
-    /// and the bridge are settled.
+    /// attribution at emit time). Leg and media state remain owned by the
+    /// target's dialog transitions.
     pub(super) fn begin_pending_customer_transfer(
         &mut self,
         mut pending: PendingCustomerTransferRelease,
@@ -2727,35 +2744,8 @@ impl SipSession {
         pending
     }
 
-    /// Releasing HALF of the deferred customer-transfer completion: BYE the
-    /// transferor and emit the canonical `call_transferred` event. Runs AFTER
-    /// the target leg is Connected and the customer↔target bridge is set up —
-    /// removing the transferor re-runs the media-path selection, which must
-    /// see the target leg already established (a Ringing-state target would
-    /// be dropped as the unpaired leg).
-    pub(super) async fn finish_pending_customer_transfer(
-        &mut self,
-        pending: PendingCustomerTransferRelease,
-    ) {
-        info!(
-            session_id = %self.id,
-            target = %pending.target_display,
-            agent_leg = %pending.agent_leg,
-            "customer blind transfer complete; releasing the transferor"
-        );
-        self.release_api_transfer_agent_leg(&pending.agent_leg).await;
-        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
-            call_id: self.context.session_id.to_string(),
-            transfer_target: Some(pending.target_display),
-            transfer_target_type: Some("sip".to_string()),
-            transfer_source: pending.transfer_source,
-        });
-    }
-
-    /// Target leg failed/ended before answering: restore the original
-    /// customer↔agent bridge so the call survives the failed transfer (the
-    /// transferor was never released). Mirrors the restoration the command's
-    /// error arm used to do for dial-issued failures.
+    /// End the pending dial after its target fails. A transferor already
+    /// released at dispatch cannot take the call back.
     pub(super) async fn abort_pending_customer_transfer(
         &mut self,
         pending: PendingCustomerTransferRelease,

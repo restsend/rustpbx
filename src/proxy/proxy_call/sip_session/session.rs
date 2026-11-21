@@ -18,6 +18,7 @@ const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
 const RECORDING_STOP_ATTEMPTS: usize = 3;
 const RECORDING_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RECORDING_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
+pub(super) const BLIND_RELEASE_HEADER: &str = "X-RustPBX-Blind-Release";
 
 #[derive(Clone, Default)]
 struct RingTimeoutNotifications(HashMap<LegId, Box<rsipstack::dialog::invitation::InviteOption>>);
@@ -89,15 +90,9 @@ struct PendingRefer {
     source: Option<crate::rwi::TransferSource>,
 }
 
-/// In-flight customer-anchored blind transfer awaiting the target leg's
-/// outcome. The transferring agent leg is NOT released at dial time: an
-/// immediate BYE races the target leg's setup on its home node (the cluster
-/// child teardown triggered by the agent-leg BYE cancels a sibling dial
-/// still in setup — production 2026-11-14: a cross-node blind transfer
-/// between two peer-homed agents died with 487 before the target rang).
-/// `LegConnected` on `target_leg` completes the hand-off (release + agent
-/// attribution + event); `LegFailed`/`LegEnded` restores the original
-/// customer↔agent bridge so a failed transfer keeps the call alive.
+/// In-flight customer-anchored handoff awaiting the target dial outcome.
+/// SIP blind transfer releases the agent at dispatch. A routed IVR jump
+/// keeps the original participants while it waits for usable target media.
 pub(super) struct PendingCustomerTransferRelease {
     pub agent_leg: LegId,
     pub customer_leg: LegId,
@@ -207,6 +202,8 @@ pub struct SipSession {
 
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
+    /// Exact remote transferor dialogs whose normal BYE accompanies an authoritative transfer.
+    pub(super) blind_release_byes: HashMap<DialogId, String>,
     /// Transferors detached from media after successful REFER; await their BYE.
     pending_refers: HashMap<LegId, PendingRefer>,
     /// Customer-anchored blind transfer waiting for the target leg's answer
@@ -2001,6 +1998,7 @@ impl SipSession {
                 lr
             },
             pending_hangup: HashSet::new(),
+            blind_release_byes: HashMap::new(),
             pending_refers: HashMap::new(),
             pending_customer_transfer_release: None,
             app_media_leg: Arc::new(RwLock::new(None)),
@@ -2890,6 +2888,7 @@ impl SipSession {
                 .active_call_registry
                 .touch_heartbeat(&self.context.session_id);
             for dialog_id in self.pending_hangup.drain() {
+                let blind_release_root = self.blind_release_byes.remove(&dialog_id);
                 let dialog = self
                     .server
                     .dialog_layer
@@ -2941,9 +2940,13 @@ impl SipSession {
                             })
                     });
                 if let Some(dialog) = dialog {
+                    // A fallback alias must never inherit another dialog's release marker.
+                    let headers = blind_release_root.filter(|_| dialog.id() == dialog_id).map(|root| {
+                        vec![rsipstack::sip::headers::make_header(BLIND_RELEASE_HEADER, root)]
+                    });
                     let dialog = dialog.clone();
                     hangup_futures.push(async move {
-                        let res = dialog.hangup().await;
+                        let res = dialog.hangup_with_headers(headers).await;
                         (dialog_id, res)
                     });
                 }
@@ -4517,7 +4520,13 @@ impl SipSession {
                     root_session_id: root.clone(),
                     connected: false,
                 };
-                self.emit_consultation_origin(&origin, "dialing", None, None);
+                self.emit_consultation_origin(
+                    &origin.agent_id,
+                    &origin.root_session_id,
+                    "dialing",
+                    None,
+                    None,
+                );
                 self.routed_consultation_origin = Some(origin);
             }
             if let Some(gw) = self.server.rwi_gateway.as_ref() {
@@ -4540,7 +4549,8 @@ impl SipSession {
 
     fn emit_consultation_origin(
         &self,
-        origin: &RoutedConsultationOrigin,
+        agent_id: &str,
+        root_session_id: &str,
         stage: &'static str,
         reason: Option<&str>,
         hangup_by: Option<&str>,
@@ -4557,11 +4567,11 @@ impl SipSession {
             call_id: physical,
             session_id: physical,
             consult_session_id: physical,
-            consult_parent_session_id: &origin.root_session_id,
+            consult_parent_session_id: root_session_id,
             leg_id: "caller",
             leg_role: "agent",
             direction: "outbound",
-            agent_id: &origin.agent_id,
+            agent_id,
             consultation_stage: stage,
             sip_headers,
             reason,
@@ -4571,7 +4581,13 @@ impl SipSession {
 
     fn release_consultation_origin(&mut self, reason: Option<&str>, hangup_by: Option<&str>) {
         if let Some(origin) = self.routed_consultation_origin.take() {
-            self.emit_consultation_origin(&origin, "released", reason, hangup_by);
+            self.emit_consultation_origin(
+                &origin.agent_id,
+                &origin.root_session_id,
+                "released",
+                reason,
+                hangup_by,
+            );
         }
     }
 
@@ -5118,6 +5134,40 @@ impl SipSession {
             .get_extension::<crate::call::CallerPeerContext>()
             .and_then(|peer| peer.0.parse::<std::net::SocketAddr>().ok())
             .is_some_and(|peer| server.cluster_peer_ips.contains(&peer.ip()))
+    }
+
+    fn remote_blind_release(&self) -> Option<crate::rwi::event::BlindTransferRelease> {
+        use base64::Engine as _;
+
+        if self.meta.child_leg_role.as_deref() != Some("agent") {
+            return None;
+        }
+        let (request, source) = self.caller_dialog.as_ref()?.remote_termination_request()?;
+        let source: std::net::IpAddr = source?.addr.host.try_into().ok()?;
+        if !self.server.cluster_peer_ips.contains(&source) {
+            return None;
+        }
+        let mut facts = request.headers.iter().filter_map(|header| match header {
+            rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case(BLIND_RELEASE_HEADER) => {
+                Some(value.trim())
+            }
+            _ => None,
+        });
+        let encoded = facts.next()?;
+        if facts.next().is_some() {
+            return None;
+        }
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
+        let release: crate::rwi::event::BlindTransferRelease = serde_json::from_slice(&data).ok()?;
+        let root = release.root.as_str();
+        let agent = self.pinned_agent_id()?;
+        if self.meta.root_session_id.as_deref() != Some(root)
+            || release.event["call_id"] != root || release.event["session_id"] != root
+            || release.event["agent_id"] != agent || release.event["transfer_source"]["agent_id"] != agent
+        {
+            return None;
+        }
+        Some(release)
     }
 
     fn stamp_peer_consultation_ids(
@@ -6441,7 +6491,10 @@ impl SipSession {
                     .detach_ended_conference_leg(&LegId::from("caller"), caller_bye)
                     .await
                 {
-                    if self.routed_consultation_origin.is_some() {
+                    let external_parent = self.extensions.read()
+                        .get::<crate::proxy::proxy_call::session_hooks::VerifiedConsultationParent>()
+                        .map(|parent| parent.root_session_id.clone());
+                    if self.routed_consultation_origin.is_some() || external_parent.is_some() {
                         // The room owner commits before handing its binding to
                         // this actor. A fast caller BYE may overtake that command.
                         let committed = self.transfer_partner.is_some()
@@ -6454,10 +6507,20 @@ impl SipSession {
                             } else {
                                 false
                             };
-                        if committed {
-                            self.release_consultation_origin(Some("refer"), Some("transfer"));
+                        let (reason, hangup_by) = if committed {
+                            (Some("refer"), Some("transfer"))
                         } else {
-                            self.release_consultation_origin(Some("callee"), Some("agent"));
+                            (Some("callee"), Some("agent"))
+                        };
+                        if let Some(parent) = external_parent.as_deref()
+                            && let Some(agent) = self.legs.get(&LegId::from("caller"))
+                                .and_then(|leg| leg.agent_id.as_deref())
+                        {
+                            // The external call continues in the room without
+                            // A's leg, so final cleanup cannot release A.
+                            self.emit_consultation_origin(agent, parent, "released", reason, hangup_by);
+                        } else {
+                            self.release_consultation_origin(reason, hangup_by);
                         }
                     }
                     self.unschedule_timer(&dialog_id);
@@ -13112,6 +13175,13 @@ impl SipSession {
                 hangup,
                 ivr_jump_result,
             });
+        } else if hangup.leg_role.as_deref() == Some("agent")
+            && let Some(blind_transfer_release) = self.remote_blind_release()
+        {
+            self.emit_typed_rwi_event(&crate::rwi::event::BlindTransferLegHangup {
+                hangup,
+                blind_transfer_release,
+            });
         } else {
             self.emit_typed_rwi_event(&hangup);
         }
@@ -14799,7 +14869,13 @@ impl SipSession {
                                 && matches!(leg.state, LegState::Connected | LegState::Hold)
                         })
                     {
-                        self.emit_consultation_origin(origin, "connected", None, None);
+                        self.emit_consultation_origin(
+                            &origin.agent_id,
+                            &origin.root_session_id,
+                            "connected",
+                            None,
+                            None,
+                        );
                         if let Some(origin) = self.routed_consultation_origin.as_mut() {
                             origin.connected = true;
                         }
@@ -16451,14 +16527,9 @@ impl SipSession {
                 // attribution to the target BEFORE the leg's answer events
                 // fire — the per-leg `call_answered` (emitted by the state
                 // update below) must carry the TARGET's identity, not the
-                // departing agent's (the old dial-time release had already
-                // re-pinned by this point). The release itself runs at the
-                // end of the arm, after the bridge is settled.
-                let mut pending_customer_transfer =
-                    self.take_pending_customer_transfer_for(&leg_id);
-                if let Some(pending) = pending_customer_transfer.take() {
-                    pending_customer_transfer = Some(self.begin_pending_customer_transfer(pending));
-                }
+                // departing agent's. The transferor was released at dispatch.
+                let pending_customer_transfer = self.take_pending_customer_transfer_for(&leg_id)
+                    .map(|pending| self.begin_pending_customer_transfer(pending));
 
                 self.mark_leg_connected_if_not_held(&leg_id);                // Queue-agent legs: an ANSWERED dynamic leg must never be
                 // left unbridged (caller and agent both Connected with zero
@@ -16508,12 +16579,9 @@ impl SipSession {
                     }
                 }
                 self.update_media_path().await;
-                // Customer-anchored blind transfer: the target leg is
-                // Connected and the bridge is settled — release the
-                // transferor now (removing it re-runs the media path, which
-                // must see the target leg established).
-                if let Some(pending) = pending_customer_transfer.take() {
-                    self.finish_pending_customer_transfer(pending).await;
+                if let Some(pending) = pending_customer_transfer {
+                    // Retry physical removal only if dispatch left the agent leg behind.
+                    self.release_api_transfer_agent_leg(&pending.agent_leg).await;
                 }
                 CommandResult::success()
             }

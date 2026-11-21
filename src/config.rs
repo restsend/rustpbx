@@ -2024,6 +2024,8 @@ where
 
 #[derive(Default)]
 pub struct DialplanHints {
+    /// Caller URI explicitly rewritten by the matched forward route.
+    pub rewritten_caller: Option<rsipstack::sip::Uri>,
     pub enable_recording: Option<bool>,
     pub recording: Option<RecordingPolicy>,
     pub bypass_media: Option<bool>,

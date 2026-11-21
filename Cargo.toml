@@ -143,7 +143,7 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
-rsipstack = { package = "fork-rsipstack", version = "=0.7.15" }
+rsipstack = { package = "fork-rsipstack", version = "=0.7.16-rc.1" }
 # 0.4.11 fixes a G.711 µ-law (PCMU) encoder bug: ~12% of samples were
 # emitted as non-standard codes, adding audible quantization noise ("hiss")
 # on recordings when decoded by standard players/peers.

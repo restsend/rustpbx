@@ -191,12 +191,16 @@ async fn attended_partner_hangs_up_while_the_peer_update_is_pending() {
 }
 
 #[tokio::test]
-async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() {
+async fn attended_consultation_reports_the_initiating_agents_lifecycle() {
     use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
 
-    let gateway = crate::rwi::RwiGateway::new();
+    let mut gateway = crate::rwi::RwiGateway::new();
+    let recording = "12345678-1234-4123-8123-123456789abc";
+    gateway.set_recording_identity_lookup(Some(Arc::new(move |call_id, agent_id, _| {
+        (call_id == "external-consult" && agent_id == "agent-a").then(|| recording.into())
+    })));
     let mut events = gateway.subscribe_events();
     let (mut server, _) = create_test_server_with_rwi_gateway(
         Default::default(), Arc::new(parking_lot::RwLock::new(gateway)),
@@ -205,12 +209,16 @@ async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() 
     agents.register("agent-a".into(), "A".into(), "sip:1001@example.test".into(), vec![], 2)
         .await.unwrap();
     Arc::get_mut(&mut server).unwrap().agent_registry = Some(agents.clone());
-    let make_session = |id: &str, marked: bool| {
+    let make_session = |id: &str, direction: DialDirection, routed: bool, marked: bool| {
         let request = create_test_request(
             rsipstack::sip::Method::Invite, "1001", None, "example.test", None,
         );
-        let dialplan = Dialplan::new(id.into(), request, DialDirection::Outbound)
-            .with_application("ivr".into(), None, false);
+        let dialplan = Dialplan::new(id.into(), request, direction);
+        let dialplan = if routed {
+            dialplan.with_application("ivr".into(), None, false)
+        } else {
+            dialplan
+        };
         let cookie = TransactionCookie::default();
         cookie.set_user(crate::call::SipUser { username: "1001".into(), ..Default::default() });
         cookie.insert_extension(crate::call::cookie::AuthenticatedSipUser);
@@ -230,32 +238,42 @@ async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() 
         session.meta.dial_leg_role = marked.then(|| "consult".into());
         (session, handle, commands)
     };
-    let (_root, root_handle, _commands) = make_session("customer-call", false);
-    server.active_call_registry.register_handle("customer-call".into(), root_handle.clone());
-    agents.update_presence("agent-a", PresenceState::Busy { call_id: Some("customer-call".into()) })
-        .await.unwrap();
-
-    let mut collected = Vec::new();
-    for marked in [false, true] {
-        let (mut session, _handle, _commands) = make_session("consult-call", marked);
+    for (call_id, primary_direction, routed, marked, stages) in [
+        ("ordinary-outbound", DialDirection::Inbound, false, false, &[][..]),
+        ("other-ivr-dial", DialDirection::Inbound, true, false, &[][..]),
+        ("routed-consult", DialDirection::Inbound, true, true, &["dialing", "connected", "released"][..]),
+        ("external-consult", DialDirection::Inbound, false, true, &["released"][..]),
+        ("external-consult", DialDirection::Outbound, false, true, &["released"][..]),
+    ] {
+        let (_root, root_handle, _root_commands) =
+            make_session("customer-call", primary_direction.clone(), false, false);
+        server.active_call_registry.register_handle("customer-call".into(), root_handle.clone());
+        agents.update_presence("agent-a", PresenceState::Busy { call_id: Some("customer-call".into()) })
+            .await.unwrap();
+        let (mut session, _handle, _commands) =
+            make_session(call_id, DialDirection::Outbound, routed, marked);
         session.initialize_agent_consultation().await;
         let caller = LegId::from("caller");
-        let target = LegId::from("target-agent");
+        let target = LegId::from("callee");
         let mut leg = Leg::new(target.clone());
-        leg.agent_id = Some("agent-b".into());
+        if routed {
+            leg.agent_id = Some("agent-b".into());
+            session.meta.queue_name = Some("support".into());
+        }
         leg.state = LegState::Ringing;
         session.legs.insert(target.clone(), leg);
-        session.meta.queue_name = Some("support".into());
         let bridge = || CallCommand::Bridge {
             leg_a: caller.clone(), leg_b: target.clone(), mode: crate::call::domain::P2PMode::Audio,
         };
         assert!(session.execute_command(bridge(), None).await.success);
-        while let Ok(entry) = events.try_recv() {
-            if entry.event.event_type == "call_consultation_origin" {
-                collected.push(entry.event.payload);
-            }
-        }
-        assert_eq!(collected.len(), usize::from(marked), "only actual dialing precedes the B answer");
+        let mut collect = || {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|entry| entry.event.event_type == "call_consultation_origin")
+                .map(|entry| entry.event.payload)
+                .collect::<Vec<_>>()
+        };
+        let mut collected = collect();
+        assert_eq!(collected.len(), usize::from(routed && marked), "{call_id}");
 
         session.legs.get_mut(&target).unwrap().state = LegState::Connected;
         assert!(session.execute_command(bridge(), None).await.success);
@@ -266,30 +284,36 @@ async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() 
         });
         assert!(session.execute_command(CallCommand::BindTransferPartner {
             cmd_tx: root_handle.command_sender(), partner_session: "customer-call".into(),
-            root_session_id: "customer-call".into(), direction: DialDirection::Inbound,
+            root_session_id: "customer-call".into(), direction: primary_direction,
             transferor_agent: Some("agent-a".into()), original_parties: None, their_leg: caller,
             completion: None,
         }, None).await.success);
         session.handle_dialog_state(DialogState::Terminated(DialogId {
             call_id: "consult-dialog".into(), local_tag: "local".into(), remote_tag: "remote".into(),
         }, TerminatedReason::UasBye)).await.unwrap();
-        assert!(session.legs.contains_key(&target), "retiring A must keep B connected");
-        session.cleanup().await;
-        while let Ok(entry) = events.try_recv() {
-            if entry.event.event_type == "call_consultation_origin" {
-                collected.push(entry.event.payload);
+        assert!(!session.legs.contains_key(&LegId::from("caller")));
+        assert!(session.legs.contains_key(&target), "retiring A must keep the target connected");
+        collected.extend(collect());
+        let observed: Vec<_> = collected.iter()
+            .filter_map(|event| event["consultation_stage"].as_str()).collect();
+        assert_eq!(observed, stages, "{call_id}");
+        for event in &collected {
+            assert_eq!(event["agent_id"], "agent-a");
+            for id in ["call_id", "session_id", "consult_session_id"] {
+                assert_eq!(event[id], call_id);
+            }
+            assert_eq!(event["consult_parent_session_id"], "customer-call");
+        }
+        if let Some(release) = collected.last() {
+            assert_eq!(release["reason"], "refer");
+            assert_eq!(release["hangup_by"], "transfer");
+            if !routed {
+                assert_eq!(release["recording_id"], recording);
             }
         }
-        assert_eq!(collected.len(), if marked { 3 } else { 0 });
+        session.cleanup().await;
+        assert!(collect().is_empty(), "final cleanup must not release A twice");
     }
-    for (event, stage) in collected.iter().zip(["dialing", "connected", "released"]) {
-        assert_eq!(event["consultation_stage"], stage);
-        assert_eq!(event["agent_id"], "agent-a");
-        assert_eq!(event["session_id"], "consult-call");
-        assert_eq!(event["consult_session_id"], "consult-call");
-        assert_eq!(event["consult_parent_session_id"], "customer-call");
-    }
-    assert_eq!(collected[2]["reason"], "refer");
 }
 
 #[tokio::test]
@@ -5192,7 +5216,7 @@ async fn outbound_transfer_fixture_with(
     use crate::config::MediaProxyMode;
     use crate::media::leg::{LegConfig, LegInner};
     use crate::proxy::tests::common::{
-        create_test_request, create_test_server, create_transaction,
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
     };
 
     let request = create_test_request(
@@ -5202,7 +5226,10 @@ async fn outbound_transfer_fixture_with(
         "127.0.0.1",
         None,
     );
-    let (server, _) = create_test_server().await;
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(crate::rwi::RwiGateway::new())),
+    ).await;
     let (tx, _) = create_transaction(request.clone()).await;
     let (agent_tx, agent_states) = mpsc::unbounded_channel();
     let dialog = server
@@ -5336,8 +5363,16 @@ async fn outbound_transfer_fixture_with(
 }
 
 async fn receive_transfer_bye(
+    dialog: rsipstack::dialog::invite_dialog::InviteDialog,
+    states: &mut mpsc::UnboundedReceiver<DialogState>,
+) -> DialogState {
+    receive_transfer_bye_with_headers(dialog, states, []).await
+}
+
+async fn receive_transfer_bye_with_headers(
     mut dialog: rsipstack::dialog::invite_dialog::InviteDialog,
     states: &mut mpsc::UnboundedReceiver<DialogState>,
+    headers: impl IntoIterator<Item = rsipstack::sip::Header>,
 ) -> DialogState {
     use crate::proxy::tests::common::create_transaction;
     let mut request = dialog.initial_request();
@@ -5350,6 +5385,7 @@ async fn receive_transfer_bye(
             _ => {}
         }
     }
+    request.headers.extend(headers.into_iter().collect());
     let (mut tx, _) = create_transaction(request).await;
     dialog.handle(&mut tx).await.unwrap();
     assert!(dialog.state().is_terminated());
@@ -5366,6 +5402,85 @@ async fn receive_transfer_bye(
     })
     .await
     .expect("SIP BYE must emit termination")
+}
+
+#[tokio::test]
+async fn child_blind_transfer_release_marks_only_the_accepted_cluster_bye() {
+    use base64::Engine as _;
+    use crate::call::{CallerPeerContext, DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use rsipstack::sip::{Header, Method};
+
+    let root = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+    for (peer, marker, expected) in [
+        ("127.0.0.1", Some(root), true),
+        ("127.0.0.1", Some("different-root"), false),
+        ("192.0.2.10", Some(root), false),
+        ("127.0.0.1", None, false),
+    ] {
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let (mut server, _) = create_test_server_with_rwi_gateway(
+            Default::default(), Arc::new(parking_lot::RwLock::new(gateway)),
+        ).await;
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec![peer.parse().unwrap()];
+        let mut invite = create_test_request(Method::Invite, "agent", None, "example.test", None);
+        invite.headers.push(Header::Other(
+            crate::call::uui::UUI_HEADER_NAME.into(),
+            crate::call::uui::build_uui_value(root, None, None, None, Some("agent")),
+        ));
+        let (tx, _) = create_transaction(invite.clone()).await;
+        let (states, mut rx) = mpsc::unbounded_channel();
+        let dialog = server.dialog_layer.get_or_create_server_invite(&tx, states, None, None).unwrap();
+        let context = CallContext {
+            session_id: "child".into(),
+            dialplan: Arc::new(Dialplan::new("child".into(), invite, DialDirection::Inbound)),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:customer@example.test".into(),
+            original_callee: "sip:agent@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        // The INVITE always came from a configured peer. The BYE test
+        // connection uses 127.0.0.1, which may be a different source.
+        context.cookie.insert_extension(CallerPeerContext(format!("{peer}:5060")));
+        let (mut session, _, _) = SipSession::new(
+            server, CancellationToken::new(), None, context, dialog.clone(), false,
+        );
+        assert_eq!(session.meta.child_leg_role.as_deref(), Some("agent"));
+        SipSession::set_pinned_agent_id(&session.extensions, "agent");
+        let fact = marker.map(|root| crate::rwi::event::BlindTransferRelease {
+            id: uuid::Uuid::new_v4(),
+            at: chrono::Utc::now(),
+            root: root.into(),
+            event: serde_json::json!({
+                "call_id": root, "session_id": root, "agent_id": "agent",
+                "transfer_source": {"source_type": "agent", "agent_id": "agent"},
+                "transfer_target": "sip:target", "transfer_target_type": "sip",
+            }),
+        });
+        let headers = fact.as_ref().map(|release| {
+            let body = serde_json::to_vec(release).unwrap();
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body);
+            Header::Other("X-RustPBX-Blind-Release".into(), encoded)
+        });
+        let state = receive_transfer_bye_with_headers(dialog, &mut rx, headers).await;
+        session.handle_dialog_state(state).await.unwrap();
+        session.cleanup().await;
+        let hangups = drain_call_hangups(&mut events);
+        assert_eq!(hangups.len(), 1);
+        assert_eq!(hangups[0]["scope"], "leg");
+        assert_eq!(hangups[0]["leg_role"], "agent");
+        let released = hangups[0].get("blind_transfer_release");
+        assert_eq!(released.is_some(), expected);
+        if expected {
+            assert_eq!(released, Some(&serde_json::to_value(fact.unwrap()).unwrap()));
+        }
+    }
 }
 
 #[tokio::test]
@@ -5451,6 +5566,14 @@ async fn customer_blind_transfer_outbound_released_at_dispatch() {
         let customer = LegId::from("callee");
         let agent_dialog = session.caller_dialog_id();
         let customer_peer = session.media_leg(&customer).unwrap();
+        let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
+        let transferred = || {
+            gateway.read().get_events_for_call(&"outbound-transfer".into())
+                .into_iter()
+                .filter(|entry| entry.event.event_type == "call_transferred")
+                .map(|entry| entry.event.payload)
+                .collect::<Vec<_>>()
+        };
 
         // 发起即释放: the transferor leg is GONE at dispatch; the release
         // BYE to its dialog is queued.
@@ -5463,6 +5586,9 @@ async fn customer_blind_transfer_outbound_released_at_dispatch() {
             session.pending_hangup.contains(&agent_dialog),
             "the release BYE to the transferor dialog is queued"
         );
+        let dispatch = transferred();
+        assert_eq!(dispatch.len(), 1, "dispatch owns the transfer event");
+        assert_eq!(dispatch[0]["transfer_source"]["agent_id"], "agent");
 
         if matches!(outcome, "reject") {
             let result = session
@@ -5588,6 +5714,7 @@ async fn customer_blind_transfer_outbound_released_at_dispatch() {
                 );
             }
         }
+        assert_eq!(transferred(), dispatch, "target outcome {outcome} must not repeat the transfer event");
         let _ = customer_peer;
         let _ = agent_dialog;
     }
@@ -5935,7 +6062,7 @@ async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
         (true, true, "8000", false),
         (true, false, "9001", false),
     ] {
-        assert_customer_blind_transfer_route(routed, restricted, target, succeeds, false).await;
+        assert_customer_blind_transfer_route(routed, restricted, target, succeeds, false, None).await;
     }
 }
 
@@ -5945,13 +6072,15 @@ async fn test_customer_blind_transfer_preserves_full_uri_policy() {
         (false, "sip:9001@blocked.example", false),
         (true, "sip:9000@allowed.example", true),
     ] {
-        assert_customer_blind_transfer_route(true, restricted, target, succeeds, false).await;
+        assert_customer_blind_transfer_route(true, restricted, target, succeeds, false, None).await;
     }
 }
 
 #[tokio::test]
 async fn test_customer_blind_transfer_registered_target_preserves_forward() {
-    assert_customer_blind_transfer_route(true, true, "9000", true, true).await;
+    for from_user in [None, Some("990128000")] {
+        assert_customer_blind_transfer_route(true, true, "9000", true, true, from_user).await;
+    }
 }
 
 async fn assert_customer_blind_transfer_route(
@@ -5960,6 +6089,7 @@ async fn assert_customer_blind_transfer_route(
     target: &str,
     succeeds: bool,
     registered: bool,
+    from_user: Option<&str>,
 ) {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
@@ -6020,6 +6150,7 @@ async fn assert_customer_blind_transfer_route(
             format!("sip:{}", wire_target.local_addr().unwrap());
         config.routes.as_mut().unwrap()[0].rewrite = Some(crate::proxy::routing::RewriteRules {
             to_user: Some("rewritten".into()),
+            from_user: from_user.map(str::to_owned),
             ..Default::default()
         });
     }
@@ -6217,6 +6348,9 @@ async fn assert_customer_blind_transfer_route(
             invite.uri.user().map(|user| user.to_string()).as_deref(),
             Some("rewritten")
         );
+        use rsipstack::sip::{HeadersExt, ToTypedHeader};
+        let from = invite.from_header().unwrap().typed().unwrap();
+        assert_eq!(from.uri.user(), Some(from_user.unwrap_or("alice")));
         session.cancel_token.cancel();
         serving.take().unwrap().abort();
     }

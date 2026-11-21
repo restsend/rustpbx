@@ -277,6 +277,22 @@ pub struct CallHangup {
 }
 rwi_event!(CallHangup, "call_hangup");
 
+/// Physical teardown of the agent leg whose business release belongs to the blind transfer.
+#[derive(Serialize)]
+pub(crate) struct BlindTransferLegHangup {
+    #[serde(flatten)]
+    pub hangup: CallHangup,
+    pub blind_transfer_release: BlindTransferRelease,
+}
+
+impl RwiEventSpec for BlindTransferLegHangup {
+    const TYPE: &'static str = CallHangup::TYPE;
+
+    fn call_id(&self) -> Option<&str> {
+        self.hangup.call_id()
+    }
+}
+
 /// A call leg was put on hold (re-INVITE with `sendonly`/`inactive`, or an
 /// explicit Hold command). Agent attribution (`agent_id` / `agent_name`) is
 /// injected via `EventCallContext` enrichment when a CC agent participates —
@@ -457,6 +473,30 @@ pub struct CallTransferred {
     pub transfer_source: Option<TransferSource>,
 }
 rwi_event!(CallTransferred, "call_transferred");
+
+/// Each producer carries the same committed release, independent of delivery order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlindTransferRelease {
+    pub id: uuid::Uuid,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub root: String,
+    pub event: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BlindTransferDispatched {
+    #[serde(flatten)]
+    pub transfer: CallTransferred,
+    pub blind_transfer_release: BlindTransferRelease,
+}
+
+impl RwiEventSpec for BlindTransferDispatched {
+    const TYPE: &'static str = CallTransferred::TYPE;
+
+    fn call_id(&self) -> Option<&str> {
+        self.transfer.call_id()
+    }
+}
 
 /// The retained agent now owns the customer conversation on this leg.
 #[derive(Debug, Clone, Serialize)]
