@@ -79,6 +79,8 @@ pub(crate) struct RetainedTransfer {
     pub root_session_id: String,
     pub direction: String,
     pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<RootCallInfo>,
 }
 
 /// Type alias for RWI event sender (used by the cc addon's agent event fanout).

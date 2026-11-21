@@ -458,6 +458,48 @@ pub struct CallTransferred {
 }
 rwi_event!(CallTransferred, "call_transferred");
 
+/// The retained agent now owns the customer conversation on this leg.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CallTransferRetained {
+    pub call_id: String,
+    pub session_id: String,
+    pub leg_id: String,
+    pub leg_role: String,
+    pub agent_id: String,
+    pub direction: String,
+    pub retained_transfer: crate::rwi::proto::RetainedTransfer,
+    pub transfer_source: TransferSource,
+}
+rwi_event!(CallTransferRetained, "call_transfer_retained");
+
+/// The originating agent's dialog, whose provisional app answer can precede the consulted agent.
+#[derive(Serialize)]
+pub(crate) struct CallConsultationOrigin<'a> {
+    pub call_id: &'a str,
+    pub session_id: &'a str,
+    pub consult_session_id: &'a str,
+    pub consult_parent_session_id: &'a str,
+    pub leg_id: &'static str,
+    pub leg_role: &'static str,
+    pub direction: &'static str,
+    pub agent_id: &'a str,
+    pub consultation_stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip_headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hangup_by: Option<&'a str>,
+}
+
+impl RwiEventSpec for CallConsultationOrigin<'_> {
+    const TYPE: &'static str = "call_consultation_origin";
+
+    fn call_id(&self) -> Option<&str> {
+        Some(self.call_id)
+    }
+}
+
 /// An answered SIP handoff that originated in a route-point jump.
 #[derive(Serialize)]
 pub(crate) struct IvrJumpTransferred<'a> {

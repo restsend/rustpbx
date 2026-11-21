@@ -726,6 +726,8 @@ pub enum CallCommand {
         partner_session: String,
         root_session_id: String,
         direction: crate::call::DialDirection,
+        transferor_agent: Option<String>,
+        original_parties: Option<crate::rwi::RootCallInfo>,
         their_leg: LegId,
     },
 

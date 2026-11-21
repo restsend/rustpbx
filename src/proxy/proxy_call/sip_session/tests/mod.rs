@@ -13,6 +13,107 @@ mod packet_diagnostics_tests;
 mod transfer_target_dialog_tests;
 
 #[tokio::test]
+async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (mut server, _) = create_test_server_with_rwi_gateway(
+        Default::default(), Arc::new(parking_lot::RwLock::new(gateway)),
+    ).await;
+    let agents = Arc::new(MemoryRegistry::new());
+    agents.register("agent-a".into(), "A".into(), "sip:1001@example.test".into(), vec![], 2)
+        .await.unwrap();
+    Arc::get_mut(&mut server).unwrap().agent_registry = Some(agents.clone());
+    let make_session = |id: &str, marked: bool| {
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "1001", None, "example.test", None,
+        );
+        let dialplan = Dialplan::new(id.into(), request, DialDirection::Outbound)
+            .with_application("ivr".into(), None, false);
+        let cookie = TransactionCookie::default();
+        cookie.set_user(crate::call::SipUser { username: "1001".into(), ..Default::default() });
+        cookie.insert_extension(crate::call::cookie::AuthenticatedSipUser);
+        let (mut session, handle, commands) = SipSession::new_uac(
+            server.clone(), CancellationToken::new(), None, CallContext {
+                session_id: id.into(),
+                dialplan: Arc::new(dialplan),
+                cookie,
+                start_time: Instant::now(),
+                original_caller: "sip:1001@example.test".into(),
+                original_callee: "sip:office@example.test".into(),
+                max_forwards: 70,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                metadata: None,
+            }, false,
+        );
+        session.meta.dial_leg_role = marked.then(|| "consult".into());
+        (session, handle, commands)
+    };
+    let (_root, root_handle, _commands) = make_session("customer-call", false);
+    server.active_call_registry.register_handle("customer-call".into(), root_handle.clone());
+    agents.update_presence("agent-a", PresenceState::Busy { call_id: Some("customer-call".into()) })
+        .await.unwrap();
+
+    let mut collected = Vec::new();
+    for marked in [false, true] {
+        let (mut session, _handle, _commands) = make_session("consult-call", marked);
+        session.initialize_agent_consultation().await;
+        let caller = LegId::from("caller");
+        let target = LegId::from("target-agent");
+        let mut leg = Leg::new(target.clone());
+        leg.agent_id = Some("agent-b".into());
+        leg.state = LegState::Ringing;
+        session.legs.insert(target.clone(), leg);
+        session.meta.queue_name = Some("support".into());
+        let bridge = || CallCommand::Bridge {
+            leg_a: caller.clone(), leg_b: target.clone(), mode: crate::call::domain::P2PMode::Audio,
+        };
+        assert!(session.execute_command(bridge(), None).await.success);
+        while let Ok(entry) = events.try_recv() {
+            if entry.event.event_type == "call_consultation_origin" {
+                collected.push(entry.event.payload);
+            }
+        }
+        assert_eq!(collected.len(), usize::from(marked), "only actual dialing precedes the B answer");
+
+        session.legs.get_mut(&target).unwrap().state = LegState::Connected;
+        assert!(session.execute_command(bridge(), None).await.success);
+        assert!(session.execute_command(bridge(), None).await.success);
+        session.conference = Some(ConferenceAttachment {
+            leg_id: target.clone(), conference_id: "test-room".into(),
+            pre_transfer_state: Some(LegState::Connected),
+        });
+        assert!(session.execute_command(CallCommand::BindTransferPartner {
+            cmd_tx: root_handle.command_sender(), partner_session: "customer-call".into(),
+            root_session_id: "customer-call".into(), direction: DialDirection::Inbound,
+            transferor_agent: Some("agent-a".into()), original_parties: None, their_leg: caller,
+        }, None).await.success);
+        session.handle_dialog_state(DialogState::Terminated(DialogId {
+            call_id: "consult-dialog".into(), local_tag: "local".into(), remote_tag: "remote".into(),
+        }, TerminatedReason::UasBye)).await.unwrap();
+        assert!(session.legs.contains_key(&target), "retiring A must keep B connected");
+        session.cleanup().await;
+        while let Ok(entry) = events.try_recv() {
+            if entry.event.event_type == "call_consultation_origin" {
+                collected.push(entry.event.payload);
+            }
+        }
+        assert_eq!(collected.len(), if marked { 3 } else { 0 });
+    }
+    for (event, stage) in collected.iter().zip(["dialing", "connected", "released"]) {
+        assert_eq!(event["consultation_stage"], stage);
+        assert_eq!(event["agent_id"], "agent-a");
+        assert_eq!(event["session_id"], "consult-call");
+        assert_eq!(event["consult_session_id"], "consult-call");
+        assert_eq!(event["consult_parent_session_id"], "customer-call");
+    }
+    assert_eq!(collected[2]["reason"], "refer");
+}
+
+#[tokio::test]
 async fn attended_room_events_snapshot_the_retained_agent_only_after_binding() {
     use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
     use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
@@ -55,6 +156,8 @@ async fn attended_room_events_snapshot_the_retained_agent_only_after_binding() {
             partner_session: "root-call".into(),
             root_session_id: "root-call".into(),
             direction: crate::call::DialDirection::Inbound,
+            transferor_agent: None,
+            original_parties: None,
             their_leg: LegId::from("caller"),
         },
         None,
@@ -140,6 +243,8 @@ async fn attended_room_teardown_reports_the_retained_agent_leg() {
                     partner_session: "customer-session".into(),
                     root_session_id: "customer-session".into(),
                     direction: crate::call::DialDirection::Inbound,
+                    transferor_agent: None,
+                    original_parties: None,
                     their_leg: LegId::from("caller"),
                 },
                 None,
@@ -15100,6 +15205,48 @@ async fn child_leg_session_hangup_claims_role_without_leg_agent_id() {
         1,
         "exactly one role-attributed agent hangup: {hangups:?}"
     );
+}
+
+#[tokio::test]
+async fn attended_refer_marks_only_the_committed_agent_child_release() {
+    use rsipstack::dialog::DialogId;
+
+    for (child_role, status, expected_reason, expected_initiator) in [
+        (Some("agent"), 200, "refer", "transfer"),
+        (Some("agent"), 486, "caller", "caller"),
+        (None, 200, "caller", "caller"),
+    ] {
+        let mut callee = crate::call::domain::Leg::new(LegId::from("callee"));
+        callee.agent_id = Some("agent-1".into());
+        callee.state = LegState::Connected;
+        let (mut session, mut events) =
+            teardown_session("attended-release", vec![callee], child_role).await;
+        let transferor = DialogId {
+            call_id: "transferor".into(),
+            local_tag: "local".into(),
+            remote_tag: "remote".into(),
+        };
+        session
+            .pending_dynamic_dialogs
+            .insert(transferor.clone(), LegId::from("callee"));
+        session.meta.hangup_reason = None;
+        session
+            .finish_attended_refer(&transferor, "sip:target@rustpbx.com?Replaces=consult", status)
+            .await;
+        session
+            .meta
+            .hangup_reason
+            .get_or_insert(CallRecordHangupReason::ByCaller);
+        session.cleanup().await;
+
+        let hangups = drain_call_hangups(&mut events);
+        let terminal = hangups
+            .iter()
+            .find(|event| event.get("leg_id").is_none())
+            .expect("session teardown event");
+        assert_eq!(terminal["reason"], expected_reason, "{child_role:?} {status}");
+        assert_eq!(terminal["hangup_by"], expected_initiator);
+    }
 }
 
 /// Ring-timeout teardown: the dialog NEVER connected (the phone leg only

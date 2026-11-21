@@ -42,6 +42,7 @@ use rsipstack::sip::{Header, HeadersExt, Request};
 
 pub(crate) const CONSULT_PARENT_HEADER: &str = "X-CC-Consult-Parent";
 pub(crate) const CONSULT_SESSION_HEADER: &str = "X-CC-Consult-Session";
+pub(crate) const ATTENDED_COMMIT_HEADER: &str = "X-CC-Attended-Commit";
 
 /// Additive consultation identity for cluster delivery. Callers must first
 /// verify the source is a cluster peer with a declared child-leg intent.

@@ -3234,8 +3234,21 @@ impl CallModule {
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
+        use crate::call::session_id::ATTENDED_COMMIT_HEADER;
+
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
+        // The initial INVITE's peer identity is insufficient for an UPDATE.
+        // Only the actual transport peer may supply the commit extension.
+        if tx.original.headers.iter().any(|h| h.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER))
+            && (tx.original.method != rsipstack::sip::Method::Update
+                || !tx.connection.as_ref()
+                    .and_then(|connection| connection.get_remote_addr())
+                    .and_then(|source| source.addr.host.clone().try_into().ok())
+                    .is_some_and(|ip: std::net::IpAddr| self.inner.server.cluster_peer_ips.contains(&ip)))
+        {
+            tx.original.headers.retain(|h| !h.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
+        }
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
@@ -3588,6 +3601,32 @@ mod tests {
     use crate::config::RouteResult;
     use crate::proxy::tests::common::{create_test_server, create_test_server_with_config};
     use crate::proxy::proxy_call::sip_session::SipSession;
+
+    #[tokio::test]
+    async fn attended_commit_header_requires_actual_cluster_transport() {
+        use crate::call::session_id::ATTENDED_COMMIT_HEADER;
+        use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use rsipstack::sip::{Header, Method};
+
+        for (method, peer, retained) in [
+            (Method::Update, "127.0.0.1", true),
+            (Method::Update, "192.0.2.44", false),
+            (Method::Invite, "127.0.0.1", false),
+        ] {
+            let (mut server, config) = create_test_server().await;
+            Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec![peer.parse().unwrap()];
+            let module = CallModule::new(config, server);
+            let mut request = create_test_request(method, "dispatcher", None, "example.test", None);
+            request.headers.push(Header::UserToUser("consult-state=talk".into()));
+            request.headers.push(Header::Other(
+                ATTENDED_COMMIT_HEADER.into(), "root;consult;inbound;agent-a".into(),
+            ));
+            let (mut tx, _) = create_transaction(request).await;
+            module.process_message(&mut tx).await.unwrap();
+            assert_eq!(tx.original.headers.iter().any(|h| h.name() == ATTENDED_COMMIT_HEADER), retained);
+            assert!(tx.original.headers.iter().any(|h| matches!(h, Header::UserToUser(_))));
+        }
+    }
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
 

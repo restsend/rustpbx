@@ -563,11 +563,23 @@ impl SipSession {
     ) {
         if (200..300).contains(&status) {
             let target_uri = refer_to.split('?').next().unwrap_or(refer_to).to_string();
-            let source = if let Some(leg) = self.leg_id_for_dialog(&source_dialog.to_string()) {
-                self.transfer_source_snapshot(&leg).await
+            let transferor_leg = self.leg_id_for_dialog(&source_dialog.to_string());
+            let source = if let Some(leg) = transferor_leg.as_ref() {
+                self.transfer_source_snapshot(leg).await
             } else {
                 None
             };
+            // An agent-home child owns only the departing seat. The
+            // dispatcher retains the customer's independent hangup reason.
+            if self.meta.child_leg_role.as_deref() == Some("agent")
+                && transferor_leg
+                    .as_ref()
+                    .is_some_and(|leg| leg.as_str() == "callee")
+            {
+                self.meta
+                    .hangup_reason
+                    .get_or_insert(crate::callrecord::CallRecordHangupReason::ByRefer);
+            }
             self.stash_transfer_source(source.clone());
             self.mark_transferred_with(Some(serde_json::json!({"target": target_uri, "kind": "sip"})));
             self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
@@ -667,6 +679,21 @@ impl SipSession {
                 .clone()
                 .ok_or_else(|| anyhow!("Session command queue is closed"))?;
             let partner_commands = owner.command_sender();
+            let transferor_agent = match self.leg_id_for_dialog(&source_dialog.to_string()) {
+                Some(leg) => self.transfer_source_snapshot(&leg).await.and_then(|source| source.agent_id),
+                None => None,
+            };
+            let root_session_id = self.root_session_id_str();
+            let original_parties = self.server.rwi_gateway.as_ref().and_then(|gateway| {
+                let meta = gateway.read().meta_store.get_sync(&self.context.session_id)?;
+                let root = meta.root.unwrap_or_default();
+                Some(crate::rwi::RootCallInfo {
+                    call_id: Some(root_session_id.clone()),
+                    caller_name: root.caller_name.or(meta.caller_name),
+                    callee_name: root.callee_name.or(meta.callee_name),
+                    ..Default::default()
+                })
+            });
             // Do not commit teardown ownership if the peer cannot accept
             // the binding. No fallible send remains after the commit.
             let permit = partner_commands
@@ -677,8 +704,10 @@ impl SipSession {
             permit.send(crate::call::domain::CallCommand::BindTransferPartner {
                 cmd_tx,
                 partner_session: self.id.to_string(),
-                root_session_id: self.root_session_id_str(),
+                root_session_id,
                 direction: self.context.dialplan.direction,
+                transferor_agent,
+                original_parties,
                 their_leg: local_leg.clone(),
             });
             self.bind_transfer_partner(

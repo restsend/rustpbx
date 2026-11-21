@@ -1,6 +1,76 @@
 use super::*;
 
 #[tokio::test]
+async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
+    use crate::call::session_id::{CONSULT_PARENT_HEADER, CONSULT_SESSION_HEADER};
+    use crate::proxy::tests::common::create_test_request;
+    use rsipstack::sip::{Header, Method};
+
+    let mut invite = create_test_request(Method::Invite, "dispatcher", None, "example.test", None);
+    invite.headers.push(crate::call::uui::build_uui_header(
+        "aabbccddeeff0011", None, None, None, Some("agent"),
+    ));
+    invite.headers.push(Header::Other(CONSULT_PARENT_HEADER.into(), "root-call".into()));
+    invite.headers.push(Header::Other(CONSULT_SESSION_HEADER.into(), "consult-call".into()));
+    let mut session = delivery_session_from_request(
+        invite, Some("consult-call"), true, true, false,
+    ).await;
+    let callee = LegId::from("callee");
+    let mut leg = Leg::new(callee.clone());
+    leg.agent_id = Some("agent-b".into());
+    leg.state = LegState::Connected;
+    session.legs.insert(callee.clone(), leg);
+    let mut events = session.server.rwi_gateway.as_ref().unwrap().read().subscribe_events();
+    let dialog = session.caller_dialog.as_ref().unwrap().id();
+
+    for (root, expected) in [
+        (None, false),
+        (Some("unrelated-root"), false),
+        (Some("root-call"), true),
+        (Some("root-call"), false),
+    ] {
+        let mut update = create_test_request(Method::Update, "dispatcher", None, "example.test", None);
+        update.headers.push(Header::UserToUser("consult-state=talk".into()));
+        if let Some(root) = root {
+            let original = r#"{"caller_name":"customer-number","callee_name":"original-access"}"#;
+            update.headers.push(Header::Other(
+                "X-CC-Attended-Commit".into(),
+                format!("{root};consult-call;inbound;agent-a;{original}"),
+            ));
+        }
+        let (transaction, _responses) = TransactionHandle::new();
+        // No handset dialog is needed to observe the business event. A failed
+        // handset relay does not roll back the already committed room.
+        let _ = session.handle_dialog_state(DialogState::Updated(
+            dialog.clone(), update, transaction,
+        )).await;
+        let retained = events.try_recv().ok().map(|entry| entry.event);
+        assert_eq!(retained.is_some(), expected, "commit root: {root:?}");
+        if let Some(retained) = retained {
+            assert_eq!(retained.event_type, "call_transfer_retained");
+            assert_eq!(retained.call_id.as_deref(), Some("consult-call"));
+            assert_eq!(retained.payload["session_id"], "consult-call");
+            assert_eq!(retained.payload["agent_id"], "agent-b");
+            assert_eq!(retained.payload["retained_transfer"]["root_session_id"], "root-call");
+            assert_eq!(retained.payload["retained_transfer"]["root"]["caller_name"], "customer-number");
+            assert_eq!(retained.payload["transfer_source"]["agent_id"], "agent-a");
+        }
+    }
+
+    session.cleanup().await;
+    let mut retained_releases = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "call_hangup" && entry.event.payload["leg_role"] == "agent" {
+            retained_releases.push(entry.event.payload);
+        }
+    }
+    assert_eq!(retained_releases.len(), 1);
+    assert_eq!(retained_releases[0]["retained_transfer"]["root_session_id"], "root-call");
+    assert_eq!(retained_releases[0]["retained_transfer"]["direction"], "inbound");
+    assert_eq!(retained_releases[0]["retained_transfer"]["root"]["callee_name"], "original-access");
+}
+
+#[tokio::test]
 async fn session_id_peer_dialog_query_does_not_confuse_correlation_with_control() {
     for (from_peer, role, local_queue) in [
         (false, Some("agent"), false),
