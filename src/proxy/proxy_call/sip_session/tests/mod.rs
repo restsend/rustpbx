@@ -353,47 +353,83 @@ async fn attended_room_events_snapshot_the_retained_agent_only_after_binding() {
 #[tokio::test]
 async fn attended_room_teardown_preserves_the_customer_bye_on_the_local_agent_leg() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
 
-    for customer_bye in [true, false] {
+    const ROOT: &str = "aabbccddeeff0011";
+    for (agent_home_child, customer_bye) in [(false, true), (true, true), (true, false)] {
         let gateway = crate::rwi::RwiGateway::new();
         let mut events = gateway.subscribe_events();
-        let (server, _) = create_test_server_with_rwi_gateway(
+        let (mut server, _) = create_test_server_with_rwi_gateway(
             Default::default(),
             Arc::new(parking_lot::RwLock::new(gateway)),
         )
         .await;
-        let make_session = |id: &str, direction| {
-            let request = create_test_request(
+        Arc::get_mut(&mut server).unwrap().cluster_peer_ips = vec!["192.0.2.44".parse().unwrap()];
+        let invite = || {
+            create_test_request(
                 rsipstack::sip::Method::Invite,
                 "1001",
                 None,
                 "example.test",
                 None,
-            );
-            let dialplan = Dialplan::new(id.into(), request, direction);
-            SipSession::new_uac(
-                server.clone(),
-                CancellationToken::new(),
-                None,
-                CallContext {
-                    session_id: id.into(),
-                    dialplan: Arc::new(dialplan),
-                    cookie: TransactionCookie::default(),
-                    start_time: Instant::now(),
-                    original_caller: "sip:1001@example.test".into(),
-                    original_callee: "sip:1002@example.test".into(),
-                    max_forwards: 70,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    metadata: None,
-                },
-                false,
             )
         };
-        let (mut customer, customer_handle, _customer_commands) =
-            make_session("customer-session", DialDirection::Inbound);
-        let (mut agent, agent_handle, mut agent_commands) =
-            make_session("consult-session", DialDirection::Outbound);
+        let make_context = |id: &str, request, direction, cookie| CallContext {
+            session_id: id.into(),
+            dialplan: Arc::new(Dialplan::new(id.into(), request, direction)),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:1001@example.test".into(),
+            original_callee: "sip:1002@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let mut request = invite();
+        let cookie = TransactionCookie::default();
+        if agent_home_child {
+            request.headers.push(crate::call::uui::build_uui_header(
+                ROOT,
+                None,
+                None,
+                None,
+                Some("agent"),
+            ));
+            cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
+        }
+        let (transaction, _) = create_transaction(request.clone()).await;
+        let (dialog_states, _states) = mpsc::unbounded_channel();
+        let customer_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&transaction, dialog_states, None, None)
+            .unwrap();
+        let customer_dialog_id = customer_dialog.id();
+        let (mut customer, customer_handle, _customer_commands) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            make_context(ROOT, request, DialDirection::Inbound, cookie),
+            customer_dialog,
+            false,
+        );
+        assert_eq!(
+            customer.meta.child_leg_role.as_deref(),
+            agent_home_child.then_some("agent"),
+        );
+        let (mut agent, agent_handle, mut agent_commands) = SipSession::new_uac(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            make_context(
+                "consult-session",
+                invite(),
+                DialDirection::Outbound,
+                TransactionCookie::default(),
+            ),
+            false,
+        );
         let room = crate::call::runtime::ConferenceId::from("attended-room");
         let caller = LegId::from("caller");
         let target = LegId::from("answered-dial-leg");
@@ -431,8 +467,8 @@ async fn attended_room_teardown_preserves_the_customer_bye_on_the_local_agent_le
         assert!(agent.execute_command(
             CallCommand::BindTransferPartner {
                 cmd_tx: customer_handle.command_sender(),
-                partner_session: "customer-session".into(),
-                root_session_id: "customer-session".into(),
+                partner_session: ROOT.into(),
+                root_session_id: ROOT.into(),
                 direction: DialDirection::Inbound,
                 transferor_agent: Some("agent-a".into()),
                 original_parties: None,
@@ -442,14 +478,32 @@ async fn attended_room_teardown_preserves_the_customer_bye_on_the_local_agent_le
             None,
         ).await.success);
 
+        if agent_home_child {
+            let callee = LegId::from("callee");
+            let mut transferor = Leg::new(callee.clone());
+            transferor.agent_id = Some("agent-a".into());
+            transferor.state = LegState::Connected;
+            customer.legs.insert(callee.clone(), transferor);
+            let transferor_dialog_id = DialogId {
+                call_id: "transferor-dialog".into(),
+                local_tag: "local".into(),
+                remote_tag: "remote".into(),
+            };
+            customer
+                .pending_dynamic_dialogs
+                .insert(transferor_dialog_id.clone(), callee);
+            customer
+                .finish_attended_refer(&transferor_dialog_id, "sip:1002@example.test", 200)
+                .await;
+            assert_eq!(
+                customer.meta.hangup_reason,
+                Some(CallRecordHangupReason::ByRefer),
+            );
+        }
         if customer_bye {
             customer
                 .handle_dialog_state(DialogState::Terminated(
-                    DialogId {
-                        call_id: "customer-dialog".into(),
-                        local_tag: "local".into(),
-                        remote_tag: "remote".into(),
-                    },
+                    customer_dialog_id,
                     TerminatedReason::UacBye,
                 ))
                 .await
@@ -460,26 +514,46 @@ async fn attended_room_teardown_preserves_the_customer_bye_on_the_local_agent_le
         let end = agent_commands.try_recv().expect("room teardown dispatched to the retained agent");
         assert!(agent.execute_command(end, None).await.success);
         agent.cleanup().await;
+        if agent_home_child {
+            customer.cleanup().await;
+        }
 
-        let releases: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        let hangups: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .map(|entry| entry.event)
-            .filter(|event| {
-                event.event_type == "call_hangup"
-                    && event.payload["leg_id"] == target.as_str()
-            })
+            .filter(|event| event.event_type == "call_hangup")
+            .map(|event| event.payload)
+            .collect();
+        if agent_home_child {
+            let releases: Vec<_> = hangups
+                .iter()
+                .filter(|event| event["call_id"] == ROOT && event["leg_role"] == "agent")
+                .collect();
+            assert_eq!(releases.len(), 1);
+            assert_eq!(releases[0]["reason"], "refer");
+            assert_eq!(releases[0]["hangup_by"], "transfer");
+        }
+        let releases: Vec<_> = hangups
+            .iter()
+            .filter(|event| event["leg_id"] == target.as_str())
             .collect();
         assert_eq!(releases.len(), 1);
-        let release = &releases[0].payload;
+        let release = releases[0];
         assert_eq!(release["call_id"], "consult-session");
-        assert_eq!(release["session_id"], "customer-session");
+        assert_eq!(release["session_id"], ROOT);
         assert_eq!(release["retained_transfer"]["agent_id"], "agent-b");
         let expected = if customer_bye {
             serde_json::json!("caller")
         } else {
             serde_json::Value::Null
         };
-        assert_eq!(release["reason"], expected);
-        assert_eq!(release["hangup_by"], expected);
+        assert_eq!(
+            release["reason"], expected,
+            "agent home child: {agent_home_child}"
+        );
+        assert_eq!(
+            release["hangup_by"], expected,
+            "agent home child: {agent_home_child}"
+        );
     }
 }
 

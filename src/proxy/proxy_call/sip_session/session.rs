@@ -6424,12 +6424,18 @@ impl SipSession {
                 }
                 // An inbound caller's BYE detaches the room owner before
                 // the session records its own terminal reason below.
+                let can_attribute_caller_bye = match self.meta.hangup_reason {
+                    None | Some(CallRecordHangupReason::ByCaller) => true,
+                    // On an agent-home child, REFER describes the departed
+                    // transferor. The incoming BYE still ends the customer leg.
+                    Some(CallRecordHangupReason::ByRefer) => {
+                        self.meta.child_leg_role.as_deref() == Some("agent")
+                    }
+                    _ => false,
+                };
                 let caller_bye = (matches!(reason, TerminatedReason::UacBye)
                     && self.context.dialplan.direction == crate::call::DialDirection::Inbound
-                    && matches!(
-                        self.meta.hangup_reason,
-                        None | Some(CallRecordHangupReason::ByCaller)
-                    ))
+                    && can_attribute_caller_bye)
                     .then_some(CallRecordHangupReason::ByCaller);
                 if self
                     .detach_ended_conference_leg(&LegId::from("caller"), caller_bye)
