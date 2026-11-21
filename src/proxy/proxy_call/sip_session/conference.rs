@@ -265,23 +265,35 @@ impl SipSession {
     }
 
     /// Detach media only; the SIP dialog remains owned by this session.
-    pub(super) async fn leave_conference_leg(&mut self, leg: &LegId) -> Result<()> {
+    pub(super) async fn leave_conference_leg(
+        &mut self,
+        leg: &LegId,
+        hangup_reason: Option<crate::callrecord::CallRecordHangupReason>,
+    ) -> Result<()> {
         if self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg) {
             self.conference = None;
         }
         drop(self.legs.remove_conference_bridge_handle(leg));
         if let Some(room) = self.server.conference_server.get_conference_id_for_leg(&self.participant_leg(leg)).await {
-            self.server.conference_server.remove_participant(&room, &self.participant_leg(leg)).await?;
+            self.server
+                .conference_server
+                .manager_raw()
+                .remove_participant_with_hangup(&room, &self.participant_leg(leg), hangup_reason)
+                .await?;
         }
         if self.conference.is_none() { self.conference_bridge.conf_id = None; }
         Ok(())
     }
 
     /// A member leaving never disconnects the other conference participants.
-    pub(super) async fn detach_ended_conference_leg(&mut self, leg: &LegId) -> bool {
+    pub(super) async fn detach_ended_conference_leg(
+        &mut self,
+        leg: &LegId,
+        hangup_reason: Option<crate::callrecord::CallRecordHangupReason>,
+    ) -> bool {
         if self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg) {
             self.remember_ended_conference_agent();
-            if let Err(error) = self.leave_conference_leg(leg).await {
+            if let Err(error) = self.leave_conference_leg(leg, hangup_reason).await {
                 warn!(session_id = %self.id, %leg, %error, "Failed to detach conference participant");
             }
             if self.conference.is_none() { self.cancel_token.cancel(); }

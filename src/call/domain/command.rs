@@ -706,6 +706,7 @@ pub enum CallCommand {
     ConferenceEnded {
         conference_id: String,
         transfer_committed: bool,
+        hangup_reason: Option<crate::callrecord::CallRecordHangupReason>,
     },
 
     /// Ask the owning session to attach the peer of an established SIP dialog.

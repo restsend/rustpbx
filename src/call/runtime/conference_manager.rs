@@ -17,6 +17,7 @@
 //! watchdog).
 
 use crate::call::domain::{CallCommand, LegId};
+use crate::callrecord::CallRecordHangupReason;
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
@@ -413,12 +414,23 @@ impl ConferenceManager {
 
     /// Destroy the room and explicitly end its remaining SIP participants.
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
+        self.destroy_conference_with_hangup(conf_id, None).await
+    }
+
+    async fn destroy_conference_with_hangup(
+        &self,
+        conf_id: &ConferenceId,
+        hangup_reason: Option<CallRecordHangupReason>,
+    ) -> Result<()> {
         // Removing first prevents new attachments and makes destruction idempotent.
         let Some((_, room)) = self.conferences.remove(conf_id) else { return Ok(()) };
         if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
             token.cancel();
         }
         let transfer_committed = room.host_leg_id.is_some();
+        // Only an attended transfer carries the departing owner's reason
+        // onto the surviving leg. Ordinary SIP rooms have their own lifecycle.
+        let hangup_reason = hangup_reason.filter(|_| transfer_committed && room.focus_uri.is_none());
         for (leg_id, participant) in room.participants {
             self.leg_to_conference.remove(&leg_id);
             self.participant_channels.remove(&leg_id);
@@ -427,6 +439,7 @@ impl ConferenceManager {
                 let command = CallCommand::ConferenceEnded {
                     conference_id: conf_id.0.clone(),
                     transfer_committed,
+                    hangup_reason: hangup_reason.clone(),
                 };
                 // A room can be destroyed from an owning session's command handler.
                 // Never wait here for that same bounded queue to drain.
@@ -513,6 +526,15 @@ impl ConferenceManager {
         conf_id: &ConferenceId,
         leg_id: &LegId,
     ) -> Result<usize> {
+        self.remove_participant_with_hangup(conf_id, leg_id, None).await
+    }
+
+    pub(crate) async fn remove_participant_with_hangup(
+        &self,
+        conf_id: &ConferenceId,
+        leg_id: &LegId,
+        hangup_reason: Option<CallRecordHangupReason>,
+    ) -> Result<usize> {
         // Remove from conference room
         let remaining;
         let creator_left;
@@ -551,7 +573,7 @@ impl ConferenceManager {
 
         if creator_left {
             info!(conf_id = %conf_id.0, %leg_id, "Conference departure requires room teardown");
-            self.destroy_conference(conf_id).await?;
+            self.destroy_conference_with_hangup(conf_id, hangup_reason).await?;
             return Ok(0);
         }
 
@@ -559,6 +581,7 @@ impl ConferenceManager {
             let command = CallCommand::ConferenceEnded {
                 conference_id: conf_id.0.clone(),
                 transfer_committed: true,
+                hangup_reason: None,
             };
             if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
                 crate::utils::spawn(async move { let _ = commands.send(command).await; });
@@ -1488,6 +1511,7 @@ mod tests {
         assert!(matches!(events.try_recv().unwrap(), CallCommand::ConferenceEnded {
             conference_id,
             transfer_committed: false,
+            hangup_reason: None,
         } if conference_id == room.0));
     }
 
@@ -1513,6 +1537,7 @@ mod tests {
                 assert!(matches!(a_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
                     conference_id,
                     transfer_committed: true,
+                    hangup_reason: None,
                 } if conference_id == room.0));
             }
             manager.remove_participant(&room, &a).await.unwrap();
@@ -1521,6 +1546,7 @@ mod tests {
                 assert!(matches!(c_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
                     conference_id,
                     transfer_committed: true,
+                    hangup_reason: None,
                 } if conference_id == room.0));
             }
         }

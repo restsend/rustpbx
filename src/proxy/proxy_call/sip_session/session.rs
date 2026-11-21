@@ -6422,8 +6422,17 @@ impl SipSession {
                     self.notify_transferred_agent_disconnected(&LegId::from("caller"), false)
                         .await;
                 }
+                // An inbound caller's BYE detaches the room owner before
+                // the session records its own terminal reason below.
+                let caller_bye = (matches!(reason, TerminatedReason::UacBye)
+                    && self.context.dialplan.direction == crate::call::DialDirection::Inbound
+                    && matches!(
+                        self.meta.hangup_reason,
+                        None | Some(CallRecordHangupReason::ByCaller)
+                    ))
+                    .then_some(CallRecordHangupReason::ByCaller);
                 if self
-                    .detach_ended_conference_leg(&LegId::from("caller"))
+                    .detach_ended_conference_leg(&LegId::from("caller"), caller_bye)
                     .await
                 {
                     if self.routed_consultation_origin.is_some() {
@@ -8015,7 +8024,7 @@ impl SipSession {
         }
         .await;
         if let Err(error) = result {
-            self.leave_conference_leg(&peer).await.ok();
+            self.leave_conference_leg(&peer, None).await.ok();
             if let Some(previous) = pre_transfer_state {
                 self.restore_conference_peer(&peer, previous).await;
             }
@@ -8035,7 +8044,7 @@ impl SipSession {
         else {
             return false;
         };
-        if let Err(error) = self.leave_conference_leg(&leg).await {
+        if let Err(error) = self.leave_conference_leg(&leg, None).await {
             warn!(session_id = %self.id, %leg, %error, "Failed to detach transfer room participant");
         }
         self.restore_conference_peer(&leg, previous).await;
@@ -8337,7 +8346,7 @@ impl SipSession {
                 let retained_room_leg = conference_leg
                     && self.conference.as_ref().is_some_and(|room| room.pre_transfer_state.is_some());
                 let conference_survives = if let Some(leg) = &terminated_leg {
-                    self.detach_ended_conference_leg(leg).await
+                    self.detach_ended_conference_leg(leg, None).await
                 } else {
                     false
                 };
@@ -13134,7 +13143,7 @@ impl SipSession {
             // The actor can no longer process a BindTransferPartner command.
             // Revoke any tentative room member before closing the data join.
             if let Some(leg) = self.conference.as_ref().map(|room| room.leg_id.clone()) {
-                if let Err(error) = self.leave_conference_leg(&leg).await {
+                if let Err(error) = self.leave_conference_leg(&leg, None).await {
                     warn!(session_id = %self.id, %leg, %error,
                           "Cannot close consultation data join after room detach failed");
                 } else {
@@ -15938,7 +15947,11 @@ impl SipSession {
                 CommandResult::success()
             }
 
-            CallCommand::ConferenceEnded { conference_id, transfer_committed } => {
+            CallCommand::ConferenceEnded {
+                conference_id,
+                transfer_committed,
+                hangup_reason,
+            } => {
                 if self
                     .conference
                     .as_ref()
@@ -15967,7 +15980,7 @@ impl SipSession {
                     .ok();
                 info!(session_id = %self.id, %conference_id, leg = %attachment.leg_id,
                     "Conference ended; hanging up participant");
-                self.handle_hangup(&HangupCommand::local("conference ended", None, None))
+                self.handle_hangup(&HangupCommand::local("conference ended", hangup_reason, None))
                     .await
             }
 
@@ -16518,7 +16531,7 @@ impl SipSession {
                 {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                     self.update_leg_state(&leg_id, LegState::Ended);
-                    self.detach_ended_conference_leg(&leg_id).await;
+                    self.detach_ended_conference_leg(&leg_id, None).await;
                     return Self::ok_or_failure(self.handle_remove_leg(leg_id, None).await);
                 }
                 if self.pending_refers.contains_key(&leg_id) {
