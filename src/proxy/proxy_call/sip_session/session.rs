@@ -5697,14 +5697,14 @@ impl SipSession {
         }
     }
 
-    fn accept_attended_commit(&mut self, headers: &rsipstack::sip::Headers) {
+    fn accept_attended_commit(&mut self, headers: &rsipstack::sip::Headers) -> bool {
         use crate::call::session_id::{ATTENDED_COMMIT_HEADER, normalize_custom};
         use rsipstack::sip::Header;
 
         if self.meta.child_leg_role.as_deref() != Some("agent")
             || !Self::from_cluster_peer(&self.server, &self.context.cookie)
         {
-            return;
+            return false;
         }
         let mut commits = headers.iter().filter_map(|header| match header {
             Header::Other(name, value) if name.eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER) => {
@@ -5713,13 +5713,13 @@ impl SipSession {
             _ => None,
         });
         let Some(commit) = commits.next().filter(|_| commits.next().is_none()) else {
-            return;
+            return false;
         };
         let mut fields = commit.splitn(5, ';');
         let (Some(root), Some(consult), Some(direction), Some(transferor)) = (
             fields.next(), fields.next(), fields.next(), fields.next(),
         ) else {
-            return;
+            return false;
         };
         // Match both IDs captured by the original cluster INVITE. Ordinary
         // softphone consult markers carry neither a commit nor authority.
@@ -5727,14 +5727,14 @@ impl SipSession {
             || self.meta.consult_session_id.as_deref() != Some(consult)
             || !matches!(direction, "inbound" | "outbound" | "internal")
         {
-            return;
+            return false;
         }
         let original_parties = if let Some(parties) = fields.next() {
             let Ok(mut parties) = serde_json::from_str::<crate::rwi::RootCallInfo>(parties) else {
-                return;
+                return false;
             };
             if parties.call_id.as_deref().is_some_and(|call_id| call_id != root) {
-                return;
+                return false;
             }
             parties.call_id = Some(root.to_string());
             Some(parties)
@@ -5748,13 +5748,19 @@ impl SipSession {
                 .and_then(|leg| leg.agent_id.clone())
                 .filter(|id| !id.is_empty() && id != &transferor)
         {
+            if let Some((leg, retained)) = self.retained_transfer.as_ref() {
+                return leg == &callee && retained.root_session_id == root
+                    && retained.direction == direction && retained.agent_id == agent;
+            }
             self.commit_retained_transfer(callee, crate::rwi::proto::RetainedTransfer {
                 root_session_id: root.to_string(),
                 direction: direction.to_string(),
                 agent_id: agent,
                 root: original_parties,
             }, Some(transferor));
+            return true;
         }
+        false
     }
 
     fn commit_retained_transfer(
@@ -5818,13 +5824,25 @@ impl SipSession {
         // consult-state=…` marker header. Marked updates are relayed to the
         // opposite side of the dialog; unmarked ones fall through untouched.
         if let Some(phase) = Self::consult_state_marker_from_headers(&request.headers) {
-            if side == DialogSide::Caller
-                && leg_id.as_str() == "caller"
-                && phase == "talk"
-                && request.method == rsipstack::sip::Method::Update
-                && request.body.is_empty()
-            {
-                self.accept_attended_commit(&request.headers);
+            use crate::call::session_id::{ATTENDED_COMMIT_ACK_HEADER, ATTENDED_COMMIT_HEADER};
+
+            let peer_commit = request.headers.iter()
+                .any(|header| header.name().eq_ignore_ascii_case(ATTENDED_COMMIT_HEADER));
+            if peer_commit {
+                if side != DialogSide::Caller || leg_id.as_str() != "caller" || phase != "talk"
+                    || request.method != rsipstack::sip::Method::Update || !request.body.is_empty()
+                    || !self.accept_attended_commit(&request.headers)
+                {
+                    tx_handle.reply(StatusCode::Conflict).await?;
+                    return Ok(());
+                }
+                // Confirm the committed PBX state independently of delivery
+                // of the softphone's presentation marker.
+                let consult = self.meta.consult_session_id.as_deref()
+                    .ok_or_else(|| anyhow!("Retained transfer has no consultation ID"))?;
+                tx_handle.respond(StatusCode::OK, Some(vec![rsipstack::sip::Header::Other(
+                    ATTENDED_COMMIT_ACK_HEADER.into(), consult.into(),
+                )]), None).await?;
             }
             let target_side = match side {
                 DialogSide::Caller => DialogSide::Callee,
@@ -5926,10 +5944,9 @@ impl SipSession {
                 self.note_local_three_way_merged();
             }
 
-            tx_handle
-                .respond(response.status_code.clone(), None, None)
-                .await
-                .ok();
+            if !peer_commit {
+                tx_handle.respond(response.status_code, None, None).await.ok();
+            }
             return Ok(());
         }
 
@@ -8094,7 +8111,17 @@ impl SipSession {
             "Callee dialog state"
         );
         match state {
-            DialogState::Confirmed(dialog_id, _) => {
+            DialogState::Confirmed(dialog_id, response) => {
+                if response.headers.iter().any(|header| {
+                    header.name().eq_ignore_ascii_case(crate::call::session_id::ATTENDED_COMMIT_CAPABILITY_HEADER)
+                        && header.value() == "1"
+                })
+                    && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
+                    && let Some(leg) = self.legs.get_mut(&leg_id)
+                    && leg.remote_registered
+                {
+                    leg.attended_commit_ack = true;
+                }
                 if let Some(handle) = self
                     .server
                     .active_call_registry
@@ -11275,6 +11302,15 @@ impl SipSession {
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
+            if self.meta.child_leg_role.as_deref() == Some("agent")
+                && self.meta.consult_parent_session_id.is_some()
+                && self.meta.consult_session_id.is_some()
+                && Self::from_cluster_peer(&self.server, &self.context.cookie)
+            {
+                headers.push(rsipstack::sip::Header::Other(
+                    crate::call::session_id::ATTENDED_COMMIT_CAPABILITY_HEADER.into(), "1".into(),
+                ));
+            }
             if let Some(focus) = self
                 .context
                 .dialplan
@@ -15601,6 +15637,7 @@ impl SipSession {
                 transferor_agent,
                 original_parties,
                 their_leg,
+                mut completion,
             } => {
                 info!(
                     session_id = %self.id,
@@ -15611,11 +15648,12 @@ impl SipSession {
                 self.bind_transfer_partner(cmd_tx, partner_session, their_leg);
                 self.set_root_session_id(root_session_id.clone());
                 if let Some(leg) = self.conference.as_ref().map(|room| room.leg_id.clone()) {
-                    use crate::call::session_id::{ATTENDED_COMMIT_HEADER, normalize_custom};
+                    use crate::call::session_id::{ATTENDED_COMMIT_ACK_HEADER, ATTENDED_COMMIT_HEADER, normalize_custom};
                     use rsipstack::sip::Header;
 
                     let direction = direction.to_string();
                     let mut headers = vec![Header::UserToUser("consult-state=talk".into())];
+                    let mut expected_ack = None;
                     if self.legs.get(&leg).is_some_and(|leg| leg.remote_registered) {
                         // The dispatcher owns the room, but the registration
                         // node owns the agent leg and its lifecycle events.
@@ -15631,6 +15669,7 @@ impl SipSession {
                                 commit.push_str(&serde_json::json!(parties).to_string());
                             }
                             headers.push(Header::Other(ATTENDED_COMMIT_HEADER.into(), commit));
+                            expected_ack = Some(consult);
                         }
                     } else if let Some((agent, _)) = self.conference_leg_agent() {
                         self.commit_retained_transfer(leg.clone(), crate::rwi::proto::RetainedTransfer {
@@ -15640,9 +15679,33 @@ impl SipSession {
                             root: original_parties,
                         }, transferor_agent);
                     }
-                    match self.send_mid_dialog_request_to_leg(
+                    // A capability advertised on the confirmed PBX leg is
+                    // required before changing its REFER completion contract.
+                    let requires_ack = self.legs.get(&leg).is_some_and(|leg| leg.attended_commit_ack);
+                    if !requires_ack && let Some(reply) = completion.take() {
+                        let _ = reply.send(Ok(()));
+                    }
+                    let result = self.send_mid_dialog_request_to_leg(
                         &leg, rsipstack::sip::Method::Update, headers, None,
-                    ).await {
+                    ).await;
+                    if let Some(reply) = completion.take() {
+                        let confirmed = result.as_ref().ok().and_then(|response| response.as_ref())
+                            .is_some_and(|response| {
+                                (200..300).contains(&response.status_code.code())
+                                    && expected_ack.as_deref().is_some_and(|expected| {
+                                        response.headers.iter().any(|header| {
+                                            header.name().eq_ignore_ascii_case(ATTENDED_COMMIT_ACK_HEADER)
+                                                && header.value() == expected
+                                        })
+                                    })
+                            });
+                        let _ = reply.send(if confirmed {
+                            Ok(())
+                        } else {
+                            Err(format!("Retained PBX did not confirm leg {leg}"))
+                        });
+                    }
+                    match result {
                         Ok(Some(response)) if (200..300).contains(&response.status_code.code()) => {}
                         result => {
                             warn!(
@@ -15655,6 +15718,9 @@ impl SipSession {
                             );
                         }
                     }
+                }
+                if let Some(reply) = completion {
+                    let _ = reply.send(Err("The retained participant is no longer attached".into()));
                 }
                 CommandResult::success()
             }

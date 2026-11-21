@@ -656,6 +656,8 @@ impl SipSession {
         manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;
         self.meta.transfer_in_progress = true;
         self.sync_rtp_timeout_pause();
+        let confirmation_deadline = tokio::time::Instant::now() + RELAYED_REFER_TIMEOUT;
+        let mut room_committed = false;
         let result: Result<()> = async {
             let local_leg = self.handle_join_conference_peer(room.0.clone(), source_dialog.clone()).await?;
             let (reply, completed) = tokio::sync::oneshot::channel();
@@ -701,6 +703,8 @@ impl SipSession {
                 .try_reserve_owned()
                 .map_err(|e| anyhow!("Failed to reserve transfer partner command: {e}"))?;
             manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+            room_committed = true;
+            let (completion, confirmed) = tokio::sync::oneshot::channel();
             permit.send(crate::call::domain::CallCommand::BindTransferPartner {
                 cmd_tx,
                 partner_session: self.id.to_string(),
@@ -709,12 +713,16 @@ impl SipSession {
                 transferor_agent,
                 original_parties,
                 their_leg: local_leg.clone(),
+                completion: Some(completion),
             });
             self.bind_transfer_partner(
                 partner_commands,
                 owner.session_id().to_string(),
                 remote_leg.clone(),
             );
+            tokio::time::timeout_at(confirmation_deadline, confirmed)
+                .await.map_err(|_| anyhow!("Retained participant did not confirm the transfer"))??
+                .map_err(|error| anyhow!(error))?;
             info!(
                 session_id = %self.id,
                 peer_session = %owner.session_id(),
@@ -728,6 +736,13 @@ impl SipSession {
         self.meta.transfer_in_progress = false;
         self.sync_rtp_timeout_pause();
         if let Err(error) = &result {
+            if room_committed {
+                // The target may have applied the transfer before its ACK was
+                // lost. Preserve the committed room and report uncertainty.
+                warn!(session_id = %self.id, room = %room.0, %error,
+                    "Attended transfer commit could not be confirmed");
+                return Err((504, error.to_string()));
+            }
             // R2: roll back atomically — customer restored held with the
             // agent, both sessions stay up, no zombie room.
             if let Err(error) = manager.destroy_conference(&room).await {

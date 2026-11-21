@@ -20,7 +20,17 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     leg.agent_id = Some("agent-b".into());
     leg.state = LegState::Connected;
     session.legs.insert(callee.clone(), leg);
-    let mut events = session.server.rwi_gateway.as_ref().unwrap().read().subscribe_events();
+    let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
+    let origin_recording = "12345678-1234-4123-8123-123456789abc";
+    let retained_recording = "87654321-4321-4321-8321-cba987654321";
+    gateway.write().set_recording_identity_lookup(Some(Arc::new(
+        move |call_id, agent_id, _| match (call_id, agent_id) {
+            ("root-call", "agent-a") => Some(origin_recording.into()),
+            ("consult-call", "agent-b") => Some(retained_recording.into()),
+            _ => None,
+        },
+    )));
+    let mut events = gateway.read().subscribe_events();
     let dialog = session.caller_dialog.as_ref().unwrap().id();
 
     for (root, expected) in [
@@ -38,12 +48,28 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
                 format!("{root};consult-call;inbound;agent-a;{original}"),
             ));
         }
-        let (transaction, _responses) = TransactionHandle::new();
+        let (transaction, mut responses) = TransactionHandle::new();
         // No handset dialog is needed to observe the business event. A failed
         // handset relay does not roll back the already committed room.
         let _ = session.handle_dialog_state(DialogState::Updated(
             dialog.clone(), update, transaction,
         )).await;
+        let response = responses.try_recv().ok();
+        if let Some(root) = root {
+            let rsipstack::dialog::dialog::TransactionCommand::Respond { status, headers, .. } =
+                response.expect("a commit request requires a PBX response even without a handset");
+            if root == "root-call" {
+                assert_eq!(status, StatusCode::OK);
+                assert!(headers.unwrap_or_default().iter().any(|header| {
+                    header.name().eq_ignore_ascii_case("X-CC-Attended-Commit-Ack")
+                        && header.value() == "consult-call"
+                }));
+            } else {
+                assert_eq!(status, StatusCode::Conflict);
+            }
+        } else {
+            assert!(response.is_none(), "plain talk cannot produce a PBX commit acknowledgement");
+        }
         let retained = events.try_recv().ok().map(|entry| entry.event);
         assert_eq!(retained.is_some(), expected, "commit root: {root:?}");
         if let Some(retained) = retained {
@@ -54,8 +80,29 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
             assert_eq!(retained.payload["retained_transfer"]["root_session_id"], "root-call");
             assert_eq!(retained.payload["retained_transfer"]["root"]["caller_name"], "customer-number");
             assert_eq!(retained.payload["transfer_source"]["agent_id"], "agent-a");
+            assert_eq!(retained.payload["recording_id"], retained_recording);
         }
     }
+
+    // The recorder releases its reservation before the final hangup; its
+    // agent-scoped metadata is still available to the gateway at dispatch.
+    {
+        let mut gateway = gateway.write();
+        gateway.set_recording_identity_lookup(None);
+        let mut meta = gateway
+            .meta_store
+            .get_sync("consult-call")
+            .unwrap_or_default();
+        meta.agent_id = Some("agent-b".into());
+        meta.recording_id = Some(retained_recording.into());
+        gateway.meta_store.insert("consult-call".into(), meta);
+    }
+    let replay = gateway.read().get_events_for_call(&"consult-call".into());
+    let retained = replay
+        .iter()
+        .find(|entry| entry.event.event_type == "call_transfer_retained")
+        .unwrap();
+    assert_eq!(retained.event.payload["recording_id"], retained_recording);
 
     session.cleanup().await;
     let mut retained_releases = Vec::new();
@@ -68,6 +115,7 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     assert_eq!(retained_releases[0]["retained_transfer"]["root_session_id"], "root-call");
     assert_eq!(retained_releases[0]["retained_transfer"]["direction"], "inbound");
     assert_eq!(retained_releases[0]["retained_transfer"]["root"]["callee_name"], "original-access");
+    assert_eq!(retained_releases[0]["recording_id"], retained_recording);
 }
 
 #[tokio::test]

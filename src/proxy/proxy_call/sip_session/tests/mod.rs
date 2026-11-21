@@ -13,6 +13,47 @@ mod packet_diagnostics_tests;
 mod transfer_target_dialog_tests;
 
 #[tokio::test]
+async fn attended_partner_requires_confirmation_only_from_a_capable_peer() {
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    for capable in [false, true] {
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite, "transferor", None, "example.test", None,
+        );
+        let dialplan = crate::call::Dialplan::new(
+            "consult-call".into(), request, crate::call::DialDirection::Outbound,
+        );
+        let (mut session, handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+        let retained = LegId::from("target-agent");
+        let mut leg = Leg::new(retained.clone());
+        leg.agent_id = Some("agent-b".into());
+        leg.state = LegState::Connected;
+        leg.remote_registered = true;
+        leg.attended_commit_ack = capable;
+        session.legs.insert(retained.clone(), leg);
+        session.conference = Some(ConferenceAttachment {
+            leg_id: retained,
+            conference_id: "transfer-room".into(),
+            pre_transfer_state: Some(LegState::Connected),
+        });
+        let (completion, confirmed) = tokio::sync::oneshot::channel();
+        session.execute_command(CallCommand::BindTransferPartner {
+            cmd_tx: handle.command_sender(),
+            partner_session: "root-call".into(),
+            root_session_id: "root-call".into(),
+            direction: crate::call::DialDirection::Inbound,
+            transferor_agent: Some("agent-a".into()),
+            original_parties: None,
+            their_leg: LegId::from("caller"),
+            completion: Some(completion),
+        }, None).await;
+        assert_eq!(confirmed.await.unwrap().is_ok(), !capable);
+        assert!(session.conference.is_some(), "an unknown result cannot undo a committed room");
+    }
+}
+
+#[tokio::test]
 async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() {
     use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
@@ -90,6 +131,7 @@ async fn routed_attended_consultation_reports_the_initiating_agents_lifecycle() 
             cmd_tx: root_handle.command_sender(), partner_session: "customer-call".into(),
             root_session_id: "customer-call".into(), direction: DialDirection::Inbound,
             transferor_agent: Some("agent-a".into()), original_parties: None, their_leg: caller,
+            completion: None,
         }, None).await.success);
         session.handle_dialog_state(DialogState::Terminated(DialogId {
             call_id: "consult-dialog".into(), local_tag: "local".into(), remote_tag: "remote".into(),
@@ -159,6 +201,7 @@ async fn attended_room_events_snapshot_the_retained_agent_only_after_binding() {
             transferor_agent: None,
             original_parties: None,
             their_leg: LegId::from("caller"),
+            completion: None,
         },
         None,
     ).await;
@@ -246,6 +289,7 @@ async fn attended_room_teardown_reports_the_retained_agent_leg() {
                     transferor_agent: None,
                     original_parties: None,
                     their_leg: LegId::from("caller"),
+                    completion: None,
                 },
                 None,
             )

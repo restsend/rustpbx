@@ -729,6 +729,7 @@ pub enum CallCommand {
         transferor_agent: Option<String>,
         original_parties: Option<crate::rwi::RootCallInfo>,
         their_leg: LegId,
+        completion: Option<oneshot::Sender<Result<(), String>>>,
     },
 
     /// Join the caller leg into a conference room, waiting for the leg to be

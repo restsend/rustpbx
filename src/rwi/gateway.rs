@@ -592,7 +592,8 @@ impl RwiGateway {
     fn snapshot_recording_identity(&self, event: &RwiEvent) -> RwiEvent {
         let mut snapshot = event.clone();
         if !matches!(event.event_type, "call_created" | "call_ringing" | "call_answered"
-            | "call_hangup" | "call_held" | "call_unheld" | "call_transferred")
+            | "call_hangup" | "call_held" | "call_unheld" | "call_transferred"
+            | "call_transfer_retained")
         {
             return snapshot;
         }
