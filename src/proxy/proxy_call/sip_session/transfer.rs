@@ -1,5 +1,5 @@
 use super::SipSession;
-use super::session::PendingCustomerTransferRelease;
+use super::session::{BLIND_RELEASE_HEADER, PendingCustomerTransferRelease};
 use crate::call::domain::{CallCommand, LegId, LegState, ReturnAppSpec};
 use crate::media::negotiate::MediaNegotiator;
 use anyhow::{Result, anyhow};
@@ -2547,7 +2547,8 @@ impl SipSession {
             use base64::Engine as _;
 
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body);
-            self.blind_release_byes.insert(dialog.id(), encoded);
+            let headers = vec![rsipstack::sip::headers::make_header(BLIND_RELEASE_HEADER, encoded)];
+            self.blind_release_byes.insert(dialog.id(), (dialog.clone(), headers));
             Some(release)
         } else {
             None

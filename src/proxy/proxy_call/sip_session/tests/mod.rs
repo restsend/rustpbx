@@ -12264,6 +12264,7 @@ async fn dynamic_hold_before_connected_command_keeps_answered_dialog_owned() {
 
 #[tokio::test]
 async fn rwi_manual_parallel_retry_and_leg_cleanup() {
+    use base64::Engine as _;
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::media::leg::{LegConfig, LegInner};
@@ -12601,6 +12602,9 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
         bye.call_id_header().unwrap(),
         invites[3].1.call_id_header().unwrap()
     );
+    assert!(!bye.headers.iter().any(|header| {
+        header.name().eq_ignore_ascii_case(BLIND_RELEASE_HEADER)
+    }));
     let ok = server
         .endpoint
         .inner
@@ -12731,8 +12735,65 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
         leg_events.len(),
         "every leg event must reach its RWI owner"
     );
+
+    // Blind transfer removes an answered dynamic agent while its dial task
+    // still owns the confirmed SIP dialog. Verify the first BYE on the wire.
+    let transferor = LegId::new(&winner.0);
+    let dialog_id = session.legs.get_dialog(&transferor).unwrap().id();
+    let agent = session.legs.get_mut(&transferor).unwrap();
+    agent.agent_id = Some("agent-a".into());
+    agent.remote_registered = true;
+    server.rwi_gateway.as_ref().unwrap().read().meta_store.insert(
+        "rwi-manual".into(),
+        crate::rwi::proto::CallMeta {
+            session_id: Some("rwi-manual".into()),
+            agent_id: Some("agent-a".into()),
+            ..Default::default()
+        },
+    );
+    session
+        .handle_customer_blind_transfer_sip(
+            &transferor,
+            &LegId::from("caller"),
+            &format!("sip:blind-target@{addr}"),
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let release = std::iter::from_fn(|| events.try_recv().ok())
+        .find(|entry| entry.event.event_type == "call_transferred")
+        .expect("transfer dispatch must publish the release fact")
+        .event.payload["blind_transfer_release"].clone();
+    assert!(release.is_object());
+    timeout(Duration::from_secs(3), async {
+        while server.dialog_layer.get_dialog(&dialog_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("removing the agent must retire its exact dialog");
+    let (callee_tx, callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+    let runner = tokio::spawn(async move { session.run_main_loop(None, callee_rx, commands).await });
+    let bye = timeout(Duration::from_secs(3), async {
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(request) = SipMessage::try_from(&buffer[..size]).unwrap()
+                && request.method == Method::Bye
+                && request.call_id_header().unwrap().value() == dialog_id.call_id
+            {
+                break request;
+            }
+        }
+    }).await.expect("transferor must receive a BYE");
+    let encoded = bye.headers.iter().find_map(|header| match header {
+        Header::Other(name, value) if name.eq_ignore_ascii_case(BLIND_RELEASE_HEADER) => Some(value),
+        _ => None,
+    }).expect("the first transferor BYE must carry the release fact");
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).unwrap();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), release);
     cancel.cancel();
-    drop(session);
+    runner.abort();
+    let _ = runner.await;
     caller_remote.stop();
     for peer in answered_peers {
         peer.stop();

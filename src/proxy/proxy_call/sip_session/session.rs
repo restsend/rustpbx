@@ -203,7 +203,7 @@ pub struct SipSession {
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
     /// Exact remote transferor dialogs whose normal BYE accompanies an authoritative transfer.
-    pub(super) blind_release_byes: HashMap<DialogId, String>,
+    pub(super) blind_release_byes: HashMap<DialogId, (Dialog, Vec<rsipstack::sip::Header>)>,
     /// Transferors detached from media after successful REFER; await their BYE.
     pending_refers: HashMap<LegId, PendingRefer>,
     /// Customer-anchored blind transfer waiting for the target leg's answer
@@ -2888,12 +2888,12 @@ impl SipSession {
                 .active_call_registry
                 .touch_heartbeat(&self.context.session_id);
             for dialog_id in self.pending_hangup.drain() {
-                let blind_release_root = self.blind_release_byes.remove(&dialog_id);
-                let dialog = self
-                    .server
-                    .dialog_layer
-                    .get_dialog(&dialog_id)
-                    .filter(|dialog| !dialog.state().is_terminated())
+                let (transfer_dialog, headers) = self.blind_release_byes.remove(&dialog_id).unzip();
+                let dialog = transfer_dialog
+                    .or_else(|| {
+                        self.server.dialog_layer.get_dialog(&dialog_id)
+                            .filter(|dialog| !dialog.state().is_terminated())
+                    })
                     .or_else(|| {
                         // Ids recorded from the peer's perspective (transfer
                         // metadata, cross-session events) don't exact-match
@@ -2939,12 +2939,7 @@ impl SipSession {
                                     .filter(|dialog| !dialog.state().is_terminated())
                             })
                     });
-                if let Some(dialog) = dialog {
-                    // A fallback alias must never inherit another dialog's release marker.
-                    let headers = blind_release_root.filter(|_| dialog.id() == dialog_id).map(|root| {
-                        vec![rsipstack::sip::headers::make_header(BLIND_RELEASE_HEADER, root)]
-                    });
-                    let dialog = dialog.clone();
+                if let Some(dialog) = dialog.filter(|dialog| !dialog.state().is_terminated()) {
                     hangup_futures.push(async move {
                         let res = dialog.hangup_with_headers(headers).await;
                         (dialog_id, res)
@@ -12904,14 +12899,18 @@ impl SipSession {
         if !dialogs_to_hangup.is_empty() {
             let hangup_dialogs = dialogs_to_hangup
                 .into_iter()
-                .filter_map(|dialog_id| self.server.dialog_layer.get_dialog(&dialog_id))
-                .filter(|dialog| !dialog.state().is_terminated())
+                .filter_map(|dialog_id| {
+                    let (transfer_dialog, headers) = self.blind_release_byes.remove(&dialog_id).unzip();
+                    transfer_dialog
+                        .or_else(|| self.server.dialog_layer.get_dialog(&dialog_id))
+                        .map(|dialog| (dialog, headers))
+                })
+                .filter(|(dialog, _)| !dialog.state().is_terminated())
                 .collect::<Vec<_>>();
             let hangups: FuturesUnordered<_> = hangup_dialogs
-                .iter()
-                .map(|dialog| {
-                    #[allow(clippy::result_large_err)]
-                    dialog.hangup().map(|result| result.map(|_| dialog.id()))
+                .into_iter()
+                .map(|(dialog, headers)| async move {
+                    dialog.hangup_with_headers(headers).await
                 })
                 .collect();
 
@@ -18368,6 +18367,11 @@ impl SipSession {
                 .as_ref()
                 .is_some_and(|dialog| dialog.state().is_terminated());
             if !terminated {
+                if self.blind_release_byes.contains_key(&dialog_id) {
+                    // The hangup drain now owns this exact dialog. Retire the
+                    // layer entry before leg removal drops its fallback guard.
+                    self.server.dialog_layer.remove_dialog(&dialog_id);
+                }
                 self.pending_hangup.insert(dialog_id.clone());
             }
             self.callee_dialogs.remove(&dialog_id);
