@@ -762,6 +762,20 @@ pub enum CallCommand {
         purpose: Option<LegPurpose>,
     },
 
+    /// Add a leg whose media peer answers a remote SDP offer (e.g. a WebRTC
+    /// client joining over RWI) instead of dialing SIP. The leg is connected
+    /// once the local answer is committed and is never bridged implicitly.
+    /// Internal request/reply command, never serialized.
+    #[serde(skip)]
+    LegAddOffer {
+        /// Optional leg ID (auto-generated if not provided)
+        leg_id: Option<LegId>,
+        /// Remote SDP offer
+        offer: String,
+        /// The added leg and the local SDP answer, or why the leg was refused
+        reply: oneshot::Sender<std::result::Result<(LegId, String), String>>,
+    },
+
     /// Remove a leg from the session
     LegRemove {
         /// Leg ID to remove

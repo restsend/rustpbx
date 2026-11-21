@@ -457,6 +457,30 @@ impl SipSessionHandle {
             .map_err(|_| anyhow::anyhow!("session closed before answering recorder query"))?
     }
 
+    /// Add a leg answering `offer` and return its ID with the local SDP
+    /// answer. ICE gathering runs before the answer is returned, so this
+    /// waits up to ten seconds for the session to finish it.
+    pub async fn add_offer_leg(
+        &self,
+        leg_id: Option<LegId>,
+        offer: String,
+    ) -> Result<(LegId, String), String> {
+        const OFFER_LEG_TIMEOUT: Duration = Duration::from_secs(10);
+        let (reply, response) = oneshot::channel();
+        self.cmd_tx
+            .send(self.sourced_command(CallCommand::LegAddOffer {
+                leg_id,
+                offer,
+                reply,
+            }))
+            .await
+            .map_err(|_| "session closed".to_string())?;
+        tokio::time::timeout(OFFER_LEG_TIMEOUT, response)
+            .await
+            .map_err(|_| "timed out waiting for the leg answer".to_string())?
+            .map_err(|_| "session closed before answering the offer".to_string())?
+    }
+
     /// Query the owning session and queue loops; no cached snapshot is consulted.
     pub async fn queue_dispatch_diagnostic(
         &self,
@@ -11943,6 +11967,20 @@ impl SipSession {
                 }
             }
 
+            CallCommand::LegAddOffer {
+                leg_id,
+                offer,
+                reply,
+            } => {
+                let added = self.handle_add_offer_leg(leg_id, &offer).await;
+                let result = match &added {
+                    Ok((leg_id, _)) => CommandResult::success_with_leg(leg_id.clone()),
+                    Err(error) => CommandResult::failure(error.to_string()),
+                };
+                let _ = reply.send(added.map_err(|error| error.to_string()));
+                result
+            }
+
             CallCommand::LegRemove { leg_id, reason } => {
                 Self::ok_or_failure(self.handle_remove_leg(leg_id, reason).await)
             }
@@ -13844,6 +13882,101 @@ impl SipSession {
             .into());
         }
         Ok(location)
+    }
+
+    /// Add a leg whose media peer answers `offer` directly, with no SIP
+    /// dialog. The transport follows the offer (ICE + DTLS → WebRTC), so a
+    /// browser or WebRTC agent can join the call through its controller. The
+    /// leg is connected once the answer is committed; like `call.leg_add`, it
+    /// joins media only through an explicit bridge and ends through leg
+    /// removal or session hangup.
+    pub(super) async fn handle_add_offer_leg(
+        &mut self,
+        leg_id: Option<LegId>,
+        offer: &str,
+    ) -> Result<(LegId, String)> {
+        let leg_id = leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
+        if self
+            .legs
+            .get(&leg_id)
+            .is_some_and(|leg| leg.state != LegState::Ended)
+        {
+            return Err(anyhow!("Leg already exists: {}", leg_id));
+        }
+        let transport = Self::sdp_transport_mode(offer);
+        let codecs = self.offer_leg_codecs(offer);
+        let video = self.video_caps_from_sdp(offer);
+        let cfg = self.build_leg_config(&leg_id, transport.clone(), codecs, video);
+        let peer = crate::media::create_leg(
+            leg_id.as_str(),
+            &cfg,
+            self.media.recording.capture_sender(),
+            crate::media::CaptureRoute::Deferred,
+        )?;
+        let answer = async {
+            peer.apply_remote_sdp(offer, rustrtc::SdpType::Offer)
+                .await?;
+            let mut answer = peer.prepare_answer().await?.to_sdp_string();
+            if !self.video_relay_enabled()
+                && let Some(stripped) = MediaNegotiator::strip_video_from_sdp(&answer)
+            {
+                answer = stripped;
+            }
+            peer.commit_local_answer(&answer, rustrtc::SdpType::Answer)
+                .await
+        }
+        .await;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                peer.stop();
+                return Err(error);
+            }
+        };
+        peer.accept();
+        info!(session_id = %self.id, %leg_id, transport = ?transport, "Adding offer-answered leg to session");
+        self.legs.insert(
+            leg_id.clone(),
+            crate::call::domain::Leg::new(leg_id.clone()),
+        );
+        self.update_leg_state(&leg_id, LegState::Initializing);
+        self.record_leg_event(
+            &leg_id.0,
+            crate::callrecord::LegTimelineEventType::Added,
+            None,
+            None,
+        );
+        self.attach_media_leg(&leg_id, peer);
+        self.legs.set_transport(leg_id.clone(), transport);
+        self.legs.set_answer(leg_id.clone(), answer.clone());
+        self.update_leg_state(&leg_id, LegState::Connected);
+        self.update_media_path().await;
+        Ok((leg_id, answer))
+    }
+
+    /// Audio codecs for an offer-answered leg: the caller's negotiated codec
+    /// when offered, so a later bridge passes audio through untranscoded;
+    /// otherwise the effective codec policy (G.711 when none is configured),
+    /// falling back to the offerer's own order when nothing intersects.
+    fn offer_leg_codecs(&self, offer: &str) -> Vec<crate::media::negotiate::CodecInfo> {
+        let offered = MediaNegotiator::build_codec_list_from_offer(offer, &[]);
+        let caller_codec = self
+            .media_leg(&LegId::from("caller"))
+            .and_then(|peer| peer.negotiated())
+            .and_then(|profile| profile.audio.map(|audio| audio.codec))
+            .filter(|codec| offered.iter().any(|offered| offered.codec == *codec));
+        let policy = match caller_codec {
+            Some(codec) => vec![codec],
+            None => {
+                let configured = self.resolve_effective_codecs();
+                if configured.is_empty() {
+                    vec![CodecType::PCMU, CodecType::PCMA]
+                } else {
+                    configured
+                }
+            }
+        };
+        MediaNegotiator::build_codec_list_from_offer(offer, &policy)
     }
 
     /// Remove a leg from the session.

@@ -207,7 +207,7 @@ Some commands support aliases for convenience:
 | `call.set_userdata` / `call.get_userdata` | Replace / read the session user data object (see below) |
 | `call.send_dtmf` | Send DTMF digits to the remote party |
 | `dtmf.collect` | Collect a multi-digit DTMF string |
-| `call.leg_add` / `call.leg_remove` | Dynamically add / remove a call leg |
+| `call.leg_add` / `call.leg_remove` | Dynamically add / remove a call leg (dialed, or answered from an SDP offer) |
 | `call.app_start` / `call.app_stop` | Start / stop a call application on the session |
 | `call.resume` | Resume receiving events for a call after re-attach |
 | `app.chain` | Chain into another call application |
@@ -308,6 +308,31 @@ answer racing with removal. Removing an already removed RWI attempt succeeds
 without changing other legs. `call.hangup` still ends the whole call. Unbridge
 leaves the legs alive and disconnected; subsequent leg state changes do not
 select a replacement pair automatically. Caller hangup still ends the session.
+
+**Add a leg from an SDP offer (WebRTC join):**
+
+Instead of a `target`, `call.leg_add` may carry an `offer`: an SDP offer from
+a client that joins the call directly, such as a browser or a WebRTC agent
+whose controller relays signaling over RWI. The session creates the leg's media
+peer from the offer (ICE + DTLS → WebRTC, the same transport WebRTC SIP callers
+use), answers it, and returns the SDP answer with the leg ID. `target` and
+`offer` are exclusive.
+
+```json
+{"action":"call.leg_add","action_id":"join-1","params":{"call_id":"session-1","leg_id":"0192f0c4a8e47b3c9d2e5f6a7b8c9d0e","offer":"v=0\r\n..."}}
+{"type":"command_completed","action_id":"join-1","status":"success","data":{"leg_id":"0192f0c4a8e47b3c9d2e5f6a7b8c9d0e","answer":"v=0\r\n..."}}
+```
+
+Unlike a dialed leg, the command completes after the answer is ready (ICE
+candidates gathered, at most 10 s), and the leg is connected at once: it emits a
+leg-scoped `call_answered` with no `call_ringing`. The answer prefers the
+caller's negotiated codec when the offer carries it, so the bridge passes audio
+through; otherwise it follows the codec policy (G.711 when none is configured)
+and transcodes. ICE uses the media `external_ip`, `webrtc_port_start`/`end` and
+`ice_servers` settings. The leg has no SIP dialog: bridge it with `call.bridge`,
+end it with `call.leg_remove`, and it ends with the call. `call.bridge` checks
+leg IDs before dispatch and accepts `caller`, `callee`, `consult*` or at least
+32 hex characters, so give the leg such an ID.
 
 **Reject call:**
 
