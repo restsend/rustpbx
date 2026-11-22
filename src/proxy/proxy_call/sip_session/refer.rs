@@ -717,7 +717,8 @@ impl SipSession {
                 .clone()
                 .try_reserve_owned()
                 .map_err(|e| anyhow!("Failed to reserve transfer partner command: {e}"))?;
-            manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+            let local_participant = self.participant_leg(&local_leg);
+            manager.bind_transfer_owner(&room, &local_participant, &remote_participant)?;
             room_committed = true;
             let (completion, bound) = tokio::sync::oneshot::channel();
             permit.send(crate::call::domain::CallCommand::BindTransferPartner {
@@ -735,15 +736,27 @@ impl SipSession {
                 owner.session_id().to_string(),
                 remote_leg.clone(),
             );
-            tokio::time::timeout_at(binding_deadline, bound)
-                .await.map_err(|_| anyhow!("Local transfer partner binding did not complete"))??
-                .map_err(|error| anyhow!(error))?;
-            info!(
-                session_id = %self.id,
-                peer_session = %owner.session_id(),
-                %local_leg, %remote_leg,
-                "Transfer partner bound — hold/unhold routes cross-session"
-            );
+            match tokio::time::timeout_at(binding_deadline, bound).await {
+                Ok(result) => {
+                    result?.map_err(|error| anyhow!(error))?;
+                    info!(session_id = %self.id, peer_session = %owner.session_id(),
+                        %local_leg, %remote_leg, "Transfer partner bound — hold/unhold routes cross-session");
+                }
+                Err(_) => {
+                    // The conference manager owns the media commit. A delayed
+                    // local command still runs if both committed legs remain.
+                    let still_connected = manager.get_conference(&room).await.is_some_and(|state| {
+                        state.is_host(&local_participant)
+                            && state.participants.contains_key(&local_participant)
+                            && state.participants.contains_key(&remote_participant)
+                    });
+                    if !still_connected {
+                        return Err(anyhow!("Local transfer partner binding did not complete"));
+                    }
+                    warn!(session_id = %self.id, peer_session = %owner.session_id(), room = %room.0,
+                        "Attended transfer room committed with local partner binding pending");
+                }
+            }
             info!(session_id = %self.id, peer_session = %owner.session_id(), %local_leg, %remote_leg,
                 room = %room.0, "Attended REFER connected existing participants across sessions");
             Ok(())

@@ -900,6 +900,145 @@ async fn attended_room_rollback_keeps_the_consultation_connected() {
 }
 
 #[tokio::test]
+async fn attended_room_reports_success_if_binding_command_runs_after_deadline() {
+    let result = attended_room_with_delayed_partner_binding(false).await;
+    assert!(result.is_ok(), "an already committed room must report REFER success: {result:?}");
+}
+
+#[tokio::test]
+async fn attended_room_reports_failure_if_peer_leaves_before_binding_deadline() {
+    let result = attended_room_with_delayed_partner_binding(true).await;
+    assert_eq!(result, Err((504, "Local transfer partner binding did not complete".into())));
+}
+
+async fn attended_room_with_delayed_partner_binding(peer_leaves: bool) -> Result<(), (u16, String)> {
+    use crate::call::{DialDirection, Dialplan, MediaConfig};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+    use rsipstack::sip::{Header, Method};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(Method::Invite, "customer", None, "example.test", None);
+    let (transaction, _) = create_transaction(request.clone()).await;
+    let (events, _states) = mpsc::unbounded_channel();
+    let customer_dialog = server.dialog_layer
+        .get_or_create_server_invite(&transaction, events, None, None)
+        .unwrap();
+    customer_dialog.accept(None, None).unwrap();
+    let dialplan = Dialplan::new("customer-call".into(), request, DialDirection::Inbound)
+        .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+    let (mut customer, _customer_handle, _customer_commands) = SipSession::new(
+        server.clone(), CancellationToken::new(), None,
+        CallContext {
+            session_id: "customer-call".into(),
+            dialplan: Arc::new(dialplan),
+            cookie: Default::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:customer@example.test".into(),
+            original_callee: "sip:transferor@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        }, customer_dialog, true,
+    );
+    let caller = LegId::from("caller");
+    customer.update_leg_state(&caller, LegState::Connected);
+
+    let request = create_test_request(Method::Invite, "transferor", None, "example.test", None);
+    let (mut transaction, _) = create_transaction(request.clone()).await;
+    let (events, _states) = mpsc::unbounded_channel();
+    let mut transferor = server.dialog_layer
+        .get_or_create_server_invite(&transaction, events, None, None)
+        .unwrap();
+    transferor.accept(None, None).unwrap();
+    let mut ack = request;
+    ack.method = Method::Ack;
+    for header in ack.headers.iter_mut() {
+        match header {
+            Header::CSeq(value) => *value = "1 ACK".into(),
+            Header::To(value) => *value = transferor.snapshot().to.to_string().into(),
+            _ => {}
+        }
+    }
+    let (mut ack_tx, _) = create_transaction(ack).await;
+    transferor.handle(&mut ack_tx).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), transferor.handle(&mut transaction))
+        .await.unwrap().unwrap();
+    assert!(transferor.state().is_confirmed());
+    let transferor_dialog = transferor.id();
+    let callee = LegId::from("callee");
+    let mut leg = Leg::new(callee.clone());
+    leg.state = LegState::Connected;
+    customer.legs.insert(callee.clone(), leg);
+    customer.legs.set_dialog(callee, Dialog::Invite(transferor));
+    customer.meta.connected_callee_dialog_id = Some(transferor_dialog.clone());
+
+    let media = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    let remote = LegInner::new("customer", &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = remote.create_offer().await.unwrap();
+    let answer = media.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+    remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    media.accept();
+    remote.accept();
+    customer.attach_media_leg(&caller, media);
+
+    let request = create_test_request(Method::Invite, "retained", None, "example.test", None);
+    let dialplan = Dialplan::new("retained-call".into(), request, DialDirection::Outbound);
+    let (agent, agent_handle, mut commands) = SipSession::new_uac(
+        server.clone(), CancellationToken::new(), None,
+        CallContext {
+            session_id: "retained-call".into(),
+            dialplan: Arc::new(dialplan),
+            cookie: Default::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:transferor@example.test".into(),
+            original_callee: "sip:retained@example.test".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        }, false,
+    );
+    server.active_call_registry.register_dialog("retained-dialog".into(), agent_handle.clone());
+    let retained = LegId::from("callee");
+    let participant = agent.participant_leg(&retained);
+    let caller_participant = customer.participant_leg(&caller);
+    let manager = server.conference_server.manager_raw();
+    tokio::time::pause();
+    let mut transfer = std::pin::pin!(customer.run_transfer_room_fallback(
+        &transferor_dialog, "retained-dialog;to-tag=local;from-tag=remote",
+    ));
+    let delayed_binding = async {
+        let CallCommand::JoinConferencePeer { conference_id, reply, .. } = commands.recv()
+            .await.expect("retained session must receive a join")
+        else {
+            panic!("expected the room attachment command");
+        };
+        let conference_id = crate::call::runtime::ConferenceId::from(conference_id);
+        manager.add_participant(&conference_id, participant.clone()).await.unwrap();
+        manager.bind_participant_session(&conference_id, &participant, agent_handle.command_sender()).unwrap();
+        reply.send(Ok(retained)).unwrap();
+        let binding = commands.recv().await.expect("the committed room must send a binding");
+        assert!(matches!(binding, CallCommand::BindTransferPartner { .. }));
+        let room = manager.get_conference(&conference_id).await.unwrap();
+        assert_eq!(room.host_leg_id.as_ref(), Some(&caller_participant));
+        assert!(room.participants.contains_key(&participant));
+        if peer_leaves {
+            manager.remove_participant(&conference_id, &participant).await.unwrap();
+        }
+        tokio::time::advance(Duration::from_secs(31)).await;
+        // Keep the delayed command alive until the transfer result resolves.
+        binding
+    };
+    let _binding = tokio::select! {
+        biased;
+        binding = delayed_binding => binding,
+        result = &mut transfer => panic!("transfer returned before the controlled delay: {result:?}"),
+    };
+    transfer.await
+}
+
+#[tokio::test]
 async fn attended_room_records_both_directions_on_the_retained_customer_leg() {
     use crate::call::{DialDirection, Dialplan, MediaConfig};
     use crate::config::MediaProxyMode;
