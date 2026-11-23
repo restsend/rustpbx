@@ -1648,6 +1648,11 @@ impl SipSession {
                         crate::call::session_id::extract_from_source_header(&request, &name)
                     });
                 let from_peer = Self::from_cluster_peer(&server, &context.cookie);
+                let from_trunk = context.cookie.get_extension::<TrunkContext>().is_some();
+                let device_custom_roots = server
+                    .proxy_config
+                    .load()
+                    .session_id_device_custom_root;
                 let (inherited, uui_root) = if trunk_root.is_some() {
                     (None, None)
                 } else {
@@ -1655,7 +1660,12 @@ impl SipSession {
                     // Peer-trusted seam: a peer may dispatch a child leg of a
                     // call whose root is a CUSTOM correlation string — accept
                     // it so the agent-home node keeps one id across the
-                    // logical call. Untrusted sources stay hex-only.
+                    // logical call. Untrusted sources stay hex-only — unless
+                    // the operator opted in (`session_id_device_custom_root`):
+                    // first-party LAN devices forwarding business correlation
+                    // ids on CC legs (`leg=` + a normalize_custom-shaped data
+                    // part) then link the same way. The UUI data part IS the
+                    // root candidate (`parse_uui` maps the first segment).
                     let uui_root = cc_uui
                         .as_ref()
                         .filter(|uui| {
@@ -1667,6 +1677,15 @@ impl SipSession {
                                         &uui.session_id,
                                     )
                                     .is_some())
+                                || (crate::call::session_id::device_custom_root_linkage_allowed(
+                                    device_custom_roots,
+                                    from_peer,
+                                    from_trunk,
+                                    uui.leg.as_deref(),
+                                ) && crate::call::session_id::normalize_custom(
+                                    &uui.session_id,
+                                )
+                                .is_some())
                         })
                         .map(|uui| uui.session_id.clone());
                     (inherited, uui_root)

@@ -210,6 +210,16 @@ media_proxy = "auto"
 # CDR; they are not stamped on the RFC `Session-ID` header.
 # Example (both sides, with a per-trunk override below):
 # session_id_default_header = "X-Correlation-Id"
+# Opt in to CUSTOM (non-hex) session-id roots declared by LAN devices on CC
+# UUI: a non-peer, non-trunk INVITE carrying `purpose=call-center`, a known
+# `leg=` intent, and a safe-string data part (≤120 chars, A-Za-z0-9._@-)
+# gets that data part adopted as the logical-call root — it then rides
+# events / CDR / the trunk correlation header verbatim. Default false: the
+# device-declared data part must stay UUID-shaped, because custom business
+# correlation strings are guessable and a planted root merges another
+# logical call's correlation onto the caller. Enable only when your devices
+# are first-party (e.g. restsend-call consult legs forwarding business ids).
+# session_id_device_custom_root = false
 
 # Direct extension-to-extension (P2P) calls: when a callee has multiple
 # registered devices, ring ALL of them in parallel (first to answer wins).

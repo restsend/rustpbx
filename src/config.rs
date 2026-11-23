@@ -1569,6 +1569,18 @@ pub struct ProxyConfig {
     /// CallMeta) and skip the RFC wire channels (`Session-ID` header / UUI).
     #[serde(default)]
     pub session_id_default_header: Option<String>,
+    /// Opt in to CUSTOM (non-hex) session-id ROOT linkage declared by LAN
+    /// devices on CC UUI: a non-peer, non-trunk INVITE whose UUI carries
+    /// `purpose=call-center`, a known `leg=` intent, and a
+    /// `normalize_custom`-shaped data part gets that data part adopted as
+    /// the logical-call root (`meta.root_session_id`). Default false — the
+    /// data part must stay UUID-shaped, because custom business correlation
+    /// strings are guessable and a planted root merges the call's events /
+    /// CDR / trunk correlation header into another logical call. Opt in only
+    /// when your devices are first-party and need to forward business
+    /// correlation ids (e.g. restsend-call consult legs).
+    #[serde(default)]
+    pub session_id_device_custom_root: bool,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -2404,6 +2416,7 @@ impl Default for ProxyConfig {
             session_id_header_mode: Default::default(),
             session_id_inherit_callid: default_session_id_inherit_callid(),
             session_id_default_header: None,
+            session_id_device_custom_root: false,
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),

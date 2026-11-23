@@ -165,6 +165,33 @@ async fn inherited_delivery_session(
     from_peer: bool,
     use_media_proxy: bool,
 ) -> SipSession {
+    inherited_delivery_session_opts(
+        header_id,
+        uui_id,
+        enabled,
+        role,
+        from_peer,
+        use_media_proxy,
+        false,
+        false,
+    )
+    .await
+}
+
+/// Full-option variant: `device_custom_roots` flips
+/// `proxy.session_id_device_custom_root` on the test server; `from_trunk`
+/// inserts a `TrunkContext` (trunk-sourced INVITE).
+#[allow(clippy::too_many_arguments)]
+async fn inherited_delivery_session_opts(
+    header_id: &str,
+    uui_id: Option<&str>,
+    enabled: bool,
+    role: Option<&str>,
+    from_peer: bool,
+    use_media_proxy: bool,
+    device_custom_roots: bool,
+    from_trunk: bool,
+) -> SipSession {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::proxy::tests::common::{
@@ -172,8 +199,10 @@ async fn inherited_delivery_session(
     };
 
     let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut proxy_config = ProxyConfig::default();
+    proxy_config.session_id_device_custom_root = device_custom_roots;
     let (mut server, _) = create_test_server_with_rwi_gateway(
-        ProxyConfig::default(),
+        proxy_config,
         Arc::new(parking_lot::RwLock::new(gateway)),
     )
     .await;
@@ -212,6 +241,13 @@ async fn inherited_delivery_session(
     let cookie = TransactionCookie::default();
     if from_peer {
         cookie.insert_extension(crate::call::CallerPeerContext("192.0.2.44:5060".into()));
+    }
+    if from_trunk {
+        cookie.insert_extension(crate::call::cookie::TrunkContext {
+            id: None,
+            name: "customer-x".to_string(),
+            did_numbers: vec![],
+        });
     }
     let context = CallContext {
         session_id: local_id.into(),
@@ -376,6 +412,108 @@ async fn cluster_child_root_linkage_accepts_non_hex_custom_root() {
             "peer UUI data with a non-hex root links; untrusted sources do not"
         );
     }
+}
+
+/// LAN device (non-peer, non-trunk) CC leg carrying a CUSTOM (non-hex) UUI
+/// data part: with `session_id_device_custom_root` opted in the data part
+/// links as the logical root. Default-off, trunk-sourced, unknown-leg and
+/// illegal-shape forms stay unlinked (the entropy gate holds).
+#[tokio::test]
+async fn device_custom_root_linkage_is_opt_in() {
+    // 开启 + LAN 设备 consult 腿：custom root 链接。
+    let session = inherited_delivery_session_opts(
+        "", // 非 hex 不走标准 `Session-ID` 头通道（build_wire_header 拒非 hex）
+        Some("ORD-88923"),
+        true,
+        Some("consult"),
+        false,
+        false,
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(
+        session.meta.root_session_id.as_deref(),
+        Some("ORD-88923"),
+        "opted-in device CC leg links the custom correlation root"
+    );
+    assert_eq!(
+        session.meta.dial_leg_role.as_deref(),
+        Some("consult"),
+        "device legs keep the stats-marker dial intent"
+    );
+
+    // 默认关（其余同参）：不链接。
+    let session = inherited_delivery_session_opts(
+        "",
+        Some("ORD-88923"),
+        true,
+        Some("consult"),
+        false,
+        false,
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(
+        session.meta.root_session_id.as_deref(),
+        None,
+        "without the opt-in the device data part must not root the call"
+    );
+
+    // trunk 来源：开启也不链接（外部可猜串保持熵门）。
+    let session = inherited_delivery_session_opts(
+        "",
+        Some("ORD-88923"),
+        true,
+        Some("consult"),
+        false,
+        false,
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(
+        session.meta.root_session_id.as_deref(),
+        None,
+        "trunk-sourced INVITEs never use the device custom-root channel"
+    );
+
+    // 未知 leg=：不链接。
+    let session = inherited_delivery_session_opts(
+        "",
+        Some("ORD-88923"),
+        true,
+        Some("weird"),
+        false,
+        false,
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(
+        session.meta.root_session_id.as_deref(),
+        None,
+        "root linkage is a CC-leg concept — unknown leg intents never link"
+    );
+
+    // 非法形态 data part（'=' 过不了 normalize_custom）：不链接。
+    let session = inherited_delivery_session_opts(
+        "",
+        Some("bad=root"),
+        true,
+        Some("consult"),
+        false,
+        false,
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(
+        session.meta.root_session_id.as_deref(),
+        None,
+        "wire-unsafe data parts are skipped even under the opt-in"
+    );
 }
 
 /// Outbound round trip: a leg routed to a trunk with `session_id_header`

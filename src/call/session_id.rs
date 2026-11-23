@@ -279,6 +279,29 @@ pub fn derive_from_call_id(candidate: &str) -> String {
     }
 }
 
+/// Whether a NON-peer device INVITE's CC-UUI data part may seed root linkage
+/// as a CUSTOM (non-hex) correlation string.
+///
+/// All four gates must hold: the operator opted in
+/// (`proxy.session_id_device_custom_root`), the INVITE is not trunk-sourced
+/// (external callers keep the UUID-shape entropy gate — custom business ids
+/// are guessable), the source is not a cluster peer (the peer seam has its
+/// own unconditional custom channel), and the UUI declares a known `leg=`
+/// dial intent (root linkage is a CC-leg concept; arbitrary UUI data parts
+/// never root calls). The caller still applies `normalize_custom` to the
+/// data part itself.
+pub fn device_custom_root_linkage_allowed(
+    enabled: bool,
+    from_peer: bool,
+    from_trunk: bool,
+    leg: Option<&str>,
+) -> bool {
+    enabled
+        && !from_peer
+        && !from_trunk
+        && leg.is_some_and(crate::call::uui::is_known_leg_role)
+}
+
 /// Normalize a caller-provided id, generating a fresh id when it does not fit
 /// the id format (e.g. Call-IDs longer than a UUID).
 pub fn normalize_or_generate(candidate: &str) -> String {
@@ -421,6 +444,34 @@ pub fn set_correlation_header(headers: &mut Vec<Header>, name: &str, value: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_custom_root_linkage_gates_every_dimension() {
+        // 默认关：不开不放行（设备侧任意串不种 root）。
+        assert!(!device_custom_root_linkage_allowed(
+            false, false, false, Some("consult")
+        ));
+        // 开启后：LAN 设备（非 peer 非 trunk）带已知 leg= 放行。
+        assert!(device_custom_root_linkage_allowed(
+            true, false, false, Some("consult")
+        ));
+        assert!(device_custom_root_linkage_allowed(
+            true, false, false, Some("transfer")
+        ));
+        // peer 不走设备通道（peer 有自己的无条件 custom 通道）。
+        assert!(!device_custom_root_linkage_allowed(
+            true, true, false, Some("consult")
+        ));
+        // trunk 来源保持熵门（外部可猜串不可种 root）。
+        assert!(!device_custom_root_linkage_allowed(
+            true, false, true, Some("consult")
+        ));
+        // 无 leg= / 未知 leg= 不放行（root 关联是 CC 腿概念）。
+        assert!(!device_custom_root_linkage_allowed(true, false, false, None));
+        assert!(!device_custom_root_linkage_allowed(
+            true, false, false, Some("weird")
+        ));
+    }
 
     #[test]
     fn bare_hex_is_normalized() {
