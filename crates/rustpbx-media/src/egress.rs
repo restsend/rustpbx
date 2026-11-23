@@ -232,7 +232,6 @@ impl EgressPipeline {
             eof_tail_remaining: 0,
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
-            transcode_probe_tick: 0,
             transcode_armed: false,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
@@ -392,9 +391,6 @@ struct EgressTask {
     /// Remaining grace ticks while draining a finished non-looping Media
     /// source. 0 = idle.
     eof_tail_remaining: u32,
-    /// TEMP probe: 1 Hz RMS trace of the transcode pipeline output (production
-    /// incident 2026-11-13 — resume noise on a rebuilt transcode bridge).
-    transcode_probe_tick: usize,
     /// Jitter absorber for TranscodePeer: buffering until two full frames of
     /// decoded PCM are on hand, then consuming one frame per tick. Frames
     /// arriving a tick late merge into the buffer instead of punching CN
@@ -721,7 +717,6 @@ impl EgressTask {
                 // drained) falls back to comfort-noise here.
                 let frame_samples = self.pcm_buf.len();
                 let mut dtmf_input: Option<AudioFrame> = None;
-                let mut decode_probe_rms: Option<(f64, usize, Option<u8>)> = None;
                 std::future::poll_fn(|cx| {
                     loop {
                         // Cap first: trim the oldest surplus even when no new
@@ -744,18 +739,7 @@ impl EgressTask {
                                     .payload_type
                                     .is_none_or(|pt| pt == *source_audio_payload_type)
                                 {
-                                    self.transcode_probe_tick =
-                                        self.transcode_probe_tick.wrapping_add(1);
                                     let mut pcm = decoder.decode(&input.data);
-                                    if self.transcode_probe_tick.is_multiple_of(50) {
-                                        let rms = (pcm.iter()
-                                            .map(|v| (*v as i64) * (*v as i64))
-                                            .sum::<i64>() as f64
-                                            / pcm.len().max(1) as f64)
-                                            .sqrt();
-                                        decode_probe_rms =
-                                            Some((rms, pcm.len(), input.payload_type));
-                                    }
                                     if let Some(rs) = &mut self.resampler {
                                         pcm = rs.resample(&pcm);
                                     }
@@ -778,12 +762,6 @@ impl EgressTask {
                     }
                 })
                 .await;
-                if let Some((rms, samples, pt)) = decode_probe_rms {
-                    eprintln!(
-                        "TX-PROBE: decoded rms={rms:.0} samples={samples} pt={pt:?} pending={}",
-                        self.transcode_pending.len(),
-                    );
-                }
                 if let Some(input) = dtmf_input {
                     match self.build_dtmf_frame(&input) {
                         Some(frame) => frame,
@@ -1111,7 +1089,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -1186,7 +1163,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1262,7 +1238,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1351,7 +1326,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1589,7 +1563,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1740,7 +1713,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -1854,7 +1826,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -2100,7 +2071,6 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         };
 
         let speech_ref: Bytes = create_encoder(CodecType::PCMU)
@@ -2245,7 +2215,6 @@ mod transcode_drain_tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
-            transcode_probe_tick: 0,
         }
     }
 
