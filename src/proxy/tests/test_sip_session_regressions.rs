@@ -3637,22 +3637,40 @@ async fn hold_unhold_flips_recording_capture_routes() {
     session.media.caller_offer = Some(recording_test_offer());
 
     // Wire real legs whose taps carry the call's recorder sender -- the same
-    // wiring the production leg-creation paths perform.
+    // wiring the production leg-creation paths perform -- and install them on
+    // both the bridge and session registry so MediaBridge::unbridge() talks to
+    // the same live egress pipelines.
     let mut recording = RecordingSession::default();
     let sender = recording.setup_recorder_task().unwrap();
-    for id in ["caller", "callee"] {
-        let leg = crate::media::leg::LegInner::new(
-            id,
-            &crate::media::leg::LegConfig::rtp_pcmu(),
-            Some(sender.clone()),
-        )
-        .unwrap();
-        if id == "callee" {
-            // Production creation sites start the callee tap fully off.
-            leg.ingress_tap().set_capture_route(None, None);
-        }
-        session.legs.set_media_leg(&LegId::from(id), leg);
-    }
+    let a = crate::media::leg::LegInner::new(
+        "caller",
+        &crate::media::leg::LegConfig::rtp_pcmu(),
+        Some(sender.clone()),
+    )
+    .unwrap();
+    let b = crate::media::leg::LegInner::new(
+        "callee",
+        &crate::media::leg::LegConfig::rtp_pcmu(),
+        Some(sender.clone()),
+    )
+    .unwrap();
+    // Production creation sites start the callee tap fully off.
+    b.ingress_tap().set_capture_route(None, None);
+    let offer = a.create_offer().await.expect("offer");
+    let answer = b.answer(&offer).await.expect("answer");
+    a.apply_remote_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply answer");
+    let mut mb = crate::media::media_bridge::MediaBridge::new("hold-rec-routes");
+    mb.replace_leg(crate::media::media_bridge::LegSide::A, a.clone())
+        .await;
+    mb.replace_leg(crate::media::media_bridge::LegSide::B, b.clone())
+        .await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    session.media.bridge = Some(mb);
+    session.legs.set_media_leg(&LegId::from("caller"), a);
+    session.legs.set_media_leg(&LegId::from("callee"), b);
 
     let route = |session: &SipSession, leg: &str| {
         session

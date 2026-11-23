@@ -2442,6 +2442,7 @@ mod transcode_drain_tests {
         in_sender.try_send(pcmu_frame(20, 160, 1)).unwrap();
         let second = task.next_frame().await.expect("second audio arms");
         assert_eq!(second.payload_type, Some(8));
+        assert!(task.transcode_armed);
         assert_eq!(task.transcode_pending.len(), 160);
 
         // Next tick flushes the remaining buffered frame; the following empty
@@ -2452,15 +2453,7 @@ mod transcode_drain_tests {
 
         let silence = task.next_frame().await.expect("post-primed silence");
         assert_eq!(silence.payload_type, Some(8));
-        assert_eq!(task.transcode_pending.len(), 160, "the first frame stays queued");
-
-        in_sender.try_send(pcmu_frame(20, 160, 1)).unwrap();
-        task.next_frame().await.expect("two frames arm the jitter buffer");
-        assert!(task.transcode_armed);
-        assert_eq!(task.transcode_pending.len(), 160);
-        task.next_frame().await.expect("flush the last buffered frame");
         assert_eq!(task.transcode_pending.len(), 0);
-        task.next_frame().await.expect("empty buffer emits paced silence");
     }
 
     /// Partial 10 ms frames fed one-per-tick on a 20 ms leg are buffered and
