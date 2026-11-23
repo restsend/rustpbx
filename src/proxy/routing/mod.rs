@@ -390,10 +390,16 @@ fn header_name_matches(pattern: &str, name: &str) -> bool {
 /// Parse a trunk destination into `(host, port)`. Handles both SIP URIs and
 /// bare `host:port` strings.
 pub fn trunk_dest_host_port(dest: &str) -> Option<(String, u16)> {
-    if dest.trim().is_empty() {
+    let dest = dest.trim();
+    if dest.is_empty() {
         return None;
     }
-    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest) {
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest)
+        && matches!(
+            uri.scheme,
+            None | Some(rsipstack::sip::Scheme::Sip | rsipstack::sip::Scheme::Sips)
+        )
+    {
         let host = uri.host().to_string();
         let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
         if host.is_empty() {
@@ -401,7 +407,8 @@ pub fn trunk_dest_host_port(dest: &str) -> Option<(String, u16)> {
         }
         return Some((host, port));
     }
-    // Try as bare host:port
+    // Try as bare host:port (e.g. `voip.example.com:5060`, which RFC 3986 URI
+    // parsing treats as `Scheme::Other("voip.example.com")`).
     let parts: Vec<&str> = dest.split(':').collect();
     let host = *parts.first()?;
     if host.is_empty() {
@@ -1593,4 +1600,42 @@ pub fn extract_request_user(origin: &rsipstack::sip::Request) -> Option<String> 
 
 pub fn escape_sip_quoted(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod trunk_dest_tests {
+    use super::trunk_dest_host_port;
+
+    #[test]
+    fn parses_bare_host_port_and_sip_uris() {
+        assert_eq!(
+            trunk_dest_host_port("voip.example.com:5060"),
+            Some(("voip.example.com".to_string(), 5060))
+        );
+        assert_eq!(
+            trunk_dest_host_port("voip.example.com:5080"),
+            Some(("voip.example.com".to_string(), 5080))
+        );
+        assert_eq!(
+            trunk_dest_host_port("sip:voip.example.com:5060"),
+            Some(("voip.example.com".to_string(), 5060))
+        );
+        assert_eq!(
+            trunk_dest_host_port("SIP:user@voip.example.com:5070;transport=tcp"),
+            Some(("voip.example.com".to_string(), 5070))
+        );
+        assert_eq!(
+            trunk_dest_host_port("sips:tls.example.com:5061"),
+            Some(("tls.example.com".to_string(), 5061))
+        );
+        assert_eq!(
+            trunk_dest_host_port("<sip:voip.example.com:5060>"),
+            Some(("voip.example.com".to_string(), 5060))
+        );
+        assert_eq!(
+            trunk_dest_host_port("192.168.1.1:5080"),
+            Some(("192.168.1.1".to_string(), 5080))
+        );
+        assert_eq!(trunk_dest_host_port("   "), None);
+    }
 }
