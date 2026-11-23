@@ -338,19 +338,13 @@ async fn repro_video_call_with_recording_establishes_no_488() -> Result<()> {
         "offer to callee should carry a video m-line with H264:\n{offer_to_bob}"
     );
 
-    // The offer to a plain-RTP SIP peer must keep the RFC 5761 §5.1.1
-    // fallback: audio-only direct legs stay non-BUNDLED (no group), and the
-    // Negotiate policy advertises an explicit `a=rtcp` port so a callee that
-    // refuses mux still has an RTCP target. Upstream rustrtc 0.6.x PROPOSES
-    // `a=rtcp-mux` on the offer (the fork omitted the attribute) — a callee
-    // that refuses mux answers without it and media flows via the RTCP port.
-    // Video rides 0.6.x's negotiated BUNDLE (multi-m-line offers bundle,
-    // rtcp-mux proposed) — the fork's strict-SIP "no BUNDLE" shape for
-    // multi-m-line offers is gone upstream; Negotiate keeps the RFC 5761
-    // §5.1.1 RTCP fallback port so non-muxing callees still interop.
+    // This plain RTP call uses separate audio and video transports. Offer
+    // RTCP mux and an explicit fallback port for each media section.
     assert!(
-        offer_to_bob.contains("a=group:BUNDLE") && offer_to_bob.contains("a=rtcp-mux"),
-        "0.6.x video offer rides negotiated BUNDLE + mux (documented shape):\n{offer_to_bob}"
+        !offer_to_bob.contains("a=group:BUNDLE")
+            && offer_to_bob.lines().filter(|line| *line == "a=rtcp-mux").count() == 2
+            && offer_to_bob.lines().filter(|line| line.starts_with("a=rtcp:")).count() == 2,
+        "plain RTP offer must advertise RTCP mux and fallback ports for both media sections:\n{offer_to_bob}"
     );
     assert!(
         !offer_to_bob.contains("m=application"),

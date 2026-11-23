@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use audio_codec::CodecType;
 use rustpbx_media::TransportMode;
-use rustpbx_media::leg::LegInner;
+use rustpbx_media::egress::EgressSource;
+use rustpbx_media::leg::{LegConfig, LegInner};
 use rustpbx_media::media_bridge::{LegSide, MediaBridge};
 use rustpbx_media::negotiate::{CodecInfo, MediaNegotiator};
 use rustrtc::config::BufferDropStrategy;
@@ -2302,24 +2303,60 @@ async fn reinvite_profile_resyncs_egress_codec_and_sender_pt() {
 
 #[tokio::test]
 async fn reinvite_with_same_codec_rebuilds_relay_payload_mapping() {
-    let mut h = TestMediaHarness::create(
-        TransportMode::Rtp,
-        CodecType::Opus,
-        TransportMode::Rtp,
-        CodecType::Opus,
-    ).await;
-    h.bridge_and_accept().await;
-    h.assert_relay(true);
+    // The default harness installs a video sender. Start with audio-only
+    // legs so a relay rearm requesting video has to wait for a transport.
+    let codec = MediaNegotiator::codec_info_for_type(CodecType::Opus);
+    let config = LegConfig {
+        codecs: vec![codec.clone()],
+        bind_ips: vec!["127.0.0.1".parse().unwrap()],
+        ..LegConfig::rtp_pcmu()
+    };
+    let leg_a = LegInner::new("a", &config, None).unwrap();
+    let leg_b = LegInner::new("b", &config, None).unwrap();
+    let test_a = TestPeer::new(TransportMode::Rtp, codec.clone());
+    let test_b = TestPeer::new(TransportMode::Rtp, codec);
+    negotiate(&test_a, &leg_a).await;
+    negotiate(&test_b, &leg_b).await;
+    let mut bridge = MediaBridge::new("rtp-reinvite");
+    bridge.select_pair(leg_a.clone(), leg_b.clone()).await.unwrap();
+    bridge.accept(LegSide::A).await;
+    bridge.accept(LegSide::B).await;
+    assert!(leg_a.egress_is_relay());
+    assert!(leg_b.egress_is_relay());
 
-    let leg_b = h.mb.leg(LegSide::B).unwrap().clone();
     let original = leg_b.negotiated().unwrap().audio.unwrap();
     let voice = encode_codec_frames(CodecType::Opus, 20);
-    h.test_a.send_audio(voice[0].clone(), 0);
-    let before = h.test_b.recv_audio(2000).await.expect("original relay packet");
-    assert_eq!(before.payload_type, Some(original.payload_type));
+    test_a.send_audio(voice[0].clone(), 0);
+    let initial = test_b.recv_audio(2000).await.expect("original relay packet");
+    assert_eq!(initial.payload_type, Some(original.payload_type));
+
+    // A rearm that adds video can wait for its transport even though the
+    // existing audio route is ready. Keep sending audio over that route.
+    let before = {
+        let rearm = leg_b.set_egress_source(EgressSource::RewriteRelay {
+            peer_pc: leg_a.pc().clone(),
+            options: Default::default(),
+            routes: vec![
+                (rustrtc::MediaKind::Audio, Vec::new()),
+                (rustrtc::MediaKind::Video, Vec::new()),
+            ],
+            on_arm_failed: None,
+        });
+        tokio::pin!(rearm);
+        tokio::select! {
+            biased;
+            result = &mut rearm => panic!("expected the video transport to still be pending: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        test_a.send_audio(voice[0].clone(), 960);
+        let during = test_b.recv_audio(2000).await.expect("relay packet while video is pending");
+        assert_eq!(during.payload_type, initial.payload_type);
+        assert_eq!(during.sequence_number, initial.sequence_number.map(|seq| seq.wrapping_add(1)));
+        during
+    };
 
     let new_pt = 109;
-    let mut offer = h.test_b.pc.create_offer().await.unwrap();
+    let mut offer = test_b.pc.create_offer().await.unwrap();
     let audio = offer.media_sections.iter_mut().find(|m| m.kind == rustrtc::MediaKind::Audio).unwrap();
     let old_format = original.payload_type.to_string();
     let format = audio.formats.iter_mut().find(|f| **f == old_format).unwrap();
@@ -2333,23 +2370,23 @@ async fn reinvite_with_same_codec_rebuilds_relay_payload_mapping() {
             *value = format!("{new_pt} {params}");
         }
     }
-    h.test_b.pc.set_local_description(offer.clone()).unwrap();
+    test_b.pc.set_local_description(offer.clone()).unwrap();
     let answer = leg_b.answer(&offer.to_sdp_string()).await.unwrap();
     let audio = leg_b.negotiated().unwrap().audio.unwrap();
     assert_eq!(audio.codec, original.codec);
     assert_eq!(audio.payload_type, new_pt);
-    h.test_b.pc
+    test_b.pc
         .set_remote_description(SessionDescription::parse(SdpType::Answer, &answer).unwrap())
         .await.unwrap();
-    h.mb.bridge().await.unwrap();
+    bridge.bridge().await.unwrap();
 
-    h.test_a.send_audio(voice[0].clone(), 960);
-    let after = h.test_b.recv_audio(2000).await.expect("relay packet after re-INVITE");
+    test_a.send_audio(voice[0].clone(), 1920);
+    let after = test_b.recv_audio(2000).await.expect("relay packet after re-INVITE");
     assert_eq!(after.payload_type, Some(new_pt));
     assert_eq!(after.sequence_number, before.sequence_number.map(|seq| seq.wrapping_add(1)));
     assert_eq!(after.rtp_timestamp.wrapping_sub(before.rtp_timestamp), 960);
     assert_eq!(after.raw_packet.unwrap().header.ssrc, before.raw_packet.unwrap().header.ssrc);
-    h.close();
+    bridge.close();
 }
 
 /// Transcoded call recording (the exact scenario of the reported stutter bug

@@ -1236,11 +1236,15 @@ impl LegInner {
         if let Some(previous) = self.relay_arm_task.lock().take() {
             previous.abort();
         }
-        // This leg's source alone decides what writes its wire: the relay into
-        // it stops on every switch and is re-armed only for a relay source.
+        // Release the relay when changing its peer or switching to paced
+        // output. A same-peer rearm keeps the old route until the replacement
+        // transports are ready. Clones share their PeerConnection's config.
         {
             let mut relay_from = self.relay_from.lock();
-            if let Some(peer) = relay_from.take() {
+            if let Some(peer) = relay_from.take()
+                && !matches!(&source, EgressSource::RewriteRelay { peer_pc, .. }
+                    if std::ptr::eq(peer.config(), peer_pc.config()))
+            {
                 peer.clear_rtp_rewrite_bridge_into(&self.pc);
             }
             if let EgressSource::RewriteRelay { peer_pc, .. } = &source {
