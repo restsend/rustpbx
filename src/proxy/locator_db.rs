@@ -369,6 +369,7 @@ fn decode_sip_addr(value: &str) -> Option<SipAddr> {
     }
 
     if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed)
+        && !matches!(uri.scheme, Some(rsipstack::sip::Scheme::Other(_)))
         && let Ok(addr) = SipAddr::try_from(uri)
     {
         return Some(addr);
@@ -1122,6 +1123,18 @@ mod tests {
     use rsipstack::sip::{Auth, HostWithPort, Scheme, transport::Transport};
     use rsipstack::transport::SipAddr;
     use sea_orm::{DbBackend, MockDatabase, MockExecResult};
+
+    #[test]
+    fn home_proxy_metadata_preserves_bare_hostname_and_port() {
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: HostWithPort::try_from("cluster-edge.example.com:5080").unwrap(),
+        };
+        let encoded = encode_location_metadata(Some("Test UA"), Some(&home_proxy), None);
+        let (user_agent, decoded, _) = decode_location_metadata(encoded.as_deref());
+        assert_eq!(user_agent.as_deref(), Some("Test UA"));
+        assert_eq!(decoded, Some(home_proxy));
+    }
 
     #[tokio::test]
     async fn register_succeeds_when_inserted_row_is_not_immediately_visible() {

@@ -139,6 +139,7 @@ pub struct ClusterChildLeg;
 pub struct OutboundTrunkContext {
     pub id: Option<i64>,
     pub name: String,
+    /// Configured signaling next hop, including the outbound proxy when used.
     pub dest: Option<String>,
     pub tenant_id: Option<i64>,
 }

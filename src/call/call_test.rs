@@ -7,6 +7,21 @@
 use super::*;
 
 #[test]
+fn build_sip_uri_preserves_explicit_sip_addresses() {
+    let realm = "pbx.example.com";
+    for uri in [
+        "SIP:alice@carrier.example.com:5080",
+        "SiPs:alice@carrier.example.com:5061",
+        "sips:carrier.example.com:5061;transport=tls",
+        "TEL:+15550100",
+    ] {
+        assert_eq!(build_sip_uri(uri, realm), uri);
+    }
+    assert_eq!(build_sip_uri("SIP:alice", realm), "SIP:alice@pbx.example.com");
+    assert_eq!(build_sip_uri("alice", realm), "sip:alice@pbx.example.com");
+}
+
+#[test]
 fn sequential_attempt_preserves_registered_contact_and_transport() {
     let location = Location {
         aor: "sip:alice@192.0.2.10".try_into().unwrap(),

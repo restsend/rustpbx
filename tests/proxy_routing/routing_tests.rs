@@ -322,8 +322,7 @@ async fn test_trunk_matches_inbound_ip_with_cidr() {
 #[tokio::test]
 async fn test_trunk_matches_inbound_ip_with_hostname() {
     let trunk = TrunkConfig {
-        dest: "sip:localhost:5060".to_string(),
-        inbound_hosts: vec!["localhost".to_string()],
+        dest: "localhost:5060".to_string(),
         ..Default::default()
     };
 

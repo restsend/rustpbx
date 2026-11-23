@@ -1308,7 +1308,7 @@ mod tests {
     async fn test_http_router_trunk_targets_inherit_trunk_config_and_retry() {
         let trunks = [
             ("carrier-a".to_string(), trunk("sip:10.0.0.1:5060", Some(vec![408, 503]))),
-            ("carrier-b".to_string(), trunk("sip:10.0.0.2:5080", None)),
+            ("carrier-b".to_string(), trunk("carrier-b.example.com:5080", None)),
         ]
         .into();
         let plan = resolve_with_trunks(json!({
@@ -1331,7 +1331,11 @@ mod tests {
         assert_eq!(attempts[0].location.aor.to_string(), "sip:target@10.0.0.1:5060");
         assert_eq!(attempts[0].location.destination.as_ref().unwrap().addr.to_string(), "10.0.0.1:5060");
         assert_eq!(attempts[0].location.credential.as_ref().unwrap().username, "acct");
-        assert_eq!(attempts[1].location.aor.to_string(), "sip:8613800000000@10.0.0.2:5080");
+        assert_eq!(attempts[1].location.aor.to_string(), "sip:8613800000000@carrier-b.example.com:5080");
+        assert_eq!(
+            attempts[1].location.destination.as_ref().unwrap().addr.to_string(),
+            "carrier-b.example.com:5080"
+        );
         assert_eq!(outbound_trunk(&attempts[0]), "carrier-a");
         assert_eq!(outbound_trunk(&attempts[1]), "carrier-b");
         assert_eq!(

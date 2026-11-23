@@ -1,8 +1,8 @@
 use super::*;
 use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
-use crate::proxy::proxy_call::sip_session::util::trunk_host_port;
 use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::sip_session::builtin_app_factory::BuiltinAppFactory;
+use crate::proxy::routing::trunk_dest_host_port;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A sequential attempt for an INVITE; a `None` policy keeps the dialer's legacy advance.
@@ -6695,53 +6695,53 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 
 // ── DTMF payload building ─────────────────────────────────────────────
 
-// --- trunk_host_port tests ---
+// --- trunk destination host/port tests ---
 
 #[test]
 fn test_trunk_host_port_sip_uri_with_port() {
-    let (host, port) = trunk_host_port("sip:198.51.100.74:6988").unwrap();
+    let (host, port) = trunk_dest_host_port("sip:198.51.100.74:6988").unwrap();
     assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 
 #[test]
 fn test_trunk_host_port_sip_uri_without_port() {
-    let (host, port) = trunk_host_port("sip:pbx.example.com").unwrap();
+    let (host, port) = trunk_dest_host_port("sip:pbx.example.com").unwrap();
     assert_eq!(host, "pbx.example.com");
     assert_eq!(port, 5060);
 }
 
 #[test]
 fn test_trunk_host_port_sip_uri_with_user_and_port() {
-    let (host, port) = trunk_host_port("sip:user@203.0.113.5:5060").unwrap();
+    let (host, port) = trunk_dest_host_port("sip:user@203.0.113.5:5060").unwrap();
     assert_eq!(host, "203.0.113.5");
     assert_eq!(port, 5060);
 }
 
 #[test]
 fn test_trunk_host_port_bare_host_port() {
-    let (host, port) = trunk_host_port("198.51.100.74:6988").unwrap();
+    let (host, port) = trunk_dest_host_port("198.51.100.74:6988").unwrap();
     assert_eq!(host, "198.51.100.74");
     assert_eq!(port, 6988);
 }
 
 #[test]
 fn test_trunk_host_port_bare_host_only() {
-    let (host, port) = trunk_host_port("203.0.113.10").unwrap();
+    let (host, port) = trunk_dest_host_port("203.0.113.10").unwrap();
     assert_eq!(host, "203.0.113.10");
     assert_eq!(port, 5060);
 }
 
 #[test]
 fn test_trunk_host_port_bare_ipv6() {
-    let (host, port) = trunk_host_port("[::1]").unwrap();
+    let (host, port) = trunk_dest_host_port("[::1]").unwrap();
     assert_eq!(host, "[::1]");
     assert_eq!(port, 5060);
 }
 
 #[test]
 fn test_trunk_host_port_empty() {
-    assert!(trunk_host_port("").is_none());
+    assert!(trunk_dest_host_port("").is_none());
 }
 
 // --- resolve_effective_codecs priority logic tests ---

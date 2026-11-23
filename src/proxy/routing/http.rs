@@ -90,11 +90,8 @@ impl HttpCallRouter {
         if trunk.disabled.unwrap_or(false) {
             return Err(anyhow!("trunk '{trunk_name}' is disabled"));
         }
-        let dest: rsipstack::sip::Uri = trunk
-            .dest
-            .as_str()
-            .try_into()
-            .map_err(|e| anyhow!("trunk '{trunk_name}' has invalid destination: {e:?}"))?;
+        let dest = super::parse_trunk_uri(&trunk.dest)
+            .map_err(|e| anyhow!("trunk '{trunk_name}' has invalid destination: {e}"))?;
         let callee = match callee.map(str::trim).filter(|value| !value.is_empty()) {
             Some(callee) => callee.to_string(),
             None => original

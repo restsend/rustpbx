@@ -518,6 +518,7 @@ pub fn transfer_target_kind(target: &str) -> Option<String> {
 /// Rules:
 /// - `"sip:user@host"` → unchanged
 /// - `"sip:user"`      → `"sip:user@<realm>"`
+/// - `"sips:host:5061"` → unchanged
 /// - `"user@host"`     → `"sip:user@host"`
 /// - `"user"`          → `"sip:user@<realm>"`
 /// - `"tel:+"`         → unchanged
@@ -527,16 +528,17 @@ pub fn build_sip_uri(target: &str, realm: &str) -> String {
         return format!("sip:anonymous@{}", realm);
     }
 
-    if let Some(rest) = trimmed.strip_prefix("sip:") {
-        if rest.contains('@') {
-            // "sip:user@host" → pass through
+    if let Some(address) = crate::proxy::routing::strip_sip_scheme(trimmed) {
+        let authority = address.split([';', '?']).next().unwrap_or(address);
+        if address.contains('@') || authority.contains(':') {
             trimmed.to_string()
         } else {
-            // "sip:user" → "sip:user@realm"
-            format!("sip:{}@{}", rest, realm)
+            format!("{trimmed}@{realm}")
         }
-    } else if let Some(_rest) = trimmed.strip_prefix("tel:") {
-        // tel: URIs are passed as-is
+    } else if trimmed
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tel:"))
+    {
         trimmed.to_string()
     } else if trimmed.contains('@') {
         // "user@host" → "sip:user@host"

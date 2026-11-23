@@ -3,7 +3,7 @@ use super::session::SipSession;
 use super::util::{CalleeError, into_callee_err};
 use crate::media::MediaNegotiationError;
 use crate::proxy::call::parse_allowed_codecs;
-use crate::proxy::proxy_call::sip_session::util::trunk_host_port;
+use crate::proxy::routing::trunk_dest_host_port;
 
 #[derive(Debug)]
 struct DownstreamMediaError(anyhow::Error);
@@ -1010,7 +1010,7 @@ impl SipSession {
             if trunk.codec.is_empty() {
                 continue;
             }
-            if let Some((trunk_host, trunk_port)) = trunk_host_port(&trunk.dest) {
+            if let Some((trunk_host, trunk_port)) = trunk_dest_host_port(&trunk.dest) {
                 if trunk_host.to_lowercase() == callee_host && trunk_port == callee_port {
                     let parsed = parse_allowed_codecs(&trunk.codec);
                     if !parsed.is_empty() {

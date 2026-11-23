@@ -772,7 +772,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
 }
 
 fn extract_host_from_uri(value: &str) -> Option<String> {
-    Uri::try_from(value)
+    routing::parse_trunk_uri(value)
         .ok()
         .map(|parsed| parsed.host_with_port.host.to_string())
 }
@@ -1075,17 +1075,9 @@ async fn probe_trunk_options(
         return bad_request("trunk destination is empty");
     }
 
-    let normalized_target = if target_raw.starts_with("sip:") || target_raw.starts_with("sips:") {
-        target_raw.clone()
-    } else {
-        format!("sip:{}", target_raw)
-    };
-
-    let target_uri: Uri = match Uri::try_from(normalized_target.as_str()) {
+    let target_uri = match routing::parse_trunk_uri(&target_raw) {
         Ok(uri) => uri,
-        Err(err) => {
-            return bad_request(format!("invalid SIP URI '{}': {}", target_raw, err));
-        }
+        Err(err) => return bad_request(err.to_string()),
     };
 
     let transport = match determine_transport(payload.transport.as_deref(), &target_uri) {
@@ -2202,7 +2194,7 @@ async fn resolve_candidate_ips(input: &str) -> Result<Vec<IpAddr>, String> {
 
 fn extract_sip_host(candidate: &str) -> Option<(String, u16)> {
     // Accept inputs that may be formatted as SIP URIs and surface the host/port for DNS resolution.
-    if let Ok(uri) = rsipstack::sip::Uri::try_from(candidate) {
+    if let Ok(uri) = routing::parse_trunk_uri(candidate) {
         let host = uri.host_with_port.host.to_string();
         if host.is_empty() {
             return None;
@@ -2820,6 +2812,12 @@ mod tests {
     async fn resolve_candidate_ips_accepts_sip_uri() {
         let ips = resolve_candidate_ips("sip:127.0.0.1:5060").await.unwrap();
         assert_eq!(ips, vec![IpAddr::from([127, 0, 0, 1])]);
+    }
+
+    #[tokio::test]
+    async fn resolve_candidate_ips_accepts_bare_hostname_and_port() {
+        let ips = resolve_candidate_ips("localhost:5080").await.unwrap();
+        assert!(ips.contains(&IpAddr::from([127, 0, 0, 1])));
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ use crate::{
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
         RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, TrunkDirection, VideoPolicy,
+        strip_sip_scheme,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -339,10 +340,7 @@ impl ProxyDataContext {
     /// Returns `None` for hostnames (no DNS resolution during config reload).
     pub(crate) fn dest_to_ipnet(dest: &str) -> Option<IpNet> {
         let dest = dest.trim().trim_matches(|c| c == '<' || c == '>');
-        let dest = dest
-            .strip_prefix("sip:")
-            .or_else(|| dest.strip_prefix("sips:"))
-            .unwrap_or(dest);
+        let dest = strip_sip_scheme(dest).unwrap_or(dest);
         if dest.is_empty() {
             return None;
         }
@@ -2859,8 +2857,12 @@ file = "db://ivr/lf-step-ivr.generated.toml"
 
     #[test]
     fn dest_to_ipnet_sips_with_port() {
-        let net = ProxyDataContext::dest_to_ipnet("sips:198.51.100.210:5061");
-        assert_eq!(net, Some("198.51.100.210/32".parse().unwrap()));
+        for value in ["sips:198.51.100.210:5061", "SIPS:198.51.100.210:5061"] {
+            assert_eq!(
+                ProxyDataContext::dest_to_ipnet(value),
+                Some("198.51.100.210/32".parse().unwrap())
+            );
+        }
     }
 
     #[test]

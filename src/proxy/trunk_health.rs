@@ -4,13 +4,13 @@
 /// Consecutive failures beyond `probe_count` mark the trunk as unhealthy,
 /// triggering automatic failover to `fallback_trunk`. When OPTIONS start
 /// succeeding again the trunk is restored to healthy.
-use crate::proxy::routing::TrunkConfig;
+use crate::proxy::routing::{TrunkConfig, parse_trunk_uri};
 use rsipstack::sip::{
-    Method, Param, Request, SipMessage, Uri, Version,
+    Auth, Method, Param, Request, Scheme, SipMessage, Transport, Version,
     headers::CallId,
     headers::typed::CSeq,
     typed::{From as FromHeader, To as ToHeader, Via},
-    uri::Tag,
+    uri::{ParamsExt, Tag},
 };
 use rsipstack::transaction::endpoint::EndpointInnerRef;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
@@ -57,9 +57,15 @@ pub async fn probe_trunk_with_timeout(
     local_sip_addr: &str,
     timeout_dur: Duration,
 ) -> Result<u64, String> {
-    let uri: Uri = format!("sip:health@{}", dest)
-        .parse()
-        .map_err(|e| format!("invalid dest URI {}: {}", dest, e))?;
+    let mut uri = parse_trunk_uri(dest).map_err(|err| err.to_string())?;
+    uri.auth = Some(Auth::from("health"));
+    let transport = uri.transport().cloned().unwrap_or_else(|| {
+        if uri.scheme == Some(Scheme::Sips) {
+            Transport::Tls
+        } else {
+            Transport::Udp
+        }
+    });
 
     let branch = format!(
         "z9hG4bK-hc{}",
@@ -76,7 +82,7 @@ pub async fn probe_trunk_with_timeout(
         uuid::Uuid::new_v4().to_string().replace('-', "")
     ));
 
-    let via = Via::parse(&format!("SIP/2.0/UDP {};branch={}", local_sip_addr, branch))
+    let via = Via::parse(&format!("SIP/2.0/{transport} {local_sip_addr};branch={branch}"))
         .map_err(|e| format!("invalid via: {}", e))?;
 
     let from = FromHeader {
@@ -88,9 +94,7 @@ pub async fn probe_trunk_with_timeout(
     };
     let to = ToHeader {
         display_name: None,
-        uri: format!("sip:health@{}", dest)
-            .parse()
-            .map_err(|e| format!("invalid to uri: {}", e))?,
+        uri: uri.clone(),
         params: vec![],
     };
 
@@ -143,51 +147,24 @@ pub fn dest_name(dest: &str) -> &str {
     dest.strip_prefix("sip:").unwrap_or(dest)
 }
 
-/// Extract port from a normalized (sip: stripped) target like `host:port`.
-/// Returns `None` if no port is present.
-fn extract_port(target: &str) -> Option<String> {
-    let target = target.trim();
-    if let Some(pos) = target.rfind(':') {
-        let port_str = &target[pos + 1..];
-        if port_str.parse::<u16>().is_ok() {
-            return Some(port_str.to_string());
-        }
-    }
-    None
-}
-
 /// Build a deduplicated list of probe targets for per-IP mode.
-/// Each inbound_host inherits the port from `dest` if it does not already have one.
-/// Duplicate (host:port) combinations are removed.
+/// Each inbound host inherits the port from `dest` if it does not already have one.
 pub fn build_per_ip_targets(dest: &str, inbound_hosts: &[String]) -> Vec<String> {
-    let dest_clean = dest_name(dest).to_string();
-    let default_port = extract_port(&dest_clean);
-
+    let default_port = parse_trunk_uri(dest).ok().and_then(|uri| uri.host_with_port.port);
     let mut seen = std::collections::HashSet::new();
-    let mut targets = Vec::new();
-
-    let add_target =
-        |t: &str, targets: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
-            if seen.insert(t.to_string()) {
-                targets.push(t.to_string());
-            }
-        };
-
-    add_target(&dest_clean, &mut targets, &mut seen);
-
-    for host in inbound_hosts {
-        let host = host.trim();
-        if extract_port(host).is_some() {
-            add_target(host, &mut targets, &mut seen);
-        } else if let Some(ref port) = default_port {
-            let normalized = format!("{}:{}", host, port);
-            add_target(&normalized, &mut targets, &mut seen);
-        } else {
-            add_target(host, &mut targets, &mut seen);
-        }
-    }
-
-    targets
+    std::iter::once(dest)
+        .chain(inbound_hosts.iter().map(String::as_str))
+        .filter_map(|value| {
+            let target = match parse_trunk_uri(value) {
+                Ok(mut uri) => {
+                    uri.host_with_port.port = uri.host_with_port.port.or(default_port);
+                    dest_name(&uri.to_string()).to_string()
+                }
+                Err(_) => value.trim().to_string(),
+            };
+            seen.insert(target.clone()).then_some(target)
+        })
+        .collect()
 }
 
 /// Spawn the background health-check loop.
@@ -262,10 +239,9 @@ fn spawn_health_loop_with_timeout(
                     let mut all_healthy = true;
 
                     for target in &targets {
-                        let tgt = dest_name(target);
                         let checked_at = chrono::Utc::now().to_rfc3339();
                         match probe_trunk_with_timeout(
-                            tgt,
+                            target,
                             &endpoint_inner,
                             &local_sip_addr,
                             probe_timeout,
@@ -354,10 +330,8 @@ fn spawn_health_loop_with_timeout(
                     drop(map);
                 } else {
                     // ── Standard mode: probe dest only ──
-                    let trunk_dest = dest_name(&cfg.dest);
-
                     match probe_trunk_with_timeout(
-                        trunk_dest,
+                        &cfg.dest,
                         &endpoint_inner,
                         &local_sip_addr,
                         probe_timeout,
@@ -602,6 +576,20 @@ mod tests {
         assert_eq!(dest_name("  sip:host  "), "host");
     }
 
+    #[test]
+    fn test_per_ip_probes_inherit_port_before_uri_parameters() {
+        let targets = build_per_ip_targets(
+            "SIPS:carrier@gateway.example.com:5080;transport=tls",
+            &["[2001:db8::10]".to_string(), "sip:peer.example.com;transport=tcp".to_string()],
+        );
+        assert_eq!(targets.len(), 3);
+        let ipv6 = parse_trunk_uri(&targets[1]).unwrap();
+        let peer = parse_trunk_uri(&targets[2]).unwrap();
+        assert_eq!(ipv6.host_with_port.to_string(), "[2001:db8::10]:5080");
+        assert_eq!(peer.host_with_port.to_string(), "peer.example.com:5080");
+        assert_eq!(peer.transport(), Some(&Transport::Tcp));
+    }
+
     // ── snapshot tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -661,14 +649,19 @@ mod tests {
         let (ep_inner, local_addr) = create_client_endpoint().await;
 
         sleep(Duration::from_millis(200)).await;
-        let result = probe_trunk_with_timeout(
-            &responder.addr(),
-            &ep_inner,
-            &local_addr,
-            Duration::from_secs(3),
-        )
-        .await;
-        assert!(result.is_ok(), "probe should succeed: {:?}", result.err());
+        for dest in [
+            responder.addr(),
+            format!("SIP:carrier@{};transport=udp", responder.addr()),
+        ] {
+            let result = probe_trunk_with_timeout(
+                &dest,
+                &ep_inner,
+                &local_addr,
+                Duration::from_secs(3),
+            )
+            .await;
+            assert!(result.is_ok(), "probe to {dest} should succeed: {:?}", result.err());
+        }
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use ipnet::IpNet;
 use regex::Regex;
 use rsipstack::sip::prelude::HeadersExt;
-use rsipstack::sip::{StatusCode, Uri};
+use rsipstack::sip::{Host, StatusCode, Uri};
 use rsipstack::transport::SipAddr;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -387,38 +387,41 @@ fn header_name_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
-/// Parse a trunk destination into `(host, port)`. Handles both SIP URIs and
-/// bare `host:port` strings.
-pub fn trunk_dest_host_port(dest: &str) -> Option<(String, u16)> {
+/// Return the address after a case-insensitive `sip:` or `sips:` prefix.
+pub fn strip_sip_scheme(value: &str) -> Option<&str> {
+    let (scheme, address) = value.split_once(':')?;
+    (scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips"))
+        .then_some(address)
+}
+
+/// Parse an explicit SIP URI or normalize a bare trunk address to SIP.
+pub fn parse_trunk_uri(dest: &str) -> Result<Uri> {
     let dest = dest.trim();
-    if dest.is_empty() {
-        return None;
-    }
-    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest)
-        && matches!(
-            uri.scheme,
-            None | Some(rsipstack::sip::Scheme::Sip | rsipstack::sip::Scheme::Sips)
-        )
+    let address = dest
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(dest)
+        .trim();
+    let uri = if strip_sip_scheme(address).is_some() {
+        Uri::try_from(address)
+    } else if let Some((scheme, rest)) = address.split_once(':')
+        && rest.starts_with("//")
     {
-        let host = uri.host().to_string();
-        let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
-        if host.is_empty() {
-            return None;
-        }
-        return Some((host, port));
-    }
-    // Try as bare host:port (e.g. `voip.example.com:5060`, which RFC 3986 URI
-    // parsing treats as `Scheme::Other("voip.example.com")`).
-    let parts: Vec<&str> = dest.split(':').collect();
-    let host = *parts.first()?;
-    if host.is_empty() {
-        return None;
-    }
-    let port = parts
-        .get(1)
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(5060);
-    Some((host.to_string(), port))
+        return Err(anyhow!("unsupported SIP URI scheme '{scheme}'"));
+    } else {
+        // A generic URI parser can read the hostname in `host:port` as a scheme.
+        Uri::try_from(format!("sip:{address}"))
+    };
+    uri.map_err(|err| anyhow!("invalid SIP URI '{dest}': {err}"))
+}
+
+/// Parse a trunk destination into `(host, port)`, defaulting to port 5060.
+pub fn trunk_dest_host_port(dest: &str) -> Option<(String, u16)> {
+    let uri = parse_trunk_uri(dest).ok()?;
+    Some((
+        uri.host().to_string(),
+        uri.host_with_port.port.map(|port| port.0).unwrap_or(5060),
+    ))
 }
 
 /// Find a trunk whose destination matches `host:port` (case-insensitive host).
@@ -1346,15 +1349,15 @@ async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {
         return ip == *addr;
     }
 
-    if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed) {
-        return host_matches(&uri.host_with_port.host.to_string(), addr).await;
+    let Ok(uri) = parse_trunk_uri(trimmed) else {
+        return false;
+    };
+    match uri.host_with_port.host {
+        Host::IpAddr(ip) => ip == *addr,
+        Host::Domain(host) => lookup_host((host.0.as_str(), 0))
+            .await
+            .is_ok_and(|mut addrs| addrs.any(|resolved| resolved.ip() == *addr)),
     }
-
-    if let Some((host, _)) = split_host_port(trimmed) {
-        return host_matches(host, addr).await;
-    }
-
-    host_matches(trimmed, addr).await
 }
 
 /// Public helper to validate whether a candidate host definition resolves to the provided IP.
@@ -1365,59 +1368,6 @@ pub async fn candidate_matches_ip(candidate: &str, addr: &IpAddr) -> bool {
 pub fn source_addr_ip(source_addr: &SipAddr) -> Option<IpAddr> {
     let ip: IpAddr = source_addr.addr.host.clone().try_into().ok()?;
     Some(ip)
-}
-
-async fn host_matches(host: &str, addr: &IpAddr) -> bool {
-    let cleaned = host
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
-
-    if cleaned.is_empty() {
-        return false;
-    }
-
-    if let Ok(network) = cleaned.parse::<IpNet>() {
-        return network.contains(addr);
-    }
-
-    if let Ok(socket) = cleaned.parse::<SocketAddr>() {
-        return socket.ip() == *addr;
-    }
-
-    if let Ok(ip) = cleaned.parse::<IpAddr>() {
-        return ip == *addr;
-    }
-
-    let lookup_target = match split_host_port(cleaned) {
-        Some((host_part, _)) => host_part.to_string(),
-        None => cleaned.to_string(),
-    };
-
-    match lookup_host((lookup_target.as_str(), 0)).await {
-        Ok(addrs) => addrs.into_iter().any(|resolved| resolved.ip() == *addr),
-        Err(_) => false,
-    }
-}
-
-fn split_host_port(input: &str) -> Option<(&str, &str)> {
-    if let Some(end) = input.find(']')
-        && input.starts_with('[')
-        && input.len() > end + 1
-        && input[end + 1..].starts_with(':')
-    {
-        return Some((&input[1..end], &input[end + 2..]));
-    }
-
-    if let Some(idx) = input.rfind(':') {
-        if input[..idx].contains(':') {
-            return None;
-        }
-        return Some((&input[..idx], &input[idx + 1..]));
-    }
-
-    None
 }
 
 fn matches_user_prefix(pattern: &str, value: &str) -> bool {
@@ -1636,6 +1586,12 @@ mod trunk_dest_tests {
             trunk_dest_host_port("192.168.1.1:5080"),
             Some(("192.168.1.1".to_string(), 5080))
         );
+        assert_eq!(
+            trunk_dest_host_port("[2001:db8::10]:5080"),
+            Some(("[2001:db8::10]".to_string(), 5080))
+        );
+        assert_eq!(trunk_dest_host_port("https://user@voip.example.com"), None);
+        assert_eq!(trunk_dest_host_port("voip.example.com:70000"), None);
         assert_eq!(trunk_dest_host_port("   "), None);
     }
 }

@@ -575,27 +575,6 @@ pub(super) fn emit_suspended_flow_session_end(
     gw.read().fan_out(session_id, &ev);
 }
 
-pub(crate) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
-    if dest.trim().is_empty() {
-        return None;
-    }
-    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest) {
-        let host = uri.host().to_string();
-        let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
-        return Some((host, port));
-    }
-    let parts: Vec<&str> = dest.split(':').collect();
-    let host = *parts.first()?;
-    if host.is_empty() {
-        return None;
-    }
-    let port = parts
-        .get(1)
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(5060);
-    Some((host.to_string(), port))
-}
-
 pub(super) fn parse_dial_target(target: &str) -> Result<rsipstack::sip::Uri> {
     let trimmed = target.trim();
     if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed) {

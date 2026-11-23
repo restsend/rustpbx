@@ -7,7 +7,7 @@
 ///
 /// On reload, registrations for removed trunks are cancelled (un-REGISTER with
 /// Expires: 0) and new/changed trunks with registration enabled are started.
-use crate::proxy::routing::TrunkConfig;
+use crate::proxy::routing::{TrunkConfig, parse_trunk_uri};
 use crate::config::{NetworkProfile, ProxyConfig};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -240,29 +240,13 @@ impl TrunkRegistrar {
     }
 }
 
-/// Normalize a trunk destination string into an `rsipstack::sip::Uri`.
-///
-/// Handles bare `host:port`, strips angle brackets, and prepends `sip:` if no
-/// scheme is present.  The `user@` part (if any) is kept — `Registration`
-/// overwrites `to.uri.auth` from the credential anyway.
-pub(crate) fn parse_server_uri(dest: &str) -> Result<rsipstack::sip::Uri> {
-    let trimmed = dest.trim().trim_matches(|c| c == '<' || c == '>');
-    let uri_str = if trimmed.starts_with("sip:") || trimmed.starts_with("sips:") {
-        trimmed.to_string()
-    } else {
-        format!("sip:{}", trimmed)
-    };
-    rsipstack::sip::Uri::try_from(uri_str.as_str())
-        .map_err(|e| anyhow::anyhow!("invalid SIP URI '{}': {}", uri_str, e))
-}
-
 /// Resolve the trunk's outbound proxy (`host[:port]` or SIP URI) to the
 /// address REGISTERs are sent to. `None` when no proxy is configured.
 async fn resolve_outbound_proxy(proxy: Option<&str>) -> Result<Option<SocketAddr>> {
     let Some(proxy) = proxy.map(str::trim).filter(|p| !p.is_empty()) else {
         return Ok(None);
     };
-    let uri = parse_server_uri(proxy)?;
+    let uri = parse_trunk_uri(proxy)?;
     let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
     let host = uri.host().to_string();
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -293,7 +277,7 @@ async fn registration_loop(
     };
 
     // Build server URI.
-    let server_uri = match parse_server_uri(&config.dest) {
+    let server_uri = match parse_trunk_uri(&config.dest) {
         Ok(uri) => uri,
         Err(err) => {
             error!(trunk = %name, error = %err, "failed to parse trunk destination for registration");
@@ -739,21 +723,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_server_uri() {
-        let uri = parse_server_uri("sip:provider.com").unwrap();
+    fn test_parse_trunk_uri() {
+        let uri = parse_trunk_uri("sip:provider.com").unwrap();
         assert_eq!(uri.to_string(), "sip:provider.com");
 
-        let uri = parse_server_uri("sip:provider.com:5060").unwrap();
+        let uri = parse_trunk_uri("sip:provider.com:5060").unwrap();
         assert_eq!(uri.to_string(), "sip:provider.com:5060");
 
-        let uri = parse_server_uri("sip:user@provider.com").unwrap();
+        let uri = parse_trunk_uri("sip:user@provider.com").unwrap();
         assert_eq!(uri.to_string(), "sip:user@provider.com");
 
-        let uri = parse_server_uri("10.0.0.1:5060").unwrap();
+        let uri = parse_trunk_uri("10.0.0.1:5060").unwrap();
         assert_eq!(uri.to_string(), "sip:10.0.0.1:5060");
 
-        let uri = parse_server_uri("provider.com").unwrap();
+        let uri = parse_trunk_uri("provider.com").unwrap();
         assert_eq!(uri.to_string(), "sip:provider.com");
+
+        let uri = parse_trunk_uri("<SIPS:user@provider.com:5061>").unwrap();
+        assert_eq!(uri.to_string(), "sips:user@provider.com:5061");
     }
 
     #[test]
