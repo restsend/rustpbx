@@ -18,6 +18,7 @@ pub mod add_sip_trunk_rewrite_hostport;
 pub mod add_user_mfa_columns;
 pub mod alter_rewrite_columns_length;
 pub mod call_record;
+pub mod call_record_created_at_index;
 pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;
 pub mod call_record_indices;

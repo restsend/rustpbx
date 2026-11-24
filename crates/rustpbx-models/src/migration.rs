@@ -18,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::call_record_optimization_indices::Migration),
             Box::new(super::call_record_dashboard_index::Migration),
             Box::new(super::call_record_from_number_index::Migration),
+            Box::new(super::call_record_created_at_index::Migration),
             Box::new(super::add_leg_timeline_column::Migration),
             Box::new(super::add_rewrite_columns::Migration),
             Box::new(super::system_notification::Migration),
