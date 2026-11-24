@@ -147,6 +147,8 @@ impl AppBuilder {
             return Ok(());
         }
 
+        crate::utils::init_instance_identity(&config);
+
         println!("Start at {}", Utc::now());
         println!("{}", version::get_version_info());
 
