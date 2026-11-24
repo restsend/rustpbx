@@ -150,11 +150,13 @@ the trunk supplies the rest of its configuration:
 
 The trunk is applied as the static routing rules apply it: destination and
 transport, credentials, host rewrite, codecs, network profile and media IPs,
-`max_ring_time` and the call record's trunk attribution. In a sequence each
-trunk's `max_ring_time` limits its own attempt; a single trunk target's limits
-the call unless the response sets `max_ring_time`. The response's `caller` and
-`headers` apply to trunk targets too. A target cannot name both `uri` and
-`trunk`. Parallel dialing uses the trunk's destination and credentials only.
+`max_ring_time` and the call record's trunk attribution. In sequential dialing,
+the trunk's `max_ring_time` limits its own attempt, including when there is only
+one target. The top-level response `max_ring_time` limits the entire call setup
+across all attempts. If omitted, the proxy's global ring timeout applies. The
+response's `caller` and `headers` apply to trunk targets too. A target cannot
+name both `uri` and `trunk`. Parallel dialing uses the trunk's destination and
+credentials only. The call-wide limit also applies to parallel dialing.
 
 For a call that arrived on a trunk (`source_trunk`), that trunk's network path
 (network profile, media IPs, ICE-lite) applies to every sequential target, as

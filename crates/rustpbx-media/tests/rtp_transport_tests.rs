@@ -3384,6 +3384,8 @@ async fn repeated_hold_unhold_cycles_keep_transcoded_audio_intact() {
 /// tests never reproduced it because frames arrived with zero jitter).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
+    use tokio::time::{Instant, sleep_until, timeout_at};
+
     let mut h = TestMediaHarness::create(
         TransportMode::Rtp,
         CodecType::G729,
@@ -3415,79 +3417,77 @@ async fn jittered_frame_arrival_keeps_transcode_output_gap_free() {
         }
     }
 
-    // Feed B's PCMA tone at a 20 ms AVERAGE cadence with a ~36 ms late spike
-    // on every 5th frame (the spike is recovered by shortening the interval
-    // before it — the RTP timestamps stay on the 20 ms grid, matching how a
-    // real sender's jitter bursts arrive: late, then bunched).
-    let frames = encode_tone_frames(CodecType::PCMA, 20, 120);
-    assert!(!frames.is_empty());
-    let rate = CodecType::PCMA.samplerate();
-    let clock_rate = CodecType::G729.samplerate() as u64;
-    let mut decoder = audio_codec::create_decoder(CodecType::G729);
-    let mut ts = 10_000u32;
-    let mut voiced_samples = 0u64;
-    let mut total_samples = 0u64;
+    // Send at a 20 ms average cadence, with four 16 ms intervals and one
+    // 36 ms interval per cycle. Absolute deadlines keep receive waits from
+    // making the sender fall behind its RTP clock.
+    let packet_ms = 20;
+    let packet_count = 120;
+    let codec_frame_ms = 10;
+    let frames = encode_tone_frames(CodecType::PCMA, packet_ms, packet_count);
+    assert_eq!(frames.len(), packet_count);
+    let start = Instant::now();
+    let receive_until = start + Duration::from_millis(packet_count as u64 * packet_ms + 300);
+    let send = async {
+        let mut send_at = start;
+        let mut timestamp = 10_000u32;
+        for (i, frame) in frames.into_iter().enumerate() {
+            sleep_until(send_at).await;
+            h.test_b.send_audio(frame, timestamp);
+            timestamp = timestamp.wrapping_add(CodecType::PCMA.samplerate() * packet_ms as u32 / 1000);
+            send_at += Duration::from_millis(if i % 5 == 4 { 36 } else { 16 });
+        }
+    };
 
-    // Interleave: send each frame on the jittered cadence, then drain the A
-    // side for the same wall-clock slice (the egress emits one frame per
-    // tick; the drain keeps the receiver ring from overflowing between
-    // counts).
-    for (i, frame) in frames.iter().enumerate() {
-        h.test_b.send_audio(frame.clone(), ts);
-        ts = ts.wrapping_add(rate / 50);
-        let wait = if i % 5 == 4 {
-
-            Duration::from_millis(36)
-        } else {
-            Duration::from_millis(16)
-        };
-        let deadline = tokio::time::Instant::now() + wait;
-        while tokio::time::Instant::now() < deadline {
-            match h.test_a.recv_audio(4).await {
-                Some(frame) if !frame.data.is_empty() => {
-                    let pcm = decoder.decode(&frame.data);
-                    total_samples += pcm.len() as u64;
-                    if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
-                        voiced_samples += pcm.len() as u64;
-                    }
-                }
-                _ => tokio::time::sleep(Duration::from_millis(2)).await,
+    let receive = async {
+        let mut decoder = audio_codec::create_decoder(CodecType::G729);
+        let rate = CodecType::G729.samplerate();
+        // G.729 uses 10 ms codec frames. Measure the 440 Hz component in
+        // each one so that a single loud sample cannot hide a quiet frame.
+        let codec_frame_samples = rate as usize * codec_frame_ms as usize / 1000;
+        let tone_basis: Vec<_> = (0..codec_frame_samples)
+            .map(|i| (std::f64::consts::TAU * 440.0 * i as f64 / f64::from(rate)).sin_cos())
+            .collect();
+        let mut has_tone = Vec::new();
+        let mut previous_sequence: Option<u16> = None;
+        while let Ok(received) = timeout_at(receive_until, h.test_a.recv_audio(50)).await {
+            let Some(frame) = received else { continue };
+            let sequence = frame.sequence_number.expect("RTP audio sequence number");
+            if let Some(previous) = previous_sequence.replace(sequence) {
+                assert_eq!(sequence, previous.wrapping_add(1), "RTP audio packet gap");
+            }
+            let pcm = decoder.decode(&frame.data);
+            for chunk in pcm.chunks_exact(codec_frame_samples) {
+                let (sin, cos) = chunk.iter().zip(&tone_basis).fold(
+                    (0.0, 0.0),
+                    |(sin_sum, cos_sum), (&sample, &(sin, cos))| {
+                        let sample = f64::from(sample);
+                        (sin_sum + sample * sin, cos_sum + sample * cos)
+                    },
+                );
+                let amplitude = 2.0 * sin.hypot(cos) / codec_frame_samples as f64;
+                has_tone.push(amplitude > f64::from(VOICED_SAMPLE_THRESHOLD));
             }
         }
-    }
-    // Short post-feed drain (300 ms) to flush the accumulator's last frames —
-    // the comfort-noise tail AFTER this point is the pipeline idling, not a
-    // mid-stream hole, so it stays out of the stats.
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
-    while tokio::time::Instant::now() < deadline {
-        match h.test_a.recv_audio(25).await {
-            Some(frame) if !frame.data.is_empty() => {
-                let pcm = decoder.decode(&frame.data);
-                total_samples += pcm.len() as u64;
-                if pcm.iter().any(|v| v.abs() > VOICED_SAMPLE_THRESHOLD) {
-                    voiced_samples += pcm.len() as u64;
-                }
-            }
-            _ => tokio::time::sleep(Duration::from_millis(5)).await,
-        }
-    }
+        has_tone
+    };
+    let ((), has_tone) = tokio::join!(send, receive);
 
-    // With jitter, the accumulator absorbs late frames: the mid-stream CN
-    // hole ratio stays tiny (≤ 5%). The old blocking-per-tick pull punched a
-    // silent slot per late frame (~20% holes) — that is the regression this
-    // test pins. No input frame may be lost either.
-    let ratio = voiced_samples as f64 / total_samples.max(1) as f64;
+    // The drain catches buffered tone after the last send. Count gaps only
+    // inside the tone, and check its recovered duration independently.
+    let first = has_tone.iter().position(|&tone| tone).expect("received tone");
+    let last = has_tone.iter().rposition(|&tone| tone).unwrap();
+    let active = &has_tone[first..=last];
+    let tone_frames = active.iter().filter(|&&tone| tone).count();
+    let expected_tone_frames = packet_count * (packet_ms / codec_frame_ms) as usize;
     assert!(
-        ratio >= 0.90,
-        "jittered feed produced {:.1}% voiced audio ({voiced_samples}/{total_samples} samples) —          late frames must merge into the accumulator, not punch silent slots",
-        ratio * 100.0
+        tone_frames * 100 >= active.len() * 95,
+        "jittered feed produced {tone_frames}/{} tone frames during active audio",
+        active.len(),
     );
     assert!(
-        total_samples >= 120 * 160,
-        "output lost frames: got {total_samples} samples, fed {}",
-        120 * 160
+        tone_frames * 100 >= expected_tone_frames * 95,
+        "jittered feed recovered {tone_frames}/{expected_tone_frames} tone frames",
     );
-    let _ = clock_rate;
 }
 
 /// Feedback addresses the producer's SSRC and sequence space, not the relay's.

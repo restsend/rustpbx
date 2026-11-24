@@ -1357,15 +1357,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_router_single_trunk_target_ring_time_limits_call() {
-        let trunks = [("carrier-a".to_string(), trunk("sip:10.0.0.1:5060", None))].into();
-        let plan = resolve_with_trunks(
-            json!({"action": "forward", "targets": [{"trunk": "carrier-a"}]}),
-            trunks,
-        )
-        .await
-        .unwrap();
-        assert_eq!(plan.max_ring_time, Some(std::time::Duration::from_secs(20)));
+    async fn test_http_router_keeps_trunk_and_call_ring_times_separate() {
+        let cases = [
+            (
+                json!({"action": "forward", "targets": [{"trunk": "carrier-a"}]}),
+                None,
+            ),
+            (
+                json!({
+                    "action": "forward",
+                    "targets": [{"trunk": "carrier-a"}],
+                    "max_ring_time": 45
+                }),
+                Some(std::time::Duration::from_secs(45)),
+            ),
+        ];
+
+        for (response, call_ring_time) in cases {
+            let trunks = [("carrier-a".to_string(), trunk("sip:10.0.0.1:5060", None))].into();
+            let plan = resolve_with_trunks(response, trunks).await.unwrap();
+            assert_eq!(plan.max_ring_time, call_ring_time);
+
+            let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+                panic!("expected sequential targets");
+            };
+            let [attempt] = attempts.as_slice() else {
+                panic!("expected one trunk attempt");
+            };
+            assert_eq!(attempt.max_ring_time, Some(std::time::Duration::from_secs(20)));
+        }
     }
 
     #[tokio::test]

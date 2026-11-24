@@ -125,9 +125,9 @@ chrono-tz = "0.10.4"
 # emitted as non-standard codes, adding audible quantization noise ("hiss")
 # on recordings when decoded by standard players/peers.
 audio-codec = "0.4.14"
-rsipstack = "0.8.5"
+rsipstack = "0.8.8"
 # Published fork keeps vendor APIs and adds correlated, rate-limited boundary logs.
-rustrtc = "0.6.7"
+rustrtc = "0.6.8"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
