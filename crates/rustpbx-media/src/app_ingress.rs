@@ -23,13 +23,20 @@ use rustrtc::rtp::RtpPacket;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
+use tracing::{debug, trace, warn};
 
 use crate::AudioFrame;
 use crate::leg_id::LegId;
 use crate::negotiate::NegotiatedLegProfile;
 
 const DEFAULT_PTIME_MS: u64 = 20;
+
+/// Decoded-PCM backlog bound for [`LegPcmStream`]: at most this many frames of
+/// decoded audio are kept when the decode task falls behind (runtime stalls,
+/// bursty packet arrival). Anything older is shed so a scheduling stall
+/// becomes a brief content skip instead of sustained downlink lag (observed
+/// as seconds-growing conference delay after repeated egress pacing stalls).
+const DECODE_BACKLOG_FRAMES: usize = 3;
 
 /// A decoded PCM frame.
 #[derive(Debug, Clone)]
@@ -153,6 +160,13 @@ async fn decode_task(
     let mut buffer: Vec<i16> = Vec::with_capacity(pcm_per_frame * 4);
     let mut interval = tokio::time::interval(Duration::from_millis(DEFAULT_PTIME_MS));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Backlog bound: if this task is not polled for a while (runtime stall,
+    // page-cache stall, ...), packets decoded after the pause pile up here
+    // and would be replayed late forever — the downlink lags by the whole
+    // accumulated span. Keep at most a couple of frames and jump to live.
+    let max_backlog = pcm_per_frame * DECODE_BACKLOG_FRAMES;
+    let mut last_shed_warn: Option<std::time::Instant> = None;
+    let mut shed_samples_total: u64 = 0;
 
     loop {
         tokio::select! {
@@ -170,6 +184,46 @@ async fn decode_task(
                 None => break,
             },
             _ = interval.tick() => {
+                // Absorbed more than the backlog bound -> this task was not
+                // polled for a while; shed the oldest PCM and jump to live so
+                // the stall becomes a brief content skip, not sustained lag.
+                if buffer.len() > max_backlog {
+                    let shed = buffer.len() - max_backlog;
+                    buffer.drain(..shed);
+                    shed_samples_total += shed as u64;
+                    let now = std::time::Instant::now();
+                    // CPU throttling is expected in quota'd containers
+                    // (throttle-as-norm): routine small sheds stay at debug;
+                    // only a drop big enough to hear (>= ~250ms) warns.
+                    let shed_ms = shed as u64 * 1000 / sample_rate as u64;
+                    let warn_worthy = shed_ms >= 250;
+                    let min_gap = if warn_worthy {
+                        Duration::from_secs(1)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    if last_shed_warn.map(|t| now - t >= min_gap).unwrap_or(true) {
+                        last_shed_warn = Some(now);
+                        if warn_worthy {
+                            warn!(
+                                leg = %leg,
+                                shed_ms,
+                                buffered_ms = buffer.len() as u64 * 1000 / sample_rate as u64,
+                                total_shed_ms = shed_samples_total * 1000 / sample_rate as u64,
+                                "app-ingress shed stale PCM to live \
+                                 (stall became a skip, not lag)"
+                            );
+                        } else {
+                            debug!(
+                                leg = %leg,
+                                shed_ms,
+                                total_shed_ms = shed_samples_total * 1000 / sample_rate as u64,
+                                "app-ingress shed stale PCM to live \
+                                 (routine under CPU throttling)"
+                            );
+                        }
+                    }
+                }
                 let (samples, silence) = if buffer.len() >= pcm_per_frame {
                     let frame: Vec<i16> = buffer.drain(..pcm_per_frame).collect();
                     (frame, false)
@@ -245,6 +299,72 @@ mod tests {
             "must emit at least one non-silence PCM frame after feeding data"
         );
 
+        cancel.cancel();
+    }
+
+
+    /// A scheduling stall delivers a burst of backlogged packets; the decode
+    /// task must shed the stale backlog and jump to live so the downlink does
+    /// not lag by the whole stall span (production: repeated 0.4-0.7s egress
+    /// pacing stalls grew conference delay to seconds).
+    #[tokio::test]
+    async fn decode_task_sheds_backlog_after_stall_burst() {
+        let (frame_tx, mut rx) = mpsc::channel::<PcmFrame>(64);
+        let (pkt_tx, mut pkt_rx) = mpsc::channel::<RtpPacket>(64);
+        let cancel = CancellationToken::new();
+        let codec = CodecType::PCMU;
+        let sample_rate = codec.samplerate();
+        let pcm_per_frame = (sample_rate as u64 * DEFAULT_PTIME_MS / 1000) as usize;
+
+        tokio::spawn(decode_task(
+            pkt_rx,
+            frame_tx,
+            LegId::from("stall"),
+            codec,
+            sample_rate,
+            pcm_per_frame,
+            cancel.clone(),
+        ));
+
+        // 40 frames of backlogged audio arrive in one burst (e.g. the task
+        // was not polled for 600ms). Packet i carries constant amplitude
+        // (i+1)*800 so the emitted content identifies its source packet.
+        use audio_codec::create_encoder;
+        let mut enc = create_encoder(codec);
+        for i in 0..40u16 {
+            let amp = ((i as i32 + 1) * 800).min(i16::MAX as i32) as i16;
+            let pcm = vec![amp; 160];
+            let payload = enc.encode(&pcm);
+            let _ = pkt_tx
+                .send(RtpPacket::new(
+                    RtpHeader::new(0, i, (i as u32) * 160, 1),
+                    payload,
+                ))
+                .await;
+        }
+        // pkt_tx stays alive so the task keeps running (cadence preserved).
+
+        // The FIRST non-silent frame must carry near-live content (a late
+        // packet), not the stale head of the backlog.
+        let mut first = None;
+        for _ in 0..50 {
+            match tokio::time::timeout(Duration::from_millis(120), rx.recv()).await {
+                Ok(Some(f)) if !f.silence => {
+                    first = Some(f);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        let first = first.expect("task must emit a non-silent frame after the burst");
+        let peak = first.frame.samples.iter().map(|s| s.abs()).max().unwrap();
+        let live_min = ((40 - DECODE_BACKLOG_FRAMES - 1) as i32 * 800 - 1600) as i32;
+        assert!(
+            peak as i32 >= live_min,
+            "first emitted frame must be near-live (peak {peak} >= {live_min}); \
+             stale backlog leaked as sustained downlink lag"
+        );
         cancel.cancel();
     }
 

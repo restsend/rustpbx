@@ -53,7 +53,7 @@ use rustrtc::media::track::SampleStreamSource;
 use rustrtc::{PeerConnection, RtpRewriteBridgeOptions, RtpRewriteRule};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::audio_source::{AudioSource, ResamplingAudioSource};
 
@@ -208,6 +208,7 @@ impl EgressPipeline {
         initial: EgressSource,
         ptime_ms: Option<u32>,
         gate: Option<Arc<AtomicBool>>,
+        identity: Option<Arc<str>>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
@@ -240,6 +241,11 @@ impl EgressPipeline {
             transcode_overflow_samples: 0,
             ingress_volume: None,
             transcode_armed: false,
+            identity,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
 
@@ -352,6 +358,27 @@ fn pcm_samples_per_frame(codec: CodecType, ptime: Duration) -> usize {
     (rate as u64 * ptime.as_millis() as u64 / 1000) as usize
 }
 
+/// Ticks a live-source underrun must persist before warning (50 × 20ms = 1s).
+const UNDERRUN_WARN_TICKS: u32 = 50;
+
+/// Whether a sustained underrun is due to warn. Brief gaps are normal (app
+/// audio chunk boundaries — every TTS fetch produces one), so only a hole
+/// that persisted [`UNDERRUN_WARN_TICKS`] ticks warns, re-warning every 5s
+/// while it lasts (production 2026-11-23: 5.85s of silent hold music).
+fn underrun_warn_due(
+    ticks: u32,
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if ticks < UNDERRUN_WARN_TICKS {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(t) => now - t >= Duration::from_secs(5),
+    }
+}
+
 /// Advance the wall-clock egress pacing schedule for one emitted frame.
 ///
 /// The schedule is an absolute deadline (`next_deadline += ptime`), so a short
@@ -394,6 +421,20 @@ fn media_source_for_codec(audio: Box<dyn AudioSource>, codec: CodecType) -> Box<
 }
 
 struct EgressTask {
+    /// Correlation label (session / leg) for pacing + backlog warnings.
+    identity: Option<Arc<str>>,
+    /// Last pacing warn (behind_ms, when): re-warn only when the stall grows
+    /// by >100ms, or after a 60s quiet stretch so a NEW, smaller incident
+    /// still warns (one big stall must not swallow every smaller future one).
+    last_pacing_warn: Option<(u64, tokio::time::Instant)>,
+    /// Last inject-backlog shed warning instant (rate-limit).
+    last_inject_shed_warn: Option<std::time::Instant>,
+    /// Last media-source underrun warning instant (rate-limit).
+    last_media_underrun_warn: Option<std::time::Instant>,
+    /// Consecutive live-source underrun ticks (reset on any real frame).
+    /// Brief gaps are normal (app audio chunk boundaries); a sustained run is
+    /// what listeners hear as a hole.
+    underrun_ticks: u32,
     volume: Option<crate::volume_stats::VolumeSampler>,
     volume_sink: crate::volume_stats::VolumeSink,
     sender: SampleStreamSource,
@@ -647,11 +688,37 @@ impl EgressTask {
                         &mut catchup_frames,
                     ) && behind >= ptime
                     {
-                        warn!(
-                            behind_ms = behind.as_millis() as u64,
-                            max_catchup_frames = MAX_CATCHUP_FRAMES,
-                            "egress pacing fell behind; dropped the remaining backlog"
-                        );
+                        // Rate-limit: repeated stalls of the same class are
+                        // one incident; only re-warn when the stall grows.
+                        // After a 60s quiet stretch reset the bar so a NEW,
+                        // smaller incident still warns.
+                        let behind_ms = behind.as_millis() as u64;
+                        if let Some((_, at)) = self.last_pacing_warn {
+                            if now - at >= Duration::from_secs(60) {
+                                self.last_pacing_warn = None;
+                            }
+                        }
+                        let notify = self
+                            .last_pacing_warn
+                            .map(|(last, _)| behind_ms > last + 100)
+                            .unwrap_or(true);
+                        if notify {
+                            self.last_pacing_warn = Some((behind_ms, now));
+                            if let Some(id) = &self.identity {
+                                warn!(
+                                    session_leg = %id,
+                                    behind_ms,
+                                    max_catchup_frames = MAX_CATCHUP_FRAMES,
+                                    "egress pacing fell behind; dropped the remaining backlog"
+                                );
+                            } else {
+                                warn!(
+                                    behind_ms,
+                                    max_catchup_frames = MAX_CATCHUP_FRAMES,
+                                    "egress pacing fell behind; dropped the remaining backlog"
+                                );
+                            }
+                        }
                     }
                     if let Some(volume) = self.volume.as_mut() {
                         volume.advance(now);
@@ -749,18 +816,94 @@ impl EgressTask {
                         // Live source underrun (ChannelAudioSource between app
                         // TTS chunks). Keep RTP cadence with digital silence —
                         // comfort noise here pops when the next chunk arrives.
+                        //
+                        // Brief gaps are NORMAL (every chunk boundary);
+                        // sustained silence is what listeners hear as a hole
+                        // (2026-11-23 production: 5.85s of silent hold music).
+                        // Warn only once the hole persists ~1s.
+                        self.underrun_ticks = self.underrun_ticks.saturating_add(1);
+                        let now = std::time::Instant::now();
+                        if underrun_warn_due(
+                            self.underrun_ticks,
+                            self.last_media_underrun_warn,
+                            now,
+                        ) {
+                            self.last_media_underrun_warn = Some(now);
+                            warn!(
+                                session_leg = self.identity.as_deref().unwrap_or(""),
+                                underrun_ticks = self.underrun_ticks,
+                                "media source underrun sustained >1s; emitting \
+                                 digital silence (listeners hear a hole — \
+                                 upstream stall/fetch)"
+                            );
+                        }
                         self.encode_digital_silence()
                     }
                 } else {
+                    self.underrun_ticks = 0;
                     self.encode_pcm_frame(n)
                 };
                 self.build_frame(encoded)
             }
             EgressSource::Inject { rx } => {
-                let passed = rx.lock().try_recv().ok().and_then(|sample| match sample {
+                // Drain-to-live: play the newest queued frame and shed anything
+                // older. A pipeline stall elsewhere (this task late, mixer
+                // hiccup) must surface as a brief content skip — never as
+                // seconds of accumulated lag (production 2026-11-23: repeated
+                // 0.4-0.7s pacing stalls grew merged-conference delay to
+                // seconds because every queued frame was replayed late).
+                let mut newest: Option<MediaSample> = None;
+                let mut shed = 0u64;
+                {
+                    let mut rx = rx.lock();
+                    while let Ok(sample) = rx.try_recv() {
+                        if newest.is_some() {
+                            shed += 1;
+                        }
+                        newest = Some(sample);
+                    }
+                }
+                let passed = newest.and_then(|sample| match sample {
                     MediaSample::Audio(frame) => Some(frame),
                     MediaSample::Video(_) => None,
                 });
+                if shed > 0 {
+                    // Routine small sheds are expected under CPU-quota
+                    // throttling (throttle-as-norm); only a drop big enough
+                    // to hear (>= ~250ms of content) is warn-worthy.
+                    let now = std::time::Instant::now();
+                    let shed_ms = shed * self.ptime.as_millis() as u64;
+                    let warn_worthy = shed_ms >= 250;
+                    let min_gap = if warn_worthy {
+                        Duration::from_secs(1)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    if self
+                        .last_inject_shed_warn
+                        .map(|t| now - t >= min_gap)
+                        .unwrap_or(true)
+                    {
+                        self.last_inject_shed_warn = Some(now);
+                        if warn_worthy {
+                            warn!(
+                                session_leg = self.identity.as_deref().unwrap_or(""),
+                                shed_frames = shed,
+                                shed_ms,
+                                "conference downlink backlog shed to live \
+                                 (stall became a skip, not lag)"
+                            );
+                        } else {
+                            debug!(
+                                session_leg = self.identity.as_deref().unwrap_or(""),
+                                shed_frames = shed,
+                                shed_ms,
+                                "conference downlink backlog shed to live \
+                                 (routine under CPU throttling)"
+                            );
+                        }
+                    }
+                }
                 match passed {
                     Some(frame) => {
                         // Mixed audio and underrun silence share the leg's
@@ -1056,6 +1199,25 @@ mod tests {
     use rustrtc::media::MediaKind;
     use rustrtc::media::track::sample_track;
 
+    /// Underrun warns only for sustained holes: chunk-boundary gaps (normal)
+    /// stay quiet, a >1s hole warns once and re-warns every 5s while it
+    /// lasts, and a NEW short hole after an old warning stays quiet.
+    #[test]
+    fn underrun_warn_only_when_sustained() {
+        let now = std::time::Instant::now();
+        // Short gaps: never warn regardless of history.
+        assert!(!underrun_warn_due(1, None, now));
+        assert!(!underrun_warn_due(49, None, now));
+        // Crosses the 1s mark: warn.
+        assert!(underrun_warn_due(50, None, now));
+        assert!(underrun_warn_due(51, None, now));
+        // Persisting: re-warn only every 5s.
+        assert!(!underrun_warn_due(60, Some(now - Duration::from_secs(1)), now));
+        assert!(underrun_warn_due(60, Some(now - Duration::from_secs(6)), now));
+        // A NEW short hole after an old warning stays quiet.
+        assert!(!underrun_warn_due(10, Some(now - Duration::from_secs(30)), now));
+    }
+
     /// A minimal AudioSource that emits a constant-amplitude PCM sine-ish ramp,
     /// looping forever.
     struct LoopingBeep {
@@ -1128,6 +1290,7 @@ mod tests {
             EgressSource::Silence,
             Some(20),
             None,
+            None,
         );
 
         assert!(pipe.volume_summary(Duration::from_secs(2)).is_none());
@@ -1175,6 +1338,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -1231,6 +1399,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 10_000,
             sequence_number: 42,
             marker_pending: true,
@@ -1305,6 +1478,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             // Stale private counter: the pipeline never emitted while the
             // relay owned the wire.
             next_rtp_timestamp: 500,
@@ -1380,6 +1558,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -1462,6 +1645,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -1558,6 +1746,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -1603,6 +1796,7 @@ mod tests {
             EgressSource::Silence,
             Some(20),
             None,
+            None,
         );
         // Switch to a looping media source mid-stream.
         pipe.set_source(EgressSource::Media {
@@ -1631,6 +1825,7 @@ mod tests {
                 on_arm_failed: None,
             },
             Some(20),
+            None,
             None,
         );
 
@@ -1751,7 +1946,7 @@ mod tests {
         };
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
         let pipe =
-            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
+            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None, None);
 
         let consumed = Arc::new(AtomicUsize::new(0));
         pipe.set_source(EgressSource::Media {
@@ -1808,6 +2003,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -1851,6 +2051,7 @@ mod tests {
         let pipeline = EgressPipeline::start_with_gate(
             sender, pcmu_codec(), EgressSource::Silence, Some(20),
             Some(Arc::new(AtomicBool::new(true))),
+            None,
         );
         pipeline.set_source(EgressSource::TranscodePeer {
             peer: peer_track,
@@ -1959,6 +2160,11 @@ mod tests {
             resampler: Some(BoxedResampler::new(48_000, 8000).expect("valid sample rates")),
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -2042,6 +2248,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -2291,6 +2502,11 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
@@ -2355,7 +2571,7 @@ mod tests {
         let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
         let codec = pcmu_codec();
         let pipe =
-            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
+            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None, None);
 
         pipe.set_source(EgressSource::Media {
             audio: Box::new(FiniteSource { frames_left: 1 }),
@@ -2439,6 +2655,11 @@ mod transcode_drain_tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
+            identity: None,
+            last_pacing_warn: None,
+            underrun_ticks: 0,
+            last_inject_shed_warn: None,
+            last_media_underrun_warn: None,
             next_rtp_timestamp: 1000,
             sequence_number: 0,
             marker_pending: false,

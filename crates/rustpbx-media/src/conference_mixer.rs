@@ -7,15 +7,24 @@ use audio_codec::CodecType;
 use parking_lot::Mutex as ParkMutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub use crate::AudioFrame;
 
 const INPUT_BUFFER_FRAMES: usize = 5;
+
+/// Mixed-audio output channel depth per participant. The forward loop
+/// (conference_media_bridge) drains this into the leg egress; if that path
+/// stalls (runtime stall, slow encode), a deep queue would replay stale
+/// audio as sustained seconds-long delay (observed 2026-11-23: merged-call
+/// delay grew to seconds after repeated egress pacing stalls). Cap to 3
+/// frames (60ms): a stall becomes a brief skip, never accumulated lag.
+const MIXED_OUT_FRAMES: usize = 3;
 
 /// Owned only by the mixing task; no shared participant or audio state.
 struct ConferenceParticipantAudio {
@@ -118,7 +127,7 @@ impl ConferenceAudioMixer {
         _codec: CodecType,
     ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
         let (input_tx, input_rx) = mpsc::channel(INPUT_BUFFER_FRAMES);
-        let (output_tx, output_rx) = mpsc::channel(100);
+        let (output_tx, output_rx) = mpsc::channel(MIXED_OUT_FRAMES);
         self.send_command(MixerCommand::Add { leg_id, input_rx, output_tx }).await?;
         Ok((input_tx, output_rx))
     }
@@ -166,6 +175,12 @@ impl ConferenceAudioMixer {
         let mut participants: Vec<ConferenceParticipantAudio> = Vec::new();
         let mut inputs = StreamMap::new();
         let mut route_gains: HashMap<(LegId, LegId), f32> = HashMap::new();
+        // Rate-limit state for mixed-output drop warnings (see try_send below);
+        // kept outside `participants` because the mix loop shares it immutably.
+        // Maps leg -> (window start, drops since last report): drops arrive at
+        // most one per mix tick, so only the accumulated count can size the
+        // audible loss.
+        let mut drop_stats: HashMap<LegId, (std::time::Instant, u64)> = HashMap::new();
         let period = tokio::time::Duration::from_millis(
             ((frame_size as u64 * 1000) / sample_rate as u64).max(1),
         );
@@ -263,7 +278,43 @@ impl ConferenceAudioMixer {
                         }
                         if !input_frames.is_empty() {
                             let mixed = AudioMixer::mix(input_frames, &gains);
-                            let _ = output.output_tx.try_send(AudioFrame::new(mixed, sample_rate));
+                            // try_send: when the participant's drain path is
+                            // stalled, drop the NEWEST frame — the queue keeps
+                            // a bounded 3-frame window so latency never
+                            // accumulates (content skips forward instead).
+                            if output
+                                .output_tx
+                                .try_send(AudioFrame::new(mixed, sample_rate))
+                                .is_err()
+                            {
+                                let now = std::time::Instant::now();
+                                let entry = drop_stats
+                                    .entry(output.leg_id.clone())
+                                    .or_insert((now, 0));
+                                entry.1 += 1;
+                                let (window_start, drops) = *entry;
+                                if now - window_start >= Duration::from_secs(5) {
+                                    *entry = (now, 0);
+                                    let lost_ms = drops * period.as_millis() as u64;
+                                    if lost_ms >= 250 {
+                                        warn!(
+                                            leg = %output.leg_id,
+                                            drops,
+                                            lost_ms,
+                                            "conference mixed-output dropping frames \
+                                             (drain stalled — stall became a skip, not lag)"
+                                        );
+                                    } else {
+                                        debug!(
+                                            leg = %output.leg_id,
+                                            drops,
+                                            lost_ms,
+                                            "conference mixed-output dropped frames \
+                                             (routine under CPU throttling)"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }

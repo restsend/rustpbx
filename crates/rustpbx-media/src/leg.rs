@@ -443,6 +443,7 @@ impl LegInner {
             EgressSource::Silence,
             None,
             Some(gated.clone()),
+            Some(label.clone().into()),
         );
 
         // Subscribe audio (and video, when present) senders' RTCP broadcast for

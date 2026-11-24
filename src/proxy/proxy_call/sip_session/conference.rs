@@ -4,6 +4,12 @@ use crate::call::domain::LegId;
 use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
 
+/// Depth of the leg egress inject channel for conference participants. The
+/// egress task consumes one 20ms frame per tick; a deep queue would turn a
+/// scheduling stall into sustained downlink lag (bounded here to 60ms — see
+/// rustpbx-media conference_mixer MIXED_OUT_FRAMES).
+const INJECT_CHANNEL_FRAMES: usize = 3;
+
 impl SipSession {
     /// Join all active legs into the given conference room.
     /// Creates the room if it does not already exist.
@@ -87,7 +93,7 @@ impl SipSession {
                 peer.pc(), peer.negotiated().ok_or_else(|| anyhow!("Leg is not negotiated"))?,
                 local_leg.clone(), self.cancel_token.child_token(),
             )?;
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let (tx, rx) = tokio::sync::mpsc::channel(INJECT_CHANNEL_FRAMES);
             peer.set_egress_source(crate::media::egress::EgressSource::Inject {
                 rx: parking_lot::Mutex::new(rx),
             }).await?;
