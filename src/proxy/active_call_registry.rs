@@ -715,4 +715,55 @@ mod tests {
         registry.remove(session);
         assert!(registry.get_context_meta(session).is_none());
     }
+
+    /// Dual-live same-id contract — the mechanism the G↔R multi-hop re-entry
+    /// rides (`session_id_live_reentry_adopt`, default ON): upsert overwrite
+    /// is latest-wins, teardown is instance-scoped. The OLD session finishing
+    /// first must NOT delete the NEWER session's registration out from under
+    /// it (the REFER-Replaces precedent documented on `remove_if_current`).
+    #[test]
+    fn dual_live_same_id_latest_wins_and_instance_scoped_teardown() {
+        let registry = ActiveProxyCallRegistry::new();
+        let root = "dual-live-root";
+
+        let old_handle = make_handle(root);
+        let new_handle = make_handle(root);
+        let old_instance = old_handle.instance_token();
+        let new_instance = new_handle.instance_token();
+        assert_ne!(
+            old_instance, new_instance,
+            "each session instance carries a distinct teardown token"
+        );
+
+        // The first (bridge) session registers the root id; the re-entering
+        // leg adopts the SAME id while it is still live.
+        registry.upsert(make_entry(root), old_handle);
+        registry.upsert(make_entry(root), new_handle.clone());
+
+        // Latest wins: by-id lookups resolve to the re-entering session.
+        assert_eq!(registry.count(), 1, "one key, newest entry wins");
+        let got = registry.get_handle(root).expect("newest entry must exist");
+        assert_eq!(
+            got.instance_token(),
+            new_instance,
+            "by-id lookups must resolve to the newest session during dual-live overlap"
+        );
+
+        // The OLD session finishing first must not delete the key out from
+        // under the newer session.
+        registry.remove_if_current(root, old_instance);
+        assert!(
+            registry.get(root).is_some(),
+            "old session teardown must spare the newer session's registration"
+        );
+        assert!(
+            registry.get_handle(root).is_some(),
+            "old session teardown must spare the newer session's handle"
+        );
+
+        // The NEWEST session's teardown removes the shared key.
+        registry.remove_if_current(root, new_instance);
+        assert!(registry.get(root).is_none());
+        assert!(registry.get_handle(root).is_none());
+    }
 }

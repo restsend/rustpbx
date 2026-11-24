@@ -587,19 +587,30 @@ impl CallModule {
                     if let Some(id) =
                         crate::call::session_id::extract_from_source_header(original, name)
                     {
-                        // Same back-off as the cluster child-leg adoption: a
-                        // live local session already holding this id (the
-                        // trunk reusing a correlation value while the previous
-                        // call is still tearing down) must not collapse into
-                        // it — fall through to the Call-ID derivation.
-                        if server.active_call_registry.get(&id).is_some() {
-                            debug!(
-                                root = %id,
-                                "trunk correlation id already live on this node; keeping a unique session id"
-                            );
-                        } else {
+                        if server.active_call_registry.get(&id).is_none() {
                             return id;
                         }
+                        // LIVE on this node: either the same logical call
+                        // re-entering (the G↔R multi-hop chain — the far side
+                        // re-dials BEFORE releasing its bridge, so the
+                        // overlap is structural, not a teardown race) or a
+                        // foreign reuse of the correlation value. Adopt by
+                        // default: concurrent same-id sessions ride the
+                        // registry's latest-wins upsert and instance-guarded
+                        // teardown (the REFER-Replaces precedent);
+                        // `session_id_live_reentry_adopt = false` restores
+                        // the unique-id back-off.
+                        if server.proxy_config.load().session_id_live_reentry_adopt {
+                            info!(
+                                root = %id,
+                                "trunk correlation id live on this node; adopting as the same logical call re-entering"
+                            );
+                            return id;
+                        }
+                        warn!(
+                            root = %id,
+                            "trunk correlation id already live on this node; keeping a unique session id (session_id_live_reentry_adopt = false)"
+                        );
                     }
                 }
             }
@@ -5972,10 +5983,17 @@ mod tests {
     );
     impl SourceHeaderSettings {
         fn install(source_header: Option<&str>) -> Self {
+            Self::install_length(32, source_header)
+        }
+
+        /// [`Self::install`] with an explicit generated-id length — for
+        /// deployments running `session_id_length = 16` (the G-system
+        /// interconnect shapes).
+        fn install_length(length: usize, source_header: Option<&str>) -> Self {
             let serial = crate::call::session_id::settings_test_lock();
             let prev = crate::call::session_id::settings();
             crate::call::session_id::init_settings(
-                32,
+                length,
                 crate::call::session_id::SessionIdHeaderMode::Native,
                 true,
                 source_header.map(str::to_string),
@@ -6028,7 +6046,8 @@ mod tests {
         );
         assert_eq!(
             resolved, "call-2026-00042",
-            "the configured source header must win over Call-ID reuse"
+            "the configured source header must win over Call-ID reuse; settings at failure: {:?}",
+            crate::call::session_id::settings()
         );
     }
 
@@ -6256,6 +6275,9 @@ mod tests {
     /// A trunk reusing a correlation value while the previous call is still
     /// live must not collapse into the live session — the same back-off the
     /// cluster child-leg path applies. Falls through to Call-ID derivation.
+    /// Opt-out contract only: default (`session_id_live_reentry_adopt = true`)
+    /// adopts the live root as the same logical call re-entering — see
+    /// `multi_hop_trunk_reentry_adopts_live_root_by_default`.
     #[tokio::test]
     async fn live_local_correlation_id_blocks_adoption() {
         use crate::proxy::active_call_registry::ActiveProxyCallEntry;
@@ -6263,6 +6285,9 @@ mod tests {
 
         let _settings = SourceHeaderSettings::install(Some("X-Call-Session-Id"));
         let (server, _config) = create_test_server().await;
+        let mut proxy_config = (*server.proxy_config.load_full()).clone();
+        proxy_config.session_id_live_reentry_adopt = false;
+        server.proxy_config.store(std::sync::Arc::new(proxy_config));
         let live_id = "ORD-88923";
         let dialplan = Dialplan::new(
             "previous-leg".to_string(),
@@ -6309,6 +6334,167 @@ mod tests {
         assert_eq!(
             resolved, "aabbccddeeff00112233445566778899",
             "fall-through must land on the Call-ID derivation"
+        );
+    }
+
+    /// PRODUCTION REGRESSION CONTRACT — CDR #373296, the G↔R multi-hop
+    /// transfer chain ("呼入R→人工 → 转G出租车IVR → G人工 → 转回R IVR/人工 → 再次转回R").
+    ///
+    /// The G side re-enters R with `X-RustPBX-SessionID: a859f71f1a805afa`
+    /// while R's PREVIOUS leg of the same logical call is still live — the
+    /// overlap is STRUCTURAL: the far side re-dials before releasing its
+    /// bridge, so the old session always occupies the id at INVITE time.
+    /// `session_id_live_reentry_adopt` (default ON) treats the re-entry as
+    /// the same logical call and keeps the root id verbatim — the pre-b91d04ffd
+    /// divergence minted 9e32d85099fae249 here (concurrent-reuse back-off,
+    /// production 2026-11-24). Once the previous leg finishes tearing down,
+    /// the identical INVITE adopts the same value: one id either way.
+    #[tokio::test]
+    async fn multi_hop_trunk_reentry_adopts_live_root_by_default() {
+        use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+        // Production shapes: 16-hex root (that deployment runs
+        // `session_id_length = 16`), the G-system correlation header, and
+        // the SBC's rewritten Call-ID (host-qualified, not id-shaped).
+        const ROOT: &str = "a859f71f1a805afa";
+        const CORRELATION_HEADER: &str = "X-RustPBX-SessionID";
+        const SBC_CALL_ID: &str = "138322115724112026155122@10.68.144.75";
+        let (server, _config) = create_test_server().await;
+        server.data_context.trunks.insert(
+            "sbc-inbound".to_string(),
+            crate::proxy::routing::TrunkConfig::default(),
+        );
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: Some(4),
+            name: "sbc-inbound".to_string(),
+            did_numbers: vec![],
+        });
+        let request = source_header_invite(CORRELATION_HEADER, ROOT, SBC_CALL_ID);
+
+        // The prior R leg of the same logical call is still up (the
+        // structural transfer overlap): adoption must keep the root id —
+        // NOT mint a fresh one (the reported symptom).
+        let dialplan = Dialplan::new(
+            "prior-leg".to_string(),
+            crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            DialDirection::Inbound,
+        );
+        let (_session, handle, _rx) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        let now = chrono::Utc::now();
+        server.active_call_registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: ROOT.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: now,
+                answered_at: Some(now),
+                status: ActiveProxyCallStatus::Talking,
+            },
+            handle,
+        );
+        // Settings window wraps ONLY the synchronous resolutions — the
+        // generator settings are process-global and sibling tests read them
+        // without the lock.
+        let (resolved, adopted_after_teardown) = {
+            let _settings = SourceHeaderSettings::install_length(16, Some(CORRELATION_HEADER));
+            let resolved = CallModule::resolve_inbound_session_id(
+                &server, &cookie, &request, SBC_CALL_ID, true,
+            );
+            // Invariant: once the prior leg finishes tearing down, the
+            // identical INVITE still resolves to the same root id — the
+            // resolution result is independent of the overlap window.
+            server.active_call_registry.remove(ROOT);
+            let adopted_after_teardown = CallModule::resolve_inbound_session_id(
+                &server, &cookie, &request, SBC_CALL_ID, true,
+            );
+            (resolved, adopted_after_teardown)
+        };
+        assert_eq!(
+            resolved, ROOT,
+            "a re-entering leg of a live logical call must keep the root session id"
+        );
+        assert_eq!(
+            adopted_after_teardown, ROOT,
+            "adoption must not depend on whether the prior leg is still live"
+        );
+    }
+
+    /// Opt-out contract: `session_id_live_reentry_adopt = false` restores the
+    /// unique-id back-off — the SBC's rewritten Call-ID is not id-shaped, so
+    /// the fall-through MINTS a fresh id (exactly the production symptom the
+    /// default-on path exists to prevent). Kept as a pinned contract for
+    /// deployments that want collision conservatism.
+    #[tokio::test]
+    async fn live_reentry_adopt_disabled_backs_off() {
+        use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+        const ROOT: &str = "a859f71f1a805afa";
+        const CORRELATION_HEADER: &str = "X-RustPBX-SessionID";
+        const SBC_CALL_ID: &str = "138322115724112026155122@10.68.144.75";
+        let (server, _config) = create_test_server().await;
+        let mut proxy_config = (*server.proxy_config.load_full()).clone();
+        proxy_config.session_id_live_reentry_adopt = false;
+        server.proxy_config.store(std::sync::Arc::new(proxy_config));
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: Some(4),
+            name: "sbc-inbound".to_string(),
+            did_numbers: vec![],
+        });
+        let request = source_header_invite(CORRELATION_HEADER, ROOT, SBC_CALL_ID);
+
+        let dialplan = Dialplan::new(
+            "prior-leg".to_string(),
+            crate::proxy::tests::common::create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            DialDirection::Inbound,
+        );
+        let (_session, handle, _rx) = build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        let now = chrono::Utc::now();
+        server.active_call_registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: ROOT.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: now,
+                answered_at: Some(now),
+                status: ActiveProxyCallStatus::Talking,
+            },
+            handle,
+        );
+        // Settings window wraps ONLY the synchronous resolution + the
+        // id-shape assertion (normalize reads the installed length).
+        let (resolved, id_shaped) = {
+            let _settings = SourceHeaderSettings::install_length(16, Some(CORRELATION_HEADER));
+            let resolved = CallModule::resolve_inbound_session_id(
+                &server, &cookie, &request, SBC_CALL_ID, true,
+            );
+            let id_shaped = crate::call::session_id::is_session_id_like(&resolved);
+            (resolved, id_shaped)
+        };
+        assert_ne!(
+            resolved, ROOT,
+            "the opt-out must restore the live-occupancy back-off"
+        );
+        assert!(
+            id_shaped,
+            "fall-through must mint a fresh id-shaped session id (the production symptom)"
         );
     }
 }

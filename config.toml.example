@@ -220,6 +220,17 @@ media_proxy = "auto"
 # logical call's correlation onto the caller. Enable only when your devices
 # are first-party (e.g. restsend-call consult legs forwarding business ids).
 # session_id_device_custom_root = false
+# Concurrent same-id re-entry: when a trunk correlation header carries a
+# value that is ALREADY live on this node, treat the INVITE as the same
+# logical call returning and keep the root id. G↔R multi-hop chains hit
+# this on every return — the far side re-dials in BEFORE releasing its
+# bridge, so the overlap is structural, not a teardown race. Concurrent
+# same-id sessions ride the registry's latest-wins upsert and
+# instance-guarded teardown (the REFER-Replaces precedent). false restores
+# the unique-id back-off on collision (a fresh unrelated id is minted,
+# severing the logical-call correlation — the 2026-11-24 production
+# regression). Default: true
+# session_id_live_reentry_adopt = true
 
 # Direct extension-to-extension (P2P) calls: when a callee has multiple
 # registered devices, ring ALL of them in parallel (first to answer wins).

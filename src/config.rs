@@ -124,6 +124,10 @@ fn default_session_id_inherit_callid() -> bool {
     true
 }
 
+fn default_session_id_live_reentry_adopt() -> bool {
+    true
+}
+
 fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
 }
@@ -1581,6 +1585,18 @@ pub struct ProxyConfig {
     /// correlation ids (e.g. restsend-call consult legs).
     #[serde(default)]
     pub session_id_device_custom_root: bool,
+    /// Adopt a trunk correlation header whose value is already LIVE on this
+    /// node. The G↔R multi-hop chain re-enters while the previous leg is
+    /// still up — the far side re-dials BEFORE releasing its bridge, so the
+    /// overlap is structural, not a teardown race — and the occupancy check
+    /// would otherwise fork a fresh id and sever the logical-call
+    /// correlation (production 2026-11-24: a859f71f1a805afa →
+    /// 9e32d85099fae249). Default true: concurrent same-id sessions ride the
+    /// registry's latest-wins upsert and instance-guarded teardown (the
+    /// REFER-Replaces precedent). false restores the unique-id back-off on
+    /// collision.
+    #[serde(default = "default_session_id_live_reentry_adopt")]
+    pub session_id_live_reentry_adopt: bool,
     pub t1_timer: Option<u64>,
     pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
@@ -2417,6 +2433,7 @@ impl Default for ProxyConfig {
             session_id_inherit_callid: default_session_id_inherit_callid(),
             session_id_default_header: None,
             session_id_device_custom_root: false,
+            session_id_live_reentry_adopt: default_session_id_live_reentry_adopt(),
             modules: Some(vec![
                 "acl".to_string(),
                 "auth".to_string(),

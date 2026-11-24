@@ -63,3 +63,6 @@ mod test_network_conference;
 
 #[path = "proxy_e2e/test_cluster_consult_state_relay_e2e.rs"]
 mod test_cluster_consult_state_relay_e2e;
+
+#[path = "proxy_e2e/test_cluster_reentry_adopts_root_e2e.rs"]
+mod test_cluster_reentry_adopts_root_e2e;
