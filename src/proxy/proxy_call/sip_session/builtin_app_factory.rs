@@ -523,7 +523,8 @@ impl BuiltinAppFactory {
                 }
 
                 let mut app = crate::call::app::queue::QueueApp::new(plan, config)
-                    .with_call_id(context.call_info.session_id.clone());
+                    .with_call_id(context.call_info.session_id.clone())
+                    .with_trace_enqueued_at(pending.joined_at);
                 // `queue_joined` was already broadcast before agent resolution
                 // (strict ordering) — suppress the duplicate in `on_enter`.
                 if pending.joined_emitted {
@@ -617,6 +618,7 @@ mod tests {
             skill_group_id: None,
             overflow_overrides: None,
             joined_emitted: false,
+            joined_at: None,
             queue_enricher: None,
         });
 
@@ -714,6 +716,7 @@ mod tests {
                         skill_group_id: Some("support".into()),
                         overflow_overrides: None,
                         joined_emitted: false,
+                        joined_at: None,
                         queue_enricher: None,
                     });
                     let app = BuiltinAppFactory::new(None, None)

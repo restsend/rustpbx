@@ -647,6 +647,14 @@ async fn device_custom_root_linkage_is_opt_in() {
         "device legs keep the stats-marker dial intent"
     );
 
+    let sentinel = inherited_delivery_session_opts(
+        "", Some("self-dial"), true, Some("consult"), false, false, true, false,
+    )
+    .await;
+    assert_eq!(sentinel.meta.root_session_id.as_deref(), None,
+        "the device's fallback marker must not correlate unrelated calls");
+    assert_eq!(sentinel.meta.dial_leg_role.as_deref(), Some("consult"));
+
     // 默认关（其余同参）：不链接。
     let session = inherited_delivery_session_opts(
         "",

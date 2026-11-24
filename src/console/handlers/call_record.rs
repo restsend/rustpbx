@@ -1742,14 +1742,25 @@ async fn query_call_records(
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct CallRecordDetailQuery {
+    by: Option<String>,
+}
+
 async fn page_call_record_detail(
     AxumPath(id_param): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
+    Query(query): Query<CallRecordDetailQuery>,
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model_result = if let Ok(pk) = id_param.parse::<i64>() {
+    let row_id = if query.by.as_deref() == Some("call_id") {
+        None
+    } else {
+        id_param.parse::<i64>().ok()
+    };
+    let model_result = if let Some(pk) = row_id {
         CallRecordEntity::find_by_id(pk).one(db).await
     } else {
         CallRecordEntity::find()
@@ -3348,6 +3359,64 @@ mod tests {
         ConsoleState::initialize(db, ConsoleConfig::default(), None)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn call_record_detail_distinguishes_numeric_call_id_from_row_id() {
+        use crate::console::middleware::ApiTokenAuth;
+        use axum::{Extension, body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let db = setup_db().await;
+        for (id, call_id) in [(17, "ordinary-call"), (18, "17"), (19, "123456789")] {
+            call_record::ActiveModel {
+                id: Set(id),
+                call_id: Set(call_id.into()),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(Utc::now()),
+                created_at: Set(Utc::now()),
+                updated_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+        let router = urls()
+            .with_state(create_console_state(db).await)
+            .layer(Extension(ApiTokenAuth(superuser())));
+        for (uri, expected_row) in [
+            ("/call-records/17", 17),
+            ("/call-records/ordinary-call", 17),
+            ("/call-records/17?by=call_id", 18),
+            ("/call-records/123456789?by=call_id", 19),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&body).unwrap().replace("&#x2f;", "/");
+            assert!(
+                html.contains(&format!("/call-records/{expected_row}/sip-flow")),
+                "expected detail page for row {expected_row} at {uri}"
+            );
+        }
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/call-records/18?by=call_id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

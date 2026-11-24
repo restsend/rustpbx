@@ -693,6 +693,27 @@ pub trait AgentRegistry: Send + Sync {
         uris
     }
 
+    /// Resolve escalation targets and report the skill group of the reserved head.
+    /// Backends that return an unattributed union can leave the group absent.
+    async fn resolve_escalation_targets_with_group(
+        &self,
+        primary_target_uri: &str,
+        add_group_ids: &[String],
+        call_id: &str,
+        fair: bool,
+        include_primary: bool,
+        excluded_agent_ids: &[String],
+    ) -> (Vec<String>, Option<String>) {
+        let uris = self.resolve_escalation_targets(
+            primary_target_uri, add_group_ids, call_id, fair, include_primary, excluded_agent_ids,
+        ).await;
+        let group = match add_group_ids {
+            [group] if !include_primary && !uris.is_empty() => Some(group.clone()),
+            _ => None,
+        };
+        (uris, group)
+    }
+
     /// Notify the dispatcher that a queued call was abandoned by the caller
     /// before any agent answered. Default no-op; addon implementations (e.g. CC)
     /// use it to emit skill-group lifecycle events (`skill_group_call_abandoned`).

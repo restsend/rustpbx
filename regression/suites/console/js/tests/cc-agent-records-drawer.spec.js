@@ -15,7 +15,7 @@
  *   3. tab switching re-queries call-history;
  *   4. the calls filter bar carries direction/status/caller/callee into
  *      the request;
- *   5. CDR detail rows link to /console/call-records/{call_id} in a new
+ *   5. CDR detail rows link to /console/call-records/{call_id}?by=call_id in a new
  *      tab (skipped without data);
  *   6. the status-history tab renders break transitions with their
  *      catalog label (「久振未接 (away:998)」 for the automatic no-answer
@@ -160,7 +160,7 @@ test.describe('CC console agent records drawer', () => {
   test('call rows link to the console CDR detail in a new tab', async ({ page }) => {
     if (!(await openAgentsTab(page))) return
     // Read whatever the drawer renders — with data, every row must carry a
-    // /console/call-records/{id} link opening in a new tab.
+    // /console/call-records/{call_id}?by=call_id link opening in a new tab.
     const icon = page
       .locator('#cc-spa-app table button[title*="通话记录"], #cc-spa-app table button[title*="Call records"], #cc-spa-app table button[title*="call records"]')
       .first()
@@ -194,7 +194,7 @@ test.describe('CC console agent records drawer', () => {
       return
     }
     const href = await links.first().getAttribute('href')
-    expect(href).toMatch(/\/call-records\/[^/]+$/)
+    expect(href).toMatch(/\/call-records\/[^/]+\?by=call_id$/)
     expect(await links.first().getAttribute('target')).toBe('_blank')
   })
 
@@ -249,7 +249,7 @@ test.describe('CC console agent records drawer', () => {
     await expect(drawer.getByText('久振未接 (away:998)')).toBeVisible()
 
     // The triggering call id links to the CDR detail page in a new tab.
-    const link = drawer.locator('a[href*="/call-records/call-abc-123"]')
+    const link = drawer.locator('a[href$="/call-records/call-abc-123?by=call_id"]')
     await expect(link).toBeVisible()
     expect(await link.getAttribute('target')).toBe('_blank')
     // Full id on hover, truncated text in the cell.

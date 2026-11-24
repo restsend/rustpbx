@@ -214,7 +214,8 @@ media_proxy = "auto"
 # UUI: a non-peer, non-trunk INVITE carrying `purpose=call-center`, a known
 # `leg=` intent, and a safe-string data part (≤120 chars, A-Za-z0-9._@-)
 # gets that data part adopted as the logical-call root — it then rides
-# events / CDR / the trunk correlation header verbatim. Default false: the
+# events / CDR / the trunk correlation header verbatim. The reserved UUI
+# data value `self-dial` only declares the leg's intent. Default false: the
 # device-declared data part must stay UUID-shaped, because custom business
 # correlation strings are guessable and a planted root merges another
 # logical call's correlation onto the caller. Enable only when your devices

@@ -912,8 +912,9 @@ async fn local_three_way_merge_synthesizes_conference_event_trio() {
         "latch must suppress duplicate conference events"
     );
 
-    // Member teardown → member_left with the latch-time role snapshot.
-    session.emit_rwi_leg_hangup(&consult, Some("UasBye".into()));
+    // Explicit removal stops the live leg monitor and must report membership
+    // immediately, with the role captured when the room was created.
+    session.handle_remove_leg(consult, None).await.unwrap();
     let mut left = Vec::new();
     while let Ok(entry) = events.try_recv() {
         if entry.event.event_type == "conference_member_left" {

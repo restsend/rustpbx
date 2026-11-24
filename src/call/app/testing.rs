@@ -58,6 +58,8 @@ pub struct MockCallStack {
     pub queue_meta_updates: std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>,
     /// Recorded [`CallCommand::PinAgentMeta`] payloads (see [`Self::next_cmd`]).
     pub pinned_agent_meta: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
+    /// Trace events observed while reading commands from the app.
+    pub trace_events: Vec<crate::call_errors::TraceEvent>,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
     /// Background task running the AppEventLoop.
@@ -112,6 +114,7 @@ impl MockCallStack {
             cmd_rx,
             queue_meta_updates: std::sync::Mutex::new(Vec::new()),
             pinned_agent_meta: std::sync::Mutex::new(Vec::new()),
+            trace_events: Vec::new(),
             cancel,
             join_handle,
         }
@@ -194,8 +197,8 @@ impl MockCallStack {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             match tokio::time::timeout_at(deadline, self.cmd_rx.recv()).await {
-                Ok(Some(CallCommand::Trace { .. }))
-                | Ok(Some(CallCommand::ReportCallError { .. })) => continue,
+                Ok(Some(CallCommand::Trace { event })) => self.trace_events.push(event),
+                Ok(Some(CallCommand::ReportCallError { .. })) => continue,
                 Ok(Some(cmd @ CallCommand::PinAgentMeta { .. })) => {
                     // Fire-and-forget attribution metadata (like
                     // UpdateQueueMeta): recorded, never part of command

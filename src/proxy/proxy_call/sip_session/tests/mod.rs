@@ -16467,21 +16467,46 @@ async fn remote_registered_leg_events_carry_no_leg_role() {
     assert_eq!(answered.event.payload["leg_id"], "agent-remote");
     assert!(answered.event.payload.get("leg_role").is_none());
 
+    let (sender, mut owner_events) = mpsc::unbounded_channel();
+    {
+        let mut gateway = session.server.rwi_gateway.as_ref().unwrap().write();
+        let owner = gateway
+            .create_session(crate::rwi::RwiIdentity {
+                token: "test".into(),
+                scopes: vec!["call.control".into()],
+            })
+            .read().id.clone();
+        gateway.set_session_event_sender(&owner, sender);
+        gateway
+            .claim_call_ownership(
+                &owner,
+                session.context.session_id.clone(),
+                crate::rwi::session::OwnershipMode::Control,
+            )
+            .unwrap();
+    }
+
     session.fire_hold_transition_hooks(
         &LegId::from("agent-remote"),
         Some(crate::call::domain::LegState::Connected),
         crate::call::domain::LegState::Hold,
     )
     .await;
-    // prd 2026-11-23 (three-way double `call_held` fix): home-proxy mirror
-    // legs emit NO hold events at all — the hold propagates to the peer
-    // session on the registration node, which owns that dialog's hold
-    // stream. Emitting here would report the same logical hold once per
-    // daisy-chain hop. Ringing/answered above stay: they are not mirrored.
-    assert!(
-        events.try_recv().is_err(),
-        "remote mirror leg must not emit call_held on this node"
-    );
+    let held = owner_events.try_recv().expect("the controlling socket receives hold");
+    assert_eq!(held["event_type"], "call_held");
+    assert_eq!(held["call_id"], "remote-role-sess");
+    assert_eq!(held["leg_id"], "agent-remote");
+    session.fire_hold_transition_hooks(
+        &LegId::from("agent-remote"),
+        Some(LegState::Hold),
+        LegState::Connected,
+    )
+    .await;
+    let unheld = owner_events.try_recv().expect("the controlling socket receives resume");
+    assert_eq!(unheld["event_type"], "call_unheld");
+    assert_eq!(unheld["call_id"], "remote-role-sess");
+    assert!(owner_events.try_recv().is_err());
+    assert!(events.try_recv().is_err(), "mirror must not duplicate webhook events");
 
     // A LOCAL agent leg in the same session is unaffected.
     let mut local_leg = crate::call::domain::Leg::new(LegId::from("agent-local"));

@@ -1581,7 +1581,8 @@ pub struct ProxyConfig {
     /// devices on CC UUI: a non-peer, non-trunk INVITE whose UUI carries
     /// `purpose=call-center`, a known `leg=` intent, and a
     /// `normalize_custom`-shaped data part gets that data part adopted as
-    /// the logical-call root (`meta.root_session_id`). Default false — the
+    /// the logical-call root (`meta.root_session_id`). The reserved
+    /// `self-dial` value only declares the leg's intent. Default false — the
     /// data part must stay UUID-shaped, because custom business correlation
     /// strings are guessable and a planted root merges the call's events /
     /// CDR / trunk correlation header into another logical call. Opt in only

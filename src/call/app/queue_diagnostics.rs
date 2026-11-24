@@ -240,7 +240,7 @@ impl QueueApp {
                 request.request_id.clone(),
                 self.pending_agents
                     .iter()
-                    .map(|(_, leg)| leg.clone())
+                    .map(|offer| offer.leg_id.clone())
                     .collect(),
             ));
             if self.recovery_requests.len() > MAX_RECOVERY_REQUESTS {
@@ -257,10 +257,10 @@ impl QueueApp {
                         "no_dispatch"
                     }
                     .into();
-                    for (uri, leg_id) in &self.pending_agents {
+                    for offer in &self.pending_agents {
                         tracing::info!(session_id = %self.call_id, request_id = %request.request_id,
-                            %leg_id, direction = "outbound", leg = "agent",
-                            agent_id = ?crate::models::call_record::extract_sip_username(uri),
+                            leg_id = %offer.leg_id, direction = "outbound", leg = "agent",
+                            agent_id = ?crate::models::call_record::extract_sip_username(&offer.uri),
                             "Queue: targeted recovery requested agent dial; awaiting SIP progress");
                     }
                     Self::log_dispatch_evidence(&request.request_id, &evidence);
@@ -294,8 +294,8 @@ impl QueueApp {
         if let Some(registry) = self.agent_registry.as_ref() {
             let mut pending_agent_ids = Vec::new();
             if preserve_pending {
-                for (uri, _) in &self.pending_agents {
-                    pending_agent_ids.push(self.agent_id_for_uri(uri).await);
+                for offer in &self.pending_agents {
+                    pending_agent_ids.push(self.agent_id_for_uri(&offer.uri).await);
                 }
             }
             for agent_id in registry.agents_ringing_for_call(&self.call_id).await {
@@ -336,12 +336,12 @@ impl QueueApp {
         let Some(index) = self
             .pending_agents
             .iter()
-            .position(|(_, leg)| leg == leg_id)
+            .position(|offer| offer.leg_id == leg_id)
         else {
             return Ok(AppAction::Continue);
         };
-        let (uri, _) = self.pending_agents.remove(index);
-        let agent_id = self.agent_id_for_uri(&uri).await;
+        let offer = self.pending_agents.remove(index);
+        let agent_id = self.agent_id_for_uri(&offer.uri).await;
         self.ringing_agent_legs.remove(leg_id);
         if let Some(registry) = &self.agent_registry {
             registry

@@ -1419,6 +1419,27 @@ async fn test_local_three_way_marker_synthesizes_conference_events() -> Result<(
         assert_eq!(joined, 2, "exactly one member_joined per leg: {joined}");
     }
 
+    // The softphone returns to two separate dialogs without hanging up.
+    alice.send_update_with_headers(&dialog, vec![
+        rsipstack::sip::Header::UserToUser("consult-state=talk".into()),
+    ]).await?;
+    for role in ["caller", "agent"] {
+        wait_webhook_matching(
+            &capture,
+            "conference_member_left",
+            |v| v["event"]["leg_role"].as_str() == Some(role),
+            Duration::from_secs(3),
+        ).await.unwrap_or_else(|| panic!("retrieve must end membership for {role}"));
+    }
+    capture.received.lock().unwrap().retain(|v| {
+        !v["event_type"].as_str().is_some_and(|event| event.starts_with("conference_"))
+    });
+    alice.send_update_with_headers(&dialog, vec![
+        rsipstack::sip::Header::UserToUser("consult-state=merged;conference-scope=local".into()),
+    ]).await?;
+    wait_webhook_event(&capture, "conference_created", Duration::from_secs(3))
+        .await.expect("re-merge on the same dialog must create a room again");
+
     // Teardown: per-leg `conference_member_left` (LegEnded handler and/or the
     // session-teardown sweep — exactly once per member either way).
     alice.hangup(&dialog).await?;

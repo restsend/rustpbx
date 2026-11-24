@@ -3228,8 +3228,27 @@ mod tests {
             "the call's own group must still be polled first, got {targets:?}"
         );
 
-        stack.cancel();
-        let _ = stack.join().await;
+        let CallCommand::LegAdd { leg_id, .. } = dial else {
+            unreachable!();
+        };
+        stack.custom("agent_connected", serde_json::json!({
+            "leg_id": leg_id,
+            "agent_uri": "sip:l2agent@example.com",
+            "agent_id": "l2agent",
+        }));
+        while stack.next_cmd(2000).await.is_some() {}
+        let offer = stack.trace_events.iter()
+            .find(|event| event.message.starts_with("Offering call to agent l2agent"))
+            .expect("overflow offer trace was written");
+        let connected = stack.trace_events.iter()
+            .find(|event| event.message == "Agent l2agent connected")
+            .expect("overflow answer trace was written");
+        for event in [offer, connected] {
+            let detail = event.detail.as_ref().unwrap();
+            assert_eq!(detail["skill_group"], "support_l2");
+            assert_eq!(detail["attempt"], 1);
+        }
+        stack.join().await.unwrap();
     }
 
     async fn overflow_offer_blocks_retry_and_next_escalation_before_180(

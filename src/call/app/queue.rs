@@ -443,6 +443,29 @@ pub struct QueueLocationEnricherSetup {
     pub caller_headers: Vec<rsipstack::sip::Header>,
 }
 
+struct ResolvedAgents {
+    locations: Vec<Location>,
+    skill_group: Option<String>,
+}
+
+struct PendingAgentOffer {
+    uri: String,
+    leg_id: String,
+    agent_id: String,
+    skill_group: Option<String>,
+    attempt: u32,
+}
+
+impl PendingAgentOffer {
+    fn add_trace_attribution(&self, detail: &mut serde_json::Value) {
+        detail["leg_id"] = serde_json::json!(self.leg_id);
+        detail["attempt"] = serde_json::json!(self.attempt);
+        if let Some(group) = &self.skill_group {
+            detail["skill_group"] = serde_json::json!(group);
+        }
+    }
+}
+
 pub struct QueueApp {
     /// The queue plan configuration.
     plan: QueuePlan,
@@ -460,7 +483,7 @@ pub struct QueueApp {
     /// Number of dial attempts made.
     dial_attempts: u32,
     /// Dynamically fetched agents from DbRegistry.
-    dynamic_agents: Option<Vec<Location>>,
+    dynamic_agents: Option<ResolvedAgents>,
     /// Optional AgentRegistry for dynamic routing.
     agent_registry: Option<Arc<dyn AgentRegistry>>,
     /// Enricher + per-call context captured by `SipSession::start_queue_app`.
@@ -477,10 +500,12 @@ pub struct QueueApp {
     caller: String,
     /// When the call entered the queue.
     pub(crate) enqueued_at: Option<Instant>,
-    /// Queue statistics.
-    /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
-    /// When the first agent answers, the rest are cancelled via LegRemove.
-    pending_agents: Vec<(String, String)>,
+    /// Queue entry before candidate resolution, used for CDR wait durations.
+    trace_enqueued_at: Option<Instant>,
+    /// Counts offers across poll rotations and escalation stages.
+    trace_attempt: u32,
+    /// In-flight offers. When the first agent answers, the rest are cancelled.
+    pending_agents: Vec<PendingAgentOffer>,
     /// Agent legs CANCELLED at ring timeout. Their late signaling (200 OK
     /// racing the CANCEL, the resulting 487 leg-failure, a delayed 180) must
     /// not re-enter the dialing state machine: the timeout handler already
@@ -593,6 +618,8 @@ impl QueueApp {
             call_id: String::new(),
             caller: String::new(),
             enqueued_at: None,
+            trace_enqueued_at: None,
+            trace_attempt: 0,
             pending_agents: Vec::new(),
             timed_out_legs: HashSet::new(),
             ringing_agent_legs: HashSet::new(),
@@ -652,6 +679,11 @@ impl QueueApp {
     /// must not emit it again.
     pub fn with_joined_emitted_externally(mut self) -> Self {
         self.joined_emitted_externally = true;
+        self
+    }
+
+    pub(crate) fn with_trace_enqueued_at(mut self, joined_at: Option<Instant>) -> Self {
+        self.trace_enqueued_at = joined_at;
         self
     }
 
@@ -945,9 +977,16 @@ impl QueueApp {
     /// Pin the CC agent attribution (PinAgentMeta) BEFORE the LegAdd so the
     /// leg-level `call_ringing` carries `agent_id` without racing the CC
     /// session hook. Fire-and-forget.
-    async fn pin_agent_for_dial(&self, ctrl: &CallController, agent_id: &str, uri: &str) {
+    async fn pin_agent_for_dial(
+        &mut self,
+        ctrl: &CallController,
+        agent_id: &str,
+        uri: &str,
+        skill_group: Option<&str>,
+    ) -> u32 {
+        self.trace_attempt += 1;
         if agent_id.is_empty() {
-            return;
+            return self.trace_attempt;
         }
         let name = self.resolve_agent_display_name(uri).await;
         ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name.clone()));
@@ -957,21 +996,23 @@ impl QueueApp {
         // RWI `queue_agent_offered` event; the terminal answer/reject traces
         // then close the story.
         let queue = self.config.name.clone();
-        let skill_group = self.skill_queue_id().to_string();
         let label = if name.is_empty() {
             agent_id.to_string()
         } else {
             format!("{} ({})", name, agent_id)
         };
-        let mut detail = serde_json::json!({ "agent_id": agent_id });
+        let mut detail = serde_json::json!({
+            "agent_id": agent_id,
+            "attempt": self.trace_attempt,
+        });
         if !name.is_empty() {
             detail["agent_name"] = serde_json::Value::String(name);
         }
         if !queue.is_empty() {
             detail["queue_name"] = serde_json::Value::String(queue.clone());
         }
-        if !skill_group.is_empty() && skill_group != queue {
-            detail["skill_group"] = serde_json::Value::String(skill_group);
+        if let Some(group) = skill_group {
+            detail["skill_group"] = serde_json::json!(group);
         }
         ctrl.record_trace(
             crate::call_errors::TraceEvent::new(
@@ -981,40 +1022,33 @@ impl QueueApp {
             .severity(crate::call_errors::ErrSeverity::Info)
             .detail(detail),
         );
+        self.trace_attempt
     }
 
-    /// Millis elapsed on the CURRENT stage clock (Sequential: per-stage dwell
-    /// since `stage_started_at`; other modes: enqueue → now). Same clock as
-    /// [`Self::stage_wait_secs`], in ms, for trace `duration_ms` fields.
-    fn stage_wait_ms(&self) -> Option<i64> {
-        let started = match self.config.escalation_mode {
-            EscalationMode::Sequential => self.stage_started_at.or(self.enqueued_at),
-            _ => self.enqueued_at,
-        };
-        started.map(|t| t.elapsed().as_millis() as i64)
+    fn trace_wait_at(&self, at: Instant) -> Option<Duration> {
+        self.trace_enqueued_at
+            .or(self.enqueued_at)
+            .map(|joined| at.saturating_duration_since(joined))
     }
 
-    /// Build the CDR trace entry that closes the assignment story: the
-    /// offered agent ANSWERED. `duration_ms` carries the enqueue → connect
-    /// wall clock — the wait the caller actually experienced — so the detail
-    /// page timeline shows it without ts arithmetic. Mirrors the 486 /
-    /// ring-timeout terminal entries (plain agent_id, queue + skill group).
-    fn connected_trace_event(&self, agent_id: &str, attempt: u32) -> crate::call_errors::TraceEvent {
-        let queue = self.config.name.clone();
-        let skill_group = self.skill_queue_id().to_string();
-        let mut detail = serde_json::json!({
-            "agent_id": agent_id,
-            "attempt": attempt,
-        });
-        if !queue.is_empty() {
-            detail["queue_name"] = serde_json::Value::String(queue.clone());
+    /// Record the caller's queue wait and attribution for the leg that answered.
+    fn connected_trace_event(
+        &self,
+        agent_id: &str,
+        offer: Option<&PendingAgentOffer>,
+        connected_at: Instant,
+    ) -> crate::call_errors::TraceEvent {
+        let agent_id = offer.map_or(agent_id, |offer| offer.agent_id.as_str());
+        let mut detail = serde_json::json!({ "agent_id": agent_id });
+        if !self.config.name.is_empty() {
+            detail["queue_name"] = serde_json::json!(self.config.name);
         }
-        if !skill_group.is_empty() && skill_group != queue {
-            detail["skill_group"] = serde_json::Value::String(skill_group);
+        if let Some(offer) = offer {
+            offer.add_trace_attribution(&mut detail);
         }
-        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs());
-        if let Some(secs) = wait_secs {
-            detail["wait_secs"] = serde_json::Value::from(secs);
+        let wait = self.trace_wait_at(connected_at);
+        if let Some(wait) = wait {
+            detail["wait_secs"] = serde_json::json!(wait.as_secs());
         }
         let mut ev = crate::call_errors::TraceEvent::new(
             crate::call_errors::TraceKind::Queue,
@@ -1022,17 +1056,33 @@ impl QueueApp {
         )
         .severity(crate::call_errors::ErrSeverity::Info)
         .detail(detail);
-        ev.duration_ms = self.enqueued_at.map(|t| t.elapsed().as_millis() as i64);
+        ev.duration_ms = wait.map(|wait| wait.as_millis() as i64);
         ev
+    }
+
+    fn terminal_offer_trace_detail(
+        &self,
+        agent_id: &str,
+        offer: Option<&PendingAgentOffer>,
+    ) -> serde_json::Value {
+        let mut detail = serde_json::json!({
+            "agent_id": agent_id,
+            "queue_id": self.config.name,
+        });
+        if let Some(offer) = offer {
+            offer.add_trace_attribution(&mut detail);
+        }
+        detail
     }
 
     /// Build the terminal CDR trace entry for an exhausted queue wait: the
     /// caller waited out max_wait and the fallback path is about to own the
     /// call. Mirrors the `queue_wait_timeout` RWI event.
-    fn max_wait_trace_event(&self, wait_secs: u64) -> crate::call_errors::TraceEvent {
+    fn max_wait_trace_event(&self, at: Instant) -> crate::call_errors::TraceEvent {
         let queue = self.config.name.clone();
         let skill_group = self.skill_queue_id().to_string();
-        let mut detail = serde_json::json!({ "wait_secs": wait_secs });
+        let wait = self.trace_wait_at(at);
+        let mut detail = serde_json::json!({ "wait_secs": wait.unwrap_or_default().as_secs() });
         if !queue.is_empty() {
             detail["queue_name"] = serde_json::Value::String(queue.clone());
         }
@@ -1045,7 +1095,7 @@ impl QueueApp {
         )
         .severity(crate::call_errors::ErrSeverity::Warn)
         .detail(detail);
-        ev.duration_ms = self.enqueued_at.map(|t| t.elapsed().as_millis() as i64);
+        ev.duration_ms = wait.map(|wait| wait.as_millis() as i64);
         ev
     }
 
@@ -1060,13 +1110,13 @@ impl QueueApp {
         skill_group: &str,
         mode: &EscalationMode,
         threshold_secs: u64,
-        wait_secs: u64,
+        wait: Duration,
     ) -> crate::call_errors::TraceEvent {
         let detail = serde_json::json!({
             "skill_group": skill_group,
             "mode": format!("{:?}", mode),
             "threshold_secs": threshold_secs,
-            "wait_secs": wait_secs,
+            "wait_secs": wait.as_secs(),
             "queue_name": self.config.name,
         });
         let mut ev = crate::call_errors::TraceEvent::new(
@@ -1075,7 +1125,7 @@ impl QueueApp {
         )
         .severity(crate::call_errors::ErrSeverity::Info)
         .detail(detail);
-        ev.duration_ms = self.stage_wait_ms();
+        ev.duration_ms = Some(wait.as_millis() as i64);
         ev
     }
 
@@ -1286,6 +1336,7 @@ impl QueueApp {
         // came back empty this tick.
         let mut poll_iter = poll_groups.iter();
         let poll_group = poll_iter.next().expect("poll list is non-empty");
+        let mut selected_group = poll_group;
         let target = format!("skill-group:{}", poll_group);
         let mut uris = registry
             .resolve_target_with_exclusions(
@@ -1337,6 +1388,7 @@ impl QueueApp {
                         skill_group = %overflow_group,
                         "Queue: escalated overflow group has an Idle agent — offering"
                     );
+                    selected_group = overflow_group;
                     uris = candidate;
                     break;
                 }
@@ -1359,6 +1411,7 @@ impl QueueApp {
                     )
                     .await;
                 if !uris.is_empty() {
+                    selected_group = group;
                     self.no_answer_agents.clear();
                     break;
                 }
@@ -1386,7 +1439,10 @@ impl QueueApp {
             })
             .collect();
         let locations = self.enrich_locations(locations).await;
-        self.dynamic_agents = Some(locations);
+        self.dynamic_agents = Some(ResolvedAgents {
+            locations,
+            skill_group: Some(selected_group.clone()),
+        });
         self.current_agent_idx = 0;
         self.dial_attempts = 0;
 
@@ -1537,12 +1593,19 @@ impl QueueApp {
     /// Get agent locations from dial strategy or dynamic agents.
     fn get_agents(&self) -> Vec<&Location> {
         if let Some(ref agents) = self.dynamic_agents {
-            return agents.iter().collect();
+            return agents.locations.iter().collect();
         }
         match &self.plan.dial_strategy {
             Some(DialStrategy::Sequential(locations)) => locations.iter().collect(),
             Some(DialStrategy::Parallel(locations)) => locations.iter().collect(),
             None => Vec::new(),
+        }
+    }
+
+    fn current_dial_skill_group(&self) -> Option<String> {
+        match &self.dynamic_agents {
+            Some(agents) => agents.skill_group.clone(),
+            None => self.config.skill_group.clone(),
         }
     }
 
@@ -1748,7 +1811,10 @@ impl QueueApp {
                         queue_id,
                         skill_group
                     );
-                    self.dynamic_agents = Some(locations);
+                    self.dynamic_agents = Some(ResolvedAgents {
+                        locations,
+                        skill_group: Some(skill_group),
+                    });
                 }
                 return;
             }
@@ -1772,7 +1838,10 @@ impl QueueApp {
                     locations.len(),
                     queue_id
                 );
-                self.dynamic_agents = Some(locations);
+                self.dynamic_agents = Some(ResolvedAgents {
+                    locations,
+                    skill_group: self.config.skill_group.clone(),
+                });
             }
         }
     }
@@ -1906,7 +1975,7 @@ impl QueueApp {
             if let Some(failed_leg_id) = failed_leg_id {
                 let pending_before = self.pending_agents.len();
                 self.pending_agents
-                    .retain(|(_, call_id)| call_id != failed_leg_id);
+                    .retain(|offer| offer.leg_id != failed_leg_id);
                 if self.pending_agents.len() == pending_before {
                     warn!(
                         %failed_leg_id,
@@ -2302,7 +2371,10 @@ impl QueueApp {
                     ..Default::default()
                 })
                 .collect();
-            self.dynamic_agents = Some(self.enrich_locations(locations).await);
+            self.dynamic_agents = Some(ResolvedAgents {
+                locations: self.enrich_locations(locations).await,
+                skill_group: Some(group),
+            });
         }
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
@@ -2367,13 +2439,22 @@ impl QueueApp {
         if !self.is_parallel() {
             self.pending_agents.clear();
         }
-        self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
+        let skill_group = self.current_dial_skill_group();
+        let attempt = self
+            .pin_agent_for_dial(ctrl, &attempt_agent_id, &uri, skill_group.as_deref())
+            .await;
         match ctrl
             .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
             .await
         {
             Ok(call_id) => {
-                self.pending_agents.push((uri, call_id));
+                self.pending_agents.push(PendingAgentOffer {
+                    uri,
+                    leg_id: call_id,
+                    agent_id: attempt_agent_id,
+                    skill_group,
+                    attempt,
+                });
             }
             Err(e) => {
                 warn!(call_id = %self.call_id, agent = %uri, error = %e, "Queue: failed to dial agent");
@@ -2423,7 +2504,7 @@ impl QueueApp {
     /// degrade to the historical 10s polling cadence. Returns `None` when
     /// every step has already triggered — the timer then stops re-arming.
     pub(crate) fn next_escalation_check_delay(&self) -> Option<Duration> {
-        let wait = self.stage_wait_secs();
+        let wait = self.stage_wait().as_secs();
         let next = self
             .config
             .escalation_timeline
@@ -2442,15 +2523,12 @@ impl QueueApp {
     /// in the current queue". Replace/Cumulative keep the legacy
     /// entry-relative timeline — their thresholds remain "seconds since
     /// enqueue", which is what existing configurations expect.
-    fn stage_wait_secs(&self) -> u64 {
-        match self.config.escalation_mode {
-            EscalationMode::Sequential => self
-                .stage_started_at
-                .or(self.enqueued_at)
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0),
-            _ => self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-        }
+    fn stage_wait(&self) -> Duration {
+        let started = match self.config.escalation_mode {
+            EscalationMode::Sequential => self.stage_started_at.or(self.enqueued_at),
+            _ => self.enqueued_at,
+        };
+        started.map_or(Duration::ZERO, |t| t.elapsed())
     }
 
     /// Check escalation timeline and add/switch skill groups.
@@ -2493,7 +2571,8 @@ impl QueueApp {
             debug!(state = ?self.state, "Queue: escalation check skipped — not waiting");
             return Ok(());
         }
-        let wait_secs = self.stage_wait_secs();
+        let stage_wait = self.stage_wait();
+        let wait_secs = stage_wait.as_secs();
 
         for step in self.config.escalation_timeline.clone() {
             if wait_secs >= step.threshold_secs
@@ -2554,11 +2633,11 @@ impl QueueApp {
                     &step.add_skill_group,
                     &self.config.escalation_mode,
                     step.threshold_secs,
-                    wait_secs,
+                    stage_wait,
                 ));
 
                 if let Some(ref registry) = self.agent_registry {
-                    let agent_uris = match self.config.skill_group.as_deref() {
+                    let (agent_uris, offer_group) = match self.config.skill_group.as_deref() {
                         Some(sg) => {
                             // Skill-group queue: resolve the primary group and
                             // the escalation target as ONE candidate set so the
@@ -2570,7 +2649,7 @@ impl QueueApp {
                             let include_primary =
                                 matches!(self.config.escalation_mode, EscalationMode::Cumulative);
                             registry
-                                .resolve_escalation_targets(
+                                .resolve_escalation_targets_with_group(
                                     &primary,
                                     &[step.add_skill_group.clone()],
                                     &self.call_id,
@@ -2582,7 +2661,10 @@ impl QueueApp {
                         }
                         None => {
                             let skill_uri = format!("skill-group:{}", step.add_skill_group);
-                            registry.resolve_target(&skill_uri).await
+                            (
+                                registry.resolve_target(&skill_uri).await,
+                                Some(step.add_skill_group.clone()),
+                            )
                         }
                     };
                     // The union may include agents already being dialed for the
@@ -2595,7 +2677,7 @@ impl QueueApp {
                             !self
                                 .pending_agents
                                 .iter()
-                                .any(|(pending, _)| pending == uri)
+                                .any(|offer| &offer.uri == uri)
                         })
                         .collect();
 
@@ -2619,6 +2701,7 @@ impl QueueApp {
                             self.dial_agents(
                                 ctrl,
                                 dial_head,
+                                offer_group.as_deref(),
                                 "Queue: cumulative escalation - added agent",
                                 "Queue: cumulative escalation - failed to add agent",
                             )
@@ -2630,6 +2713,7 @@ impl QueueApp {
                             self.dial_agents(
                                 ctrl,
                                 dial_head,
+                                offer_group.as_deref(),
                                 "Queue: replace escalation - dialed agent",
                                 "Queue: replace escalation - failed to dial agent",
                             )
@@ -2647,6 +2731,7 @@ impl QueueApp {
                             self.dial_agents(
                                 ctrl,
                                 dial_head,
+                                offer_group.as_deref(),
                                 "Queue: sequential overflow - dialed agent",
                                 "Queue: sequential overflow - failed to dial agent",
                             )
@@ -2676,7 +2761,7 @@ impl QueueApp {
             let old_legs: Vec<String> = self
                 .pending_agents
                 .iter()
-                .map(|(_, cid)| cid.clone())
+                .map(|offer| offer.leg_id.clone())
                 .collect();
             ctrl.remove_legs(&old_legs, "stage_switch");
             self.pending_agents.clear();
@@ -2718,6 +2803,7 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
         uris: &[String],
+        skill_group: Option<&str>,
         success_log: &str,
         failure_log: &str,
     ) {
@@ -2725,7 +2811,7 @@ impl QueueApp {
         for uri in uris {
             let agent_id = self.agent_id_for_uri(uri).await;
             self.record_attempted_agent(agent_id.clone());
-            self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
+            let attempt = self.pin_agent_for_dial(ctrl, &agent_id, uri, skill_group).await;
             let leg_headers = self.leg_headers_for(uri).await;
             match ctrl
                 .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
@@ -2733,7 +2819,13 @@ impl QueueApp {
             {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
-                    self.pending_agents.push((uri.clone(), call_id));
+                    self.pending_agents.push(PendingAgentOffer {
+                        uri: uri.clone(),
+                        leg_id: call_id,
+                        agent_id,
+                        skill_group: skill_group.map(str::to_owned),
+                        attempt,
+                    });
                     originated = true;
                 }
                 Err(e) => {
@@ -2887,6 +2979,7 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
+        self.trace_enqueued_at.get_or_insert_with(Instant::now);
         self.caller = ctx.call_info.caller.clone();
         // The caller's extension may itself be a registered agent (a helpdesk
         // line staffed by the same people who call it). Resolve the identity
@@ -3041,7 +3134,9 @@ impl CallApp for QueueApp {
                     .await;
 
                 // Originate call to agent
-                self.pin_agent_for_dial(ctrl, &agent.agent_id, &agent.uri)
+                let skill_group = self.config.skill_group.clone();
+                let attempt = self
+                    .pin_agent_for_dial(ctrl, &agent.agent_id, &agent.uri, skill_group.as_deref())
                     .await;
                 let leg_headers = self.leg_headers_for(&agent.uri).await;
                 let call_id = ctrl
@@ -3049,8 +3144,13 @@ impl CallApp for QueueApp {
                     .await?;
 
                 self.record_attempted_agent(agent.agent_id.clone());
-                self.pending_agents
-                    .push((agent.uri.clone(), call_id.clone()));
+                self.pending_agents.push(PendingAgentOffer {
+                    uri: agent.uri.clone(),
+                    leg_id: call_id.clone(),
+                    agent_id: agent.agent_id.clone(),
+                    skill_group,
+                    attempt,
+                });
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -3157,12 +3257,15 @@ impl CallApp for QueueApp {
                 let parallel_uris: Vec<String> =
                     agents.iter().map(|a| a.aor.to_string()).collect();
                 drop(agents);
+                let skill_group = self.current_dial_skill_group();
                 let mut pending = Vec::with_capacity(parallel_uris.len());
                 for (idx, uri) in parallel_uris.into_iter().enumerate() {
                     let leg_headers = self.leg_headers_for(&uri).await;
                     let attempt_agent_id = self.agent_id_for_uri(&uri).await;
                     self.record_attempted_agent(attempt_agent_id.clone());
-                    self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
+                    let attempt = self
+                        .pin_agent_for_dial(ctrl, &attempt_agent_id, &uri, skill_group.as_deref())
+                        .await;
                     match ctrl
                         .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                         .await
@@ -3173,7 +3276,13 @@ impl CallApp for QueueApp {
                                 call_id = %call_id,
                                 "Queue: parallel originate to agent"
                             );
-                            pending.push((uri, call_id));
+                            pending.push(PendingAgentOffer {
+                                uri,
+                                leg_id: call_id,
+                                agent_id: attempt_agent_id,
+                                skill_group: skill_group.clone(),
+                                attempt,
+                            });
                         }
                         Err(e) => {
                             warn!(
@@ -3348,8 +3457,8 @@ impl CallApp for QueueApp {
                         let agent_leg = leg_id.clone().or_else(|| {
                             self.pending_agents
                                 .iter()
-                                .find(|(uri, _)| uri == &agent_uri)
-                                .map(|(_, id)| id.clone())
+                                .find(|offer| offer.uri == agent_uri)
+                                .map(|offer| offer.leg_id.clone())
                         });
                         let Some(agent_leg) = agent_leg else {
                             warn!(agent = %agent_uri, "Queue: ignoring answer without an agent leg ID");
@@ -3369,6 +3478,14 @@ impl CallApp for QueueApp {
                             ctrl.remove_legs(&[agent_leg], "superseded");
                             return Ok(AppAction::Continue);
                         }
+                        let connected_at = Instant::now();
+                        let connected_agent_id =
+                            agent_id.clone().unwrap_or_else(|| agent_uri.clone());
+                        let winning_offer =
+                            self.pending_agents.iter().find(|offer| offer.leg_id == agent_leg);
+                        let trace = self.connected_trace_event(
+                            &connected_agent_id, winning_offer, connected_at,
+                        );
                         // Select the winner before prompts or cleanup can resume media.
                         if !self.answered {
                             ctrl.answer().await?;
@@ -3403,9 +3520,9 @@ impl CallApp for QueueApp {
                         if !self.pending_agents.is_empty() {
                             let mut other_legs: Vec<String> = Vec::new();
                             let all = std::mem::take(&mut self.pending_agents);
-                            for (_, cid) in all {
-                                if cid != agent_leg {
-                                    other_legs.push(cid);
+                            for offer in all {
+                                if offer.leg_id != agent_leg {
+                                    other_legs.push(offer.leg_id);
                                 }
                             }
                             if !other_legs.is_empty() {
@@ -3416,6 +3533,8 @@ impl CallApp for QueueApp {
                                 ctrl.remove_legs(&other_legs, "superseded");
                             }
                         }
+
+                        ctrl.record_trace(trace);
 
                         // NOTE: no registry.start_call() here — the connected
                         // agent's call accounting is owned by the call-session
@@ -3429,8 +3548,6 @@ impl CallApp for QueueApp {
                         // 486 got a phantom `Busy{call_id}` from the agent_busy
                         // handler). The connected agent is excluded — its real
                         // lifecycle is owned by the call-session hooks.
-                        let connected_agent_id =
-                            agent_id.clone().unwrap_or_else(|| agent_uri.clone());
                         self.release_phantom_agents(Some(connected_agent_id.as_str()))
                             .await;
 
@@ -3463,15 +3580,6 @@ impl CallApp for QueueApp {
                                 }
                             },
                         });
-
-                        // Terminal CDR trace: closes the "Offering call to
-                        // agent X" entry — the timeline now shows WHO answered
-                        // and HOW LONG the caller waited (duration_ms =
-                        // enqueue → connect), mirroring the 486 / ring-timeout
-                        // terminal entries.
-                        ctrl.record_trace(
-                            self.connected_trace_event(&connected_agent_id, self.dial_attempts),
-                        );
 
                         // CC adapter analytics: agent answered →
                         // `skill_group_agent_connected` +
@@ -3543,7 +3651,7 @@ impl CallApp for QueueApp {
                     // A terminal from an earlier offer must not release or
                     // advance the current offer, including within the same call.
                     if let Some(leg) = leg_id.as_deref()
-                        && !self.pending_agents.iter().any(|(_, pending)| pending == leg)
+                        && !self.pending_agents.iter().any(|offer| offer.leg_id == leg)
                     {
                         debug!(call_id = %self.call_id, leg_id = %leg,
                             "Queue: ignoring terminal for an inactive agent offer");
@@ -3613,6 +3721,13 @@ impl CallApp for QueueApp {
                             let state_mismatch = outcome.state_mismatch();
                             let outcome_detail =
                                 serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+                            let offer = leg_id.as_deref().and_then(|leg| {
+                                self.pending_agents.iter().find(|offer| offer.leg_id == leg)
+                            });
+                            let mut detail = self.terminal_offer_trace_detail(&agent_id, offer);
+                            detail["sip_status"] = serde_json::json!(486);
+                            detail["outcome"] = outcome_detail;
+                            detail["state_mismatch"] = serde_json::json!(state_mismatch);
                             ctrl.record_trace(
                                 crate::call_errors::TraceEvent::new(
                                     crate::call_errors::TraceKind::Queue,
@@ -3622,14 +3737,7 @@ impl CallApp for QueueApp {
                                     ),
                                 )
                                 .severity(crate::call_errors::ErrSeverity::Warn)
-                                .detail(serde_json::json!({
-                                    "agent_id": &agent_id,
-                                    "sip_status": 486,
-                                    "attempt": self.dial_attempts,
-                                    "queue_id": self.config.name,
-                                    "outcome": outcome_detail,
-                                    "state_mismatch": state_mismatch,
-                                })),
+                                .detail(detail),
                             );
 
                             // Instant "assigned but not answered" alert —
@@ -3661,7 +3769,7 @@ impl CallApp for QueueApp {
                     // A terminal from an earlier offer must not release or
                     // advance the current offer, including within the same call.
                     if let Some(leg) = leg_id.as_deref()
-                        && !self.pending_agents.iter().any(|(_, pending)| pending == leg)
+                        && !self.pending_agents.iter().any(|offer| offer.leg_id == leg)
                     {
                         debug!(call_id = %self.call_id, leg_id = %leg,
                             "Queue: ignoring terminal for an inactive agent offer");
@@ -3687,19 +3795,16 @@ impl CallApp for QueueApp {
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
                         self.record_no_answer_agent(agent_id.clone());
 
-                        // Terminal CDR trace for the missed assignment
-                        // (mirrors the 486 reject entry).
+                        let offer = leg_id.as_deref().and_then(|leg| {
+                            self.pending_agents.iter().find(|offer| offer.leg_id == leg)
+                        });
                         ctrl.record_trace(
                             crate::call_errors::TraceEvent::new(
                                 crate::call_errors::TraceKind::Queue,
                                 format!("Agent {} did not answer (ring timeout)", &agent_id),
                             )
                             .severity(crate::call_errors::ErrSeverity::Warn)
-                            .detail(serde_json::json!({
-                                "agent_id": &agent_id,
-                                "attempt": self.dial_attempts,
-                                "queue_id": self.config.name,
-                            })),
+                            .detail(self.terminal_offer_trace_detail(&agent_id, offer)),
                         );
 
                         // Instant "assigned but not answered" alert — same
@@ -3796,15 +3901,15 @@ impl CallApp for QueueApp {
                 // re-dials these legs: pending_agents is already cleared (a
                 // later re-offer dials a FRESH leg id).
                 let timed_out_legs: Vec<String> = timed_out_agents.iter()
-                    .map(|(_, leg_id)| leg_id.clone()).collect();
+                    .map(|offer| offer.leg_id.clone()).collect();
                 for leg_id in &timed_out_legs {
                     self.timed_out_legs.insert(leg_id.clone());
                 }
                 if !timed_out_legs.is_empty() {
                     if let Some(registry) = &self.agent_registry {
                         // Arm acknowledgement before CANCEL can deliver the expiry event.
-                        for (uri, _) in &timed_out_agents {
-                            registry.expire_client_ring_offer(uri, &self.call_id).await;
+                        for offer in &timed_out_agents {
+                            registry.expire_client_ring_offer(&offer.uri, &self.call_id).await;
                         }
                     }
                     info!(
@@ -3825,7 +3930,9 @@ impl CallApp for QueueApp {
                 let mut timed_out_agent_ids: Vec<String> = Vec::new();
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
-                    for (uri, leg_id) in &timed_out_agents {
+                    for offer in &timed_out_agents {
+                        let uri = &offer.uri;
+                        let leg_id = &offer.leg_id;
                         let agent_id = all_agents
                             .iter()
                             .find(|a| a.uri == *uri)
@@ -3846,11 +3953,7 @@ impl CallApp for QueueApp {
                                 format!("Agent {} did not answer (ring timeout)", &agent_id),
                             )
                             .severity(crate::call_errors::ErrSeverity::Warn)
-                            .detail(serde_json::json!({
-                                "agent_id": &agent_id,
-                                "attempt": self.dial_attempts,
-                                "queue_id": self.config.name,
-                            })),
+                            .detail(self.terminal_offer_trace_detail(&agent_id, Some(offer))),
                         );
                         registry
                             .emit_assign_failed_alert(&AssignFailedAlert {
@@ -3937,6 +4040,8 @@ impl CallApp for QueueApp {
                 // rings / orphan legs on Transfer-style fallbacks).
                 ctrl.cancel_timeout("escalation_check");
 
+                ctrl.record_trace(self.max_wait_trace_event(Instant::now()));
+
                 // Notify queue timeout
                 ctrl.notify_event(
                     "queue.timeout",
@@ -3957,10 +4062,6 @@ impl CallApp for QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: self.config.name.clone(),
                 });
-
-                // Terminal CDR trace: the caller exhausted max_wait; the
-                // fallback path owns the call from here.
-                ctrl.record_trace(self.max_wait_trace_event(wait_secs));
 
                 self.play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
                     .await
@@ -4110,22 +4211,28 @@ mod queue_trace_tests {
     #[test]
     fn connected_trace_carries_agent_attempt_and_wait_duration() {
         let mut app = app_with_queue("support");
-        app.enqueued_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(42));
-
-        let ev = app.connected_trace_event("1001", 2);
+        let answered_at = Instant::now();
+        app.trace_enqueued_at = Some(answered_at - Duration::from_secs(42));
+        app.enqueued_at = Some(answered_at - Duration::from_secs(10));
+        let offer = PendingAgentOffer {
+            uri: "sip:1001@example.com".into(),
+            leg_id: "agent-leg".into(),
+            agent_id: "1001".into(),
+            skill_group: None,
+            attempt: 2,
+        };
+        let ev = app.connected_trace_event("other-agent", Some(&offer), answered_at);
         assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
         assert_eq!(ev.message, "Agent 1001 connected");
         assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Info));
         let ms = ev
             .duration_ms
             .expect("connected trace must carry the enqueue→connect duration");
-        assert!(
-            (41_000..=43_000).contains(&ms),
-            "duration_ms should be ≈42s, got {ms}"
-        );
+        assert_eq!(ms, 42_000);
         let detail = ev.detail.expect("connected trace should carry detail");
         assert_eq!(detail["agent_id"].as_str(), Some("1001"));
         assert_eq!(detail["attempt"].as_u64(), Some(2));
+        assert_eq!(detail["leg_id"].as_str(), Some("agent-leg"));
         assert_eq!(detail["queue_name"].as_str(), Some("support"));
         assert_eq!(detail["wait_secs"].as_u64(), Some(42));
         // No skill group configured → the key stays absent, mirroring the
@@ -4136,7 +4243,7 @@ mod queue_trace_tests {
     #[test]
     fn connected_trace_without_enqueue_time_has_no_wait_fields() {
         let app = app_with_queue("support");
-        let ev = app.connected_trace_event("1002", 1);
+        let ev = app.connected_trace_event("1002", None, Instant::now());
         assert!(
             ev.duration_ms.is_none(),
             "no enqueue clock → no fabricated duration"
@@ -4155,7 +4262,14 @@ mod queue_trace_tests {
                 ..Default::default()
             },
         );
-        let ev = app.connected_trace_event("1001", 1);
+        let offer = PendingAgentOffer {
+            uri: "sip:1001@example.com".into(),
+            leg_id: "agent-leg".into(),
+            agent_id: "1001".into(),
+            skill_group: Some("sg-9".into()),
+            attempt: 1,
+        };
+        let ev = app.connected_trace_event("1001", Some(&offer), Instant::now());
         let detail = ev.detail.expect("detail");
         assert_eq!(detail["skill_group"].as_str(), Some("sg-9"));
     }
@@ -4163,13 +4277,15 @@ mod queue_trace_tests {
     #[test]
     fn max_wait_trace_is_warn_and_carries_wait() {
         let mut app = app_with_queue("support");
-        app.enqueued_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
+        let timed_out_at = Instant::now();
+        app.trace_enqueued_at = Some(timed_out_at - Duration::from_secs(90));
+        app.enqueued_at = Some(timed_out_at - Duration::from_secs(75));
 
-        let ev = app.max_wait_trace_event(90);
+        let ev = app.max_wait_trace_event(timed_out_at);
         assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
         assert_eq!(ev.message, "Queue wait timed out");
         assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Warn));
-        assert!(ev.duration_ms.is_some(), "max wait trace carries duration");
+        assert_eq!(ev.duration_ms, Some(90_000));
         let detail = ev.detail.expect("detail");
         assert_eq!(detail["wait_secs"].as_u64(), Some(90));
         assert_eq!(detail["queue_name"].as_str(), Some("support"));
@@ -4178,7 +4294,12 @@ mod queue_trace_tests {
     #[test]
     fn overflow_trace_names_target_group_mode_and_threshold() {
         let app = app_with_queue("support");
-        let ev = app.overflow_trace_event("billing", &EscalationMode::Sequential, 30, 31);
+        let ev = app.overflow_trace_event(
+            "billing",
+            &EscalationMode::Sequential,
+            30,
+            Duration::from_secs(31),
+        );
         assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
         assert_eq!(ev.message, "Overflowed to skill group 'billing'");
         assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Info));

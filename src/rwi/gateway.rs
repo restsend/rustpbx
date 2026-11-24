@@ -1167,6 +1167,17 @@ impl RwiGateway {
         self.dispatch(&cid, &flat, DispatchTarget::Owner(&cid));
     }
 
+    /// Publish a mirror transition only to the controlling WebSocket.
+    pub(crate) fn send_to_owner_socket<E: RwiEventSpec>(&self, event: &E) {
+        if let Some(call_id) = event.call_id()
+            && let Some(owner) = self.call_ownership.get(call_id)
+        {
+            let flat = RwiEvent::from_spec(event, None);
+            self.cache_event(&call_id.to_owned(), &flat);
+            self.send_flat_to_session(owner, &self.enrich_flat_event(&flat));
+        }
+    }
+
     pub(crate) fn send_flat_to_owner(&self, event: &RwiEvent) {
         if let Some(call_id) = event.call_id.as_ref() {
             self.dispatch(call_id, event, DispatchTarget::Owner(call_id));
