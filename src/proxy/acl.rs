@@ -2,7 +2,10 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{TransactionCookie, TrunkContext};
 use crate::{
     config::ProxyConfig,
-    proxy::routing::{extract_from_user, extract_to_user, extract_trusted_ip, parse_trusted_proxy},
+    proxy::routing::{
+        extract_from_user, extract_to_user, extract_trusted_addr, extract_trusted_ip,
+        parse_trusted_proxy,
+    },
 };
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -272,6 +275,16 @@ impl AclModule {
         extract_trusted_ip(tx, &trusted)
     }
 
+    fn extract_addr(&self, tx: &Transaction) -> Option<(IpAddr, Option<u16>)> {
+        let trusted: Vec<ipnet::IpNet> = self
+            .live_config()
+            .trusted_proxies
+            .iter()
+            .filter_map(|s| parse_trusted_proxy(s))
+            .collect();
+        extract_trusted_addr(tx, &trusted)
+    }
+
     async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
         let cfg = self.live_config();
         let now = Instant::now();
@@ -356,6 +369,7 @@ impl AclModule {
     pub fn is_from_trunk_context(
         &self,
         addr: &IpAddr,
+        port: Option<u16>,
         origin: &rsipstack::sip::Request,
     ) -> Option<TrunkContext> {
         let Some(server) = self.inner.server.as_ref() else {
@@ -365,6 +379,7 @@ impl AclModule {
         let to_user = extract_to_user(origin);
         server.data_context.resolve_inbound_trunk_by_ip(
             addr,
+            port,
             from_user.as_deref(),
             to_user.as_deref(),
         )
@@ -562,13 +577,14 @@ impl ProxyModule for AclModule {
         }
 
         // 4. IP ACL check (allow/deny with trunk bypass)
-        let from_addr = self
-            .extract_ip(tx)
+        let (from_addr, from_port) = self
+            .extract_addr(tx)
             .ok_or_else(|| anyhow::anyhow!("missing transport source address"))?;
-        if let Some(ctx) = self.is_from_trunk_context(&from_addr, &tx.original) {
+        if let Some(ctx) = self.is_from_trunk_context(&from_addr, from_port, &tx.original) {
             debug!(
                 method = tx.original.method().to_string(),
                 source_ip = %from_addr,
+                ?from_port,
                 trunk = %ctx.name,
                 "IP is from trunk, bypassing acl check"
             );
@@ -687,7 +703,7 @@ mod tests {
             None,
         );
         let ctx = acl
-            .is_from_trunk_context(&source_ip, &request)
+            .is_from_trunk_context(&source_ip, None, &request)
             .expect("inbound trunk should match");
 
         assert_eq!(ctx.id, Some(144));
@@ -724,7 +740,7 @@ mod tests {
         );
 
         let ctx = acl
-            .is_from_trunk_context(&source_ip, &request)
+            .is_from_trunk_context(&source_ip, None, &request)
             .expect("dest-only trunk should now match inbound source IP");
         assert_eq!(ctx.id, Some(144));
         assert_eq!(ctx.name, "inbound-dest-only");
@@ -807,7 +823,7 @@ mod tests {
             None,
         );
         let ctx = acl
-            .is_from_trunk_context(&source_ip, &matching_request)
+            .is_from_trunk_context(&source_ip, None, &matching_request)
             .expect("matching prefix should select a trunk");
         assert_eq!(ctx.id, Some(145));
         assert_eq!(ctx.name, "prefix-86155");
@@ -820,7 +836,7 @@ mod tests {
             None,
         );
         let ctx = acl
-            .is_from_trunk_context(&source_ip, &matching_bye)
+            .is_from_trunk_context(&source_ip, None, &matching_bye)
             .expect("BYE should use its From/To users for prefix matching");
         assert_eq!(ctx.id, Some(145));
         assert_eq!(ctx.name, "prefix-86155");
@@ -833,7 +849,7 @@ mod tests {
             None,
         );
         let ctx = acl
-            .is_from_trunk_context(&source_ip, &broad_request)
+            .is_from_trunk_context(&source_ip, None, &broad_request)
             .expect("broader CIDR should match after exact candidates reject the prefix");
         assert_eq!(ctx.id, Some(143));
 
@@ -845,20 +861,20 @@ mod tests {
             None,
         );
         assert!(
-            acl.is_from_trunk_context(&source_ip, &unmatched_request)
+            acl.is_from_trunk_context(&source_ip, None, &unmatched_request)
                 .is_none()
         );
 
         let cidr_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 25));
         assert_eq!(
-            acl.is_from_trunk_context(&cidr_ip, &matching_request)
+            acl.is_from_trunk_context(&cidr_ip, None, &matching_request)
                 .expect("IPv4 CIDR should match")
                 .id,
             Some(146)
         );
         let ipv6_ip = IpAddr::V6(Ipv6Addr::from_str("2001:db8::1234").unwrap());
         assert_eq!(
-            acl.is_from_trunk_context(&ipv6_ip, &matching_request)
+            acl.is_from_trunk_context(&ipv6_ip, None, &matching_request)
                 .expect("IPv6 CIDR should match")
                 .id,
             Some(147)
@@ -882,12 +898,12 @@ mod tests {
             .await
             .expect("runtime trunk reload should succeed");
         assert!(
-            acl.is_from_trunk_context(&source_ip, &matching_request)
+            acl.is_from_trunk_context(&source_ip, None, &matching_request)
                 .is_none(),
             "server-backed ACL must not fall back to stale startup trunks"
         );
         assert_eq!(
-            acl.is_from_trunk_context(&reloaded_ip, &matching_request)
+            acl.is_from_trunk_context(&reloaded_ip, None, &matching_request)
                 .expect("reloaded trunk should match")
                 .id,
             Some(200)
@@ -926,6 +942,7 @@ mod tests {
         let hit = server.data_context.resolve_inbound_trunk_by_ip(
             &IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)),
             None,
+            None,
             Some("861234"),
         );
         assert_eq!(hit.as_ref().map(|c| c.id), Some(Some(301)));
@@ -934,6 +951,7 @@ mod tests {
         // CIDR covers IP but callee prefix does not match -> None
         let miss = server.data_context.resolve_inbound_trunk_by_ip(
             &IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)),
+            None,
             None,
             Some("441234"),
         );
@@ -944,12 +962,14 @@ mod tests {
             &IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
             None,
             None,
+            None,
         );
         assert_eq!(exact.unwrap().id, Some(302));
 
         // Uncovered IP -> None
         let none = server.data_context.resolve_inbound_trunk_by_ip(
             &IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            None,
             None,
             None,
         );
@@ -1025,7 +1045,7 @@ mod tests {
                 .get(&ipnet::IpNet::from(source_ip))
                 .expect("source IP should have inbound trunk candidates");
             assert_eq!(
-                candidates.iter().map(String::as_str).collect::<Vec<_>>(),
+                candidates.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
                 vec![
                     "long-caller-long-callee",
                     "same-match-higher-id",
@@ -1045,11 +1065,135 @@ mod tests {
         );
 
         let context = acl
-            .is_from_trunk_context(&source_ip, &request)
+            .is_from_trunk_context(&source_ip, None, &request)
             .expect("the most specific trunk should match");
 
         assert_eq!(context.id, Some(303));
         assert_eq!(context.name, "long-caller-long-callee");
+    }
+
+    #[tokio::test]
+    async fn inbound_trunk_port_limitation_separates_same_ip_sources() {
+        let shared_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 39));
+        let mut config = ProxyConfig::default();
+        config.generated_dir = format!(
+            "target/test-generated/acl-trunk-port-limit-{}",
+            std::process::id()
+        );
+        // Trunk pinned to 192.168.1.39:5060 with dest on the same IP:
+        // dest must NOT widen it back to match arbitrary ports (e.g. a local
+        // registered client on 192.168.1.39:53345).
+        config.trunks.insert(
+            "rts".to_string(),
+            TrunkConfig {
+                id: Some(401),
+                direction: Some(TrunkDirection::Bidirectional),
+                dest: "sip:192.168.1.39:5060".to_string(),
+                inbound_hosts: vec!["192.168.1.39:5060".to_string()],
+                ..Default::default()
+            },
+        );
+        // Second trunk on the same IP, different port.
+        config.trunks.insert(
+            "rts-alt".to_string(),
+            TrunkConfig {
+                id: Some(402),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["192.168.1.39:5080".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let (server, config) = create_test_server_with_config(config).await;
+        let acl = AclModule::with_server(config, Some(server));
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "10000200",
+            Some("1007"),
+            "192.168.1.39",
+            None,
+        );
+
+        // Matching port 5060 -> rts
+        let matched_5060 = acl
+            .is_from_trunk_context(&shared_ip, Some(5060), &request)
+            .expect("port 5060 should match rts");
+        assert_eq!(matched_5060.name, "rts");
+
+        // Matching port 5080 -> rts-alt
+        let matched_5080 = acl
+            .is_from_trunk_context(&shared_ip, Some(5080), &request)
+            .expect("port 5080 should match rts-alt");
+        assert_eq!(matched_5080.name, "rts-alt");
+
+        // Ephemeral client port on the same IP -> NOT a trunk
+        assert!(
+            acl.is_from_trunk_context(&shared_ip, Some(53345), &request)
+                .is_none(),
+            "registered client on an ephemeral port must not match port-pinned trunks"
+        );
+
+        // Unknown port -> NOT matched by port-pinned trunks
+        assert!(
+            acl.is_from_trunk_context(&shared_ip, None, &request)
+                .is_none(),
+            "missing source port must not match port-pinned trunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_trunk_same_ip_resolves_by_id_order() {
+        let shared_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
+        let mut config = ProxyConfig::default();
+        config.generated_dir = format!(
+            "target/test-generated/acl-trunk-port-precedence-{}",
+            std::process::id()
+        );
+        config.trunks.insert(
+            "no-id-trunk".to_string(),
+            TrunkConfig {
+                id: None,
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["192.168.1.50:5060".to_string()],
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "higher-id-trunk".to_string(),
+            TrunkConfig {
+                id: Some(99),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["192.168.1.50:5060".to_string()],
+                ..Default::default()
+            },
+        );
+        config.trunks.insert(
+            "lower-id-trunk".to_string(),
+            TrunkConfig {
+                id: Some(1),
+                direction: Some(TrunkDirection::Inbound),
+                inbound_hosts: vec!["192.168.1.50".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let (server, config) = create_test_server_with_config(config).await;
+        let acl = AclModule::with_server(config, Some(server));
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "1000",
+            None,
+            "rustpbx.com",
+            None,
+        );
+
+        // Lower ID wins regardless of port specificity
+        assert_eq!(
+            acl.is_from_trunk_context(&shared_ip, Some(5060), &request)
+                .expect("port 5060 should match lower-id-trunk")
+                .name,
+            "lower-id-trunk"
+        );
     }
 
     #[test]

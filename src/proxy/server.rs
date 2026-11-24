@@ -1749,13 +1749,16 @@ impl SipServer {
                                 })
                                 .any(|network| network.contains(&ip))
                         });
+                        let source_port = remote_addr
+                            .and_then(|addr| addr.addr.port.map(|p| p.0));
                         let is_trunk = if let Some(ref ip) = via_ip {
                             let inbound_trunks = self.inner.data_context.acl_inbound_trunks.load();
                             let source_network = ipnet::IpNet::from(*ip);
-                            inbound_trunks
-                                .cover_values(&source_network)
-                                .next()
-                                .is_some()
+                            inbound_trunks.cover_values(&source_network).any(|candidates| {
+                                candidates
+                                    .iter()
+                                    .any(|c| c.port.is_none() || c.port == source_port)
+                            })
                         } else {
                             false
                         };

@@ -1370,6 +1370,12 @@ pub fn source_addr_ip(source_addr: &SipAddr) -> Option<IpAddr> {
     Some(ip)
 }
 
+pub fn source_addr_ip_port(source_addr: &SipAddr) -> Option<(IpAddr, Option<u16>)> {
+    let ip = source_addr_ip(source_addr)?;
+    let port = source_addr.addr.port.map(|p| p.0);
+    Some((ip, port))
+}
+
 fn matches_user_prefix(pattern: &str, value: &str) -> bool {
     let trimmed = pattern.trim();
     if trimmed.is_empty() {
@@ -1457,18 +1463,18 @@ fn split_via_values(raw: &str) -> Vec<&str> {
     entries
 }
 
-pub fn extract_trusted_ip(
+pub fn extract_trusted_addr(
     tx: &rsipstack::transaction::transaction::Transaction,
     trusted_proxies: &[IpNet],
-) -> Option<IpAddr> {
-    let socket_ip = tx
+) -> Option<(IpAddr, Option<u16>)> {
+    let (socket_ip, socket_port) = tx
         .connection
         .as_ref()
         .and_then(|conn| conn.get_remote_addr())
-        .and_then(source_addr_ip)?;
+        .and_then(source_addr_ip_port)?;
 
     if trusted_proxies.is_empty() || !ip_matches_trusted(&socket_ip, trusted_proxies) {
-        return Some(socket_ip);
+        return Some((socket_ip, socket_port));
     }
 
     // A SIP proxy prepends its own Via. Once the transport peer has been
@@ -1492,7 +1498,7 @@ pub fn extract_trusted_ip(
             via_count = entries.len(),
             "trusted proxy request has no forwarded Via hop; using transport source"
         );
-        return Some(socket_ip);
+        return Some((socket_ip, socket_port));
     };
 
     let typed = match rsipstack::sip::headers::typed::Via::parse(entry) {
@@ -1503,7 +1509,7 @@ pub fn extract_trusted_ip(
                 %error,
                 "trusted proxy forwarded Via is malformed; using transport source"
             );
-            return Some(socket_ip);
+            return Some((socket_ip, socket_port));
         }
     };
     let received_ip = typed.received().and_then(Result::ok);
@@ -1514,18 +1520,33 @@ pub fn extract_trusted_ip(
             sent_by = %typed.sent_by(),
             "trusted proxy forwarded Via has no IP address; using transport source"
         );
-        return Some(socket_ip);
+        return Some((socket_ip, socket_port));
     };
+    let source_port = Some(
+        typed
+            .rport()
+            .and_then(|r| r)
+            .or_else(|| typed.sent_by().port.map(|p| p.0))
+            .unwrap_or_else(|| typed.transport.default_port().0),
+    );
 
     tracing::debug!(
         %socket_ip,
         %source_ip,
+        ?source_port,
         via_hop = 2,
         sent_by = %typed.sent_by(),
         received = ?received_ip,
         "trusted proxy source resolved from forwarded Via"
     );
-    Some(source_ip)
+    Some((source_ip, source_port))
+}
+
+pub fn extract_trusted_ip(
+    tx: &rsipstack::transaction::transaction::Transaction,
+    trusted_proxies: &[IpNet],
+) -> Option<IpAddr> {
+    extract_trusted_addr(tx, trusted_proxies).map(|(ip, _)| ip)
 }
 
 pub fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {

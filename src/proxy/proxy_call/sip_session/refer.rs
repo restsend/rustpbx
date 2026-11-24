@@ -265,12 +265,19 @@ impl SipSession {
         // pre-route hook ran — not every INVITE path). No trunk = an unknown
         // registered UA: the transferee role is not guaranteed → use the
         // transfer room.
-        let Some(peer_ip) = self
+        let Some((peer_ip, peer_port)) = self
             .context
             .cookie
             .get_extension::<crate::call::CallerPeerContext>()
             .and_then(|p| {
-                p.0.split(':').next().and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                if let Ok(sock) = p.0.parse::<std::net::SocketAddr>() {
+                    Some((sock.ip(), Some(sock.port())))
+                } else {
+                    p.0.split(':')
+                        .next()
+                        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                        .map(|ip| (ip, None))
+                }
             })
         else {
             return false;
@@ -291,6 +298,7 @@ impl SipSession {
             .map(|s| s.trim_start_matches("sip:").to_string());
         let trunk = self.server.data_context.resolve_inbound_trunk_by_ip(
             &peer_ip,
+            peer_port,
             from_user.as_deref(),
             to_user.as_deref(),
         );
