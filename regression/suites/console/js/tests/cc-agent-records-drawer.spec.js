@@ -16,7 +16,14 @@
  *   4. the calls filter bar carries direction/status/caller/callee into
  *      the request;
  *   5. CDR detail rows link to /console/call-records/{call_id} in a new
- *      tab (skipped without data).
+ *      tab (skipped without data);
+ *   6. the status-history tab renders break transitions with their
+ *      catalog label (「久振未接 (away:998)」 for the automatic no-answer
+ *      break) and links the triggering call_id to the CDR detail page
+ *      (route-mocked fixtures);
+ *   7. switching away from Skill Groups before its load resolves never
+ *      paints Skill Groups back over the active tab (stale-view
+ *      lifecycle regression, route-delayed fixtures).
  *
  * Requires a running PBX with the Contact Center addon (views at
  * /console/cc#agents). Skips when the view is not present.
@@ -189,5 +196,92 @@ test.describe('CC console agent records drawer', () => {
     const href = await links.first().getAttribute('href')
     expect(href).toMatch(/\/call-records\/[^/]+$/)
     expect(await links.first().getAttribute('target')).toBe('_blank')
+  })
+
+  test('status history labels break transitions and links the triggering call id', async ({ page }) => {
+    if (!(await openAgentsTab(page))) return
+
+    // Hermetic fixtures: one automatic no-answer break entry (to=away with
+    // the break catalog id in reason_code) carrying the dispatch call id.
+    await page.route('**/api/cc/presence/config*', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        source: 'toml',
+        config: {},
+        global_break_types: [{ id: '998', label_zh: '久振未接', label_en: 'No answer', max_secs: 0, max_count_per_day: 0 }],
+        phone_behavior: { ring_no_answer_break_id: '998' },
+        runtime_break_types: [],
+        runtime_phone_behavior: {},
+      }),
+    }))
+    await page.route('**/api/cc/agents/*/status_history*', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: [{
+          from_status: 'ringing', to_status: 'away', reason_code: '998',
+          duration_secs: 30, call_id: 'call-abc-123', instance_id: 'n1',
+          created_at: Math.floor(Date.now() / 1000),
+        }],
+        total: 1,
+      }),
+    }))
+
+    const icon = page
+      .locator('#cc-spa-app table button[title*="通话记录"], #cc-spa-app table button[title*="Call records"], #cc-spa-app table button[title*="call records"]')
+      .first()
+    const hasIcon = await icon
+      .waitFor({ state: 'visible', timeout: 10000 })
+      .then(() => true)
+      .catch(() => false)
+    if (!hasIcon) {
+      test.skip(true, 'no agent row with the records icon on this instance')
+      return
+    }
+    await icon.click()
+    const drawer = page.locator('#agent-records-drawer')
+    await expect(drawer).toBeVisible()
+    await drawer.locator('[data-ar-tab="status"]').click()
+
+    // The transition chip shows the catalog label with the raw business
+    // status, not a bare `away`.
+    await expect(drawer.getByText('久振未接 (away:998)')).toBeVisible()
+
+    // The triggering call id links to the CDR detail page in a new tab.
+    const link = drawer.locator('a[href*="/call-records/call-abc-123"]')
+    await expect(link).toBeVisible()
+    expect(await link.getAttribute('target')).toBe('_blank')
+    // Full id on hover, truncated text in the cell.
+    expect(await link.getAttribute('title')).toBe('call-abc-123')
+    const text = await link.textContent()
+    expect(text.length).toBeLessThanOrEqual(19)
+  })
+
+  test('switching away from skill groups mid-load never paints skill groups back', async ({ page }) => {
+    if (!(await openAgentsTab(page))) return
+
+    // Delay the skill-groups payload so its load resolves AFTER we have
+    // already switched away — the stale view must neither repaint nor arm
+    // its orphan 5s auto-refresh timer.
+    await page.route('**/api/cc/skill-groups*', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: [] }),
+      })
+    })
+
+    await page.goto(`${CC_URL}#skill-groups`, { waitUntil: 'domcontentloaded' })
+    // Switch away immediately — inside the delayed load window.
+    await page.locator("#cc-tabs button[onclick*=\"setTab('agents')\"]").click()
+
+    // Past the stale view's first 5s tick, the Agents view must still own
+    // the screen (without the lifetime guard, Skill Groups repainted here
+    // every 5s until a full reload).
+    await page.waitForTimeout(6500)
+    await expect(page.locator('#cc-spa-app .cc-content h1', { hasText: 'Agents' })).toBeVisible()
+    await expect(page.locator('#cc-spa-app .cc-content h1', { hasText: 'Skill Groups' })).toHaveCount(0)
   })
 })
