@@ -419,6 +419,7 @@ async fn test_comprehensive_core_event_structs() {
 
         gw.broadcast(&rustpbx::rwi::ConferenceCreated {
             conf_id: "conf-core-001".into(),
+            call_id: None,
         });
         gw.broadcast(&rustpbx::rwi::CallBridged {
             leg_a: call_id.into(),

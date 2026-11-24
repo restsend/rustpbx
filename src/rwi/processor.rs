@@ -3136,6 +3136,7 @@ impl RwiCommandProcessor {
         let gw = self.gateway.read();
         gw.broadcast(&crate::rwi::ConferenceCreated {
             conf_id: conf_id.clone(),
+            call_id: None,
         });
 
         info!(conf_id = %conf_id, "Conference created");
@@ -3190,6 +3191,8 @@ impl RwiCommandProcessor {
             crate::rwi::ConferenceMemberJoined {
                 conf_id: conf_id.to_string(),
                 call_id: call_id.to_string(),
+                leg_id: None,
+                leg_role: None,
             },
             |conf_id, call_id| CommandResult::ConferenceMemberAdded { conf_id, call_id },
             "added",
@@ -3210,6 +3213,8 @@ impl RwiCommandProcessor {
             crate::rwi::ConferenceMemberLeft {
                 conf_id: conf_id.to_string(),
                 call_id: call_id.to_string(),
+                leg_id: None,
+                leg_role: None,
             },
             |conf_id, call_id| CommandResult::ConferenceMemberRemoved { conf_id, call_id },
             "removed",
@@ -3439,6 +3444,8 @@ impl RwiCommandProcessor {
                     gw.broadcast(&crate::rwi::ConferenceMemberJoined {
                         conf_id: conf_id.to_string(),
                         call_id: new_call_id.to_string(),
+                        leg_id: None,
+                        leg_role: None,
                     });
                 }
 
@@ -3453,6 +3460,8 @@ impl RwiCommandProcessor {
                         gw.broadcast(&crate::rwi::ConferenceMemberLeft {
                             conf_id: conf_id.to_string(),
                             call_id: old_call_id.to_string(),
+                            leg_id: None,
+                            leg_role: None,
                         });
                     }
                 }

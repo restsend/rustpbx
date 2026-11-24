@@ -741,11 +741,19 @@ impl RwiEventSpec for CallBridged {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConferenceCreated {
     pub conf_id: String,
+    /// Root call id when the room is created for a specific call (e.g. the
+    /// client-side local 3-way merge synthesized from the
+    /// `consult-state=merged` marker). Without it `call_id()` is `None` and
+    /// `RwiGateway::send_to_owner` drops the event before any subscriber or
+    /// webhook sees it; the plain RWI `conference.create` command path keeps
+    /// it absent (broadcast, unenriched — historical wire shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 impl RwiEventSpec for ConferenceCreated {
     const TYPE: &'static str = "conference_created";
     fn call_id(&self) -> Option<&str> {
-        None
+        self.call_id.as_deref()
     }
 }
 
@@ -1047,6 +1055,14 @@ impl RwiEventSpec for ConferenceError {
 pub struct ConferenceMemberJoined {
     pub conf_id: String,
     pub call_id: String,
+    /// Session-local leg identity + role snapshot for synthesized members
+    /// (client-side local 3-way merge). Absent on the RWI
+    /// `conference.add` command path (whole-call membership, historical
+    /// wire shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceMemberJoined, "conference_member_joined");
 
@@ -1054,6 +1070,11 @@ rwi_event!(ConferenceMemberJoined, "conference_member_joined");
 pub struct ConferenceMemberLeft {
     pub conf_id: String,
     pub call_id: String,
+    /// See [`ConferenceMemberJoined::leg_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceMemberLeft, "conference_member_left");
 

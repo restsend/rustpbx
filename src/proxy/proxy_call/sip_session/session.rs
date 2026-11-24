@@ -115,6 +115,20 @@ pub(super) struct ConferenceAttachment {
     pub conference_id: crate::call::runtime::ConferenceId,
 }
 
+/// Client-side local 3-way room (restsend `consult-state=merged` marker).
+/// The conference exists only inside the transferor's UA — the server never
+/// creates a room or mixes audio — so the `conference_*` event trio is
+/// synthesized at the terminal hop and latched here: re-sent markers and the
+/// `talk` edge stay idempotent, and member teardowns emit
+/// `conference_member_left` until the room is empty / the session ends.
+#[derive(Debug, Clone)]
+pub(super) struct LocalThreeWayRoom {
+    pub conf_id: String,
+    /// Legs that were live at the merge edge, with their `leg_role` snapshot
+    /// (roles must survive the leg registry removal at teardown).
+    pub members: Vec<(LegId, Option<String>)>,
+}
+
 /// Cross-session hold path for the attended-transfer room. After the
 /// transferor departs, the in-session bridged peer is the retired consult
 /// dialog — the real peer leg lives in the partner session. Hold/unhold for
@@ -191,6 +205,9 @@ pub struct SipSession {
     pub(super) app_media_leg: Arc<RwLock<Option<LegId>>>,
     /// This session contributes one leg while retaining its SIP dialog ownership.
     pub(super) conference: Option<ConferenceAttachment>,
+    /// Latched client-side local 3-way room (see [`LocalThreeWayRoom`]).
+    /// Mutex because the member-left emitter runs on `&self` teardown paths.
+    local_three_way: parking_lot::Mutex<Option<LocalThreeWayRoom>>,
     pub meta: crate::proxy::proxy_call::call_meta::CallMeta,
     pub media: crate::proxy::proxy_call::media_state::MediaState,
 
@@ -1905,6 +1922,7 @@ impl SipSession {
             pending_customer_transfer_release: None,
             app_media_leg: Arc::new(RwLock::new(None)),
             conference: None,
+            local_three_way: parking_lot::Mutex::new(None),
             context,
             owns_statistics,
             concurrent_call_lease,
@@ -5348,6 +5366,70 @@ impl SipSession {
         None
     }
 
+    /// Client-side local 3-way merge (`consult-state=merged` marker at the
+    /// terminal hop): the conference exists only inside the transferor's UA —
+    /// the server never creates a room or mixes audio — so the
+    /// `conference_created` + per-leg `conference_member_joined` events are
+    /// synthesized here, latched on the session (re-sent markers and later
+    /// `talk` edges are no-ops). Members are the legs live at the merge edge
+    /// with their role snapshot; teardowns emit `conference_member_left` (see
+    /// `emit_rwi_leg_hangup` / the session-teardown sweep).
+    fn note_local_three_way_merged(&mut self) {
+        {
+            // Already attached to a real PBX conference room — its own
+            // conference events fire; a synthesized client-side room here
+            // would double-report the same membership.
+            if self.conference.is_some() {
+                debug!(session_id = %self.id,
+                    "consult-state=merged ignored — session already attached to a PBX conference");
+                return;
+            }
+            let mut room = self.local_three_way.lock();
+            if room.is_some() {
+                debug!(session_id = %self.id, "consult-state=merged — local 3-way room already latched");
+                return;
+            }
+            let call_id = self.context.session_id.to_string();
+            let conf_id = format!("consult-{}", call_id);
+            let members: Vec<(LegId, Option<String>)> = self
+                .legs
+                .iter()
+                .filter(|(_, leg)| {
+                    matches!(leg.state, crate::call::domain::LegState::Connected | crate::call::domain::LegState::Hold)
+                })
+                .map(|(id, _)| {
+                    // Same role semantics as the call_* event stream — the
+                    // child-session callee slot carries the pinned role.
+                    let role = self.leg_role_of(id.as_str());
+                    (id.clone(), role)
+                })
+                .collect();
+            if members.is_empty() {
+                info!(session_id = %self.id, %conf_id,
+                    "consult-state=merged at terminal hop but no connected legs — conference events skipped");
+                return;
+            }
+            info!(session_id = %self.id, %conf_id, members = ?members,
+                "Synthesizing client-side local 3-way conference events");
+            *room = Some(LocalThreeWayRoom {
+                conf_id: conf_id.clone(),
+                members: members.clone(),
+            });
+            self.emit_typed_rwi_event(&crate::rwi::ConferenceCreated {
+                conf_id: conf_id.clone(),
+                call_id: Some(call_id.clone()),
+            });
+            for (leg_id, leg_role) in &members {
+                self.emit_typed_rwi_event(&crate::rwi::ConferenceMemberJoined {
+                    conf_id: conf_id.clone(),
+                    call_id: call_id.clone(),
+                    leg_id: Some(leg_id.to_string()),
+                    leg_role: leg_role.clone(),
+                });
+            }
+        }
+    }
+
     async fn handle_updated_dialog(
         &mut self,
         side: DialogSide,
@@ -5398,6 +5480,15 @@ impl SipSession {
             // swallowed the marker and the agent stayed on the pre-merge
             // label although the P2P consult path relays fine).
             use crate::call::domain::LegState;
+            // Legs the marker is relayed to — needed by the terminal-hop
+            // gate below: a relay target that is itself a home-proxy mirror
+            // leg (`remote_registered`) means this session is an intermediate
+            // hop and the peer node's session will process the same marker
+            // again (cluster daisy chain).
+            let mut relay_targets: Vec<crate::call::domain::LegId> = match target_side {
+                DialogSide::Callee => vec![LegId::from("callee")],
+                DialogSide::Caller => vec![LegId::from("caller")],
+            };
             let response: Option<rsipstack::sip::Response> = match self
                 .send_mid_dialog_request_to_side(
                     target_side,
@@ -5422,6 +5513,7 @@ impl SipSession {
                     if targets.is_empty() {
                         return Err(side_err);
                     }
+                    relay_targets = targets.clone();
                     info!(session_id = %self.id, legs = ?targets,
                         "consult_state UPDATE — no classic opposite side, relaying to dynamic legs");
                     let mut delivered: Option<rsipstack::sip::Response> = None;
@@ -5454,6 +5546,21 @@ impl SipSession {
             };
             let response =
                 response.ok_or_else(|| anyhow!("consult_state UPDATE relay timed out"))?;
+
+            // Client-side local 3-way: `merged` announces the merge edge of a
+            // conference that exists only inside the transferor's UA (the
+            // server never creates a room). Synthesize the conference event
+            // trio once, at the TERMINAL hop only — an intermediate hop's
+            // relay target is a home-proxy mirror leg and the peer node's
+            // session will process this same marker again. `talk` (the
+            // complete-transfer downgrade edge) never creates a room.
+            let terminal_hop = relay_targets
+                .iter()
+                .any(|t| !self.legs.get(t).is_some_and(|leg| leg.remote_registered));
+            if phase == "merged" && terminal_hop {
+                self.note_local_three_way_merged();
+            }
+
             tx_handle
                 .respond(response.status_code.clone(), None, None)
                 .await
@@ -12359,6 +12466,23 @@ impl SipSession {
             }
         }
 
+        // Client-side local 3-way room: members not yet reported leave the
+        // synthesized conference before the session event closes the call.
+        // Roles are the latch-time snapshot — the leg registry entries may
+        // already be removed here.
+        if let Some(room) = self.local_three_way.lock().take() {
+            for (leg_id, leg_role) in room.members {
+                info!(session_id = %self.id, conf_id = %room.conf_id, %leg_id,
+                    "Local 3-way member left at session teardown");
+                self.emit_typed_rwi_event(&crate::rwi::ConferenceMemberLeft {
+                    conf_id: room.conf_id.clone(),
+                    call_id: self.context.session_id.clone(),
+                    leg_id: Some(leg_id.to_string()),
+                    leg_role,
+                });
+            }
+        }
+
         let hangup = crate::rwi::CallHangup {
             scope: if self.meta.child_leg_role.is_some() {
                 crate::rwi::CallHangupScope::Leg
@@ -16591,6 +16715,23 @@ impl SipSession {
         if self.cancel_token.is_cancelled() {
             return;
         }
+        // Client-side local 3-way room: a member leg's teardown emits
+        // `conference_member_left` (latched at the `consult-state=merged`
+        // edge). Session teardown paths are handled by the cleanup sweep —
+        // this early-return above deliberately defers to it.
+        if let Some(room) = self.local_three_way.lock().as_mut() {
+            if let Some(pos) = room.members.iter().position(|(m, _)| m == id) {
+                let (leg_id, leg_role) = room.members.remove(pos);
+                info!(session_id = %self.id, conf_id = %room.conf_id, %leg_id,
+                    "Local 3-way member left the synthesized conference");
+                self.emit_typed_rwi_event(&crate::rwi::ConferenceMemberLeft {
+                    conf_id: room.conf_id.clone(),
+                    call_id: self.context.session_id.clone(),
+                    leg_id: Some(leg_id.to_string()),
+                    leg_role,
+                });
+            }
+        }
         let sip_status = reason
             .as_deref()
             .and_then(|r| r.strip_prefix("Rejected with "))
@@ -16791,6 +16932,22 @@ impl SipSession {
                 )
                 .severity(crate::call_errors::ErrSeverity::Info),
             );
+        }
+        // Home-proxy mirror legs (the dispatcher hop toward a peer-registered
+        // endpoint) never surface hold events or hooks: the dialog's
+        // registration node owns the leg-role-attributed stream (same
+        // contract as `leg_role_of` / `cc_leg_teardowns`). Emitting here
+        // would double-report the same logical hold beside the peer
+        // session's authoritative event (prd 2026-11-23: three-way
+        // `call_held` reported once per daisy-chain hop).
+        if self
+            .legs
+            .get(leg_id)
+            .is_some_and(|leg| leg.remote_registered)
+        {
+            debug!(session_id = %self.id, %leg_id, ?new,
+                "Suppressed hold transition events for home-proxy mirror leg");
+            return;
         }
         let ctx = self.session_hook_ctx();
         let leg_id_str = leg_id.to_string();
@@ -18857,22 +19014,31 @@ impl SipSession {
                 self.update_leg_state(&leg_id, LegState::Hold);
                 info!(session_id = %self.id, %leg_id, "Hold re-INVITE sent successfully");
 
-                if !self.server.session_hooks.is_empty() {
-                    let ctx = self.session_hook_ctx();
-                    let leg_id_str = leg_id.to_string();
-                    for hook in self.server.session_hooks.iter() {
-                        hook.on_call_held(&ctx, &leg_id_str).await;
+                // Home-proxy mirror legs stay silent (see
+                // `fire_hold_transition_hooks`): the registration node's
+                // session owns this dialog's hold reporting.
+                if !self
+                    .legs
+                    .get(&leg_id)
+                    .is_some_and(|leg| leg.remote_registered)
+                {
+                    if !self.server.session_hooks.is_empty() {
+                        let ctx = self.session_hook_ctx();
+                        let leg_id_str = leg_id.to_string();
+                        for hook in self.server.session_hooks.iter() {
+                            hook.on_call_held(&ctx, &leg_id_str).await;
+                        }
                     }
-                }
 
-                // Core hold event — agent attribution (agent_id / agent_name /
-                // queue_id) is injected from the RWI call meta published at
-                // ringing/connected time (replaces the former `cc_held`).
-                self.emit_typed_rwi_event(&crate::rwi::CallHeld {
-                    leg_role: self.leg_role_of(leg_id.as_str()),
-                    call_id: self.context.session_id.clone(),
-                    leg_id: leg_id.to_string(),
-                });
+                    // Core hold event — agent attribution (agent_id / agent_name /
+                    // queue_id) is injected from the RWI call meta published at
+                    // ringing/connected time (replaces the former `cc_held`).
+                    self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                        leg_role: self.leg_role_of(leg_id.as_str()),
+                        call_id: self.context.session_id.clone(),
+                        leg_id: leg_id.to_string(),
+                    });
+                }
 
                 // Switch the held leg's media egress to hold music (looping) or
                 // CNG/silence. Mirrors propagate_hold_to_callee / _to_caller: without
@@ -19100,19 +19266,26 @@ impl SipSession {
             peer.set_ingress_quiet_expected(false);
         }
         self.update_leg_state(&leg_id, LegState::Connected);
-        if !self.server.session_hooks.is_empty() {
-            let ctx = self.session_hook_ctx();
-            let leg_id_str = leg_id.to_string();
-            for hook in self.server.session_hooks.iter() {
-                hook.on_call_unheld(&ctx, &leg_id_str).await;
+        // Home-proxy mirror legs stay silent (see `fire_hold_transition_hooks`).
+        if !self
+            .legs
+            .get(&leg_id)
+            .is_some_and(|leg| leg.remote_registered)
+        {
+            if !self.server.session_hooks.is_empty() {
+                let ctx = self.session_hook_ctx();
+                let leg_id_str = leg_id.to_string();
+                for hook in self.server.session_hooks.iter() {
+                    hook.on_call_unheld(&ctx, &leg_id_str).await;
+                }
             }
+            // Core unhold event (replaces the former `cc_unheld`).
+            self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+                leg_role: self.leg_role_of(leg_id.as_str()),
+                call_id: self.context.session_id.clone(),
+                leg_id: leg_id.to_string(),
+            });
         }
-        // Core unhold event (replaces the former `cc_unheld`).
-        self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
-            leg_role: self.leg_role_of(leg_id.as_str()),
-            call_id: self.context.session_id.clone(),
-            leg_id: leg_id.to_string(),
-        });
         self.restore_recording_routes();
         Ok(())
     }

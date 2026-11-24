@@ -57,6 +57,9 @@ const WEBHOOK_EVENTS: &[&str] = &[
     "queue_agent_offered",
     "queue_agent_connected",
     "queue_left",
+    "conference_created",
+    "conference_member_joined",
+    "conference_member_left",
 ];
 
 /// Call-IDs seen on incoming INVITEs, per UA — filled by the answer pumps.
@@ -1286,6 +1289,164 @@ async fn test_queue_miss_then_redial_keeps_callid_contract() -> Result<()> {
     let _ = bob.stop();
     let _ = charlie.stop();
     let _ = caller.stop();
+    harness.server.stop();
+    Ok(())
+}
+
+/// ── Scenario ⑤: client-side local 3-way merge (`consult-state=merged`) ─────
+///
+/// The caller announces the local-merge edge over the queue-dispatched agent
+/// call. The PBX never creates a room — the terminal-hop queue session
+/// synthesizes the conference event trio onto the REAL webhook JSON stream:
+/// `conference_created` (call_id-routed, so `send_to_owner` accepts it), one
+/// `conference_member_joined` per live leg with leg identity + role, and
+/// per-leg `conference_member_left` as the call tears down. Agent
+/// attribution (agent_id) rides the enrichment like on every call-scoped
+/// event.
+#[tokio::test]
+async fn test_local_three_way_marker_synthesizes_conference_events() -> Result<()> {
+    let _ = tracing_subscriber::fmt().try_init();
+    let capture = WebhookCapture::start().await;
+    let harness = start_harness(&capture).await?;
+    let proxy_addr = harness.server.proxy_addr;
+
+    let mut bob = make_ua(proxy_addr, "bob");
+    bob.start().await?;
+    bob.register().await?;
+    let bob_call_ids: SeenCallIds = Arc::new(Mutex::new(Vec::new()));
+    let bob_pump = spawn_answer_pump(bob.clone(), bob_call_ids.clone());
+
+    let mut alice = make_ua(proxy_addr, "alice");
+    alice.start().await?;
+    alice.register().await?;
+    sleep(Duration::from_millis(300)).await;
+
+    // alice → queue → bob answers.
+    let offer = create_test_sdp(
+        "127.0.0.1",
+        portpicker::pick_unused_port().unwrap_or(30250),
+        false,
+    );
+    let dialog = alice.make_call(QUEUE_NUMBER, Some(offer)).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while bob_call_ids.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queue never dispatched bob"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    sleep(Duration::from_millis(500)).await;
+    let session_id = harness
+        .server
+        .wait_for_active_call(Duration::from_secs(5))
+        .await
+        .expect("queue call must be active");
+    let conf_id = format!("consult-{}", session_id);
+
+    // The caller announces the local 3-way merge edge (bodyless in-dialog
+    // UPDATE carrying the restsend marker).
+    alice
+        .send_update_with_headers(
+            &dialog,
+            vec![rsipstack::sip::Header::UserToUser(
+                "consult-state=merged".into(),
+            )],
+        )
+        .await?;
+
+    // `conference_created` — routed by call_id (this is the field that keeps
+    // `send_to_owner` from dropping the event) with the mixer-shaped conf id.
+    let created = wait_webhook_event(&capture, "conference_created", Duration::from_secs(10))
+        .await
+        .expect("webhook must receive conference_created for the local 3-way merge");
+    assert_eq!(
+        created["event"]["conf_id"].as_str(),
+        Some(conf_id.as_str()),
+        "conf_id must be consult-{session_id}: {created}"
+    );
+    assert_eq!(
+        created["event"]["call_id"].as_str(),
+        Some(session_id.as_str()),
+        "conference_created must carry the call id: {created}"
+    );
+    assert_eq!(
+        created["call_id"].as_str(),
+        Some(session_id.as_str()),
+        "top-level call_id must be set (owner routing): {created}"
+    );
+
+    // One `conference_member_joined` per live leg: the caller leg and the
+    // dispatched agent leg — with leg identity, role, and CC attribution.
+    let caller_joined = wait_webhook_matching(
+        &capture,
+        "conference_member_joined",
+        |v| v["event"]["leg_role"].as_str() == Some("caller"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the caller-leg member_joined");
+    assert_eq!(caller_joined["event"]["conf_id"].as_str(), Some(conf_id.as_str()));
+    assert_eq!(
+        caller_joined["event"]["call_id"].as_str(),
+        Some(session_id.as_str())
+    );
+    assert!(
+        caller_joined["event"]["leg_id"].is_string(),
+        "synthesized member carries leg_id: {caller_joined}"
+    );
+    let agent_joined = wait_webhook_matching(
+        &capture,
+        "conference_member_joined",
+        |v| v["event"]["leg_role"].as_str() == Some("agent"),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the agent-leg member_joined");
+    assert_eq!(agent_joined["event"]["conf_id"].as_str(), Some(conf_id.as_str()));
+    assert_eq!(
+        agent_joined["event"]["agent_id"].as_str(),
+        Some("bob"),
+        "agent attribution enriches the synthesized event: {agent_joined}"
+    );
+    {
+        let events = capture.received.lock().unwrap();
+        let joined = events
+            .iter()
+            .filter(|v| v["event_type"].as_str() == Some("conference_member_joined"))
+            .count();
+        assert_eq!(joined, 2, "exactly one member_joined per leg: {joined}");
+    }
+
+    // Teardown: per-leg `conference_member_left` (LegEnded handler and/or the
+    // session-teardown sweep — exactly once per member either way).
+    alice.hangup(&dialog).await?;
+    for role in ["caller", "agent"] {
+        let left = wait_webhook_matching(
+            &capture,
+            "conference_member_left",
+            |v| v["event"]["leg_role"].as_str() == Some(role),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_or_else(|| {
+            panic!("webhook must receive the {role}-leg conference_member_left")
+        });
+        assert_eq!(left["event"]["conf_id"].as_str(), Some(conf_id.as_str()));
+        assert_eq!(left["event"]["call_id"].as_str(), Some(session_id.as_str()));
+    }
+    {
+        let events = capture.received.lock().unwrap();
+        let lefts = events
+            .iter()
+            .filter(|v| v["event_type"].as_str() == Some("conference_member_left"))
+            .count();
+        assert_eq!(lefts, 2, "exactly one member_left per member: {lefts}");
+    }
+
+    bob_pump.abort();
+    let _ = bob.stop();
+    let _ = alice.stop();
     harness.server.stop();
     Ok(())
 }

@@ -384,21 +384,41 @@ async fn child_added_legs_keep_their_own_role_and_registration_owner() {
                 delivered.push(entry.event);
             }
         }
-        for kind in [
-            "call_ringing",
-            "call_answered",
-            "call_held",
-            "call_unheld",
-            "call_hangup",
-        ] {
+        // Home-proxy mirror legs (`remote_registered`) stay silent on
+        // hold/unheld — the dialog's registration node owns the hold stream
+        // (prd 2026-11-23: three-way double `call_held` suppression).
+        let (present_kinds, absent_kinds): (&[&str], &[&str]) = if expected.is_some() {
+            (
+                &[
+                    "call_ringing",
+                    "call_answered",
+                    "call_held",
+                    "call_unheld",
+                    "call_hangup",
+                ],
+                &[],
+            )
+        } else {
+            (
+                &["call_ringing", "call_answered", "call_hangup"],
+                &["call_held", "call_unheld"],
+            )
+        };
+        for kind in present_kinds {
             let event = delivered
                 .iter()
-                .find(|event| event.event_type == kind)
+                .find(|event| event.event_type == *kind)
                 .unwrap_or_else(|| panic!("missing {kind} for {name}: {delivered:?}"));
             assert_eq!(
                 event.payload.get("leg_role").and_then(|role| role.as_str()),
                 expected,
                 "{name}: {event:?}"
+            );
+        }
+        for kind in absent_kinds {
+            assert!(
+                delivered.iter().all(|event| event.event_type != *kind),
+                "{name}: {kind} must not be emitted for a home-proxy mirror leg: {delivered:?}"
             );
         }
     }
@@ -800,4 +820,125 @@ async fn check_transfer_max_duration(bye_transport_fails: bool) {
     }
     session.cleanup().await;
     serving.abort();
+}
+
+/// Client-side local 3-way (restsend `consult-state=merged` marker): the
+/// terminal-hop session synthesizes `conference_created` +
+/// per-leg `conference_member_joined` exactly once (latch), member teardowns
+/// emit `conference_member_left` with the latch-time role snapshot, and the
+/// session-teardown sweep reports remaining members. Asserted against the
+/// real RWI gateway event JSON.
+#[tokio::test]
+async fn local_three_way_merge_synthesizes_conference_event_trio() {
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        crate::config::ProxyConfig {
+            route_originated_calls: false,
+            ..Default::default()
+        },
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "customer",
+        None,
+        "example.test",
+        None,
+    );
+    let dialplan = Dialplan::new("local-3way".into(), request, DialDirection::Inbound);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
+
+    // Two live members at the merge edge: the caller leg and a consult-style
+    // dynamic leg (inserted directly — no dial outcome dependency).
+    session.update_leg_state(&LegId::from("caller"), crate::call::domain::LegState::Connected);
+    let consult = LegId::from("consult-x");
+    let mut consult_leg = crate::call::domain::Leg::new(consult.clone());
+    consult_leg.purpose = Some(crate::call::domain::LegPurpose::Consult);
+    session.legs.insert(consult.clone(), consult_leg);
+    session.update_leg_state(&consult, crate::call::domain::LegState::Connected);
+    while events.try_recv().is_ok() {}
+
+    // Merge edge: created + one joined per live member.
+    session.note_local_three_way_merged();
+    let call_id = session.context.session_id.to_string();
+    let conf_id = format!("consult-{}", call_id);
+    let mut batch = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        batch.push(entry.event);
+    }
+    let created = batch
+        .iter()
+        .find(|e| e.event_type == "conference_created")
+        .unwrap_or_else(|| panic!("missing conference_created: {batch:?}"));
+    assert_eq!(created.payload["conf_id"], conf_id);
+    assert_eq!(
+        created.payload["call_id"], call_id,
+        "conference_created must carry the call id (send_to_owner routing): {created:?}"
+    );
+    let joined: Vec<_> = batch
+        .iter()
+        .filter(|e| e.event_type == "conference_member_joined")
+        .collect();
+    assert_eq!(joined.len(), 2, "one member_joined per live leg: {batch:?}");
+    for event in &joined {
+        assert_eq!(event.payload["conf_id"], conf_id);
+        assert_eq!(event.payload["call_id"], call_id);
+        assert!(
+            event.payload["leg_id"].is_string()
+                && event.payload["leg_role"].is_string()
+                && event.payload["leg_id"] != serde_json::Value::Null
+                && event.payload["leg_role"] != serde_json::Value::Null,
+            "synthesized members carry leg identity + role: {event:?}"
+        );
+    }
+    let caller_joined = joined
+        .iter()
+        .find(|e| e.payload["leg_id"] == "caller")
+        .expect("caller leg must be a member");
+    assert_eq!(caller_joined.payload["leg_role"], "caller");
+    let consult_joined = joined
+        .iter()
+        .find(|e| e.payload["leg_id"] == "consult-x")
+        .expect("consult leg must be a member");
+    assert_eq!(consult_joined.payload["leg_role"], "consult");
+
+    // Latch: re-sent merged markers are no-ops.
+    session.note_local_three_way_merged();
+    session.note_local_three_way_merged();
+    assert!(
+        events.try_recv().is_err(),
+        "latch must suppress duplicate conference events"
+    );
+
+    // Member teardown → member_left with the latch-time role snapshot.
+    session.emit_rwi_leg_hangup(&consult, Some("UasBye".into()));
+    let mut left = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "conference_member_left" {
+            left.push(entry.event);
+        }
+    }
+    assert_eq!(left.len(), 1, "exactly one member_left: {left:?}");
+    assert_eq!(left[0].payload["leg_id"], "consult-x");
+    assert_eq!(left[0].payload["leg_role"], "consult");
+    assert_eq!(left[0].payload["conf_id"], conf_id);
+    assert_eq!(left[0].payload["call_id"], call_id);
+
+    // Session teardown sweeps the remaining member (the caller leg).
+    session.cleanup().await;
+    let mut swept = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "conference_member_left" {
+            swept.push(entry.event);
+        }
+    }
+    assert_eq!(
+        swept.len(),
+        1,
+        "teardown sweep reports the remaining member exactly once: {swept:?}"
+    );
+    assert_eq!(swept[0].payload["leg_id"], "caller");
+    assert_eq!(swept[0].payload["leg_role"], "caller");
 }

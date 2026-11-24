@@ -14160,7 +14160,12 @@ async fn failed_blind_transfer_restores_agent_leg_locality() {
             }
         }
         session.cleanup().await;
-        assert_eq!(payloads.len(), 2);
+        // prd 2026-11-23 (hold-mirror suppression): a REMOTE original emits
+        // only the leg-scoped hangup — its `call_held` is suppressed on this
+        // node because the registration node's child session owns the hold
+        // stream. A local original emits held + hangup as before.
+        let expected_payloads = if original_remote { 1 } else { 2 };
+        assert_eq!(payloads.len(), expected_payloads);
         for payload in payloads {
             assert_eq!(payload["leg_id"], "callee");
             if original_remote {
@@ -14779,6 +14784,8 @@ async fn leg_remove_of_unconnected_leg_emits_miss_hangup() {
 /// the registration node's child-leg session is the single source of the
 /// agent attribution. Without this both nodes stamped
 /// `leg_role: "agent"` on the same agent leg (two ringings per dial).
+/// Hold/unheld events are suppressed entirely on this node (prd 2026-11-23:
+/// the same logical hold used to report once per daisy-chain hop).
 #[tokio::test]
 async fn remote_registered_leg_events_carry_no_leg_role() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
@@ -14858,10 +14865,15 @@ async fn remote_registered_leg_events_carry_no_leg_role() {
         crate::call::domain::LegState::Hold,
     )
     .await;
-    let held = events.try_recv().expect("leg held");
-    assert_eq!(held.event.event_type, "call_held");
-    assert_eq!(held.event.payload["leg_id"], "agent-remote");
-    assert!(held.event.payload.get("leg_role").is_none());
+    // prd 2026-11-23 (three-way double `call_held` fix): home-proxy mirror
+    // legs emit NO hold events at all — the hold propagates to the peer
+    // session on the registration node, which owns that dialog's hold
+    // stream. Emitting here would report the same logical hold once per
+    // daisy-chain hop. Ringing/answered above stay: they are not mirrored.
+    assert!(
+        events.try_recv().is_err(),
+        "remote mirror leg must not emit call_held on this node"
+    );
 
     // A LOCAL agent leg in the same session is unaffected.
     let mut local_leg = crate::call::domain::Leg::new(LegId::from("agent-local"));
