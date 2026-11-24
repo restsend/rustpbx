@@ -1973,6 +1973,17 @@ async fn assert_refer_agent_identity(target_kinds: &[u8], inherited_roots: &[Opt
                 .await
                 .unwrap();
             if target_kind == 2 {
+                // The Refer-To user also matches an unrelated agent ID.
+                registry
+                    .register(
+                        "charlie".into(),
+                        "Other agent".into(),
+                        "sip:other@127.0.0.1".into(),
+                        vec![],
+                        1,
+                    )
+                    .await
+                    .unwrap();
                 // A non-agent's arbitrary Contact user must not claim another agent.
                 let aor = "sip:charlie@127.0.0.1".parse().unwrap();
                 let mut location = server

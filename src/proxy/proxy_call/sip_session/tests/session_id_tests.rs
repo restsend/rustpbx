@@ -14,7 +14,7 @@ async fn attended_commit_on_home_dialog_reports_the_retained_agent_once() {
     invite.headers.push(Header::Other(CONSULT_SESSION_HEADER.into(), "consult-call".into()));
     mark_consultation_data_join(&mut invite, 1);
     let mut session = delivery_session_from_request(
-        invite, Some("consult-call"), true, true, false,
+        invite, Some("consult-call"), true, true, false, false, false,
     ).await;
     let callee = LegId::from("callee");
     let mut leg = Leg::new(callee.clone());
@@ -158,7 +158,7 @@ async fn attended_consultation_data_join_requires_one_marker_from_trusted_peer()
         invite.headers.push(Header::Other("X-CC-Consult-Data-Join".into(), "1".into()));
         mark_consultation_data_join(&mut invite, marker_count);
         let mut session = delivery_session_from_request(
-            invite, Some("collided-call"), true, from_peer, false,
+            invite, Some("collided-call"), true, from_peer, false, false, false,
         ).await;
         let dialog = session.caller_dialog.as_ref().unwrap().id().call_id;
         let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
