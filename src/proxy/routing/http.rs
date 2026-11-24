@@ -499,9 +499,12 @@ impl CallRouter for HttpCallRouter {
                         let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
                             continue;
                         };
+                        let hints = arrival_hints(arrival_trunk.as_ref()).map(Arc::new);
+                        let max_ring_time = hints.as_ref().and_then(|h| h.max_ring_time);
                         attempts.push(DialAttempt {
                             retry_policy,
-                            hints: arrival_hints(arrival_trunk.as_ref()).map(Arc::new),
+                            hints,
+                            max_ring_time,
                             ..Location {
                                 aor: uri,
                                 headers: custom_headers.clone(),
@@ -529,12 +532,6 @@ impl CallRouter for HttpCallRouter {
                     }
                 }
 
-                // The sequential dialer times a trunk's attempt only within a
-                // sequence; a lone trunk target's ring time is the call's.
-                let single_ring_time = match attempts.as_slice() {
-                    [only] => only.hints.as_ref().and_then(|hints| hints.max_ring_time),
-                    _ => None,
-                };
                 let strategy = match result.strategy {
                     Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(
                         attempts.into_iter().map(|attempt| attempt.location).collect(),
@@ -608,9 +605,6 @@ impl CallRouter for HttpCallRouter {
                     dialplan.max_call_duration = Some(Duration::from_secs(timeout as u64));
                 }
 
-                if single_ring_time.is_some() {
-                    dialplan.max_ring_time = single_ring_time;
-                }
                 if let Some(max_ring_time) = result.max_ring_time {
                     dialplan.max_ring_time =
                         (max_ring_time > 0).then(|| Duration::from_secs(max_ring_time as u64));

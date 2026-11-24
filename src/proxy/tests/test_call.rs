@@ -604,6 +604,103 @@ async fn default_resolve_fixes_call_settings_from_the_first_of_several_targets()
     assert!(plan.extensions.get::<crate::call::OutboundTrunkContext>().is_none(), "other hints stay per attempt");
 }
 
+#[tokio::test]
+async fn default_resolve_applies_call_max_ring_time_independently_of_attempt_ring_time() {
+    struct ConfigurableRouter(Vec<(Option<u64>, Option<u64>)>);
+    #[async_trait]
+    impl RouteInvite for ConfigurableRouter {
+        async fn route_invite(
+            &self, option: InviteOption, _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection, _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            let targets = self.0.iter().enumerate().map(|(index, &(call_limit, attempt_limit))| {
+                let mut opt = option.clone();
+                opt.callee = format!("sip:target{index}@carrier.example.com").try_into().unwrap();
+                crate::config::RouteTarget::new(opt, Some(crate::config::DialplanHints {
+                    call_max_ring_time: call_limit.map(std::time::Duration::from_secs),
+                    max_ring_time: attempt_limit.map(std::time::Duration::from_secs),
+                    ..Default::default()
+                }))
+            }).collect();
+            Ok(RouteResult::Forward(targets))
+        }
+    }
+
+    let (server, config) = create_test_server().await;
+    let module = CallModule::new(config, server);
+    let request = crate::proxy::tests::common::create_test_request(
+        rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+    );
+    let caller = SipUser { username: "alice".into(), realm: Some("rustpbx.com".into()), ..Default::default() };
+
+    // Multi-target: call_max_ring_time controls the whole call; max_ring_time stays per-attempt.
+    let multi = module
+        .default_resolve(
+            &request,
+            Box::new(ConfigurableRouter(vec![(Some(45), Some(15)), (Some(45), Some(20))])),
+            &caller,
+            &TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(multi.max_ring_time, Some(std::time::Duration::from_secs(45)));
+    let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = &multi.flow else {
+        panic!("expected sequential plan");
+    };
+    assert_eq!(attempts[0].max_ring_time, Some(std::time::Duration::from_secs(15)));
+    assert_eq!(attempts[1].max_ring_time, Some(std::time::Duration::from_secs(20)));
+
+    // Single-target: call_max_ring_time stays on dialplan (call control),
+    // while trunk max_ring_time stays on DialAttempt (dial control).
+    let single_both = module
+        .default_resolve(
+            &request,
+            Box::new(ConfigurableRouter(vec![(Some(45), Some(15))])),
+            &caller,
+            &TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(single_both.max_ring_time, Some(std::time::Duration::from_secs(45)));
+    let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = &single_both.flow else {
+        panic!("expected sequential plan");
+    };
+    assert_eq!(attempts[0].max_ring_time, Some(std::time::Duration::from_secs(15)));
+
+    // Single-target with only trunk max_ring_time: dialplan.max_ring_time stays None
+    // (governed by global [proxy].max_ring_time), while the attempt keeps its dial limit.
+    let single_trunk_only = module
+        .default_resolve(
+            &request,
+            Box::new(ConfigurableRouter(vec![(None, Some(20))])),
+            &caller,
+            &TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(single_trunk_only.max_ring_time, None);
+    let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = &single_trunk_only.flow else {
+        panic!("expected sequential plan");
+    };
+    assert_eq!(attempts[0].max_ring_time, Some(std::time::Duration::from_secs(20)));
+
+    // Single-target with only call_max_ring_time: dialplan caps the whole call; attempt has no separate limit.
+    let single_call_only = module
+        .default_resolve(
+            &request,
+            Box::new(ConfigurableRouter(vec![(Some(30), None)])),
+            &caller,
+            &TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(single_call_only.max_ring_time, Some(std::time::Duration::from_secs(30)));
+    let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = &single_call_only.flow else {
+        panic!("expected sequential plan");
+    };
+    assert_eq!(attempts[0].max_ring_time, None);
+}
+
 struct RecordingHintsRouteInvite {
     recording: Option<RecordingPolicy>,
     enable_recording: Option<bool>,

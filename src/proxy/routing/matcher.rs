@@ -372,7 +372,7 @@ async fn match_invite_impl(
         }
         if let Some(max_ring_time) = rule.max_ring_time {
             let hints = hints.get_or_insert_with(DialplanHints::default);
-            hints.max_ring_time =
+            hints.call_max_ring_time =
                 (max_ring_time > 0).then(|| std::time::Duration::from_secs(max_ring_time as u64));
         }
         if let Some(busy_wait) = rule.action.busy_wait.as_ref().filter(|bw| bw.enabled) {

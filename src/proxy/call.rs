@@ -1112,12 +1112,14 @@ impl CallModule {
                     RouteResult::Forward(mut targets) => {
                         // A single target's hints apply to the whole dialplan, as a plain
                         // forward; several targets keep their hints scoped to each attempt,
-                        // except the call-wide recording, taken from the first.
+                        // except call-wide settings (recording and call_max_ring_time),
+                        // taken from the first.
                         let hints = match targets.as_mut_slice() {
                             [single] => single.hints.take(),
                             [first, ..] => first.hints.as_ref().map(|hints| crate::config::DialplanHints {
                                 recording: hints.recording.clone(),
                                 enable_recording: hints.enable_recording,
+                                call_max_ring_time: hints.call_max_ring_time,
                                 ..Default::default()
                             }),
                             [] => None,
@@ -1153,6 +1155,10 @@ impl CallModule {
             .as_ref()
             .and_then(|targets| targets.first())
             .map(|target| target.option.caller.clone());
+        let single_attempt_max_ring_time = routed_targets
+            .as_ref()
+            .filter(|targets| targets.len() == 1)
+            .and_then(|_| dialplan_hints.as_ref().and_then(|hints| hints.max_ring_time));
         let targets = if pending_app.is_some() {
             DialStrategy::Sequential(vec![])
         } else if let Some(queue_targets) = queue_targets {
@@ -1186,7 +1192,9 @@ impl CallModule {
                         self.inner.server.proxy_config.load().parallel_fork,
                     )?
                 } else {
-                    DialStrategy::Sequential(vec![target.into()])
+                    let mut attempt = crate::call::DialAttempt::from(target);
+                    attempt.max_ring_time = single_attempt_max_ring_time;
+                    DialStrategy::Sequential(vec![attempt])
                 }
             } else {
                 // Several targets are tried in order with their own caller and hints;
@@ -1407,8 +1415,10 @@ impl CallModule {
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
-            if hints.max_ring_time.is_some() {
-                dialplan.max_ring_time = hints.max_ring_time;
+            // Call-wide ring timeout comes only from call-control hints (route /
+            // routing profile), never from per-trunk dial max_ring_time.
+            if let Some(call_max_ring_time) = hints.call_max_ring_time {
+                dialplan.max_ring_time = Some(call_max_ring_time);
             }
             if let Some(enable_sipflow) = hints.enable_sipflow {
                 dialplan.enable_sipflow = enable_sipflow;

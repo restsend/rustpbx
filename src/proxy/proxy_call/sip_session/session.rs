@@ -7269,12 +7269,11 @@ if self
             }
             let plan = Self::plan_for_attempt(&self.server, &base, attempt);
             self.activate_attempt(attempt, plan).await;
-            // Each trunk's own ring time limits its attempt (408 when it runs out);
-            // the call's ring timer wraps the whole loop. A single target's ring
-            // time is the call's, so it gets no attempt timer.
-            let attempt_timeout = (targets.len() > 1)
-                .then(|| attempt.hints.as_ref().and_then(|hints| hints.max_ring_time))
-                .flatten();
+            // Each target's own ring time limits its dial attempt (408 when it runs out);
+            // the call's ring timer wraps the whole loop (whether 1 or N targets).
+            let attempt_timeout = attempt
+                .max_ring_time
+                .or_else(|| attempt.hints.as_ref().and_then(|hints| hints.max_ring_time));
             let started_at = Instant::now();
             info!(session_id = %self.id, index = idx, target = %attempt.location.aor, "Trying sequential target");
             let (label, detail) = Self::attempt_trace_target(idx, attempt);

@@ -2255,6 +2255,11 @@ pub struct DialplanHints {
     pub bypass_media: Option<bool>,
     pub max_duration: Option<std::time::Duration>,
     pub max_ring_time: Option<std::time::Duration>,
+    /// Call-wide max ring/setup time across all sequential targets (failover
+    /// attempts). Overrides `[proxy].max_ring_time` for the whole call and
+    /// never triggers a retry when it expires. Separate from `max_ring_time`,
+    /// which limits an individual target's attempt in a multi-target sequence.
+    pub call_max_ring_time: Option<std::time::Duration>,
     pub enable_sipflow: Option<bool>,
     pub allow_codecs: Option<Vec<String>>,
     pub extensions: http::Extensions,
@@ -2306,6 +2311,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("bypass_media", &self.bypass_media)
             .field("max_duration", &self.max_duration)
             .field("max_ring_time", &self.max_ring_time)
+            .field("call_max_ring_time", &self.call_max_ring_time)
             .field("enable_sipflow", &self.enable_sipflow)
             .field("disable_ice_servers", &self.disable_ice_servers)
             .field("media_mode", &self.media_mode)

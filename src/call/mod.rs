@@ -255,13 +255,16 @@ pub struct DialAttempt {
     /// None inherits the shared dialplan caller.
     pub caller: Option<rsipstack::sip::Uri>,
     pub hints: Option<Arc<crate::config::DialplanHints>>,
+    /// Per-attempt dial ring timeout (e.g. from trunk `max_ring_time`).
+    /// Independent of the call-wide `Dialplan::max_ring_time`.
+    pub max_ring_time: Option<Duration>,
     /// None advances after failure; an empty status-code list stops retry.
     pub retry_policy: Option<crate::proxy::routing::RetryPolicy>,
 }
 
 impl From<Location> for DialAttempt {
     fn from(location: Location) -> Self {
-        Self { location, caller: None, hints: None, retry_policy: None }
+        Self { location, caller: None, hints: None, max_ring_time: None, retry_policy: None }
     }
 }
 
@@ -269,6 +272,7 @@ impl From<Location> for DialAttempt {
 impl From<crate::config::RouteTarget> for DialAttempt {
     fn from(target: crate::config::RouteTarget) -> Self {
         let option = target.option;
+        let max_ring_time = target.hints.as_ref().and_then(|hints| hints.max_ring_time);
         Self {
             location: Location {
                 aor: option.callee,
@@ -279,6 +283,7 @@ impl From<crate::config::RouteTarget> for DialAttempt {
             },
             caller: Some(option.caller),
             hints: target.hints.map(Arc::new),
+            max_ring_time,
             // A routed target without a policy never advances.
             retry_policy: Some(target.retry_policy.unwrap_or_default()),
         }
@@ -327,6 +332,7 @@ impl std::fmt::Debug for DialAttempt {
             .field("callee", &self.location.aor)
             .field("caller", &self.caller)
             .field("hints", &self.hints)
+            .field("max_ring_time", &self.max_ring_time)
             .field("retry_policy", &self.retry_policy)
             .finish_non_exhaustive()
     }
