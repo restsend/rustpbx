@@ -155,8 +155,10 @@ the trunk's `max_ring_time` limits its own attempt, including when there is only
 one target. The top-level response `max_ring_time` limits the entire call setup
 across all attempts. If omitted, the proxy's global ring timeout applies. The
 response's `caller` and `headers` apply to trunk targets too. A target cannot
-name both `uri` and `trunk`. Parallel dialing uses the trunk's destination and
-credentials only. The call-wide limit also applies to parallel dialing.
+name both `uri` and `trunk`. A lone trunk target with its own `max_ring_time`
+uses sequential dialing even when the response requests `parallel`. Parallel
+dialing uses the trunk's destination and credentials only. The call-wide limit
+also applies to parallel dialing.
 
 For a call that arrived on a trunk (`source_trunk`), that trunk's network path
 (network profile, media IPs, ICE-lite) applies to every sequential target, as

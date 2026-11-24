@@ -532,10 +532,20 @@ impl CallRouter for HttpCallRouter {
                     }
                 }
 
+                // A single timed target can use the sequential dialer's attempt timer.
+                let has_single_attempt_timeout = matches!(
+                    attempts.as_slice(),
+                    [DialAttempt {
+                        max_ring_time: Some(_),
+                        ..
+                    }]
+                );
                 let strategy = match result.strategy {
-                    Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(
-                        attempts.into_iter().map(|attempt| attempt.location).collect(),
-                    ),
+                    Some(HttpRouteStrategy::Parallel) if !has_single_attempt_timeout => {
+                        DialStrategy::Parallel(
+                            attempts.into_iter().map(|attempt| attempt.location).collect(),
+                        )
+                    }
                     _ => DialStrategy::Sequential(attempts),
                 };
 

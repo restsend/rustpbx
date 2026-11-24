@@ -1371,6 +1371,23 @@ mod tests {
                 }),
                 Some(std::time::Duration::from_secs(45)),
             ),
+            (
+                json!({
+                    "action": "forward",
+                    "strategy": "parallel",
+                    "targets": [{"trunk": "carrier-a"}],
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "action": "forward",
+                    "strategy": "parallel",
+                    "targets": [{"trunk": "carrier-a"}],
+                    "max_ring_time": 45
+                }),
+                Some(std::time::Duration::from_secs(45)),
+            ),
         ];
 
         for (response, call_ring_time) in cases {
@@ -1386,6 +1403,23 @@ mod tests {
             };
             assert_eq!(attempt.max_ring_time, Some(std::time::Duration::from_secs(20)));
         }
+
+        let mut untimed_trunk = trunk("sip:10.0.0.1:5060", None);
+        untimed_trunk.max_ring_time = None;
+        let plan = resolve_with_trunks(
+            json!({
+                "action": "forward",
+                "strategy": "parallel",
+                "targets": [{"trunk": "carrier-a"}],
+            }),
+            [("carrier-a".to_string(), untimed_trunk)].into(),
+        )
+        .await
+        .unwrap();
+        let DialplanFlow::Targets(DialStrategy::Parallel(targets)) = plan.flow else {
+            panic!("expected parallel targets without an attempt timer");
+        };
+        assert_eq!(targets.len(), 1);
     }
 
     #[tokio::test]
