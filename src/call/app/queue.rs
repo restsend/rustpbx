@@ -983,6 +983,102 @@ impl QueueApp {
         );
     }
 
+    /// Millis elapsed on the CURRENT stage clock (Sequential: per-stage dwell
+    /// since `stage_started_at`; other modes: enqueue → now). Same clock as
+    /// [`Self::stage_wait_secs`], in ms, for trace `duration_ms` fields.
+    fn stage_wait_ms(&self) -> Option<i64> {
+        let started = match self.config.escalation_mode {
+            EscalationMode::Sequential => self.stage_started_at.or(self.enqueued_at),
+            _ => self.enqueued_at,
+        };
+        started.map(|t| t.elapsed().as_millis() as i64)
+    }
+
+    /// Build the CDR trace entry that closes the assignment story: the
+    /// offered agent ANSWERED. `duration_ms` carries the enqueue → connect
+    /// wall clock — the wait the caller actually experienced — so the detail
+    /// page timeline shows it without ts arithmetic. Mirrors the 486 /
+    /// ring-timeout terminal entries (plain agent_id, queue + skill group).
+    fn connected_trace_event(&self, agent_id: &str, attempt: u32) -> crate::call_errors::TraceEvent {
+        let queue = self.config.name.clone();
+        let skill_group = self.skill_queue_id().to_string();
+        let mut detail = serde_json::json!({
+            "agent_id": agent_id,
+            "attempt": attempt,
+        });
+        if !queue.is_empty() {
+            detail["queue_name"] = serde_json::Value::String(queue.clone());
+        }
+        if !skill_group.is_empty() && skill_group != queue {
+            detail["skill_group"] = serde_json::Value::String(skill_group);
+        }
+        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs());
+        if let Some(secs) = wait_secs {
+            detail["wait_secs"] = serde_json::Value::from(secs);
+        }
+        let mut ev = crate::call_errors::TraceEvent::new(
+            crate::call_errors::TraceKind::Queue,
+            format!("Agent {} connected", agent_id),
+        )
+        .severity(crate::call_errors::ErrSeverity::Info)
+        .detail(detail);
+        ev.duration_ms = self.enqueued_at.map(|t| t.elapsed().as_millis() as i64);
+        ev
+    }
+
+    /// Build the terminal CDR trace entry for an exhausted queue wait: the
+    /// caller waited out max_wait and the fallback path is about to own the
+    /// call. Mirrors the `queue_wait_timeout` RWI event.
+    fn max_wait_trace_event(&self, wait_secs: u64) -> crate::call_errors::TraceEvent {
+        let queue = self.config.name.clone();
+        let skill_group = self.skill_queue_id().to_string();
+        let mut detail = serde_json::json!({ "wait_secs": wait_secs });
+        if !queue.is_empty() {
+            detail["queue_name"] = serde_json::Value::String(queue.clone());
+        }
+        if !skill_group.is_empty() && skill_group != queue {
+            detail["skill_group"] = serde_json::Value::String(skill_group);
+        }
+        let mut ev = crate::call_errors::TraceEvent::new(
+            crate::call_errors::TraceKind::Queue,
+            "Queue wait timed out",
+        )
+        .severity(crate::call_errors::ErrSeverity::Warn)
+        .detail(detail);
+        ev.duration_ms = self.enqueued_at.map(|t| t.elapsed().as_millis() as i64);
+        ev
+    }
+
+    /// Build the CDR trace entry for an escalation step firing: the stage
+    /// wait crossed `threshold_secs` and the call joined another skill group
+    /// (Replace / Cumulative / Sequential alike). Complements the
+    /// `queue_overflow_joined` RWI event so the CDR timeline shows overflow
+    /// stages too, not just the RWI stream. `duration_ms` rides the STAGE
+    /// clock (per-stage dwell in Sequential mode), same as `wait_secs`.
+    fn overflow_trace_event(
+        &self,
+        skill_group: &str,
+        mode: &EscalationMode,
+        threshold_secs: u64,
+        wait_secs: u64,
+    ) -> crate::call_errors::TraceEvent {
+        let detail = serde_json::json!({
+            "skill_group": skill_group,
+            "mode": format!("{:?}", mode),
+            "threshold_secs": threshold_secs,
+            "wait_secs": wait_secs,
+            "queue_name": self.config.name,
+        });
+        let mut ev = crate::call_errors::TraceEvent::new(
+            crate::call_errors::TraceKind::Queue,
+            format!("Overflowed to skill group '{}'", skill_group),
+        )
+        .severity(crate::call_errors::ErrSeverity::Info)
+        .detail(detail);
+        ev.duration_ms = self.stage_wait_ms();
+        ev
+    }
+
     /// Release phantom agent states bound to THIS call (never-connected
     /// Ringing reservations / phantom Busy from rejections).
     ///
@@ -2451,6 +2547,16 @@ impl QueueApp {
                     priority: (self.config.priority != 0).then_some(self.config.priority),
                 });
 
+                // CDR trace: the stage wait crossed an escalation threshold
+                // and the call joined another skill group — the CDR timeline
+                // shows overflow stages too, not just the RWI stream.
+                ctrl.record_trace(self.overflow_trace_event(
+                    &step.add_skill_group,
+                    &self.config.escalation_mode,
+                    step.threshold_secs,
+                    wait_secs,
+                ));
+
                 if let Some(ref registry) = self.agent_registry {
                     let agent_uris = match self.config.skill_group.as_deref() {
                         Some(sg) => {
@@ -3358,6 +3464,15 @@ impl CallApp for QueueApp {
                             },
                         });
 
+                        // Terminal CDR trace: closes the "Offering call to
+                        // agent X" entry — the timeline now shows WHO answered
+                        // and HOW LONG the caller waited (duration_ms =
+                        // enqueue → connect), mirroring the 486 / ring-timeout
+                        // terminal entries.
+                        ctrl.record_trace(
+                            self.connected_trace_event(&connected_agent_id, self.dial_attempts),
+                        );
+
                         // CC adapter analytics: agent answered →
                         // `skill_group_agent_connected` +
                         // `skill_group_call_left{connected}` (full history).
@@ -3843,6 +3958,10 @@ impl CallApp for QueueApp {
                     queue_id: self.config.name.clone(),
                 });
 
+                // Terminal CDR trace: the caller exhausted max_wait; the
+                // fallback path owns the call from here.
+                ctrl.record_trace(self.max_wait_trace_event(wait_secs));
+
                 self.play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
                     .await
             }
@@ -3966,5 +4085,108 @@ mod caller_exclusion_tests {
         app.no_answer_agents = vec!["1001".into()];
         let excluded = app.dispatch_exclusions();
         assert_eq!(excluded, vec!["1001".to_string()]);
+    }
+}
+
+/// CDR trace contracts for the queue app's own timeline entries: connected /
+/// max-wait-timeout / overflow must carry the agent, the wait duration and
+/// the queue/skill-group attribution so the call-record detail page answers
+/// "who answered, how long did the caller wait, what happened" without ts
+/// arithmetic (see the "Offering call to agent X" entry these close).
+#[cfg(test)]
+mod queue_trace_tests {
+    use super::*;
+
+    fn app_with_queue(name: &str) -> QueueApp {
+        QueueApp::new(
+            QueuePlan::default(),
+            QueueConfig {
+                name: name.into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn connected_trace_carries_agent_attempt_and_wait_duration() {
+        let mut app = app_with_queue("support");
+        app.enqueued_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(42));
+
+        let ev = app.connected_trace_event("1001", 2);
+        assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
+        assert_eq!(ev.message, "Agent 1001 connected");
+        assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Info));
+        let ms = ev
+            .duration_ms
+            .expect("connected trace must carry the enqueue→connect duration");
+        assert!(
+            (41_000..=43_000).contains(&ms),
+            "duration_ms should be ≈42s, got {ms}"
+        );
+        let detail = ev.detail.expect("connected trace should carry detail");
+        assert_eq!(detail["agent_id"].as_str(), Some("1001"));
+        assert_eq!(detail["attempt"].as_u64(), Some(2));
+        assert_eq!(detail["queue_name"].as_str(), Some("support"));
+        assert_eq!(detail["wait_secs"].as_u64(), Some(42));
+        // No skill group configured → the key stays absent, mirroring the
+        // offering entry's detail contract.
+        assert!(detail.get("skill_group").is_none());
+    }
+
+    #[test]
+    fn connected_trace_without_enqueue_time_has_no_wait_fields() {
+        let app = app_with_queue("support");
+        let ev = app.connected_trace_event("1002", 1);
+        assert!(
+            ev.duration_ms.is_none(),
+            "no enqueue clock → no fabricated duration"
+        );
+        let detail = ev.detail.expect("detail");
+        assert!(detail.get("wait_secs").is_none());
+    }
+
+    #[test]
+    fn skill_group_queue_connected_trace_names_the_group() {
+        let app = QueueApp::new(
+            QueuePlan::default(),
+            QueueConfig {
+                name: "support".into(),
+                skill_group: Some("sg-9".into()),
+                ..Default::default()
+            },
+        );
+        let ev = app.connected_trace_event("1001", 1);
+        let detail = ev.detail.expect("detail");
+        assert_eq!(detail["skill_group"].as_str(), Some("sg-9"));
+    }
+
+    #[test]
+    fn max_wait_trace_is_warn_and_carries_wait() {
+        let mut app = app_with_queue("support");
+        app.enqueued_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
+
+        let ev = app.max_wait_trace_event(90);
+        assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
+        assert_eq!(ev.message, "Queue wait timed out");
+        assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Warn));
+        assert!(ev.duration_ms.is_some(), "max wait trace carries duration");
+        let detail = ev.detail.expect("detail");
+        assert_eq!(detail["wait_secs"].as_u64(), Some(90));
+        assert_eq!(detail["queue_name"].as_str(), Some("support"));
+    }
+
+    #[test]
+    fn overflow_trace_names_target_group_mode_and_threshold() {
+        let app = app_with_queue("support");
+        let ev = app.overflow_trace_event("billing", &EscalationMode::Sequential, 30, 31);
+        assert_eq!(ev.kind, crate::call_errors::TraceKind::Queue);
+        assert_eq!(ev.message, "Overflowed to skill group 'billing'");
+        assert_eq!(ev.severity, Some(crate::call_errors::ErrSeverity::Info));
+        let detail = ev.detail.expect("detail");
+        assert_eq!(detail["skill_group"].as_str(), Some("billing"));
+        assert_eq!(detail["mode"].as_str(), Some("Sequential"));
+        assert_eq!(detail["threshold_secs"].as_u64(), Some(30));
+        assert_eq!(detail["wait_secs"].as_u64(), Some(31));
+        assert_eq!(detail["queue_name"].as_str(), Some("support"));
     }
 }

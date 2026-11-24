@@ -586,9 +586,11 @@
                                             </template>
                                         </div>
                                         <p class="mt-0.5 text-sm text-slate-600" x-text="ev.message"></p>
-                                        <template x-if="ev.kind === 'play' && ev.duration_ms != null">
+                                        <template x-if="ev.duration_ms != null && (ev.kind === 'play' || ev.kind === 'queue')">
                                             <p class="mt-0.5 text-xs text-slate-400"
-                                                x-text="'duration: ' + formatTraceMs(ev.duration_ms) + (ev.interrupted ? ' · interrupted' : ' · completed')"></p>
+                                                x-text="ev.kind === 'play'
+                                                    ? 'duration: ' + formatTraceMs(ev.duration_ms) + (ev.interrupted ? ' · interrupted' : ' · completed')
+                                                    : 'wait: ' + formatTraceMs(ev.duration_ms)"></p>
                                         </template>
                                         <template x-if="hasTraceDetail(ev)">
                                             <div class="mt-2">
