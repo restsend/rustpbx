@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +87,102 @@ fn take_bridge_pcm_frame(
         return Some(tail);
     }
     None
+}
+
+/// Per-packet dynamic audio decoder + FIR resampler for `voip_bridge`'s reverse loop.
+///
+/// Resolves each packet's RTP payload type by static RFC 3551 audio PT
+/// (`0` PCMU, `8` PCMA, `9` G.722, `18` G.729) first, then dynamic PT (`>= 96`)
+/// via `audio_pt_map` (negotiated answer overriding offer), decoding and
+/// resampling into reusable buffers with `BoxedResampler::resample_into`.
+struct BridgeReverseDecoder {
+    audio_pt_map: BTreeMap<u8, audio_codec::CodecType>,
+    decoders: HashMap<u8, Box<dyn audio_codec::Decoder>>,
+    target_sample_rate: u32,
+    resampler: Option<(u32, audio_codec::BoxedResampler)>,
+    decode_buf: Vec<i16>,
+    resample_buf: Vec<i16>,
+}
+
+impl BridgeReverseDecoder {
+    fn new(
+        negotiated_audio: Option<(u8, audio_codec::CodecType)>,
+        mut audio_pt_map: BTreeMap<u8, audio_codec::CodecType>,
+        target_sample_rate: u32,
+    ) -> Self {
+        let mut decoders = HashMap::new();
+        if let Some((pt, codec)) = negotiated_audio {
+            audio_pt_map.insert(pt, codec);
+            decoders.insert(codec.payload_type(), audio_codec::create_decoder(codec));
+        }
+        Self {
+            audio_pt_map,
+            decoders,
+            target_sample_rate,
+            resampler: None,
+            decode_buf: vec![0i16; 4096],
+            resample_buf: vec![0i16; 4096],
+        }
+    }
+
+    fn resolve_codec(&self, pt: u8) -> Option<audio_codec::CodecType> {
+        // Static RFC 3551 audio PTs (0=PCMU, 8=PCMA, 9=G722, 18=G729) first.
+        if pt < 96 {
+            return audio_codec::CodecType::try_from(pt)
+                .ok()
+                .filter(|c| c.is_audio() && !c.is_dynamic());
+        }
+        // Dynamic PTs (>= 96): answer overrides offer in `audio_pt_map`; DTMF/unknown → None.
+        self.audio_pt_map.get(&pt).copied()
+    }
+
+    /// Decode an inbound RTP payload and resample to `target_sample_rate`.
+    fn decode(&mut self, pt: u8, data: &[u8]) -> Option<&[i16]> {
+        let codec = self.resolve_codec(pt)?;
+        let decoder = self
+            .decoders
+            .entry(codec.payload_type())
+            .or_insert_with(|| audio_codec::create_decoder(codec));
+        let mut written = decoder.decode_into(data, &mut self.decode_buf).ok()?;
+        if decoder.channels() == 2 {
+            // `OpusDecoder::decode_into` outputs interleaved stereo, whereas
+            // `Decoder::decode` downmixes stereo to mono; mirror that in place.
+            let mono_len = written / 2;
+            for i in 0..mono_len {
+                self.decode_buf[i] =
+                    ((self.decode_buf[2 * i] as i32 + self.decode_buf[2 * i + 1] as i32) / 2)
+                        as i16;
+            }
+            written = mono_len;
+        }
+        if written == 0 {
+            return None;
+        }
+
+        let src_rate = decoder.sample_rate();
+        if src_rate == self.target_sample_rate {
+            return Some(&self.decode_buf[..written]);
+        }
+
+        if !matches!(self.resampler, Some((rate, _)) if rate == src_rate) {
+            let r = audio_codec::BoxedResampler::new(
+                src_rate as usize,
+                self.target_sample_rate as usize,
+            )
+            .ok()?;
+            self.resampler = Some((src_rate, r));
+        }
+        let (_, resampler) = self.resampler.as_mut()?;
+        let decoded = &self.decode_buf[..written];
+        let needed = resampler.max_output_samples(decoded.len());
+        if self.resample_buf.len() < needed {
+            self.resample_buf.resize(needed, 0);
+        }
+        let out_len = resampler
+            .resample_into(decoded, &mut self.resample_buf)
+            .ok()?;
+        Some(&self.resample_buf[..out_len])
+    }
 }
 
 /// Classify a reverse-pump failure (`ws_write` send / track recv error) so
@@ -3720,56 +3816,31 @@ impl SipSession {
                     .map(MediaNegotiator::extract_leg_profile)
             });
 
-        // ── 2. Determine codec type + payload type ───────────────────────
-        // Prefer the selected leg's negotiated codec and PT so the injected
-        // audio and reverse decoder use the profile that leg actually accepted.
-        // The bridge URL `codec` query param is only a fallback — encoding the
-        // fallback's STATIC default PT (Opus=111, PCMU=0) instead of the
-        // negotiated PT makes forward frames carry a PT the caller never
-        // offered (PT 0↔96/111 toggle on the greeting's SSRC).
-        let codec_type = if let Some(audio) = negotiated_profile
+        // ── 2. Reverse decoder (per-packet PT → decoder) ─────────────────
+        let negotiated_audio = negotiated_profile
             .as_ref()
             .and_then(|profile| profile.audio.as_ref())
-        {
-            info!(
-                %leg_id,
-                negotiated_codec = ?audio.codec,
-                negotiated_pt = audio.payload_type,
-                negotiated_clock_rate = audio.clock_rate,
-                bridge_codec = %codec,
-                "voip_bridge using leg-negotiated codec/PT"
-            );
-            audio.codec
-        } else {
-            let fallback = match codec.as_str() {
-                "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
-                "pcma" | "g711" => audio_codec::CodecType::PCMA,
-                "opus" => audio_codec::CodecType::Opus,
-                "g722" => audio_codec::CodecType::G722,
-                _ => self.leg_negotiated_codec(&leg_id),
-            };
-            fallback
-        };
-
-        // Decode the reverse RTP stream with the same codec selected for this
-        // leg. Using the session-level decoder here defaulted RWI calls to PCMU
-        // even after the real MediaBridge leg had negotiated Opus.
-        let mut decoder = audio_codec::create_decoder(codec_type);
-        let dec_sample_rate = decoder.sample_rate();
-        let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
+            .map(|audio| {
+                info!(
+                    %leg_id,
+                    negotiated_codec = ?audio.codec,
+                    negotiated_pt = audio.payload_type,
+                    negotiated_clock_rate = audio.clock_rate,
+                    bridge_codec = %codec,
+                    "voip_bridge using leg-negotiated codec/PT"
+                );
+                (audio.payload_type, audio.codec)
+            });
+        let mut reverse_decoder = BridgeReverseDecoder::new(
+            negotiated_audio,
+            leg.offered_audio_pt_map(),
+            ws_sample_rate,
+        );
 
         // ── 3. Cancellation token (parent = session cancel) ──────────
         let cancel_token = self.cancel_token.child_token();
 
-        // ── 4. DTMF payload types (from answer SDP) ─────────────────
-        let mut dtmf_payload_types: Vec<u8> = negotiated_profile
-            .as_ref()
-            .map(|profile| profile.dtmf_pts().into_iter().collect())
-            .unwrap_or_default();
-        dtmf_payload_types.sort_unstable();
-        dtmf_payload_types.dedup();
-
-        // ── 5. DTMF JSON text-frame channel ─────────────────────────
+        // ── 4. DTMF JSON text-frame channel ─────────────────────────
         let (dtmf_json_tx, mut dtmf_json_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         *self.bridge_dtmf_tx.write() = Some(dtmf_json_tx.clone());
         let bridge_dtmf_tx_state = self.bridge_dtmf_tx.clone();
@@ -3843,23 +3914,10 @@ impl SipSession {
                         sample = track.recv() => {
                             match sample {
                                 Ok(MediaSample::Audio(frame)) => {
-                                    let is_dtmf = frame.payload_type
-                                        .map_or(false, |pt| dtmf_payload_types.contains(&pt));
-
-                                    if !is_dtmf {
-                                        // Regular audio frame — decode to PCM, resample, send as binary
-                                        let pcm = decoder.decode(&frame.data);
-                                        let samples = if dec_sample_rate != ws_sample_rate {
-                                            crate::call::runtime::conference_media_bridge::resample_linear(
-                                                &pcm, dec_sample_rate, ws_sample_rate,
-                                            )
-                                        } else {
-                                            pcm
-                                        };
-                                        let mut bytes = Vec::with_capacity(samples.len() * 2);
-                                        for s in &samples {
-                                            bytes.extend_from_slice(&s.to_ne_bytes());
-                                        }
+                                    if let Some(pt) = frame.payload_type
+                                        && let Some(samples) = reverse_decoder.decode(pt, &frame.data)
+                                    {
+                                        let bytes = bytemuck::cast_slice::<i16, u8>(samples).to_vec();
                                         tokio::select! {
                                             biased;
                                             _ = reverse_cancel.cancelled() => break,
@@ -5046,5 +5104,121 @@ mod tests {
         let output =
             crate::call::runtime::conference_media_bridge::resample_linear(&input, 16000, 8000);
         assert_eq!(output.len(), 160, "16k→8k should halve sample count");
+    }
+
+    fn sine_pcm(sample_rate: u32, samples: usize, freq_hz: f32) -> Vec<i16> {
+        (0..samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                ((2.0 * std::f32::consts::PI * freq_hz * t).sin() * 12_000.0) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_switches_g729_to_pcmu_and_pcma() {
+        let mut decoder = BridgeReverseDecoder::new(
+            Some((18, audio_codec::CodecType::G729)),
+            BTreeMap::new(),
+            16_000,
+        );
+
+        let pcm_8k = sine_pcm(8000, 160, 440.0);
+
+        // 1. Negotiated G.729 (PT 18, 20 bytes) → 320 samples (640 bytes) @ 16 kHz.
+        let g729_payload = audio_codec::create_encoder(audio_codec::CodecType::G729).encode(&pcm_8k);
+        assert_eq!(g729_payload.len(), 20);
+        let g729_16k = decoder
+            .decode(18, &g729_payload)
+            .expect("G.729 packet must decode");
+        assert_eq!(g729_16k.len(), 320);
+
+        // 2. Unsolicited switch to PCMU (PT 0, 160 bytes) → exact 8 kHz PCMU decode
+        //    and 320 samples (640 bytes, NOT 5120 bytes) @ 16 kHz.
+        let pcmu_payload = audio_codec::create_encoder(audio_codec::CodecType::PCMU).encode(&pcm_8k);
+        assert_eq!(pcmu_payload.len(), 160);
+        let pcmu_16k = decoder
+            .decode(0, &pcmu_payload)
+            .expect("PCMU packet must decode dynamically");
+        assert_eq!(pcmu_16k.len(), 320);
+        let expected_pcmu_8k =
+            audio_codec::create_decoder(audio_codec::CodecType::PCMU).decode(&pcmu_payload);
+        assert_eq!(&decoder.decode_buf[..160], expected_pcmu_8k.as_slice());
+
+        // 3. Unsolicited switch to PCMA (PT 8, 160 bytes) → exact 8 kHz PCMA decode
+        //    and 320 samples @ 16 kHz.
+        let pcma_payload = audio_codec::create_encoder(audio_codec::CodecType::PCMA).encode(&pcm_8k);
+        assert_eq!(pcma_payload.len(), 160);
+        let pcma_16k = decoder
+            .decode(8, &pcma_payload)
+            .expect("PCMA packet must decode dynamically");
+        assert_eq!(pcma_16k.len(), 320);
+        let expected_pcma_8k =
+            audio_codec::create_decoder(audio_codec::CodecType::PCMA).decode(&pcma_payload);
+        assert_eq!(&decoder.decode_buf[..160], expected_pcma_8k.as_slice());
+
+        // 4. Switching back to G.729 (PT 18) reuses the same buffers cleanly.
+        let g729_again = decoder
+            .decode(18, &g729_payload)
+            .expect("switching back to G.729 must decode");
+        assert_eq!(g729_again.len(), 320);
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_uses_active_codec_sample_rate() {
+        // Negotiated G.729 (8 kHz) switching to G.722 (16 kHz) reports 16 kHz,
+        // so targeting a 16 kHz WS consumer stays 320 samples (not 640).
+        let mut decoder = BridgeReverseDecoder::new(
+            Some((18, audio_codec::CodecType::G729)),
+            BTreeMap::new(),
+            16_000,
+        );
+
+        let pcm_16k = sine_pcm(16_000, 320, 440.0);
+        let g722_payload =
+            audio_codec::create_encoder(audio_codec::CodecType::G722).encode(&pcm_16k);
+        assert_eq!(g722_payload.len(), 160);
+
+        let samples = decoder
+            .decode(9, &g722_payload)
+            .expect("static G.722 PT 9 must decode");
+        assert_eq!(samples.len(), 320);
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_skips_dtmf_and_unknown_pts() {
+        let mut decoder = BridgeReverseDecoder::new(
+            Some((18, audio_codec::CodecType::G729)),
+            BTreeMap::new(),
+            16_000,
+        );
+
+        assert!(decoder.decode(102, &[1, 0x0a, 0, 160]).is_none());
+        assert!(decoder.decode(13, &[40]).is_none());
+        assert!(decoder.decode(111, &[0u8; 40]).is_none());
+        assert!(decoder.decode(120, &[0u8; 40]).is_none());
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_handles_offered_dynamic_pt() {
+        // Answer negotiated G.729 (18), offer also included Opus on dynamic PT 106.
+        // Switching to PT 106 resolves via `audio_pt_map` from the offer.
+        let audio_pt_map = BTreeMap::from([
+            (18, audio_codec::CodecType::G729),
+            (106, audio_codec::CodecType::Opus),
+        ]);
+        let mut decoder = BridgeReverseDecoder::new(
+            Some((18, audio_codec::CodecType::G729)),
+            audio_pt_map,
+            16_000,
+        );
+
+        let pcm_48k = sine_pcm(48_000, 960, 440.0);
+        let opus_payload =
+            audio_codec::create_encoder(audio_codec::CodecType::Opus).encode(&pcm_48k);
+        let samples = decoder
+            .decode(106, &opus_payload)
+            .expect("offered dynamic PT 106 (Opus) must decode");
+        assert_eq!(samples.len(), 320);
     }
 }

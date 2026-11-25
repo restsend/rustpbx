@@ -684,6 +684,21 @@ impl LegInner {
         self.negotiated.lock().clone()
     }
 
+    /// Audio `(payload_type -> CodecType)` map from this leg's SDP offer.
+    /// Available as soon as an offer is created or received (before answer).
+    pub fn offered_audio_pt_map(&self) -> std::collections::BTreeMap<u8, CodecType> {
+        let Some(offer) = self.offer_description() else {
+            return std::collections::BTreeMap::new();
+        };
+        offer
+            .media_sections
+            .iter()
+            .filter(|section| section.kind == rustrtc::MediaKind::Audio)
+            .flat_map(negotiate::MediaNegotiator::parse_rtp_map_from_section)
+            .filter_map(|(pt, (codec, _, _))| codec.is_audio().then_some((pt, codec)))
+            .collect()
+    }
+
     /// Build a local description for hold/resume without re-offering unused audio codecs.
     pub fn negotiated_local_sdp(&self) -> Option<SessionDescription> {
         let mut local = self.pc.local_description()?;
@@ -3187,5 +3202,76 @@ mod ice_lite_tests {
             .build();
         let pc = track.get_peer_connection().await.expect("pc");
         assert_eq!(pc.config().connectivity, Connectivity::Ice);
+    }
+
+    #[tokio::test]
+    async fn offered_audio_pt_map_works_before_and_after_negotiation() {
+        let mut cfg = LegConfig::rtp_pcmu();
+        cfg.codecs = vec![
+            CodecInfo {
+                payload_type: 106,
+                codec: CodecType::Opus,
+                clock_rate: 48_000,
+                channels: 2,
+                fmtp: None,
+            },
+            CodecInfo {
+                payload_type: 18,
+                codec: CodecType::G729,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            },
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            },
+            CodecInfo {
+                payload_type: 102,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: Some("0-16".to_string()),
+            },
+        ];
+        let leg = LegInner::new("uac", &cfg, None).expect("leg");
+        let _offer = leg.create_offer().await.expect("create_offer");
+
+        // Before answer arrives: negotiated() is still None, but offered_audio_pt_map()
+        // already knows all offered audio PTs (including dynamic Opus 106) and excludes DTMF.
+        assert!(leg.negotiated().is_none());
+        let pre_answer = leg.offered_audio_pt_map();
+        assert_eq!(pre_answer.get(&106), Some(&CodecType::Opus));
+        assert_eq!(pre_answer.get(&18), Some(&CodecType::G729));
+        assert_eq!(pre_answer.get(&0), Some(&CodecType::PCMU));
+        assert_eq!(pre_answer.get(&102), None);
+
+        // After answer narrows to G.729 (PT 18) only: offered_audio_pt_map() still
+        // returns the full offer PT map.
+        let answer_sdp = "v=0\r\n\
+            o=- 2 2 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 26186 RTP/AVP 18 102\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:102 telephone-event/8000\r\n\
+            a=sendrecv\r\n";
+        leg.apply_remote_sdp(answer_sdp, SdpType::Answer)
+            .await
+            .expect("apply_remote_sdp");
+        assert_eq!(
+            leg.negotiated().unwrap().audio.unwrap().codec,
+            CodecType::G729
+        );
+        let post_answer = leg.offered_audio_pt_map();
+        assert_eq!(post_answer.get(&18), Some(&CodecType::G729));
+        assert_eq!(post_answer.get(&0), Some(&CodecType::PCMU));
+        assert_eq!(post_answer.get(&106), Some(&CodecType::Opus));
+        assert_eq!(post_answer.get(&102), None);
+        leg.stop();
     }
 }
