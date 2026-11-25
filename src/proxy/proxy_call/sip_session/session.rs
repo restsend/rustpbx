@@ -5061,16 +5061,9 @@ impl SipSession {
     /// P2P flows (`session_id_enabled == false`) or non-UUID-shaped legacy
     /// ids, which keep relying on the UUI (RFC 7433) correlation channel.
     fn session_id_for_outgoing_leg(&self) -> Option<String> {
-        if !self.context.dialplan.session_id_enabled {
-            return None;
-        }
-        let candidate = self
-            .meta
-            .root_session_id
+        self.session_id_raw_candidate()
             .as_deref()
-            .or(self.context.dialplan.session_id.as_deref())
-            .unwrap_or(&self.context.session_id);
-        crate::call::session_id::normalize_inherited(candidate)
+            .and_then(crate::call::session_id::normalize_inherited)
     }
 
     /// Raw (non-hex-gated) session id candidate for OUTGOING custom
@@ -5081,6 +5074,15 @@ impl SipSession {
     fn session_id_raw_candidate(&self) -> Option<String> {
         if !self.context.dialplan.session_id_enabled {
             return None;
+        }
+        // External consultation remains a separate local call until REFER.
+        // Its first trunk INVITE already needs the verified parent's root.
+        if let Some(parent) = self
+            .extensions
+            .read()
+            .get::<crate::proxy::proxy_call::session_hooks::VerifiedConsultationParent>()
+        {
+            return Some(parent.root_session_id.clone());
         }
         Some(
             self.meta

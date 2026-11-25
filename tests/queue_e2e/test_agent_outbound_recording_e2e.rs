@@ -153,6 +153,7 @@ async fn start_harness(capture: &WebhookCapture, trunk_port: Option<u16>) -> Res
         }]);
         proxy_config.trunks.insert("external-test".into(), TrunkConfig {
             dest: format!("sip:127.0.0.1:{port}"),
+            session_id_header: Some("X-RustPBX-SessionID".into()),
             ..Default::default()
         });
     }
@@ -643,13 +644,29 @@ async fn external_consult_recording() -> Result<()> {
     let held_sdp = desk_sdp.replace("a=sendrecv", "a=inactive");
     assert!(held_sdp.contains("a=inactive"), "offer must put the original call on hold");
     desk.send_reinvite(&parent, Some(held_sdp)).await?;
-    let (consult, (_, rtp_endpoint)) = tokio::try_join!(
+    let (consult, (trunk_consult, rtp_endpoint)) = tokio::try_join!(
         desk.make_call_with_headers("919002", Some(desk_sdp), vec![(
             "User-to-User".into(),
             "self-dial;encoding=ascii;purpose=call-center;leg=consult".into(),
         )]),
         answer_trunk(),
     )?;
+    assert_eq!(
+        trunk
+            .incoming_invite_header(&trunk_consult, "X-RustPBX-SessionID")
+            .await
+            .as_deref(),
+        Some(parent_busy.as_str()),
+        "the first consult INVITE must give the trunk the original call's correlation ID"
+    );
+    let session_header = trunk
+        .incoming_invite_header(&trunk_consult, "Session-ID")
+        .await;
+    assert_eq!(
+        session_header.as_deref().and_then(|value| value.split(';').next()),
+        Some(parent_busy.as_str()),
+        "the two session ID headers must identify the same business call"
+    );
     for seq in 1..=50 {
         let packet = RtpPacket::new(0, seq, u32::from(seq) * 160, 0x3333, vec![CUSTOMER_TONE_BYTE; 160]);
         trunk_rtp.send_to(&packet.encode(), rtp_endpoint).await?;
