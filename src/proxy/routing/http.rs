@@ -525,11 +525,15 @@ impl CallRouter for HttpCallRouter {
                         }
                         uri_attempt_count += 1;
                         let hints = hints.map(Arc::new);
-                        let max_ring_time = hints.as_ref().and_then(|h| h.max_ring_time);
                         attempts.push(DialAttempt {
                             retry_policy,
                             hints,
-                            max_ring_time,
+                            // Trunk-less targets carry no per-attempt ring
+                            // timeout: arrival_hints excludes it (the arrival
+                            // trunk's ring time is call-wide, enforced by the
+                            // session), and the call-wide response field lands
+                            // in dialplan.max_ring_time below.
+                            max_ring_time: None,
                             ..Location {
                                 aor: uri,
                                 headers: custom_headers.clone(),
