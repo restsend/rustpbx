@@ -186,6 +186,38 @@ pub(crate) async fn persist_call_records(
     db: &DatabaseConnection,
     records: &[CallRecord],
 ) -> anyhow::Result<()> {
+    // InnoDB rolls back the deadlocked statement. Build fresh models on each retry.
+    let mut backoff_ms = [5, 10, 20].into_iter();
+    loop {
+        let result = persist_call_records_once(db, records).await;
+        if let Err(error) = &result
+            && is_mysql_deadlock(error)
+            && let Some(delay) = backoff_ms.next()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            continue;
+        }
+        return result;
+    }
+}
+
+fn is_mysql_deadlock(error: &anyhow::Error) -> bool {
+    use sea_orm::{DbErr, RuntimeErr::SqlxError};
+
+    let Some(DbErr::Exec(SqlxError(error)) | DbErr::Query(SqlxError(error))) =
+        error.downcast_ref::<DbErr>()
+    else {
+        return false;
+    };
+    error.as_database_error()
+        .and_then(|error| error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
+        .is_some_and(|error| error.number() == 1213)
+}
+
+async fn persist_call_records_once(
+    db: &DatabaseConnection,
+    records: &[CallRecord],
+) -> anyhow::Result<()> {
     use rustpbx_models::call_record::{Column, Entity};
     use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func};
 

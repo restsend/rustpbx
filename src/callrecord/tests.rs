@@ -195,6 +195,104 @@ async fn test_builtin_saver_inserts_a_batch() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires RUSTPBX_TEST_MYSQL_URL pointing at an isolated MySQL server"]
+async fn mysql_concurrent_root_cdr_preserves_recording() -> anyhow::Result<()> {
+    use sea_orm::{ConnectionTrait, Database};
+
+    let base = std::env::var("RUSTPBX_TEST_MYSQL_URL")?;
+    let name = format!("rustpbx_cdr_test_{}", uuid::Uuid::new_v4().simple());
+    let admin = Database::connect(&base).await?;
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE `{name}`"))
+        .await?;
+    let db = Database::connect(format!("{}/{name}", base.trim_end_matches('/'))).await?;
+    let result = exercise_mysql_peer_cdr_writes(&db, &name).await;
+    admin
+        .execute_unprepared(&format!("DROP DATABASE `{name}`"))
+        .await?;
+    result
+}
+
+async fn exercise_mysql_peer_cdr_writes(db: &DatabaseConnection, name: &str) -> anyhow::Result<()> {
+    use rustpbx_models::call_record::{Column, Entity};
+    use sea_orm::{ConnectionTrait, EntityTrait, TransactionTrait};
+
+    create_call_record_table(db, "rustpbx_call_records").await?;
+    let saver = BuiltinDatabaseSaver { db: db.clone() };
+    for i in 0..32 {
+        let root = format!("peer-root-{i}");
+        let mut owner = make_record();
+        owner.call_id = root.clone();
+        owner.session_id = Some(root.clone());
+        let mut peer = owner.clone();
+        owner.details.recording_url = Some("agent.wav".into());
+        let (owner_result, peer_result) = tokio::join!(
+            saver.save(std::slice::from_ref(&owner)),
+            saver.save(std::slice::from_ref(&peer)),
+        );
+        owner_result?;
+        peer_result?;
+        let row = Entity::find()
+            .filter(Column::CallId.eq(&root))
+            .one(db)
+            .await?
+            .unwrap();
+        assert_eq!(row.recording_url.as_deref(), Some("agent.wav"));
+    }
+    // Hold the primary row first, as a concurrent updater can. The saver
+    // looks up the same row via the unique call_id index. Make its smaller
+    // transaction the InnoDB victim when the two lock orders cross.
+    let root = "peer-root-0";
+    let peer_tx = db.begin().await?;
+    for call_id in [root, "peer-root-1", "peer-root-2", "peer-root-3"] {
+        let id = Entity::find()
+            .filter(Column::CallId.eq(call_id))
+            .one(db)
+            .await?
+            .unwrap()
+            .id;
+        peer_tx
+            .execute_unprepared(&format!(
+                "UPDATE rustpbx_call_records SET duration_secs = duration_secs + 1 WHERE id = {id}"
+            ))
+            .await?;
+    }
+    let mut later = make_record();
+    later.call_id = root.into();
+    later.session_id = Some(root.into());
+    later.details.recording_url = Some("later.wav".into());
+    let peer = async {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                loop {
+                    let waiting = db.query_one_raw(sea_orm::Statement::from_sql_and_values(
+                        sea_orm::DbBackend::MySql,
+                        "SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits w \
+                         JOIN performance_schema.data_locks l ON l.engine_lock_id=w.requesting_engine_lock_id \
+                         WHERE l.object_schema=? AND l.object_name='rustpbx_call_records'",
+                        [name.into()],
+                    )).await?.unwrap().try_get::<i64>("", "n")?;
+                    if waiting > 0 { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await??;
+        peer_tx
+            .execute_unprepared(
+                "UPDATE rustpbx_call_records SET duration_secs = 30 WHERE call_id = 'peer-root-0'",
+            )
+            .await?;
+        peer_tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let (saved, peer) = tokio::join!(saver.save(std::slice::from_ref(&later)), peer);
+    peer?;
+    saved?;
+    let stored = Entity::find().filter(Column::CallId.eq(root)).one(db).await?.unwrap();
+    assert_eq!(stored.recording_url.as_deref(), Some("later.wav"));
+    Ok(())
+}
+
 /// Stale FK ids (in-memory extensions/trunks/departments that were never
 /// persisted, or were deleted before the CDR landed) must be nulled out so the
 /// INSERT cannot fail with a FOREIGN KEY constraint error.
