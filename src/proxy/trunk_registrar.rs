@@ -99,6 +99,15 @@ impl TrunkRegistrar {
         *self.network.write().unwrap() = Some((profiles, default_id, proxy));
     }
 
+    /// The network profiles, default id and proxy config as supplied to
+    /// [`Self::set_network_profiles`] — the same live view calls use, kept
+    /// fresh on every reload. Callers without a server handle (e.g. the HTTP
+    /// call router) resolve profiles through this instead of their own stale
+    /// copies.
+    pub fn network_state(&self) -> Option<(Vec<NetworkProfile>, String, ProxyConfig)> {
+        self.network.read().unwrap().clone()
+    }
+
     /// Get the registration status of all trunks.
     pub fn get_statuses(&self) -> HashMap<String, TrunkRegistrationStatus> {
         self.statuses
