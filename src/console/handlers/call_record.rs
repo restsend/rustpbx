@@ -1320,6 +1320,67 @@ async fn count_session_legs(
     counts
 }
 
+/// Maps trusted, addon-owned leg metadata to the recording UUID assigned by its owner.
+#[derive(Clone, Copy)]
+pub struct DeliveredRecordingId(pub fn(&Value) -> Option<&str>);
+
+fn delivered_segment<'a>(state: &ConsoleState, leg: &'a CallRecordModel) -> Option<&'a str> {
+    if leg_role(leg) != "child"
+        || leg
+            .recording_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+    {
+        return None;
+    }
+    let resolver = state.get_addon_state::<DeliveredRecordingId>()?;
+    (resolver.0)(leg.metadata.as_ref()?)
+}
+
+fn uploaded_segment_url<'a>(owner: &'a CallRecordModel, id: &str) -> Option<&'a str> {
+    use crate::callrecord::recording_upload::recording_trace_codes::{RETRY_SUCCEEDED, UPLOADED};
+
+    let metadata = owner.metadata.as_ref()?;
+    let segment = metadata
+        .get("recording_segments")?
+        .as_array()?
+        .iter()
+        .find(|segment| segment["uniqueId"].as_str() == Some(id))?;
+    let path = segment.get("path")?.as_str().filter(|s| !s.is_empty())?;
+    metadata
+        .get("trace")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find_map(|event| {
+            let detail = &event["detail"];
+            if matches!(event["code"].as_str(), Some(UPLOADED | RETRY_SUCCEEDED))
+                && detail["path"].as_str() == Some(path)
+            {
+                return detail["url"]
+                    .as_str()
+                    .filter(|url| url.starts_with("https://") || url.starts_with("http://"));
+            }
+            None
+        })
+}
+
+fn with_delivered_recording<'a>(
+    state: &ConsoleState,
+    leg: &'a CallRecordModel,
+    root: Option<&CallRecordModel>,
+) -> std::borrow::Cow<'a, CallRecordModel> {
+    let mut result = std::borrow::Cow::Borrowed(leg);
+    if let Some(id) = delivered_segment(state, leg)
+        && let Some(root) = root
+        && leg.session_id.as_deref() == Some(root.call_id.as_str())
+        && let Some(url) = uploaded_segment_url(root, id)
+    {
+        result.to_mut().recording_url = Some(url.to_owned());
+    }
+    result
+}
+
 async fn stream_call_recording(
     AxumPath(pk): AxumPath<i64>,
     Query(query): Query<RecordingPlaybackQuery>,
@@ -1354,23 +1415,54 @@ async fn stream_call_recording(
         .map(str::trim)
         .filter(|selector| !selector.is_empty());
     let recording_path = match requested_segment {
-        Some(selector) => {
-            let found = select_recording_segment_path(&record, cdr_data.as_ref(), Some(selector));
-            if found.is_none() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    [(http::header::CACHE_CONTROL, "no-store")],
-                    Json(json!({
-                        "message": "Recording segment not found",
-                        "segment": selector,
-                    })),
-                )
-                    .into_response();
-            }
-            found
-        }
+        Some(id) => select_recording_segment_path(&record, cdr_data.as_ref(), Some(id)),
         None => select_recording_path(&record, cdr_data.as_ref()),
     };
+    if recording_path.is_none() {
+        // Uploaded files contain the complete recording. Keep explicit channel selection local.
+        if query.stream.is_none() || stream_leg.is_none() {
+            let mut url = requested_segment
+                .and_then(|id| uploaded_segment_url(&record, id))
+                .map(str::to_owned);
+            if url.is_none()
+                && let Some(id) = delivered_segment(&state, &record)
+                && requested_segment.is_none_or(|selector| selector == id)
+                && let Some(session) = &record.session_id
+            {
+                match CallRecordEntity::find()
+                    .filter(CallRecordColumn::CallId.eq(session))
+                    .one(db)
+                    .await
+                {
+                    Ok(Some(root)) if leg_role(&root) == "primary" => {
+                        url = uploaded_segment_url(&root, id).map(str::to_owned);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        return internal_error(format!("Failed to load recording owner: {err}"));
+                    }
+                }
+            }
+            if let Some(url) = url {
+                let url = presign_artifact_url(&state, &url).await.unwrap_or(url);
+                if let Ok(location) = HeaderValue::from_str(&url) {
+                    return (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(http::header::LOCATION, location)],
+                    )
+                        .into_response();
+                }
+            }
+        }
+        if let Some(selector) = requested_segment {
+            return (
+                StatusCode::NOT_FOUND,
+                [(http::header::CACHE_CONTROL, "no-store")],
+                Json(json!({"message": "Recording segment not found", "segment": selector})),
+            )
+                .into_response();
+        }
+    }
 
     // Try to stream from file first
     if let Some(ref path) = recording_path
@@ -2599,7 +2691,35 @@ async fn build_recording_segments_payload(
     record: &CallRecordModel,
     cdr: Option<&CdrData>,
 ) -> Option<Value> {
-    let cdr_data = cdr?;
+    let Some(cdr_data) = cdr else {
+        // Database-backed CDRs retain segment identities even without a raw recorder list.
+        let segments = record
+            .metadata
+            .as_ref()?
+            .get("recording_segments")?
+            .as_array()?;
+        if segments.len() < 2 {
+            return None;
+        }
+        let mut playback = Vec::with_capacity(segments.len());
+        for segment in segments {
+            let Some(id) = segment["uniqueId"].as_str().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let Some(uploaded) = uploaded_segment_url(record, id) else {
+                continue;
+            };
+            let url = presign_artifact_url(state, uploaded)
+                .await
+                .unwrap_or_else(|| uploaded.to_owned());
+            playback.push(json!({
+                "unique_id": id, "seq": segment["seq"], "label": segment["label"],
+                "segment_type": segment["segmentType"], "duration_secs": segment["durationSecs"],
+                "supports_streams": false, "playback_url": url,
+            }));
+        }
+        return (playback.len() > 1).then(|| Value::Array(playback));
+    };
     let entries: Vec<&crate::callrecord::CallRecordMedia> = cdr_data
         .record
         .recorder
@@ -2942,6 +3062,12 @@ async fn build_detail_payload(
     cdr: Option<&CdrData>,
     child_legs: &[CallRecordModel],
 ) -> Value {
+    let root = std::iter::once(record).chain(child_legs).find(|leg| {
+        leg_role(leg) == "primary"
+            && leg.call_id == record.session_id.as_deref().unwrap_or(&record.call_id)
+    });
+    let projected = with_delivered_recording(state, record, root);
+    let record = projected.as_ref();
     let inline_recording_url = select_recording_path(record, cdr)
         .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
     let mut record_payload =
@@ -3025,6 +3151,8 @@ async fn build_detail_payload(
     // page can triage every leg without navigating away.
     let mut child_legs_payload = Vec::with_capacity(child_legs.len());
     for leg in child_legs {
+        let projected = with_delivered_recording(state, leg, root);
+        let leg = projected.as_ref();
         let recording_url = derive_recording_download_url(state, leg).await;
         let media_quality = leg
             .metadata
