@@ -742,9 +742,8 @@ async fn routed_consultation_cleanup_reports_each_agent_from_its_own_leg() {
         let (mut session, _handle, _commands) = build_session_with_cmd_rx_on(server, dialplan).await;
         let caller = LegId::from("caller");
         let callee = LegId::from("callee");
-        let caller_leg = session.legs.get_mut(&caller).expect("original caller");
-        caller_leg.agent_id = Some("agent-a".into());
-        caller_leg.state = LegState::Ended;
+        session.set_caller_agent_identity("agent-a".into());
+        session.legs.get_mut(&caller).expect("original caller").state = LegState::Ended;
         let mut target = Leg::new(callee.clone());
         target.agent_id = Some("agent-b".into());
         target.state = LegState::Connected;
@@ -5679,6 +5678,41 @@ async fn customer_blind_transfer_outbound_customer_bye_before_agent_reply() {
         fixture.session.legs.get(&fixture.target).unwrap().state,
         LegState::Ended
     );
+}
+
+#[tokio::test]
+async fn transferred_customer_bye_reports_callee_when_dial_pending_or_app_running() {
+    for application_peer in [false, true] {
+        let mut fixture = outbound_transfer_fixture().await;
+        let session = &mut fixture.session;
+        assert!(session.pending_customer_transfer_release.is_some());
+        if application_peer {
+            // An app handoff retains the customer leg as its media peer.
+            session.pending_customer_transfer_release.take();
+            *session.app_media_leg.write() = Some(LegId::from("callee"));
+        }
+        SipSession::set_pinned_agent_id(&session.extensions, "agent");
+        let gateway = session.server.rwi_gateway.as_ref().unwrap().clone();
+        let mut events = gateway.read().subscribe_events();
+
+        session
+            .handle_callee_state(DialogState::Terminated(
+                fixture.customer_dialog,
+                TerminatedReason::UasBye,
+            ))
+            .await
+            .unwrap();
+        assert!(session.cancel_token.is_cancelled());
+        assert_eq!(session.legs.get(&fixture.target).unwrap().state, LegState::Ended);
+        let snapshot = session.record_snapshot();
+        assert_eq!(snapshot.metadata["hangup_by"], "callee", "application peer: {application_peer}");
+
+        session.cleanup().await;
+        let events = drain_call_hangups(&mut events);
+        let hangup = events.last().expect("session hangup event");
+        assert_eq!(hangup["scope"], "call");
+        assert_eq!(hangup["hangup_by"], "callee");
+    }
 }
 
 #[tokio::test]

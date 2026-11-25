@@ -598,6 +598,7 @@ async fn test_agent_initiated_call_caller_leg_reports_agent_role() -> Result<()>
         Some(session_id.as_str()),
         "call_created call_id must be the root session id: {created}"
     );
+    assert_eq!(created["event"]["direction"], "internal");
 
     // The customer (callee) leg rings with the plain "callee" role.
     let ringing = wait_webhook_matching(
@@ -664,13 +665,16 @@ async fn test_agent_initiated_call_caller_leg_reports_agent_role() -> Result<()>
         session_id
     );
 
-    let hangup_result = bob.hangup(&dialog).await;
-    if let Err(e) = &hangup_result {
-        tracing::warn!("bob hangup failed: {e}");
-    }
-    wait_webhook_event(&capture, "call_hangup", Duration::from_secs(10))
-        .await
-        .expect("webhook must receive call_hangup");
+    bob.hangup(&dialog).await?;
+    let hangup = wait_webhook_matching(
+        &capture,
+        "call_hangup",
+        |event| event["event"]["scope"] == "call" && event["call_id"] == session_id.as_str(),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("webhook must receive the session hangup");
+    assert_eq!(hangup["event"]["hangup_by"], "caller");
 
     bob_pump.abort();
     alice_pump.abort();

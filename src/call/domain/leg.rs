@@ -60,9 +60,8 @@ pub struct Leg {
     /// Originating peer for an explicitly composed dial; not bridge membership.
     #[serde(default)]
     pub source_leg: Option<LegId>,
-    /// Declared dial intent carried over from `CallCommand::LegAdd` (`Agent` /
-    /// `Consult`). Together with `agent_id` it drives the RWI `leg_role`
-    /// attribution on leg-scoped events (see [`Leg::leg_role`]).
+    /// Declared dial intent from `CallCommand::LegAdd` or an originating seat.
+    /// Together with `agent_id` it drives RWI attribution (see [`Leg::leg_role`]).
     #[serde(default)]
     pub purpose: Option<super::LegPurpose>,
     /// True when this leg's INVITE was routed to the endpoint's remote
@@ -116,12 +115,9 @@ impl Leg {
     /// that owns the registration stamps it instead (see
     /// `SipSession::leg_role_of`).
     pub fn leg_role(&self) -> &'static str {
-        // The positional caller slot is ALWAYS the caller leg — even when the
-        // caller's extension is also a CC agent. `agent_id` on that leg is CC
-        // attribution, not the slot identity; letting it win flipped the IVR
-        // root caller leg from `caller` (call_created) to `agent`
-        // (call_answered/call_hangup) on the dispatcher node (prd e2e S17 A10
-        // `dispatcher call_* bare-leg events carry no leg_role=agent` leak).
+        // A dispatcher/IVR caller can have CC attribution while keeping its
+        // positional role throughout the event stream. A direct dial from
+        // an originating seat explicitly assigns the Agent purpose.
         if self.id.as_str() == "caller" && self.purpose.is_none() {
             return "caller";
         }
@@ -174,6 +170,8 @@ mod tests {
         let mut leg = Leg::new(LegId::from("caller"));
         leg.agent_id = Some("1008".into());
         assert_eq!(leg.leg_role(), "caller");
+        leg.purpose = Some(super::super::LegPurpose::Agent);
+        assert_eq!(leg.leg_role(), "agent");
         // A dynamic agent-facing leg (non-caller id) still reports agent.
         let mut dyn_leg = Leg::new(LegId::from("agent-leg"));
         dyn_leg.agent_id = Some("1008".into());

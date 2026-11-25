@@ -155,7 +155,7 @@ async fn start_server(
     agents: &[(&str, &str)],
     hook: AttributionHook,
 ) -> (WebhookCapture, Arc<E2eTestServer>) {
-    start_server_with_carrier(agents, hook, "127.0.0.1:1").await
+    start_server_with_carrier(agents, Arc::new(hook), "127.0.0.1:1").await
 }
 
 /// Same server, but the `913*` carrier trunk points at `carrier_dest` so a
@@ -163,7 +163,7 @@ async fn start_server(
 /// the first terminal BYE from either side.
 async fn start_server_with_carrier(
     agents: &[(&str, &str)],
-    hook: AttributionHook,
+    hook: Arc<dyn CallSessionHook>,
     carrier_dest: &str,
 ) -> (WebhookCapture, Arc<E2eTestServer>) {
     let capture = WebhookCapture::start().await;
@@ -241,7 +241,7 @@ async fn start_server_with_carrier(
             config,
             E2eTestServerInject {
                 agent_registry: Some(registry.clone()),
-                session_hook: Some(Arc::new(hook.clone())),
+                session_hook: Some(hook),
                 users,
                 rwi_gateway: Some(gateway),
                 ..Default::default()
@@ -251,6 +251,40 @@ async fn start_server_with_carrier(
         .expect("E2E server start failed"),
     );
     (capture, server)
+}
+
+#[cfg(feature = "addon-cc")]
+async fn start_outbound_cc_hook() -> (Arc<dyn CallSessionHook>, sea_orm::DatabaseConnection) {
+    use rustpbx::addons::cc::{
+        agent::{AgentRegistry, AgentStatus},
+        cc_call_session_hook::CcCallSessionHook,
+        metrics::MetricsCollector,
+        migration::Migrator,
+    };
+    use sea_orm_migration::MigratorTrait;
+
+    let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    let registry = Arc::new(AgentRegistry::with_db(db.clone()));
+    registry.register("alice".into(), vec![], 1).await.unwrap();
+    registry.update_status("alice", AgentStatus::Idle).await.unwrap();
+    let hook = CcCallSessionHook::new(registry, Arc::new(MetricsCollector::new())).with_db(db.clone());
+    (Arc::new(hook), db)
+}
+
+#[cfg(feature = "addon-cc")]
+async fn assert_outbound_cc_hangup(db: &sea_orm::DatabaseConnection, call_id: &str, expected: &str) {
+    use rustpbx::addons::cc::models::cc_call;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let call = cc_call::Entity::find()
+        .filter(cc_call::Column::CallId.eq(call_id))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("the CC hook must persist the answered call");
+    assert_eq!(call.direction.as_deref(), Some("outbound"));
+    assert_eq!(call.hangup_by.as_deref(), Some(expected));
 }
 
 /// Agent dials an external (non-local) number: `call_created` must carry the
@@ -307,7 +341,10 @@ async fn outbound_customer_hangup_reports_callee_in_webhook_and_cdr() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let customer_port = portpicker::pick_unused_port().expect("free customer port");
-    let hook = AttributionHook::new();
+    #[cfg(feature = "addon-cc")]
+    let (hook, db) = start_outbound_cc_hook().await;
+    #[cfg(not(feature = "addon-cc"))]
+    let hook = Arc::new(AttributionHook::new());
     let (capture, server) = start_server_with_carrier(
         &[("alice", "Alice")],
         hook,
@@ -341,6 +378,8 @@ async fn outbound_customer_hangup_reports_callee_in_webhook_and_cdr() {
     wait_webhook_envelope(&capture, "call_answered")
         .await
         .expect("call must connect before the hangup assertion");
+    #[cfg(feature = "addon-cc")]
+    sleep(Duration::from_secs(1)).await;
 
     // Customer (B/callee dialog remote) hangs up first.
     customer.hangup(&dialog).await.expect("customer BYE");
@@ -378,6 +417,8 @@ async fn outbound_customer_hangup_reports_callee_in_webhook_and_cdr() {
         Some("callee"),
         "CDR metadata.hangup_by must agree with the webhook"
     );
+    #[cfg(feature = "addon-cc")]
+    assert_outbound_cc_hangup(&db, &call_id, "callee").await;
 
     // The customer callee leg must never be emitted as an agent leg (the
     // former `accept_call` served-agent stamp mislabeled it with the
@@ -412,7 +453,10 @@ async fn outbound_seat_hangup_reports_agent_in_webhook_and_cdr() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let customer_port = portpicker::pick_unused_port().expect("free customer port");
-    let hook = AttributionHook::new();
+    #[cfg(feature = "addon-cc")]
+    let (hook, db) = start_outbound_cc_hook().await;
+    #[cfg(not(feature = "addon-cc"))]
+    let hook = Arc::new(AttributionHook::new());
     let (capture, server) = start_server_with_carrier(
         &[("alice", "Alice")],
         hook,
@@ -446,6 +490,8 @@ async fn outbound_seat_hangup_reports_agent_in_webhook_and_cdr() {
     wait_webhook_envelope(&capture, "call_answered")
         .await
         .expect("call must connect before the hangup assertion");
+    #[cfg(feature = "addon-cc")]
+    sleep(Duration::from_secs(1)).await;
 
     let alice_dialog = tokio::time::timeout(Duration::from_secs(10), caller)
         .await
@@ -487,6 +533,8 @@ async fn outbound_seat_hangup_reports_agent_in_webhook_and_cdr() {
         Some("agent"),
         "CDR metadata.hangup_by must agree with the webhook"
     );
+    #[cfg(feature = "addon-cc")]
+    assert_outbound_cc_hangup(&db, &call_id, "agent").await;
 
     server.stop();
 }

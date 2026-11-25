@@ -762,6 +762,13 @@ impl SipSession {
         }
     }
 
+    fn record_callee_remote_bye(&mut self, leg_id: Option<&LegId>) {
+        if self.meta.hangup_reason.is_none() {
+            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+            self.meta.hangup_by_side = Some(self.callee_remote_bye_side(leg_id).to_string());
+        }
+    }
+
     /// Established CC-role legs (agent / consult / transfer) still registered
     /// at session teardown — each gets its own leg-scoped `call_hangup` so
     /// consumers filtering by role see every teardown. Home-proxy-routed legs
@@ -2160,13 +2167,9 @@ impl SipSession {
         initial_request: rsipstack::sip::Request,
         original_callee: &str,
     ) -> bool {
-        if session.context.dialplan.direction != crate::call::DialDirection::Outbound {
-            return false;
-        }
-        if matches!(
-            session.context.dialplan.flow,
-            crate::call::DialplanFlow::Application { .. }
-        ) {
+        if session.context.dialplan.direction != DialDirection::Outbound
+            || !session.owns_originating_seat()
+        {
             return false;
         }
         let (Some(registry), Some(gw)) = (&server.agent_registry, &server.rwi_gateway) else {
@@ -2223,9 +2226,7 @@ impl SipSession {
                     crate::proxy::proxy_call::session_hooks::OriginatingAgentSnapshot(agent),
                 );
             }
-            if let Some(caller) = session.legs.get_mut(&LegId::from("caller")) {
-                caller.agent_id = Some(cand.clone());
-            }
+            session.set_caller_agent_identity(cand.clone());
             debug!(
                 session_id = %session.context.session_id,
                 agent_id = %cand,
@@ -4357,10 +4358,28 @@ impl SipSession {
         (!user.is_empty()).then(|| user.to_string())
     }
 
-    /// Scenario ③ (agent-initiated calls): resolve and stamp the caller leg's
-    /// agent identity when the inbound INVITE originates from a registered CC
-    /// agent. Leg-scoped RWI events for the caller leg then carry
-    /// `leg_role: "agent"`. Idempotent; no-op for non-agent callers.
+    /// The caller slot represents the originating seat on a direct endpoint
+    /// dial. Root callers of app flows and peer delivery retain their role.
+    fn owns_originating_seat(&self) -> bool {
+        self.meta.child_leg_role.is_none()
+            && self.context.dialplan.direction != DialDirection::Inbound
+            && matches!(self.context.dialplan.flow, crate::call::DialplanFlow::Targets(_))
+            && self.context.cookie.get_extension::<TrunkContext>().is_none()
+            && !Self::from_cluster_peer(&self.server, &self.context.cookie)
+    }
+
+    fn set_caller_agent_identity(&mut self, agent_id: String) {
+        let owns_seat = self.owns_originating_seat();
+        if let Some(leg) = self.legs.get_mut(&LegId::from("caller")) {
+            leg.agent_id = Some(agent_id);
+            if owns_seat {
+                leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+            }
+        }
+    }
+
+    /// Resolve the caller's registered agent identity for direct calls that
+    /// did not already obtain an authenticated identity during setup.
     async fn stamp_caller_agent_identity(&mut self) {
         // On the target's home node the caller dialog is the dispatch hop.
         // Only the dialed target is a local agent participant.
@@ -4381,10 +4400,8 @@ impl SipSession {
         let Some(registry) = self.server.agent_registry.as_ref() else {
             return;
         };
-        if registry.get_agent(&user).await.is_some()
-            && let Some(leg) = self.legs.get_mut(&caller_id)
-        {
-            leg.agent_id = Some(user);
+        if registry.get_agent(&user).await.is_some() {
+            self.set_caller_agent_identity(user);
         }
     }
 
@@ -4474,9 +4491,7 @@ impl SipSession {
         {
             return;
         }
-        if let Some(leg) = self.legs.get_mut(&LegId::from("caller")) {
-            leg.agent_id = Some(caller.agent_id.clone());
-        }
+        self.set_caller_agent_identity(caller.agent_id.clone());
         let registered_consult_target = callee_id.is_some();
         let originating_external_consult = !registered_consult_target
             && self.context.dialplan.direction == DialDirection::Outbound
@@ -6568,20 +6583,12 @@ impl SipSession {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
                             self.meta.hangup_by_side = Some("local".to_string());
-                            // Direct softphone outbound (UAS caller dialog):
-                            // the remote UAC that sent this BYE is the
-                            // originating SEAT. When that leg carries agent
-                            // attribution the business initiator is "agent"
-                            // (the docs contract: an agent-initiated hangup is
-                            // `agent`). The SIP positional `ByCaller` alone
-                            // would surface as "caller". `!primary_leg_uac`
-                            // distinguishes this remote BYE from our own UAC
-                            // teardown BYE, which also maps to `UacBye` (we
-                            // are the UAC there).
-                            if self.context.dialplan.direction
-                                == crate::call::DialDirection::Outbound
+                            // On direct outbound UAS calls the remote UAC is
+                            // the originating seat when the caller leg owns that role.
+                            if self.context.dialplan.direction == DialDirection::Outbound
                                 && !self.primary_leg_uac
-                                && self.leg_remote_is_agent(&LegId::from("caller"))
+                                && self.legs.get(&LegId::from("caller"))
+                                    .is_some_and(|leg| leg.leg_role() == "agent")
                             {
                                 self.meta.hangup_by_side =
                                     Some(self.caller_remote_bye_side().to_string());
@@ -6592,29 +6599,11 @@ impl SipSession {
                     TerminatedReason::UasBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
-                            // Remote BYE on the caller/A dialog of an OUTBOUND
-                            // call. WHO the remote is decides the attribution:
-                            //   - queue-dispatch / consult legs pin an agent
-                            //     (`pinned_agent_id`), so the remote IS the
-                            //     agent hanging up → `callee_remote` keeps the
-                            //     CC-centric "agent" normalization intact;
-                            //   - a plain CTI click-to-dial leg has no pin —
-                            //     the remote is the dialed CUSTOMER →
-                            //     `caller_remote` corrects the normalization
-                            //     to "callee" (a customer hanging up is not an
-                            //     agent-side teardown).
-                            // (Inbound caller dialogs have the proxy as UAS —
-                            // a UasBye there is the callee-side cascade,
-                            // correctly attributed by the existing mapping; no
-                            // stamp.)
-                            if self.context.dialplan.direction
-                                == crate::call::DialDirection::Outbound
-                            {
-                                if self.pinned_agent_id().is_some() {
-                                    self.meta.hangup_by_side = Some("callee_remote".to_string());
-                                } else {
-                                    self.meta.hangup_by_side = Some("caller_remote".to_string());
-                                }
+                            // In an originate the remote UAS is the dialed
+                            // participant. The session pin can name the CTI agent.
+                            if self.primary_leg_uac {
+                                self.meta.hangup_by_side =
+                                    Some(self.caller_remote_bye_side().to_string());
                             }
                         }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye) on caller dialog");
@@ -8377,6 +8366,9 @@ impl SipSession {
                     .as_ref()
                     .is_some_and(|pending| terminated_leg.as_ref() == Some(&pending.customer_leg))
                 {
+                    if matches!(reason, TerminatedReason::UasBye) {
+                        self.record_callee_remote_bye(terminated_leg.as_ref());
+                    }
                     self.handle_hangup(&HangupCommand::all(
                         self.meta.hangup_reason.clone(),
                         None,
@@ -8458,6 +8450,9 @@ impl SipSession {
                 if application_peer_terminated {
                     // After the transferor leaves, this leg owns the running app;
                     // its BYE ends the session rather than leaving an orphan IVR.
+                    if matches!(reason, TerminatedReason::UasBye) {
+                        self.record_callee_remote_bye(terminated_leg.as_ref());
+                    }
                     self.handle_hangup(&HangupCommand::all(
                         Some(CallRecordHangupReason::ByCallee),
                         None,
@@ -8512,20 +8507,7 @@ impl SipSession {
                 // Only populate the reason when nothing recorded it earlier.
                 match &reason {
                     TerminatedReason::UasBye => {
-                        if self.meta.hangup_reason.is_none() {
-                            self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
-                            // The remote on a callee dialog is the AGENT only
-                            // when this leg carries CC agent attribution
-                            // (queue/skill-group dispatch, agent bridge,
-                            // transfer target). A direct softphone outbound's
-                            // callee leg is the dialed CUSTOMER — position
-                            // alone must never label a customer hangup as
-                            // "agent".
-                            self.meta.hangup_by_side = Some(
-                                self.callee_remote_bye_side(terminated_leg.as_ref())
-                                    .to_string(),
-                            );
-                        }
+                        self.record_callee_remote_bye(terminated_leg.as_ref());
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye)");
                     }
                     TerminatedReason::UacBye => {

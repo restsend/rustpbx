@@ -98,7 +98,7 @@ pub struct AnsweredConsultTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegPurpose {
-    /// Queue / skill-group dispatch: the dialed party is a CC agent.
+    /// A CC agent participating as the dialed party or originating seat.
     Agent,
     /// Consult (attended transfer) leg: agent B consulting target C.
     Consult,

@@ -1196,6 +1196,7 @@ impl RwiCommandProcessor {
             use crate::call::{DialDirection, Dialplan};
             use crate::callrecord::CallRecordHangupReason;
             use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+            use crate::proxy::proxy_call::session_hooks::NormalizedHangupBy;
             use crate::proxy::proxy_call::sip_session::SipSession;
             use crate::proxy::proxy_call::state::CallContext;
 
@@ -1211,7 +1212,8 @@ impl RwiCommandProcessor {
             let mut cdr_rwi_call_record_guard = Some(rwi_call_record_guard);
             let mut cleanup =
                 move |ring_time: Option<chrono::DateTime<chrono::Utc>>,
-                      answer_time: Option<chrono::DateTime<chrono::Utc>>| {
+                      answer_time: Option<chrono::DateTime<chrono::Utc>>,
+                      terminal_hangup: Option<(CallRecordHangupReason, String)>| {
                     let Some(rwi_call_record_guard) = cdr_rwi_call_record_guard.take() else {
                         return;
                     };
@@ -1220,6 +1222,11 @@ impl RwiCommandProcessor {
                         use crate::callrecord::CallRecordHangupReason;
                         let end_time = chrono::Utc::now();
                         let answered = answer_time.is_some();
+                        let (hangup_reason, hangup_by) = match terminal_hangup {
+                            Some((reason, initiator)) => (reason, Some(initiator)),
+                            None if answered => (CallRecordHangupReason::BySystem, None),
+                            None => (CallRecordHangupReason::Canceled, None),
+                        };
                         // Attach the recorder media when a recording was started on
                         // this call (originate `record` option or mid-call
                         // record.start) so the CDR carries recording_url and the
@@ -1370,11 +1377,7 @@ impl RwiCommandProcessor {
                             answer_time,
                             end_time,
                             status_code: if answered { 200 } else { 0 },
-                            hangup_reason: Some(if answered {
-                                CallRecordHangupReason::BySystem
-                            } else {
-                                CallRecordHangupReason::Canceled
-                            }),
+                            hangup_reason: Some(hangup_reason),
                             hangup_messages: vec![],
                             recorder,
                             sip_leg_roles: std::collections::HashMap::new(),
@@ -1390,6 +1393,12 @@ impl RwiCommandProcessor {
                                 to_number: Some(cdr_callee.clone()),
                                 metadata: {
                                     let mut meta = user_data_meta;
+                                    if let Some(initiator) = hangup_by {
+                                        meta.get_or_insert_with(Default::default).insert(
+                                            "hangup_by".to_string(),
+                                            serde_json::Value::String(initiator),
+                                        );
+                                    }
                                     if let Some(segments) = recording_segments_meta {
                                         meta.get_or_insert_with(Default::default).insert(
                                             "recording_segments".to_string(),
@@ -1532,7 +1541,7 @@ impl RwiCommandProcessor {
                         });
                     }
                     cancel_token.cancel();
-                    cleanup(cdr_ring_time, cdr_answer_time);
+                    cleanup(cdr_ring_time, cdr_answer_time, None);
                     return;
                 }
             };
@@ -2062,6 +2071,10 @@ impl RwiCommandProcessor {
                                 tracing::warn!(call_id = %session_call_id, error = %e, "UAC session loop exited with error");
                             }
                             session_cancel.cancel();
+                            let hangup_by = session.extensions.read()
+                                .get::<NormalizedHangupBy>()
+                                .map(|value| value.0.clone());
+                            session.meta.hangup_reason.clone().zip(hangup_by)
                         });
 
                         use crate::proxy::active_call_registry::ActiveProxyCallStatus;
@@ -2095,10 +2108,14 @@ impl RwiCommandProcessor {
                                 cancel_token.cancel();
                             }
                         }
-                        if let Err(e) = session_join.await {
-                            tracing::warn!(%call_id, error = %e, "UAC session join failed");
-                        }
-                        cleanup(cdr_ring_time, cdr_answer_time);
+                        let terminal_hangup = match session_join.await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                tracing::warn!(%call_id, error = %e, "UAC session join failed");
+                                None
+                            }
+                        };
+                        cleanup(cdr_ring_time, cdr_answer_time, terminal_hangup);
                         return;
                     }
                     Ok(Some(Ok((_dialog, resp_opt)))) => {
@@ -2205,7 +2222,7 @@ impl RwiCommandProcessor {
             }
             cancel_token.cancel();
             registry.remove(&call_id);
-            cleanup(cdr_ring_time, cdr_answer_time);
+            cleanup(cdr_ring_time, cdr_answer_time, None);
         });
 
         Ok(CommandResult::Originated {

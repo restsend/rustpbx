@@ -1281,6 +1281,22 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
         Some("1001"),
         "call_hangup must carry the agent's id"
     );
+    let record = server
+        .cdr_capture
+        .wait_for_record(&call_id, std::time::Duration::from_secs(5))
+        .await
+        .expect("answered originate must emit its CDR");
+    assert_eq!(record.status_code, 200);
+    assert_eq!(record.details.status, "answered");
+    assert_eq!(hangup.event.payload["hangup_by"], "callee");
+    assert_eq!(
+        record.hangup_reason,
+        Some(rustpbx::callrecord::CallRecordHangupReason::ByCallee),
+    );
+    assert_eq!(
+        record.details.metadata.as_ref().unwrap()["hangup_by"],
+        "callee",
+    );
 
     server.stop();
 }
