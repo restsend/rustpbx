@@ -174,6 +174,7 @@ impl SipSession {
         let refer_to_clone = refer_to.clone();
         let server = self.server.clone();
         let original_session_id = original_handle.session_id().to_string();
+        let root_session_id = self.root_session_id_str();
         crate::utils::spawn(async move {
             info!("Spawned inbound REFER background task");
 
@@ -193,7 +194,7 @@ impl SipSession {
             let (target_uri, _) = Self::parse_refer_to(&refer_to_clone);
 
             let result = Self::execute_inbound_refer_transfer(
-                &server, &original_handle, &original_session_id,
+                &server, &original_handle, &original_session_id, &root_session_id,
                 &target_uri,
             ).await;
 
@@ -1042,6 +1043,7 @@ impl SipSession {
         server: &SipServerRef,
         original_handle: &crate::proxy::proxy_call::sip_session::SipSessionHandle,
         original_session_id: &str,
+        root_session_id: &str,
         target_uri: &str,
     ) -> Result<(), (u16, String)> {
         info!(target_uri, "Starting inbound REFER transfer execution");
@@ -1060,21 +1062,6 @@ impl SipSession {
             rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
                 .map_err(|e| (500, format!("Invalid caller URI: {:?}", e)))?;
 
-        // Resolve the root session id from the original session so the
-        // transfer-target leg stays correlated with the whole logical call
-        // (RFC 7433 UUI, purpose=call-center). Falls back to the original
-        // session id when no meta is available.
-        let root_session_id = server
-            .rwi_gateway
-            .as_ref()
-            .and_then(|gw| {
-                gw.read()
-                    .meta_store
-                    .get_sync(original_session_id)
-                    .and_then(|m| m.session_id)
-            })
-            .unwrap_or_else(|| original_session_id.to_string());
-
         let mut headers = vec![rsipstack::sip::Header::Other(
             "Max-Forwards".into(),
             "70".into(),
@@ -1083,7 +1070,7 @@ impl SipSession {
         // ids ride a raw Session-ID header (rsipstack's InviteOption.session_id
         // validation only accepts 32 hex chars).
         let transfer_session_id =
-            crate::call::session_id::build_wire_header(Some(&root_session_id));
+            crate::call::session_id::build_wire_header(Some(root_session_id));
         if let Some(header) = transfer_session_id.1.clone() {
             headers.push(header);
         }
@@ -1101,7 +1088,7 @@ impl SipSession {
             _ => "transfer",
         };
         headers.push(crate::call::uui::build_uui_header(
-            &root_session_id,
+            root_session_id,
             None,
             None,
             None,
@@ -1117,7 +1104,7 @@ impl SipSession {
             ..Default::default()
         };
         if let Some(name) = server.outbound_session_id_header(None, &refer_target, &destination_uri).await
-            && let Some(root) = crate::call::session_id::normalize_custom(&root_session_id)
+            && let Some(root) = crate::call::session_id::normalize_custom(root_session_id)
         {
             crate::call::session_id::set_correlation_header(&mut headers, &name, &root);
         }
@@ -1243,7 +1230,7 @@ impl SipSession {
                 if let Some(ref gw) = server.rwi_gateway {
                     let gw = gw.read();
                     let mut meta = gw.meta_store.get_sync(&new_call_id).unwrap_or_default();
-                    meta.session_id = Some(root_session_id.clone());
+                    meta.session_id = Some(root_session_id.to_owned());
                     // Carry the transferring agent onto the target leg so its
                     // events (call_answered, call_hangup, ...) keep the agent
                     // context — this leg never emits a `call_created` of its
@@ -1512,7 +1499,7 @@ mod correlation_tests {
         let target = format!("sip:9001@{}", socket.local_addr().unwrap());
         const ROOT: &str = "708fed201de7cbb4";
         let (handle, _commands) = SipSession::with_handle(SessionId::from(ROOT));
-        let transfer = SipSession::execute_inbound_refer_transfer(&server, &handle, ROOT, &target);
+        let transfer = SipSession::execute_inbound_refer_transfer(&server, &handle, ROOT, ROOT, &target);
         tokio::pin!(transfer);
         let mut buffer = [0u8; 8192];
         tokio::select! {
