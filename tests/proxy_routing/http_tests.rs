@@ -1523,4 +1523,102 @@ mod tests {
         assert_eq!(attempts[0].hints.as_ref().unwrap().network_profile_id.as_deref(), Some("arrival"));
         assert_eq!(attempts[1].hints.as_ref().unwrap().network_profile_id.as_deref(), Some("dest"));
     }
+
+    #[tokio::test]
+    async fn test_http_router_network_profile_replaces_uri_target_profile() {
+        let mut arrival = trunk("sip:192.0.2.9", None);
+        arrival.profile = Some("arrival".to_string());
+        arrival.external_ip = Some("198.51.100.1".to_string());
+        let mut own = trunk("sip:10.0.0.2", None);
+        own.profile = Some("dest".to_string());
+        let trunks = [
+            ("carrier-in".to_string(), arrival),
+            ("own-profile".to_string(), own),
+        ]
+        .into();
+        let plan = resolve_inbound(json!({
+            "action": "forward",
+            "network_profile_id": "wan",
+            "targets": ["sip:legacy@example.com", {"trunk": "own-profile"}]
+        }), trunks, Some("carrier-in")).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        // The URI target dials the response's profile, over the arrival
+        // trunk's; the arrival trunk's explicit IPs stay untouched.
+        let hints = attempts[0].hints.as_ref().expect("attempt hints");
+        assert_eq!(hints.network_profile_id.as_deref(), Some("wan"));
+        assert_eq!(hints.external_ip.as_deref(), Some("198.51.100.1"));
+        // A trunk target keeps its own profile.
+        assert_eq!(attempts[1].hints.as_ref().unwrap().network_profile_id.as_deref(), Some("dest"));
+    }
+
+    #[tokio::test]
+    async fn test_http_router_network_profile_without_arrival_trunk() {
+        // An internal call to a pure-URI target still gets the response's
+        // profile, so Contact / SDP come from that network, not the default.
+        let plan = resolve_with_response(json!({
+            "action": "forward",
+            "network_profile_id": "wan",
+            "targets": ["sip:legacy@example.com"]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        let hints = attempts[0].hints.as_ref().expect("attempt hints");
+        assert_eq!(hints.network_profile_id.as_deref(), Some("wan"));
+        assert!(hints.external_ip.is_none());
+        assert!(hints.bind_ip.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_http_router_network_profile_downgrades_parallel_to_sequential() {
+        // Parallel dialing carries no per-attempt hints, so a profiled
+        // response dials sequentially to keep the profile.
+        let plan = resolve_with_response(json!({
+            "action": "forward",
+            "network_profile_id": "wan",
+            "strategy": "parallel",
+            "targets": ["sip:first@example.com", "sip:second@example.com"]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        assert_eq!(attempts.len(), 2);
+        for attempt in &attempts {
+            assert_eq!(
+                attempt.hints.as_ref().unwrap().network_profile_id.as_deref(),
+                Some("wan")
+            );
+        }
+
+        // Trunk targets only: the response's id is unused (trunk profiles
+        // live in per-attempt hints, which parallel dialing drops — a
+        // pre-existing gap), so parallel dialing is preserved.
+        let trunks = [
+            ("carrier-a".to_string(), trunk("sip:10.0.0.1", None)),
+            ("carrier-b".to_string(), trunk("sip:10.0.0.2", None)),
+        ]
+        .into();
+        let plan = resolve_with_trunks(json!({
+            "action": "forward",
+            "network_profile_id": "wan",
+            "strategy": "parallel",
+            "targets": [{"trunk": "carrier-a"}, {"trunk": "carrier-b"}]
+        }), trunks).await.unwrap();
+        assert!(matches!(plan.flow, DialplanFlow::Targets(DialStrategy::Parallel(_))));
+    }
+
+    #[tokio::test]
+    async fn test_http_router_blank_network_profile_is_ignored() {
+        let plan = resolve_with_response(json!({
+            "action": "forward",
+            "network_profile_id": "  ",
+            "targets": ["sip:legacy@example.com"]
+        })).await.unwrap();
+        let DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = plan.flow else {
+            panic!("expected sequential targets");
+        };
+        assert!(attempts[0].hints.is_none());
+    }
 }

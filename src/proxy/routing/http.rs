@@ -250,6 +250,14 @@ struct HttpResponsePayload {
     /// authenticated caller is kept. An unparseable value fails the call
     /// immediately with 500 Server Internal Error.
     pub caller: Option<String>,
+    /// Network profile id to apply for this call. Applies to targets that
+    /// resolve no trunk (e.g. passive gateways returning pure-URI targets),
+    /// where it replaces the arrival trunk's profile; trunk targets keep
+    /// their own `trunk.profile`. An unknown id falls back to the default
+    /// profile at dial time, as an unknown trunk profile does. When any
+    /// trunk-less target is routed, the call dials sequentially (parallel
+    /// dialing carries no per-attempt hints).
+    pub network_profile_id: Option<String>,
 }
 
 #[async_trait]
@@ -458,10 +466,18 @@ impl CallRouter for HttpCallRouter {
                 let arrival_trunk = source_trunk
                     .as_deref()
                     .and_then(|name| self.data_context.get_trunk(name));
+                // The response's network profile for trunk-less targets.
+                let response_profile = result
+                    .network_profile_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
                 let rtp_bind_ip = result.rtp_config.as_ref().and_then(|c| c.bind_ip).map(|ip| ip.to_string());
                 let rtp_external_ip =
                     result.rtp_config.as_ref().and_then(|c| c.external_ip).map(|ip| ip.to_string());
                 let mut attempts = Vec::new();
+                let mut uri_attempt_count = 0usize;
                 if let Some(targets) = result.targets {
                     for target in targets {
                         let (uri, retry_policy) = match target {
@@ -499,7 +515,16 @@ impl CallRouter for HttpCallRouter {
                         let Ok(uri) = rsipstack::sip::Uri::try_from(uri) else {
                             continue;
                         };
-                        let hints = arrival_hints(arrival_trunk.as_ref()).map(Arc::new);
+                        // Trunk-less target: the response's profile replaces
+                        // the arrival trunk's — an explicit per-call choice.
+                        let mut hints = arrival_hints(arrival_trunk.as_ref());
+                        if let Some(profile_id) = response_profile.as_deref() {
+                            hints
+                                .get_or_insert_with(DialplanHints::default)
+                                .network_profile_id = Some(profile_id.to_string());
+                        }
+                        uri_attempt_count += 1;
+                        let hints = hints.map(Arc::new);
                         let max_ring_time = hints.as_ref().and_then(|h| h.max_ring_time);
                         attempts.push(DialAttempt {
                             retry_policy,
@@ -540,8 +565,14 @@ impl CallRouter for HttpCallRouter {
                         ..
                     }]
                 );
+                // A response profile reaches trunk-less targets only via
+                // per-attempt hints, which parallel dialing carries none of;
+                // dial such calls sequentially instead.
+                let profiled_uri_attempt = response_profile.is_some() && uri_attempt_count > 0;
                 let strategy = match result.strategy {
-                    Some(HttpRouteStrategy::Parallel) if !has_single_attempt_timeout => {
+                    Some(HttpRouteStrategy::Parallel)
+                        if !has_single_attempt_timeout && !profiled_uri_attempt =>
+                    {
                         DialStrategy::Parallel(
                             attempts.into_iter().map(|attempt| attempt.location).collect(),
                         )
