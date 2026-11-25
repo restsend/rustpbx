@@ -502,7 +502,7 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `reason` | Option\<String\> | Hangup reason (see table below) |
-| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. A callee hangup is reported as `agent` only when the call actually involved a CC agent (queue-routed or `resolved_agent_id`); otherwise it is `callee`. |
+| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `callee` \| `system` \| `transfer` \| `unknown`. Decided by the **actual remote role of the SIP dialog that sent the FIRST BYE**: remote is an agent leg (queue dispatch / agent bridge / the seat on a direct outbound A leg) → `agent`; outbound customer hung up → `callee`; inbound customer hung up → `caller`. SIP dialog position alone is no longer the criterion. |
 | `sip_status` | Option\<u16\> | SIP response code |
 | `duration_secs` | Option\<u64\> | Talk time in seconds (answer → hangup); omitted when the call was never answered |
 | *+ctx* | | Flat context fields |

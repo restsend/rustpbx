@@ -13192,6 +13192,151 @@ async fn teardown_emits_leg_scoped_hangup_for_connected_cc_legs() {
     assert_eq!(hangups[1]["reason"], "callee");
 }
 
+/// Direct softphone outbound, CUSTOMER hangs up first: the seat is on the
+/// A/caller leg, the customer on the B/callee leg. The old unconditional
+/// `callee_remote` (assumed agent) mapping mislabeled this as
+/// `hangup_by=agent`; the first-BYE dialog's remote role now decides, and
+/// webhook / CDR metadata / `NormalizedHangupBy` (consumed by `cc_calls`)
+/// must agree on `callee`.
+#[tokio::test]
+async fn direct_outbound_customer_bye_reports_callee_on_every_surface() {
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Connected;
+    caller_leg.agent_id = Some("agent-1".into());
+    let mut callee_leg = crate::call::domain::Leg::new(LegId::from("callee"));
+    callee_leg.state = LegState::Connected; // dialed customer — no agent attribution
+    let (mut session, mut events) = teardown_session(
+        "direct-outbound-customer-bye",
+        vec![caller_leg, callee_leg],
+        None,
+    )
+    .await;
+
+    // What the callee-dialog termination branch now stamps for a customer leg.
+    session.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+    session.meta.hangup_by_side = Some(
+        session
+            .callee_remote_bye_side(Some(&LegId::from("callee")))
+            .to_string(),
+    );
+    assert_eq!(
+        session.meta.hangup_by_side.as_deref(),
+        Some("callee_remote_customer"),
+        "non-agent callee leg must not be stamped as an agent BYE"
+    );
+    assert!(
+        !session.leg_remote_is_agent(&LegId::from("callee")),
+        "the dialed customer leg carries no agent attribution"
+    );
+    assert_eq!(
+        session.session_hangup_by().as_deref(),
+        Some("callee"),
+        "normalized initiator must be the customer"
+    );
+    assert_eq!(
+        session
+            .record_snapshot()
+            .metadata
+            .get("hangup_by")
+            .and_then(|v| v.as_str()),
+        Some("callee"),
+        "CDR metadata.hangup_by must use the same normalized value"
+    );
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+    let session_event = hangups.last().expect("session-scoped call_hangup");
+    assert_eq!(
+        session_event["hangup_by"], "callee",
+        "RWI call_hangup must report the customer hangup: {session_event}"
+    );
+    // The ended hooks receive this exact value; the CC addon persists it into
+    // cc_calls.hangup_by.
+    let normalized = session
+        .extensions
+        .read()
+        .get::<crate::proxy::proxy_call::session_hooks::NormalizedHangupBy>()
+        .cloned();
+    assert_eq!(
+        normalized.map(|v| v.0).as_deref(),
+        Some("callee"),
+        "cc_calls must consume the core-normalized initiator"
+    );
+}
+
+/// Symmetric shape: the SEAT hangs up first on a direct outbound (UacBye;
+/// the SIP position is `caller`). Docs contract: an agent-initiated hangup
+/// is `agent`, never the positional `caller`.
+#[tokio::test]
+async fn direct_outbound_seat_bye_reports_agent_on_every_surface() {
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Connected;
+    caller_leg.agent_id = Some("agent-1".into());
+    let (mut session, mut events) =
+        teardown_session("direct-outbound-seat-bye", vec![caller_leg], None).await;
+
+    session.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+    session.meta.hangup_by_side = Some(session.caller_remote_bye_side().to_string());
+    assert_eq!(
+        session.meta.hangup_by_side.as_deref(),
+        Some("caller_remote_agent"),
+        "direct-dial caller leg IS the seat"
+    );
+    assert_eq!(
+        session.session_hangup_by().as_deref(),
+        Some("agent"),
+        "seat hangup must normalize to agent, not the positional caller"
+    );
+    assert_eq!(
+        session
+            .record_snapshot()
+            .metadata
+            .get("hangup_by")
+            .and_then(|v| v.as_str()),
+        Some("agent")
+    );
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+    assert_eq!(
+        hangups.last().expect("session call_hangup")["hangup_by"],
+        "agent"
+    );
+}
+
+/// Regression lock: a queue/agent bridge leg (`LegPurpose::Agent`) hangup
+/// must still report `agent`.
+#[tokio::test]
+async fn agent_callee_bye_stays_agent_on_every_surface() {
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Connected;
+    let mut agent_leg = crate::call::domain::Leg::new(LegId::from("callee"));
+    agent_leg.state = LegState::Connected;
+    agent_leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    let (mut session, mut events) =
+        teardown_session("agent-callee-bye", vec![caller_leg, agent_leg], None).await;
+
+    session.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+    session.meta.hangup_by_side = Some(
+        session
+            .callee_remote_bye_side(Some(&LegId::from("callee")))
+            .to_string(),
+    );
+    assert_eq!(
+        session.meta.hangup_by_side.as_deref(),
+        Some("callee_remote_agent")
+    );
+    assert_eq!(session.session_hangup_by().as_deref(), Some("agent"));
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+    let session_event = hangups.last().expect("session call_hangup");
+    assert_eq!(session_event["hangup_by"], "agent");
+}
+
 /// 没有坐席/consult 腿的普通两腿呼叫（含纯中继外呼）：teardown 不新增 leg 级
 /// 事件，仍然只有 session 级一条 `call_hangup`。
 #[tokio::test]

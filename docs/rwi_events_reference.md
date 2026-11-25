@@ -487,7 +487,7 @@ Webhook **不做发送侧去重**：网关产出的每一条事件都会被投�
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `reason` | Option\<String\> | 挂机原因（见下表） |
-| `hangup_by` | Option\<String\> | 归一化发起方：`agent` / `caller` / `system` / `transfer` / `unknown`（仅当呼叫实际涉及 CC 坐席——队列路由或 resolved_agent_id——被叫挂机才记为 `agent`，否则记为 `callee`） |
+| `hangup_by` | Option\<String\> | 归一化发起方：`agent` / `caller` / `callee` / `system` / `transfer` / `unknown`。按**首个挂断 BYE 所在 SIP 对话的远端实际角色**判定：远端是坐席腿（队列派发 / 坐席桥接 / 直拨外呼的坐席 A 腿）→ `agent`；外呼客户先挂 → `callee`；呼入客户先挂 → `caller`；与 SIP 对话位置无关 |
 | `sip_status` | Option\<u16\> | SIP 响应码 |
 | `duration_secs` | Option\<u64\> | 通话时长（应答 → 挂机，秒）；未应答呼叫省略 |
 | *+ctx* | | 扁平化上下文（涉及坐席时含 `agent_id` / `agent_name` / `queue_id`） |

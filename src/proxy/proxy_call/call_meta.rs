@@ -63,19 +63,26 @@ pub struct CallMeta {
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
-    /// Which dialog sent the FIRST BYE of the terminal hangup — attribution
-    /// context for the RWI `call_hangup.hangup_by` normalization. `ByCallee`
-    /// means different parties in different call shapes: on an inbound CC
-    /// call the callee side IS the agent (`"agent"`), but on an outbound
-    /// (CTI click-to-dial) call the remote party of the caller/A dialog is
-    /// the CUSTOMER, so `ByCallee` must normalize to `"callee"`. Written
-    /// once, together with the FIRST `hangup_reason` assignment from a
-    /// dialog termination; later cascade BYEs must not overwrite it.
-    /// Values: `"caller_remote"` (remote BYE on the caller/A dialog —
-    /// stamped for OUTBOUND sessions only, where that remote is the
-    /// customer), `"callee_remote"` (remote BYE on a callee/agent dialog —
-    /// the agent hung up), `"local"` (we sent the BYE). `None` for
-    /// non-BYE terminal paths (cancel, autohangup, IVR/system hangup).
+    /// Which dialog sent the FIRST BYE of the terminal hangup, plus whether
+    /// that dialog's REMOTE party is a CC agent — attribution context for the
+    /// RWI `call_hangup.hangup_by` normalization (and the CDR / `cc_calls`
+    /// surfaces that consume the same normalized value). `ByCallee` means
+    /// different parties in different call shapes: on an inbound CC call the
+    /// callee side IS the agent (`"agent"`), but on an outbound direct
+    /// softphone dial the callee dialog's remote is the CUSTOMER
+    /// (`"callee"`), while the caller dialog's remote is the SEAT
+    /// (`"agent"`). Position alone is therefore never enough. Written once,
+    /// together with the FIRST `hangup_reason` assignment from a dialog
+    /// termination; later cascade BYEs must not overwrite it.
+    /// Values: `"caller_remote"` (legacy: remote BYE on the caller/A dialog,
+    /// stamped for OUTBOUND sessions where that remote is the customer),
+    /// `"callee_remote"` (legacy: remote BYE on a callee dialog, assumed to
+    /// be the agent), `"caller_remote_agent"` / `"callee_remote_agent"`
+    /// (remote BYE whose leg carries RAW agent attribution — `agent_id` or
+    /// `LegPurpose::Agent`), `"caller_remote_customer"` /
+    /// `"callee_remote_customer"` (remote BYE from a non-agent party), and
+    /// `"local"` (we sent the BYE). `None` for non-BYE terminal paths
+    /// (cancel, autohangup, IVR/system hangup).
     pub hangup_by_side: Option<String>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,

@@ -112,6 +112,16 @@ impl std::ops::Deref for SessionExtensions {
 #[derive(Clone)]
 pub struct OriginatingAgentSnapshot(pub crate::call::app::agent_registry::AgentRecord);
 
+/// Core-normalized terminal `hangup_by` (`agent` / `caller` / `callee` /
+/// `system` / `transfer` / `unknown`), computed once from the FIRST-BYE
+/// dialog's actual leg role and inserted into the session extension bag
+/// before `on_call_ended` hooks run. Addons (CC `cc_calls`) persist this
+/// exact value instead of re-deriving the CC-centric
+/// `CallRecordHangupReason::initiator()`, so every consumer surface (RWI
+/// `call_hangup`, CDR metadata, `cc_calls`) agrees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedHangupBy(pub String);
+
 /// Lightweight context passed to every session-hook callback.
 /// All fields are cheaply cloneable.
 pub struct CallSessionContext {

@@ -116,6 +116,15 @@ impl Leg {
     /// that owns the registration stamps it instead (see
     /// `SipSession::leg_role_of`).
     pub fn leg_role(&self) -> &'static str {
+        // The positional caller slot is ALWAYS the caller leg — even when the
+        // caller's extension is also a CC agent. `agent_id` on that leg is CC
+        // attribution, not the slot identity; letting it win flipped the IVR
+        // root caller leg from `caller` (call_created) to `agent`
+        // (call_answered/call_hangup) on the dispatcher node (prd e2e S17 A10
+        // `dispatcher call_* bare-leg events carry no leg_role=agent` leak).
+        if self.id.as_str() == "caller" && self.purpose.is_none() {
+            return "caller";
+        }
         if self.agent_id.is_some() {
             "agent"
         } else if self.purpose == Some(super::LegPurpose::Consult) {
@@ -153,6 +162,22 @@ mod tests {
         assert_eq!(leg.leg_role(), "callee");
         leg.agent_id = Some("1001".into());
         assert_eq!(leg.leg_role(), "agent");
+    }
+
+    /// The positional caller slot stays `caller` even when the caller's
+    /// extension is also a CC agent — `agent_id` is attribution, not the
+    /// slot role. Regression lock for prd e2e S17 A10: the IVR root caller
+    /// leg reported `leg_role=agent` on `call_answered`/`call_hangup`
+    /// (dispatcher leak) while `call_created` said `caller`.
+    #[test]
+    fn leg_role_caller_slot_wins_over_agent_attribution() {
+        let mut leg = Leg::new(LegId::from("caller"));
+        leg.agent_id = Some("1008".into());
+        assert_eq!(leg.leg_role(), "caller");
+        // A dynamic agent-facing leg (non-caller id) still reports agent.
+        let mut dyn_leg = Leg::new(LegId::from("agent-leg"));
+        dyn_leg.agent_id = Some("1008".into());
+        assert_eq!(dyn_leg.leg_role(), "agent");
     }
 
     #[test]

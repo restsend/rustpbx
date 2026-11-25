@@ -8,15 +8,27 @@ pub(super) fn normalize_call_hangup_by(
     has_resolved_agent: bool,
     hangup_by_side: Option<&str>,
 ) -> String {
-    // Outbound correction: on a CTI click-to-dial / originate call the
-    // caller/A dialog's UAS is the dialed CUSTOMER. A UAS BYE there is the
-    // customer hanging up (stamped `caller_remote`), so the CC-centric
-    // `ByCallee → "agent"` mapping must not fire — the initiator is the
-    // customer ("callee"). A remote BYE on a callee/agent dialog
-    // (`callee_remote`) IS the agent hanging up and keeps "agent"; inbound
-    // sessions never stamp `caller_remote` (their caller-dialog UAS is the
-    // proxy, so a UasBye there is the callee-side cascade, correctly
-    // attributed through the existing mapping below).
+    // FIRST-BYE dialog attribution (leg-local): the side stamp records where
+    // the terminal BYE came from AND whether that dialog's remote party is a
+    // CC agent (`*_agent`) or the customer/other party (`*_customer`).
+    // Position alone is not enough: on a direct softphone outbound the
+    // caller/A dialog's remote is the SEAT (agent) while the callee/B
+    // dialog's remote is the dialed CUSTOMER. The old position-only mapping
+    // (`ByCallee → "agent"`) mislabeled a customer hangup as agent.
+    if matches!(hangup_by, "caller" | "agent") {
+        match hangup_by_side {
+            Some("caller_remote_agent") | Some("callee_remote_agent") => {
+                return "agent".to_string();
+            }
+            Some("caller_remote_customer") | Some("callee_remote_customer") => {
+                return "callee".to_string();
+            }
+            _ => {}
+        }
+    }
+    // Legacy stamp (kept for existing callers/tests): on a CTI click-to-dial
+    // / originate call the caller/A dialog's remote is the dialed CUSTOMER,
+    // so the CC-centric `ByCallee → "agent"` mapping must not fire.
     if hangup_by == "agent" && hangup_by_side == Some("caller_remote") {
         return "callee".to_string();
     }
@@ -105,11 +117,62 @@ mod tests {
     }
 
     #[test]
+    fn first_bye_remote_role_decides_business_initiator() {
+        // Direct softphone outbound, CUSTOMER (callee dialog remote) hangs up:
+        // the leg carries no agent attribution → "callee".
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("callee_remote_customer")),
+            "callee"
+        );
+        // Same shape with queue context: the side stamp still wins.
+        assert_eq!(
+            normalize_call_hangup_by(
+                "agent",
+                Some("support"),
+                true,
+                Some("callee_remote_customer")
+            ),
+            "callee"
+        );
+        // Direct softphone outbound, SEAT (caller dialog remote) hangs up:
+        // SIP reason is ByCaller, but the caller leg IS the agent.
+        assert_eq!(
+            normalize_call_hangup_by("caller", Some("support"), true, Some("caller_remote_agent")),
+            "agent"
+        );
+        // Queue/CTI shape where the caller dialog's remote is the agent.
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("caller_remote_agent")),
+            "agent"
+        );
+        // Agent bridge / inbound agent leg on the callee dialog.
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, Some("callee_remote_agent")),
+            "agent"
+        );
+        // CTI click-to-dial, CUSTOMER on the caller/A dialog.
+        assert_eq!(
+            normalize_call_hangup_by(
+                "agent",
+                Some("support"),
+                true,
+                Some("caller_remote_customer")
+            ),
+            "callee"
+        );
+    }
+
+    #[test]
     fn local_bye_and_non_agent_initiators_untouched() {
         // We tore the call down ourselves: never rewritten.
         assert_eq!(
             normalize_call_hangup_by("system", None, false, Some("local")),
             "system"
+        );
+        // A local BYE that was labeled ByCallee stays on the CC mapping.
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("local")),
+            "agent"
         );
         // Plain customer/caller initiator: untouched.
         assert_eq!(

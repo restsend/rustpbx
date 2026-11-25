@@ -702,6 +702,45 @@ impl SipSession {
             })
     }
 
+    /// Whether the party on the REMOTE end of `leg` is a CC agent: RAW leg
+    /// attribution (`agent_id`, or an explicit agent dial intent), independent
+    /// of [`Self::leg_role_of`] (which suppresses the role for
+    /// home-proxy-routed legs whose home node owns the role event).
+    ///
+    /// Single decision point for the first-BYE `hangup_by_side` stamps: the
+    /// SIP dialog position says nothing about whether the remote is the
+    /// agent (queue-dispatch agent leg) or the customer (direct softphone
+    /// outbound B leg).
+    pub(crate) fn leg_remote_is_agent(&self, leg_id: &LegId) -> bool {
+        self.legs.get(leg_id).is_some_and(|leg| {
+            leg.agent_id.is_some() || leg.purpose == Some(crate::call::domain::LegPurpose::Agent)
+        })
+    }
+
+    /// First-BYE `hangup_by_side` stamp for a REMOTE BYE on the caller/A
+    /// dialog. The remote is an agent for a direct softphone outbound (the
+    /// seat) or a queue-dispatched agent dialed as the caller leg; otherwise
+    /// it is the dialed customer.
+    pub(crate) fn caller_remote_bye_side(&self) -> &'static str {
+        if self.leg_remote_is_agent(&LegId::from("caller")) {
+            "caller_remote_agent"
+        } else {
+            "caller_remote_customer"
+        }
+    }
+
+    /// First-BYE `hangup_by_side` stamp for a REMOTE BYE on a callee dialog.
+    /// Agent-attributed callee legs (queue dispatch / agent bridge / transfer
+    /// target) keep `"agent"`; a plain customer callee leg normalizes to
+    /// `"callee"` instead of being mislabeled by SIP dialog position.
+    pub(crate) fn callee_remote_bye_side(&self, leg_id: Option<&LegId>) -> &'static str {
+        if leg_id.is_some_and(|id| self.leg_remote_is_agent(id)) {
+            "callee_remote_agent"
+        } else {
+            "callee_remote_customer"
+        }
+    }
+
     /// Established CC-role legs (agent / consult / transfer) still registered
     /// at session teardown — each gets its own leg-scoped `call_hangup` so
     /// consumers filtering by role see every teardown. Home-proxy-routed legs
@@ -3668,6 +3707,22 @@ impl SipSession {
         self.extensions.agent_attribution()
     }
 
+    /// Normalized terminal initiator shared by every consumer surface: the
+    /// RWI `call_hangup` event, the CDR `metadata.hangup_by` and the CC
+    /// `cc_calls.hangup_by` row. `hangup_by_side` carries the FIRST-BYE
+    /// dialog's REMOTE role (agent vs customer), so business attribution no
+    /// longer follows the SIP dialog position alone (a direct softphone
+    /// outbound customer hangup is `"callee"`, not `"agent"`).
+    pub(crate) fn session_hangup_by(&self) -> Option<String> {
+        let reason = self.meta.hangup_reason.as_ref()?;
+        Some(normalize_call_hangup_by(
+            reason.initiator(),
+            self.meta.queue_name.as_deref(),
+            self.pinned_agent_id().is_some(),
+            self.meta.hangup_by_side.as_deref(),
+        ))
+    }
+
     /// Plant/update the pinned agent id in an extensions bag.
     pub(crate) fn set_pinned_agent_id(
         extensions: &crate::proxy::proxy_call::session_hooks::SessionExtensions,
@@ -5977,6 +6032,24 @@ impl SipSession {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
                             self.meta.hangup_by_side = Some("local".to_string());
+                            // Direct softphone outbound (UAS caller dialog):
+                            // the remote UAC that sent this BYE is the
+                            // originating SEAT. When that leg carries agent
+                            // attribution the business initiator is "agent"
+                            // (the docs contract: an agent-initiated hangup is
+                            // `agent`). The SIP positional `ByCaller` alone
+                            // would surface as "caller". `!primary_leg_uac`
+                            // distinguishes this remote BYE from our own UAC
+                            // teardown BYE, which also maps to `UacBye` (we
+                            // are the UAC there).
+                            if self.context.dialplan.direction
+                                == crate::call::DialDirection::Outbound
+                                && !self.primary_leg_uac
+                                && self.leg_remote_is_agent(&LegId::from("caller"))
+                            {
+                                self.meta.hangup_by_side =
+                                    Some(self.caller_remote_bye_side().to_string());
+                            }
                         }
                         info!(session_id = %self.id, "Caller initiated hangup (UacBye)");
                     }
@@ -7881,9 +7954,17 @@ impl SipSession {
                     TerminatedReason::UasBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
-                            // Remote BYE on a callee/agent dialog: the agent
-                            // hung up — attribution context for `hangup_by`.
-                            self.meta.hangup_by_side = Some("callee_remote".to_string());
+                            // The remote on a callee dialog is the AGENT only
+                            // when this leg carries CC agent attribution
+                            // (queue/skill-group dispatch, agent bridge,
+                            // transfer target). A direct softphone outbound's
+                            // callee leg is the dialed CUSTOMER — position
+                            // alone must never label a customer hangup as
+                            // "agent".
+                            self.meta.hangup_by_side = Some(
+                                self.callee_remote_bye_side(terminated_leg.as_ref())
+                                    .to_string(),
+                            );
                         }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye)");
                     }
@@ -10726,7 +10807,16 @@ impl SipSession {
         // queue 派发的 LegConnected 盖章点，离场冻结
         //（`freeze_served_agent_attribution`）按腿自身身份定归属，缺章则
         // 完成转接后归因漂到转接目标（A 0 行 / B 双行）。
-        if let Some(ref callee_uri) = callee
+        //
+        // OUTBOUND guard: on a direct softphone outbound the connected
+        // callee leg is the CUSTOMER. The session pin names the ORIGINATING
+        // agent (the A/caller leg), and `leg_agent_id`'s session fallback
+        // would stamp that agent onto the customer leg — making the customer's
+        // own BYE look like an agent hangup (`hangup_by=agent`) and emitting
+        // a bogus `leg_role:"agent"` teardown for it. Only inbound/A2A shapes
+        // have the served agent on the callee leg.
+        if self.context.dialplan.direction != crate::call::DialDirection::Outbound
+            && let Some(ref callee_uri) = callee
             && let Some(agent) = self.leg_agent_id(Some(callee_uri)).await
             && let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref()
             && let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string())
@@ -12348,6 +12438,19 @@ impl SipSession {
             }
         }
 
+        // Normalize the terminal initiator ONCE for every consumer surface
+        // (RWI `call_hangup`, CDR `metadata.hangup_by`, CC `cc_calls`). The
+        // FIRST-BYE side stamp is final by now; computing before the ended
+        // hooks also hands them a `NormalizedHangupBy` extension so the CC
+        // hook persists exactly this value instead of re-deriving the
+        // CC-centric `initiator()`.
+        let hangup_by = self.session_hangup_by();
+        if let Some(ref normalized) = hangup_by {
+            self.extensions.write().insert(
+                crate::proxy::proxy_call::session_hooks::NormalizedHangupBy(normalized.clone()),
+            );
+        }
+
         self.collect_replaced_recordings();
         if !self.cdr_sent.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(reporter) = &self.reporter
@@ -12390,28 +12493,6 @@ impl SipSession {
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
-        // `initiator()` maps any callee hangup to "agent" (contact-center
-        // centric). When no CC agent actually participated (no queue routing
-        // and no resolved_agent_id), report "callee" so non-CC calls are not
-        // mislabeled as agent-driven. On OUTBOUND calls whose FIRST terminal
-        // BYE came from the caller/A dialog's remote (the dialed customer,
-        // `hangup_by_side == "caller_remote"`), "agent" is corrected to
-        // "callee" — see `normalize_call_hangup_by`.
-        let has_resolved_agent = self.pinned_agent_id().is_some();
-        let queue_name = self.meta.queue_name.clone();
-        let hangup_by = self
-            .meta
-            .hangup_reason
-            .as_ref()
-            .map(|r| r.initiator().to_string())
-            .map(|h| {
-                normalize_call_hangup_by(
-                    &h,
-                    queue_name.as_deref(),
-                    has_resolved_agent,
-                    self.meta.hangup_by_side.as_deref(),
-                )
-            });
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
 
         // Teardown-cascade leg events: attribution duplicates of the session
@@ -13587,16 +13668,22 @@ impl SipSession {
                 meta.insert("transferred".to_string(), serde_json::Value::Bool(true));
             }
             // Who hung up + the normalized hangup reason, so the CC call-history
-            // UI can display and filter by them.
+            // UI can display and filter by them. `hangup_by` goes through the
+            // same FIRST-BYE leg-role normalization as the RWI `call_hangup`
+            // and `cc_calls` surfaces — the raw `initiator()` mapping alone
+            // mislabels an outbound customer hangup as "agent".
             match self.meta.hangup_reason.as_ref() {
                 Some(reason) => {
                     meta.insert(
                         "hangup_reason".to_string(),
                         serde_json::Value::String(reason.to_string()),
                     );
+                    let hangup_by = self
+                        .session_hangup_by()
+                        .unwrap_or_else(|| "unknown".to_string());
                     meta.insert(
                         "hangup_by".to_string(),
-                        serde_json::Value::String(reason.initiator().to_string()),
+                        serde_json::Value::String(hangup_by),
                     );
                 }
                 None => {

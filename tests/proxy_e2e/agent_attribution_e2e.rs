@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::common::webhook_capture::WebhookCapture;
 
 use crate::common::agent_registry::StaticRegistry;
@@ -39,6 +40,46 @@ const ALICE_SDP: &str = "v=0\r\n\
     a=rtpmap:0 PCMU/8000\r\n\
     a=rtpmap:101 telephone-event/8000\r\n\
     a=sendrecv\r\n";
+
+/// Poll the webhook capture until it has seen the SESSION-scoped
+/// `call_hangup` (`scope == "call"`). A CC-role leg may emit its leg-scoped
+/// teardown first, so filtering on event type alone would race.
+async fn wait_session_hangup(capture: &WebhookCapture) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        {
+            let received = capture.received.lock().unwrap();
+            if let Some(ev) = received.iter().find(|v| {
+                v["event_type"].as_str() == Some("call_hangup")
+                    && v["event"]["scope"].as_str() == Some("call")
+            }) {
+                return Some(ev.clone());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll the unregistered customer UA until the outbound INVITE arrives.
+async fn wait_incoming_call(ua: &TestUa) -> Option<rsipstack::dialog::DialogId> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(events) = ua.process_dialog_events().await {
+            for event in events {
+                if let TestUaEvent::IncomingCall(id, _) = event {
+                    return Some(id);
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
 
 /// Poll the webhook capture until it has seen `event_type`.
 async fn wait_webhook_envelope(
@@ -114,6 +155,17 @@ async fn start_server(
     agents: &[(&str, &str)],
     hook: AttributionHook,
 ) -> (WebhookCapture, Arc<E2eTestServer>) {
+    start_server_with_carrier(agents, hook, "127.0.0.1:1").await
+}
+
+/// Same server, but the `913*` carrier trunk points at `carrier_dest` so a
+/// test can put a real (unregistered) customer UA on the other end and drive
+/// the first terminal BYE from either side.
+async fn start_server_with_carrier(
+    agents: &[(&str, &str)],
+    hook: AttributionHook,
+    carrier_dest: &str,
+) -> (WebhookCapture, Arc<E2eTestServer>) {
     let capture = WebhookCapture::start().await;
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -152,7 +204,7 @@ async fn start_server(
     config.trunks.insert(
         "testcarrier".to_string(),
         TrunkConfig {
-            dest: "127.0.0.1:1".to_string(),
+            dest: carrier_dest.to_string(),
             backup_dest: None,
             username: None,
             password: None,
@@ -242,6 +294,200 @@ async fn outbound_agent_call_created_carries_originating_agent() {
         "session hook must observe the pinned agent attribution: {:?}",
         hook.seen.lock().await
     );
+}
+
+/// Direct softphone outbound to an EXTERNAL customer that ANSWERS, then the
+/// CUSTOMER hangs up first. The seat is the A/caller leg (agent-attributed),
+/// the customer is the B/callee leg — the session-scoped `call_hangup` must
+/// say `hangup_by=callee` (not the CC-centric `agent`) and the CDR metadata
+/// must carry the same value.
+#[tokio::test]
+async fn outbound_customer_hangup_reports_callee_in_webhook_and_cdr() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let customer_port = portpicker::pick_unused_port().expect("free customer port");
+    let hook = AttributionHook::new();
+    let (capture, server) = start_server_with_carrier(
+        &[("alice", "Alice")],
+        hook,
+        &format!("127.0.0.1:{customer_port}"),
+    )
+    .await;
+
+    let alice = server.create_ua("alice").await.expect("create alice failed");
+    let mut customer = TestUa::new(TestUaConfig {
+        webrtc: false,
+        username: "customer".to_string(),
+        password: String::new(),
+        realm: "127.0.0.1".to_string(),
+        local_port: customer_port,
+        proxy_addr: server.proxy_addr,
+    });
+    customer.start().await.expect("customer UA start");
+    sleep(Duration::from_millis(200)).await;
+
+    let caller = {
+        let a = alice.clone();
+        rustpbx::utils::spawn(async move { a.make_call("91300000000", Some(ALICE_SDP.to_string())).await })
+    };
+    let dialog = wait_incoming_call(&customer)
+        .await
+        .expect("customer must receive the outbound INVITE");
+    customer
+        .answer_call(&dialog, Some(ALICE_SDP.to_string()))
+        .await
+        .expect("customer answer");
+    wait_webhook_envelope(&capture, "call_answered")
+        .await
+        .expect("call must connect before the hangup assertion");
+
+    // Customer (B/callee dialog remote) hangs up first.
+    customer.hangup(&dialog).await.expect("customer BYE");
+    let hangup = wait_session_hangup(&capture)
+        .await
+        .expect("session-scoped call_hangup");
+    assert_eq!(
+        hangup["event"]["hangup_by"].as_str(),
+        Some("callee"),
+        "external customer hangup must not be labeled agent: {hangup}"
+    );
+    assert_eq!(hangup["event"]["reason"].as_str(), Some("callee"));
+
+    // Same value on the CDR surface (metadata.hangup_by).
+    let call_id = hangup["event"]["call_id"]
+        .as_str()
+        .expect("call_hangup call_id")
+        .to_string();
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(8))
+        .await
+        .expect("CDR for the answered outbound call");
+    let record = records
+        .iter()
+        .find(|r| r.call_id == call_id)
+        .expect("CDR must match the call_hangup call_id");
+    assert_eq!(
+        record
+            .details
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("hangup_by"))
+            .and_then(|v| v.as_str()),
+        Some("callee"),
+        "CDR metadata.hangup_by must agree with the webhook"
+    );
+
+    // The customer callee leg must never be emitted as an agent leg (the
+    // former `accept_call` served-agent stamp mislabeled it with the
+    // ORIGINATING agent on outbound calls). The caller slot is the seat — a
+    // legitimate agent leg there is not this bug.
+    let customer_agent_leg_hangups: Vec<_> = capture
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|v| {
+            v["event_type"].as_str() == Some("call_hangup")
+                && v["event"]["leg_role"].as_str() == Some("agent")
+                && v["event"]["leg_id"].as_str() != Some("caller")
+        })
+        .cloned()
+        .collect();
+    assert!(
+        customer_agent_leg_hangups.is_empty(),
+        "the dialed customer leg must not carry leg_role=agent: {customer_agent_leg_hangups:?}"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(2), caller).await;
+    server.stop();
+}
+
+/// Symmetric shape: the SEAT (A/caller leg) hangs up first. The SIP reason is
+/// `caller` (UAS caller dialog remote BYE) but the business initiator must be
+/// `agent` — webhook and CDR agree.
+#[tokio::test]
+async fn outbound_seat_hangup_reports_agent_in_webhook_and_cdr() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let customer_port = portpicker::pick_unused_port().expect("free customer port");
+    let hook = AttributionHook::new();
+    let (capture, server) = start_server_with_carrier(
+        &[("alice", "Alice")],
+        hook,
+        &format!("127.0.0.1:{customer_port}"),
+    )
+    .await;
+
+    let alice = server.create_ua("alice").await.expect("create alice failed");
+    let mut customer = TestUa::new(TestUaConfig {
+        webrtc: false,
+        username: "customer".to_string(),
+        password: String::new(),
+        realm: "127.0.0.1".to_string(),
+        local_port: customer_port,
+        proxy_addr: server.proxy_addr,
+    });
+    customer.start().await.expect("customer UA start");
+    sleep(Duration::from_millis(200)).await;
+
+    let caller = {
+        let a = alice.clone();
+        rustpbx::utils::spawn(async move { a.make_call("91300000000", Some(ALICE_SDP.to_string())).await })
+    };
+    let dialog = wait_incoming_call(&customer)
+        .await
+        .expect("customer must receive the outbound INVITE");
+    customer
+        .answer_call(&dialog, Some(ALICE_SDP.to_string()))
+        .await
+        .expect("customer answer");
+    wait_webhook_envelope(&capture, "call_answered")
+        .await
+        .expect("call must connect before the hangup assertion");
+
+    let alice_dialog = tokio::time::timeout(Duration::from_secs(10), caller)
+        .await
+        .expect("make_call must return after the answer")
+        .expect("caller task")
+        .expect("make_call");
+    alice.hangup(&alice_dialog).await.expect("seat BYE");
+
+    let hangup = wait_session_hangup(&capture)
+        .await
+        .expect("session-scoped call_hangup");
+    assert_eq!(
+        hangup["event"]["hangup_by"].as_str(),
+        Some("agent"),
+        "seat (agent) hangup must be agent, not the SIP positional caller: {hangup}"
+    );
+    assert_eq!(hangup["event"]["reason"].as_str(), Some("caller"));
+
+    let call_id = hangup["event"]["call_id"]
+        .as_str()
+        .expect("call_hangup call_id")
+        .to_string();
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(8))
+        .await
+        .expect("CDR for the answered outbound call");
+    let record = records
+        .iter()
+        .find(|r| r.call_id == call_id)
+        .expect("CDR must match the call_hangup call_id");
+    assert_eq!(
+        record
+            .details
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("hangup_by"))
+            .and_then(|v| v.as_str()),
+        Some("agent"),
+        "CDR metadata.hangup_by must agree with the webhook"
+    );
+
+    server.stop();
 }
 
 /// Agent→agent (both registered, internal direction): `call_created` stays
