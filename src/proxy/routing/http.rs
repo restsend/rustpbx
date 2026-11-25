@@ -603,8 +603,52 @@ impl CallRouter for HttpCallRouter {
                 if rtp_external_ip.is_some() {
                     dialplan.media.external_ip = rtp_external_ip;
                 }
-                dialplan.caller_media_network =
-                    crate::call::MediaNetworkConfig::from(&dialplan.media);
+                // Caller-leg network (toward the arrival carrier), mirroring
+                // the static matcher (call.rs): the arrival trunk's profile
+                // and explicit IPs override the global baseline, before the
+                // callee leg's hints / rtp_config above took effect.
+                dialplan.caller_media_network = {
+                    let mut caller_media = dialplan.media.clone();
+                    if let Some(trunk) = arrival_trunk.as_ref()
+                        && (trunk.profile.is_some()
+                            || trunk.external_ip.is_some()
+                            || trunk.bind_ip.is_some())
+                    {
+                        if let Some(id) = trunk.profile.as_deref() {
+                            // Same live view the dial-time profile resolution
+                            // uses; refreshed on every reload.
+                            if let Some((profiles, default_id, proxy)) =
+                                self.data_context.trunk_registrar().network_state()
+                                && let Some(profile) = profiles
+                                    .iter()
+                                    .find(|p| p.id == id)
+                                    .or_else(|| profiles.iter().find(|p| p.id == default_id))
+                                    .cloned()
+                            {
+                                let rtp_bind = self.rtp_config.load().bind_ip.clone();
+                                caller_media.external_ip = profile.external_ip.clone();
+                                caller_media.bind_ip = Some(
+                                    profile
+                                        .effective_bind_ip(&proxy.addr, rtp_bind.as_deref())
+                                        .to_string(),
+                                );
+                                if let Some(start) = profile.rtp_start_port {
+                                    caller_media.rtp_start_port = Some(start);
+                                }
+                                if let Some(end) = profile.rtp_end_port {
+                                    caller_media.rtp_end_port = Some(end);
+                                }
+                            }
+                        }
+                        if let Some(ip) = trunk.external_ip.clone() {
+                            caller_media.external_ip = Some(ip);
+                        }
+                        if let Some(ip) = trunk.bind_ip.clone() {
+                            caller_media.bind_ip = Some(ip);
+                        }
+                    }
+                    crate::call::MediaNetworkConfig::from(&caller_media)
+                };
 
                 if let Some(uri) = dialplan_caller {
                     dialplan = dialplan.with_caller(uri);

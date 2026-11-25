@@ -61,6 +61,18 @@ mod tests {
         trunks: std::collections::HashMap<String, rustpbx::proxy::routing::TrunkConfig>,
         source_trunk: Option<&str>,
     ) -> Result<rustpbx::call::Dialplan, rustpbx::proxy::call::RouteError> {
+        resolve_with_network(response, trunks, Vec::new(), "", source_trunk).await
+    }
+
+    /// As [`resolve_inbound`], with `network_profiles` published through the
+    /// trunk registrar (the live view the router resolves profiles from).
+    async fn resolve_with_network(
+        response: serde_json::Value,
+        trunks: std::collections::HashMap<String, rustpbx::proxy::routing::TrunkConfig>,
+        network_profiles: Vec<rustpbx::config::NetworkProfile>,
+        default_profile_id: &str,
+        source_trunk: Option<&str>,
+    ) -> Result<rustpbx::call::Dialplan, rustpbx::proxy::call::RouteError> {
         let cookie = TransactionCookie::default();
         if let Some(name) = source_trunk {
             cookie.insert_extension(rustpbx::call::TrunkContext {
@@ -85,13 +97,21 @@ mod tests {
             fallback_to_static: false,
             timeout_ms: Some(1000),
         };
+        let data_context = data_context(trunks).await;
+        if !network_profiles.is_empty() {
+            data_context.trunk_registrar().set_network_profiles(
+                network_profiles,
+                default_profile_id.to_string(),
+                rustpbx::config::ProxyConfig::default(),
+            );
+        }
         let router = HttpCallRouter::new(
             config,
             ArcSwap::new(Arc::new(RtpConfig::default())),
             ArcSwap::new(Arc::new(MediaProxyMode::None)),
             true,
             None,
-            data_context(trunks).await,
+            data_context,
         );
 
         let request = rsipstack::sip::Request {
@@ -1522,6 +1542,65 @@ mod tests {
         // Profiles still apply underneath (ports, SIP Contact).
         assert_eq!(attempts[0].hints.as_ref().unwrap().network_profile_id.as_deref(), Some("arrival"));
         assert_eq!(attempts[1].hints.as_ref().unwrap().network_profile_id.as_deref(), Some("dest"));
+    }
+
+    fn network_profile(id: &str, external_ip: &str, bind_ip: &str) -> rustpbx::config::NetworkProfile {
+        rustpbx::config::NetworkProfile {
+            id: id.to_string(),
+            label: None,
+            description: None,
+            external_ip: Some(external_ip.to_string()),
+            auto_external_ip: None,
+            sip_external_ip: None,
+            auto_sip_external_ip: None,
+            local_networks: Vec::new(),
+            contact_lan_use_bind: false,
+            sip_contact_always_bind: false,
+            bind_ip: Some(bind_ip.to_string()),
+            rtp_start_port: None,
+            rtp_end_port: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_router_caller_media_network_from_arrival_trunk() {
+        // Mirror of the static matcher: the arrival trunk's profile serves
+        // the caller leg, not just the callee attempts.
+        let mut arrival = trunk("sip:192.0.2.9", None);
+        arrival.profile = Some("wan".to_string());
+        let trunks = [("carrier-in".to_string(), arrival)].into();
+        let plan = resolve_with_network(
+            json!({"action": "forward", "targets": ["sip:legacy@example.com"]}),
+            trunks,
+            vec![network_profile("wan", "203.0.113.1", "10.0.0.50")],
+            "wan",
+            Some("carrier-in"),
+        ).await.unwrap();
+        assert_eq!(plan.caller_media_network.external_ip.as_deref(), Some("203.0.113.1"));
+        assert_eq!(plan.caller_media_network.bind_ip.as_deref(), Some("10.0.0.50"));
+
+        // Explicit trunk IPs apply over the profile, as in the static matcher.
+        let mut arrival = trunk("sip:192.0.2.9", None);
+        arrival.profile = Some("wan".to_string());
+        arrival.external_ip = Some("198.51.100.1".to_string());
+        arrival.bind_ip = Some("10.0.0.9".to_string());
+        let trunks = [("carrier-in".to_string(), arrival)].into();
+        let plan = resolve_with_network(
+            json!({"action": "forward", "targets": ["sip:legacy@example.com"]}),
+            trunks,
+            vec![network_profile("wan", "203.0.113.1", "10.0.0.50")],
+            "wan",
+            Some("carrier-in"),
+        ).await.unwrap();
+        assert_eq!(plan.caller_media_network.external_ip.as_deref(), Some("198.51.100.1"));
+        assert_eq!(plan.caller_media_network.bind_ip.as_deref(), Some("10.0.0.9"));
+
+        // No arrival trunk: the caller leg keeps the global baseline.
+        let plan = resolve_with_response(json!({
+            "action": "forward", "targets": ["sip:legacy@example.com"]
+        })).await.unwrap();
+        assert!(plan.caller_media_network.external_ip.is_none());
+        assert!(plan.caller_media_network.bind_ip.is_none());
     }
 
     #[tokio::test]
