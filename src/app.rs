@@ -1426,7 +1426,9 @@ pub fn create_router(state: AppState) -> Router {
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
+            axum::http::Method::HEAD,
             axum::http::Method::OPTIONS,
         ])
         .allow_headers([
@@ -1434,6 +1436,8 @@ pub fn create_router(state: AppState) -> Router {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
+            axum::http::header::RANGE,
+            axum::http::HeaderName::from_static("x-request-id"),
         ]);
 
     // Read paths from proxy config (fallback to hardcoded defaults)
@@ -1470,15 +1474,7 @@ pub fn create_router(state: AppState) -> Router {
     }
     router = router
         .nest_service(&static_path, static_files_service)
-        .merge(call_routes)
-        .layer(cors);
-
-    // Rolling handover endpoints (hello/manifest/relay_egress/relay_ingress/
-    // handoff_registrations). Loopback-guarded handlers; also served again by
-    // the predecessor's loopback listener during the handover window.
-    if state.rolling.is_some() {
-        router = router.merge(crate::rolling::rolling_routes(&state));
-    }
+        .merge(call_routes);
 
     // Add RWI WebSocket endpoint if configured
     if let (Some(auth), Some(gateway), Some(call_registry)) = (
@@ -1537,6 +1533,19 @@ pub fn create_router(state: AppState) -> Router {
     #[cfg(feature = "commerce")]
     if let Some(sso_router) = crate::auth::sso::mount_router(state.config()) {
         router = router.merge(sso_router);
+    }
+
+    // Apply CORS after merging console/API/SSO routers so preflight OPTIONS
+    // requests are answered before auth middleware runs, and responses carry
+    // CORS headers.
+    router = router.layer(cors);
+
+    // Rolling handover endpoints (hello/manifest/relay_egress/relay_ingress/
+    // handoff_registrations). Loopback-guarded internal endpoints kept outside
+    // CORS; merging `router` into `rolling_routes` preserves `router`'s
+    // CORS-wrapped fallback for unknown paths.
+    if state.rolling.is_some() {
+        router = crate::rolling::rolling_routes(&state).merge(router);
     }
 
     let access_log_skip_paths = Arc::new(state.config().http_access_skip_paths.clone());
@@ -1650,5 +1659,301 @@ mod ice_servers_tests {
         );
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"Invalid TURN REST configuration");
+    }
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request, header};
+    use tower::ServiceExt;
+
+    fn free_udp_port() -> u16 {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("bind ephemeral udp socket")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
+    async fn build_test_router(with_rolling: bool) -> Router {
+        #[allow(unused_mut)]
+        let mut config = Config {
+            http_addr: "127.0.0.1:0".to_string(),
+            database_url: "sqlite::memory:".to_string(),
+            proxy: crate::config::ProxyConfig {
+                addr: "127.0.0.1".to_string(),
+                udp_port: Some(free_udp_port()),
+                modules: Some(vec![]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        #[cfg(feature = "console")]
+        {
+            config.console = Some(crate::config::ConsoleConfig {
+                api_tokens: vec![crate::config::ApiTokenConfig {
+                    token: "test-cors-token".to_string(),
+                    scopes: vec![],
+                }],
+                ..Default::default()
+            });
+        }
+
+        let mut builder = AppStateBuilder::new().with_config(config);
+        if with_rolling {
+            let rolling_cfg = crate::config::RollingConfig {
+                enabled: true,
+                ..Default::default()
+            };
+            builder.rolling = Some(crate::rolling::RollingRuntime::new(
+                rolling_cfg,
+                "127.0.0.1:0",
+            ));
+        }
+
+        let state = builder.build().await.expect("build test app state");
+        create_router(state)
+    }
+
+    #[cfg(feature = "console")]
+    #[tokio::test]
+    async fn management_api_cors_preflight_and_responses() {
+        let app = build_test_router(true).await;
+
+        // 1. Preflight OPTIONS on /api/extensions for PUT (issue #311 repro)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/extensions")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization, content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let methods = resp.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
+            .to_str()
+            .unwrap();
+        for expected in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+            assert!(
+                methods.contains(expected),
+                "missing method {expected} in {methods}"
+            );
+        }
+        let allow_headers = resp.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        for expected in [
+            "authorization",
+            "content-type",
+            "accept",
+            "origin",
+            "range",
+            "x-request-id",
+        ] {
+            assert!(
+                allow_headers.contains(expected),
+                "missing header {expected} in {allow_headers}"
+            );
+        }
+
+        // 2. Preflight OPTIONS on /api/extensions/1 for PATCH and /api/sip-trunk for PUT
+        for (uri, req_method) in [("/api/extensions/1", "PATCH"), ("/api/sip-trunk", "PUT")] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri(uri)
+                        .header(header::ORIGIN, "http://localhost:5173")
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, req_method)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "preflight failed for {uri}");
+            assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        }
+
+        // 3. Unauthenticated request still gets 401 AND includes CORS header
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/extensions")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+        // 4. Authenticated Bearer PUT (exact issue #311 create flow) + POST query + PATCH update
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/extensions")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::AUTHORIZATION, "Bearer test-cors-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"extension":"1001"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/extensions")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::AUTHORIZATION, "Bearer test-cors-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"page":1,"per_page":20}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/extensions/1")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::AUTHORIZATION, "Bearer test-cors-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"display_name":"Updated"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    }
+
+    #[tokio::test]
+    async fn rolling_routes_exclude_cors_while_public_and_fallback_keep_cors() {
+        let app = build_test_router(true).await;
+        let hello_uri = format!("{}/hello", crate::rolling::ROLLING_BASE);
+
+        // Loopback-only rolling handover routes must not expose CORS headers.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri(&hello_uri)
+                    .header(header::ORIGIN, "http://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(&hello_uri)
+                    .header(header::ORIGIN, "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+
+        let manifest_uri = format!("{}/manifest", crate::rolling::ROLLING_BASE);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(&manifest_uri)
+                    .header(header::ORIGIN, "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+
+        // Public config endpoint keeps CORS headers.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/config/phone")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+        // Unknown path still hits the CORS-wrapped fallback even with rolling enabled.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/does-not-exist")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
     }
 }
