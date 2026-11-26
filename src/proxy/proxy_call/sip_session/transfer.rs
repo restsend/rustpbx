@@ -89,6 +89,21 @@ fn take_bridge_pcm_frame(
     None
 }
 
+/// Decoded result of one inbound RTP packet in `voip_bridge`'s reverse loop.
+#[derive(Debug, PartialEq, Eq)]
+enum ReverseAudio<'a> {
+    /// Active speech PCM at `target_sample_rate`. `enter_silence` is true when
+    /// a trailing G.729B 2-byte SID ended the packet (DTX begins right after).
+    Speech {
+        samples: &'a [i16],
+        enter_silence: bool,
+    },
+    /// Explicit DTX / comfort-noise packet (G.729B 2-byte SID, RFC 3389 PT 13
+    /// CN, Opus 1-byte TOC) — emit 20 ms digital silence frames until the next
+    /// active speech packet arrives.
+    Silence,
+}
+
 /// Per-packet dynamic audio decoder + FIR resampler for `voip_bridge`'s reverse loop.
 ///
 /// Resolves each packet's RTP payload type by static RFC 3551 audio PT
@@ -137,8 +152,20 @@ impl BridgeReverseDecoder {
     }
 
     /// Decode an inbound RTP payload and resample to `target_sample_rate`.
-    fn decode(&mut self, pt: u8, data: &[u8]) -> Option<&[i16]> {
+    ///
+    /// Explicit DTX / comfort-noise packets (G.729 Annex B 2-byte SID, RFC 3389
+    /// PT 13 CN, Opus 1-byte TOC) return `Some(ReverseAudio::Silence)` so the
+    /// reverse loop's 20 ms silence timer fills digital zeros until active
+    /// speech resumes. DTMF and unknown PTs return `None`.
+    fn decode(&mut self, pt: u8, data: &[u8]) -> Option<ReverseAudio<'_>> {
+        // RFC 3389 narrowband Comfort Noise (static PT 13).
+        if pt == 13 {
+            return Some(ReverseAudio::Silence);
+        }
         let codec = self.resolve_codec(pt)?;
+        if codec == audio_codec::CodecType::Opus && data.len() == 1 {
+            return Some(ReverseAudio::Silence);
+        }
         let decoder = self
             .decoders
             .entry(codec.payload_type())
@@ -155,13 +182,27 @@ impl BridgeReverseDecoder {
             }
             written = mono_len;
         }
+        // RFC 3551 §4.5.6: a G.729 payload whose length is `10*N + 2` ends with
+        // a 2-byte Annex B SID frame (decoded to 80 samples / 10 ms of CNG).
+        // `decode_into` above keeps the decoder state synced; strip the trailing
+        // CNG samples and signal DTX silence instead.
+        let has_g729_sid = codec == audio_codec::CodecType::G729 && data.len() % 10 == 2;
+        if has_g729_sid {
+            written = written.saturating_sub(80);
+            if written == 0 {
+                return Some(ReverseAudio::Silence);
+            }
+        }
         if written == 0 {
             return None;
         }
 
         let src_rate = decoder.sample_rate();
         if src_rate == self.target_sample_rate {
-            return Some(&self.decode_buf[..written]);
+            return Some(ReverseAudio::Speech {
+                samples: &self.decode_buf[..written],
+                enter_silence: has_g729_sid,
+            });
         }
 
         if !matches!(self.resampler, Some((rate, _)) if rate == src_rate) {
@@ -181,7 +222,10 @@ impl BridgeReverseDecoder {
         let out_len = resampler
             .resample_into(decoded, &mut self.resample_buf)
             .ok()?;
-        Some(&self.resample_buf[..out_len])
+        Some(ReverseAudio::Speech {
+            samples: &self.resample_buf[..out_len],
+            enter_silence: has_g729_sid,
+        })
     }
 }
 
@@ -3908,52 +3952,75 @@ impl SipSession {
                     );
                 }
 
+                let frame_samples = ((ws_sample_rate as usize) * 20 / 1000).max(1);
+                let silence_frame = bytes::Bytes::from(vec![0u8; frame_samples * 2]);
+                let mut silence_interval = tokio::time::interval(Duration::from_millis(20));
+                silence_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut in_dtx = false;
+
                 loop {
-                    tokio::select! {
+                    let outbound = tokio::select! {
                         biased;
                         _ = reverse_cancel.cancelled() => {
                             info!(session_id = %session_id, %leg_id, "Bridge reverse loop cancelled");
                             break;
                         }
-                        json = dtmf_json_rx.recv() => {
-                            match json {
-                                Some(json) => {
-                                    tokio::select! {
-                                        biased;
-                                        _ = reverse_cancel.cancelled() => break,
-                                        result = ws_write.send(Message::Text(json.into())) => {
-                                            if result.is_err() {
-                                                log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, "Bridge WS DTMF json write failed").await;
-                                                break;
-                                            }
-                                        }
+                        json = dtmf_json_rx.recv() => match json {
+                            Some(json) => Some((Message::Text(json.into()), "Bridge WS DTMF json write failed")),
+                            None => break,
+                        },
+                        sample = track.recv() => match sample {
+                            Ok(MediaSample::Audio(frame)) => match frame
+                                .payload_type
+                                .and_then(|pt| reverse_decoder.decode(pt, &frame.data))
+                            {
+                                Some(ReverseAudio::Speech { samples, enter_silence }) => {
+                                    let bytes: bytes::Bytes =
+                                        if enter_silence && samples.len() < frame_samples {
+                                            // 12-byte G.729 (10 ms speech + 2 B SID): pad to 20 ms.
+                                            let mut padded = vec![0i16; frame_samples];
+                                            padded[..samples.len()].copy_from_slice(samples);
+                                            bytes::Bytes::from(
+                                                bytemuck::cast_slice::<i16, u8>(&padded).to_vec(),
+                                            )
+                                        } else {
+                                            bytes::Bytes::from(
+                                                bytemuck::cast_slice::<i16, u8>(samples).to_vec(),
+                                            )
+                                        };
+                                    in_dtx = enter_silence;
+                                    if in_dtx {
+                                        silence_interval.reset();
                                     }
+                                    Some((Message::Binary(bytes), "Bridge reverse audio write failed"))
                                 }
-                                None => break,
+                                Some(ReverseAudio::Silence) => {
+                                    if !in_dtx {
+                                        in_dtx = true;
+                                        silence_interval.reset_immediately();
+                                    }
+                                    None
+                                }
+                                None => None,
+                            },
+                            Ok(_) => None,
+                            Err(e) => {
+                                log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, &format!("Bridge reverse track error: {e}")).await;
+                                break;
                             }
+                        },
+                        _ = silence_interval.tick(), if in_dtx => {
+                            Some((Message::Binary(silence_frame.clone()), "Bridge reverse silence write failed"))
                         }
-                        sample = track.recv() => {
-                            match sample {
-                                Ok(MediaSample::Audio(frame)) => {
-                                    if let Some(pt) = frame.payload_type
-                                        && let Some(samples) = reverse_decoder.decode(pt, &frame.data)
-                                    {
-                                        let bytes = bytemuck::cast_slice::<i16, u8>(samples).to_vec();
-                                        tokio::select! {
-                                            biased;
-                                            _ = reverse_cancel.cancelled() => break,
-                                            result = ws_write.send(Message::Binary(bytes.into())) => {
-                                                if result.is_err() {
-                                                    log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, "Bridge reverse audio write failed").await;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, &format!("Bridge reverse track error: {e}")).await;
+                    };
+
+                    if let Some((msg, err_msg)) = outbound {
+                        tokio::select! {
+                            biased;
+                            _ = reverse_cancel.cancelled() => break,
+                            result = ws_write.send(msg) => {
+                                if result.is_err() {
+                                    log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, err_msg).await;
                                     break;
                                 }
                             }
@@ -5136,6 +5203,16 @@ mod tests {
             .collect()
     }
 
+    fn unwrap_speech(audio: Option<ReverseAudio<'_>>) -> (&[i16], bool) {
+        match audio {
+            Some(ReverseAudio::Speech {
+                samples,
+                enter_silence,
+            }) => (samples, enter_silence),
+            other => panic!("expected ReverseAudio::Speech, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_voip_bridge_reverse_decoder_switches_g729_to_pcmu_and_pcma() {
         let mut decoder = BridgeReverseDecoder::new(
@@ -5149,19 +5226,17 @@ mod tests {
         // 1. Negotiated G.729 (PT 18, 20 bytes) → 320 samples (640 bytes) @ 16 kHz.
         let g729_payload = audio_codec::create_encoder(audio_codec::CodecType::G729).encode(&pcm_8k);
         assert_eq!(g729_payload.len(), 20);
-        let g729_16k = decoder
-            .decode(18, &g729_payload)
-            .expect("G.729 packet must decode");
+        let (g729_16k, enter_silence) = unwrap_speech(decoder.decode(18, &g729_payload));
         assert_eq!(g729_16k.len(), 320);
+        assert!(!enter_silence);
 
         // 2. Unsolicited switch to PCMU (PT 0, 160 bytes) → exact 8 kHz PCMU decode
         //    and 320 samples (640 bytes, NOT 5120 bytes) @ 16 kHz.
         let pcmu_payload = audio_codec::create_encoder(audio_codec::CodecType::PCMU).encode(&pcm_8k);
         assert_eq!(pcmu_payload.len(), 160);
-        let pcmu_16k = decoder
-            .decode(0, &pcmu_payload)
-            .expect("PCMU packet must decode dynamically");
+        let (pcmu_16k, enter_silence) = unwrap_speech(decoder.decode(0, &pcmu_payload));
         assert_eq!(pcmu_16k.len(), 320);
+        assert!(!enter_silence);
         let expected_pcmu_8k =
             audio_codec::create_decoder(audio_codec::CodecType::PCMU).decode(&pcmu_payload);
         assert_eq!(&decoder.decode_buf[..160], expected_pcmu_8k.as_slice());
@@ -5170,19 +5245,17 @@ mod tests {
         //    and 320 samples @ 16 kHz.
         let pcma_payload = audio_codec::create_encoder(audio_codec::CodecType::PCMA).encode(&pcm_8k);
         assert_eq!(pcma_payload.len(), 160);
-        let pcma_16k = decoder
-            .decode(8, &pcma_payload)
-            .expect("PCMA packet must decode dynamically");
+        let (pcma_16k, enter_silence) = unwrap_speech(decoder.decode(8, &pcma_payload));
         assert_eq!(pcma_16k.len(), 320);
+        assert!(!enter_silence);
         let expected_pcma_8k =
             audio_codec::create_decoder(audio_codec::CodecType::PCMA).decode(&pcma_payload);
         assert_eq!(&decoder.decode_buf[..160], expected_pcma_8k.as_slice());
 
         // 4. Switching back to G.729 (PT 18) reuses the same buffers cleanly.
-        let g729_again = decoder
-            .decode(18, &g729_payload)
-            .expect("switching back to G.729 must decode");
+        let (g729_again, enter_silence) = unwrap_speech(decoder.decode(18, &g729_payload));
         assert_eq!(g729_again.len(), 320);
+        assert!(!enter_silence);
     }
 
     #[test]
@@ -5200,10 +5273,9 @@ mod tests {
             audio_codec::create_encoder(audio_codec::CodecType::G722).encode(&pcm_16k);
         assert_eq!(g722_payload.len(), 160);
 
-        let samples = decoder
-            .decode(9, &g722_payload)
-            .expect("static G.722 PT 9 must decode");
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(9, &g722_payload));
         assert_eq!(samples.len(), 320);
+        assert!(!enter_silence);
     }
 
     #[test]
@@ -5215,7 +5287,7 @@ mod tests {
         );
 
         assert!(decoder.decode(102, &[1, 0x0a, 0, 160]).is_none());
-        assert!(decoder.decode(13, &[40]).is_none());
+        assert_eq!(decoder.decode(13, &[40]), Some(ReverseAudio::Silence));
         assert!(decoder.decode(111, &[0u8; 40]).is_none());
         assert!(decoder.decode(120, &[0u8; 40]).is_none());
     }
@@ -5237,10 +5309,9 @@ mod tests {
         let pcm_48k = sine_pcm(48_000, 960, 440.0);
         let opus_payload =
             audio_codec::create_encoder(audio_codec::CodecType::Opus).encode(&pcm_48k);
-        let samples = decoder
-            .decode(106, &opus_payload)
-            .expect("offered dynamic PT 106 (Opus) must decode");
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(106, &opus_payload));
         assert_eq!(samples.len(), 320);
+        assert!(!enter_silence);
     }
 
     #[tokio::test]
@@ -5280,5 +5351,52 @@ mod tests {
 
         drop(source);
         assert_eq!(drain_audio_track(track.as_ref()), 0);
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_classifies_g729_sid_cn_and_opus_dtx() {
+        let audio_pt_map = BTreeMap::from([
+            (18, audio_codec::CodecType::G729),
+            (106, audio_codec::CodecType::Opus),
+        ]);
+        let mut decoder = BridgeReverseDecoder::new(
+            Some((18, audio_codec::CodecType::G729)),
+            audio_pt_map,
+            16_000,
+        );
+
+        let pcm_20ms = sine_pcm(8000, 160, 440.0);
+        let g729_20ms = audio_codec::create_encoder(audio_codec::CodecType::G729).encode(&pcm_20ms);
+        assert_eq!(g729_20ms.len(), 20);
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &g729_20ms));
+        assert_eq!(samples.len(), 320);
+        assert!(!enter_silence);
+
+        // Standalone 2-byte G.729 Annex B SID enters DTX silence.
+        let sid = [0x12u8, 0x34u8];
+        assert_eq!(decoder.decode(18, &sid), Some(ReverseAudio::Silence));
+
+        // 12-byte G.729 (10 B speech + 2 B SID) yields 10 ms speech + enter_silence.
+        let mut speech_10ms_plus_sid = g729_20ms[..10].to_vec();
+        speech_10ms_plus_sid.extend_from_slice(&sid);
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &speech_10ms_plus_sid));
+        assert_eq!(samples.len(), 160);
+        assert!(enter_silence);
+
+        // 22-byte G.729 (20 B speech + 2 B SID) yields 20 ms speech + enter_silence.
+        let mut speech_20ms_plus_sid = g729_20ms.clone();
+        speech_20ms_plus_sid.extend_from_slice(&sid);
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &speech_20ms_plus_sid));
+        assert_eq!(samples.len(), 320);
+        assert!(enter_silence);
+
+        // RFC 3389 PT 13 CN and Opus 1-byte TOC DTX both return Silence.
+        assert_eq!(decoder.decode(13, &[40]), Some(ReverseAudio::Silence));
+        assert_eq!(decoder.decode(106, &[0xF8]), Some(ReverseAudio::Silence));
+
+        // Active speech resumes cleanly and clears enter_silence.
+        let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &g729_20ms));
+        assert_eq!(samples.len(), 320);
+        assert!(!enter_silence);
     }
 }
