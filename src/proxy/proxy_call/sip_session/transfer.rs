@@ -3,7 +3,7 @@ use super::session::PendingCustomerTransferRelease;
 use crate::call::domain::{CallCommand, LegId, LegState, ReturnAppSpec};
 use crate::media::negotiate::MediaNegotiator;
 use anyhow::{Result, anyhow};
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use rsipstack::dialog::dialog::DialogState;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -303,6 +303,17 @@ async fn bridge_forward_loop<S>(
             }
         }
     }
+}
+
+/// Discard stale RTP samples already buffered in a receiver track (e.g. 183
+/// early-media ringtone or pre-bridge IVR/hold audio sitting in `rustrtc`'s
+/// 64-slot ring) so the live consumer starts at current audio.
+fn drain_audio_track(track: &dyn rustrtc::media::MediaStreamTrack) -> usize {
+    let mut drained = 0usize;
+    while let Some(Ok(_)) = track.recv().now_or_never() {
+        drained += 1;
+    }
+    drained
 }
 
 /// Raw return-app specification extracted from a transfer target's query
@@ -3887,6 +3898,16 @@ impl SipSession {
                     }
                 };
 
+                let drained = drain_audio_track(track.as_ref());
+                if drained > 0 {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        %leg_id,
+                        drained_frames = drained,
+                        "Bridge reverse loop drained stale buffered audio frames"
+                    );
+                }
+
                 loop {
                     tokio::select! {
                         biased;
@@ -5220,5 +5241,44 @@ mod tests {
             .decode(106, &opus_payload)
             .expect("offered dynamic PT 106 (Opus) must decode");
         assert_eq!(samples.len(), 320);
+    }
+
+    #[tokio::test]
+    async fn test_drain_audio_track_discards_stale_frames_and_keeps_live_audio() {
+        use rustrtc::media::MediaStreamTrack;
+        use rustrtc::media::frame::{AudioFrame, MediaKind, MediaSample};
+        use rustrtc::media::track::sample_track;
+
+        let (source, track, _fb) = sample_track(MediaKind::Audio, 64);
+        assert_eq!(drain_audio_track(track.as_ref()), 0);
+
+        for seq in 0u16..10 {
+            source
+                .send_audio(AudioFrame {
+                    sequence_number: Some(seq),
+                    payload_type: Some(0),
+                    data: vec![0x7F; 160].into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert_eq!(drain_audio_track(track.as_ref()), 10);
+        assert_eq!(drain_audio_track(track.as_ref()), 0);
+
+        source
+            .send_audio(AudioFrame {
+                sequence_number: Some(10),
+                payload_type: Some(0),
+                data: vec![0x55; 160].into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let MediaSample::Audio(frame) = track.recv().await.unwrap() else {
+            panic!("expected live audio frame");
+        };
+        assert_eq!(frame.sequence_number, Some(10));
+
+        drop(source);
+        assert_eq!(drain_audio_track(track.as_ref()), 0);
     }
 }
