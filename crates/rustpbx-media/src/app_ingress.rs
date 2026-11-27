@@ -378,6 +378,9 @@ async fn decode_task(
     let mut next_timestamp: u64 = 0;
     let mut idle_ticks: u8 = 0;
     let mut non_audio_logged = false;
+    let mut in_dtx = false;
+    let mut sid_silence_pending = false;
+    let sid_samples = (sample_rate as usize / 100).max(1);
 
     loop {
         tokio::select! {
@@ -389,6 +392,10 @@ async fn decode_task(
                         // RFC 4733 telephone-event / CNG / video: decoding
                         // these as audio poisons stateful codecs.
                         counters.non_audio_packets.fetch_add(1, Ordering::Relaxed);
+                        if p.header.payload_type == crate::dtx::COMFORT_NOISE_PT {
+                            in_dtx = true;
+                            sid_silence_pending = false;
+                        }
                         if !non_audio_logged {
                             non_audio_logged = true;
                             debug!(
@@ -418,8 +425,27 @@ async fn decode_task(
                     idle_ticks = 0;
                 }
                 for packet in ready {
-                    let pcm = decoder.decode(&packet.payload);
-                    buffer.extend_from_slice(&pcm);
+                    match crate::dtx::decode_audio_packet(
+                        codec,
+                        decoder.as_mut(),
+                        &packet.payload,
+                    ) {
+                        crate::dtx::DecodedAudio::Speech { pcm, enter_dtx } => {
+                            if sid_silence_pending {
+                                // Preserve the 10 ms G.729B SID duration when
+                                // speech resumes before the trailing silence flushes.
+                                buffer.resize(buffer.len() + sid_samples, 0);
+                            }
+                            buffer.extend_from_slice(&pcm);
+                            in_dtx = enter_dtx;
+                            sid_silence_pending = enter_dtx;
+                        }
+                        crate::dtx::DecodedAudio::Silence => {
+                            in_dtx = true;
+                            sid_silence_pending = false;
+                        }
+                        crate::dtx::DecodedAudio::Ignore => {}
+                    }
                 }
 
                 if buffer.len() > max_buffer_samples {
@@ -431,9 +457,18 @@ async fn decode_task(
                 let (samples, silence) = if buffer.len() >= pcm_per_frame {
                     let frame: Vec<i16> = buffer.drain(..pcm_per_frame).collect();
                     (frame, false)
+                } else if in_dtx && !buffer.is_empty() {
+                    // Explicit DTX ended on a partial frame (e.g. 12 B G.729
+                    // 10 ms speech + 2 B SID): flush it padded with silence
+                    // rather than stranding trailing speech until the next talkspurt.
+                    let mut frame: Vec<i16> = buffer.drain(..).collect();
+                    frame.resize(pcm_per_frame, 0);
+                    sid_silence_pending = false;
+                    (frame, false)
                 } else {
                     // Not enough decoded PCM yet → pad with silence to keep
                     // cadence (buffer continues accumulating).
+                    sid_silence_pending = false;
                     (vec![0i16; pcm_per_frame], true)
                 };
                 let mut frame = AudioFrame::new(samples, sample_rate);
@@ -743,6 +778,181 @@ mod tests {
             .expect("recv after overflow")
             .expect("stream still open");
         assert_eq!(f.frame.samples.len(), pf);
+
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn decode_task_g729_dtx_suppresses_cng_and_flushes_12b_tail() {
+        let (frame_tx, mut rx) = mpsc::channel::<PcmFrame>(64);
+        let (pkt_tx, pkt_rx) = mpsc::channel::<RtpPacket>(64);
+        let cancel = CancellationToken::new();
+        let codec = CodecType::G729;
+        let sr = codec.samplerate();
+        let pf = (sr as u64 * DEFAULT_PTIME_MS / 1000) as usize;
+
+        tokio::spawn(decode_task(
+            pkt_rx,
+            frame_tx,
+            LegId::from("g729-dtx"),
+            codec,
+            18,
+            sr,
+            pf,
+            cancel.clone(),
+            Arc::new(IngressCounters::default()),
+        ));
+
+        let mut enc = audio_codec::create_encoder(CodecType::G729);
+        let sine: Vec<i16> = (0..160)
+            .map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / 8000.0).sin() * 12_000.0) as i16)
+            .collect();
+        let _ = enc.encode(&sine);
+        let speech1 = enc.encode(&sine);
+        let speech2 = enc.encode(&sine);
+        let speech3 = enc.encode(&sine);
+        let mut mixed_12 = speech3[..10].to_vec();
+        mixed_12.extend_from_slice(&[0x12, 0x34]);
+
+        // Send 20 ms speech, 20 ms speech, 12 B (10 ms speech + 2 B SID), then 4 standalone SIDs.
+        for (seq, ts, payload) in [
+            (1u16, 0u32, speech1),
+            (2, 160, speech2),
+            (3, 320, mixed_12),
+            (4, 480, vec![0x12, 0x34]),
+            (5, 640, vec![0x12, 0x34]),
+            (6, 800, vec![0x12, 0x34]),
+            (7, 960, vec![0x12, 0x34]),
+        ] {
+            pkt_tx
+                .send(RtpPacket::new(RtpHeader::new(18, seq, ts, 0x11), payload))
+                .await
+                .unwrap();
+        }
+
+        let mut active_frames = Vec::new();
+        let mut trailing_silence = 0usize;
+        for _ in 0..12 {
+            tokio::time::advance(Duration::from_millis(DEFAULT_PTIME_MS)).await;
+            if let Some(frame) = rx.recv().await {
+                if frame.silence {
+                    if !active_frames.is_empty() {
+                        trailing_silence += 1;
+                    }
+                } else {
+                    assert_eq!(
+                        trailing_silence, 0,
+                        "standalone G.729B SIDs must not emit non-silent CNG frames after DTX"
+                    );
+                    active_frames.push(frame.frame.samples);
+                }
+            }
+        }
+
+        // Expect 3 active frames: speech1 (20 ms), speech2 (20 ms), and flushed
+        // 12 B tail (10 ms speech + 10 ms zero-pad).
+        assert_eq!(active_frames.len(), 3, "12 B speech tail must flush without CNG extras");
+        assert!(
+            active_frames[2][..80].iter().any(|s| s.unsigned_abs() > 100),
+            "flushed 12 B tail must carry the 10 ms speech"
+        );
+        assert!(
+            active_frames[2][80..].iter().all(|&s| s == 0),
+            "second half of flushed 12 B tail must be digital silence"
+        );
+        assert!(trailing_silence >= 4, "DTX ticks must emit silence frames");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn decode_task_opus_dtx_emits_silence_without_plc() {
+        let (frame_tx, mut rx) = mpsc::channel::<PcmFrame>(64);
+        let (pkt_tx, pkt_rx) = mpsc::channel::<RtpPacket>(64);
+        let cancel = CancellationToken::new();
+        let codec = CodecType::Opus;
+        let sr = codec.samplerate();
+        let pf = (sr as u64 * DEFAULT_PTIME_MS / 1000) as usize;
+
+        tokio::spawn(decode_task(
+            pkt_rx,
+            frame_tx,
+            LegId::from("opus-dtx"),
+            codec,
+            111,
+            sr,
+            pf,
+            cancel.clone(),
+            Arc::new(IngressCounters::default()),
+        ));
+
+        let mut enc = audio_codec::create_encoder(CodecType::Opus);
+        let sine: Vec<i16> = (0..960)
+            .map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 10_000.0) as i16)
+            .collect();
+        let speech1 = enc.encode(&sine);
+        let speech2 = enc.encode(&sine);
+        let speech3 = enc.encode(&sine);
+        let flipped_dtx = vec![(speech3[0] & !3) ^ 0x04];
+
+        // 3 speech frames + 3 Opus DTX markers (1 B flipped-stereo TOC, 2 B code-2, 2 B code-3).
+        for (seq, ts, payload) in [
+            (1u16, 0u32, speech1),
+            (2, 960, speech2),
+            (3, 1920, speech3),
+            (4, 2880, flipped_dtx),
+            (5, 3840, vec![0xFA, 0]),
+            (6, 4800, vec![0xFB, 2]),
+        ] {
+            pkt_tx
+                .send(RtpPacket::new(RtpHeader::new(111, seq, ts, 0x22), payload))
+                .await
+                .unwrap();
+        }
+
+        let mut active_before_dtx = 0usize;
+        let mut silence_during_dtx = 0usize;
+        for _ in 0..12 {
+            tokio::time::advance(Duration::from_millis(DEFAULT_PTIME_MS)).await;
+            if let Some(frame) = rx.recv().await {
+                if frame.silence {
+                    if active_before_dtx > 0 {
+                        silence_during_dtx += 1;
+                    }
+                } else {
+                    assert_eq!(
+                        silence_during_dtx, 0,
+                        "Opus DTX markers must never emit non-silent PLC frames"
+                    );
+                    active_before_dtx += 1;
+                }
+            }
+        }
+        assert_eq!(active_before_dtx, 3, "exact 3 active Opus speech frames expected");
+        assert!(silence_during_dtx >= 3, "Opus DTX must emit silence frames");
+
+        // Resumed speech after DTX decodes cleanly.
+        for (seq, ts) in [(7u16, 19_200u32), (8, 20_160), (9, 21_120)] {
+            pkt_tx
+                .send(RtpPacket::new(
+                    RtpHeader::new(111, seq, ts, 0x22),
+                    enc.encode(&sine),
+                ))
+                .await
+                .unwrap();
+        }
+        let mut resumed_speech = false;
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_millis(DEFAULT_PTIME_MS)).await;
+            if let Some(frame) = rx.recv().await
+                && !frame.silence
+                && frame.frame.samples.iter().any(|s| s.unsigned_abs() > 100)
+            {
+                resumed_speech = true;
+                break;
+            }
+        }
+        assert!(resumed_speech, "resumed Opus speech must decode after DTX");
 
         cancel.cancel();
     }

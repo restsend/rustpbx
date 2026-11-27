@@ -293,6 +293,7 @@ impl Recorder {
             profile_audio_clock_rate,
             profile_dtmf_pt,
             profile_dtmf_clock_rate,
+            profile_dtmf_pts,
         ) = {
             let profile = profile.unwrap_or(&self.profile);
             (
@@ -301,29 +302,52 @@ impl Recorder {
                 profile.audio.as_ref().map(|codec| codec.clock_rate),
                 profile.dtmf.as_ref().map(|codec| codec.payload_type),
                 profile.dtmf.as_ref().map(|codec| codec.clock_rate),
+                profile.dtmf_pts(),
             )
         };
+        // RFC 3389 narrowband Comfort Noise (static PT 13): leave silent on the
+        // WAV timeline without feeding it to the DTMF heuristic or audio decoder.
+        if frame.payload_type == Some(crate::dtx::COMFORT_NOISE_PT)
+            && profile_audio_pt != Some(crate::dtx::COMFORT_NOISE_PT)
+        {
+            if let Some(resampler) = profile_audio_codec
+                .and_then(|c| self.resamplers.get_mut(&(leg, c.payload_type())))
+            {
+                resampler.reset();
+            }
+            if self.last_flush.elapsed() >= self.ptime {
+                self.flush().await?;
+            }
+            return Ok(());
+        }
+
         let dtmf_pt = dtmf_pt.or(profile_dtmf_pt);
         let dtmf_clock_rate = dtmf_clock_rate.or(profile_dtmf_clock_rate);
-        if let (Some(pt), Some(dpt)) = (frame.payload_type, dtmf_pt)
-            && pt == dpt
+        if let Some(pt) = frame.payload_type
+            && (dtmf_pt == Some(pt) || profile_dtmf_pts.contains(&pt))
         {
+            let clock = if dtmf_pt == Some(pt) {
+                dtmf_clock_rate.unwrap_or(self.sample_rate)
+            } else if frame.clock_rate > 0 {
+                frame.clock_rate
+            } else {
+                dtmf_clock_rate.unwrap_or(self.sample_rate)
+            };
             return self
-                .write_dtmf_payload_at(
-                    leg,
-                    &frame.data,
-                    frame.rtp_timestamp,
-                    dtmf_clock_rate.unwrap_or(self.sample_rate),
-                    capture_ts,
-                )
+                .write_dtmf_payload_at(leg, &frame.data, frame.rtp_timestamp, clock, capture_ts)
                 .await;
         }
 
-        // DTMF fallback: when the PT doesn't match the profile's DTMF PT
-        // (e.g. SDP negotiated multiple telephone-event PTs but only one
-        // was stored), detect DTMF by payload shape — RFC 4733 payload is
-        // always exactly 4 bytes and the first byte is a valid digit code.
-        if dtmf_pt.is_some() && frame.data.len() == 4 {
+        // DTMF fallback: when a secondary telephone-event PT wasn't recorded in
+        // the profile, detect RFC 4733 by payload shape — NEVER on the
+        // negotiated audio PT (e.g. a 4-byte Opus frame) or PT 13 CN.
+        let is_audio_pt = frame
+            .payload_type
+            .is_some_and(|pt| profile_audio_pt == Some(pt));
+        if (dtmf_pt.is_some() || !profile_dtmf_pts.is_empty())
+            && !is_audio_pt
+            && frame.data.len() == 4
+        {
             let code = frame.data[0];
             if crate::telephone_event::dtmf_code_to_char(code).is_some() {
                 return self
@@ -419,24 +443,46 @@ impl Recorder {
                 .decoders
                 .entry((leg, decoder_type.payload_type()))
                 .or_insert_with(|| create_decoder(decoder_type));
-            let pcm = decoder.decode(&encoded);
-            let resampler = self
-                .resamplers
-                .entry((leg, decoder_type.payload_type()))
-                .or_insert_with(|| {
-                    audio_codec::BoxedResampler::new(
-                        decoder.sample_rate() as usize,
-                        self.sample_rate as usize,
-                    )
-                    .expect("valid sample rates")
-                });
-            let pcm = resampler.resample(&pcm);
-            encoded = if let Some(enc) = self.encoder.as_mut() {
-                enc.encode(&pcm)
-            } else {
-                audio_codec::samples_to_bytes(&pcm)
-            }
-            .into();
+            encoded = match crate::dtx::decode_audio_packet(
+                decoder_type,
+                decoder.as_mut(),
+                &encoded,
+            ) {
+                crate::dtx::DecodedAudio::Speech { pcm, enter_dtx } => {
+                    let resampler = self
+                        .resamplers
+                        .entry((leg, decoder_type.payload_type()))
+                        .or_insert_with(|| {
+                            audio_codec::BoxedResampler::new(
+                                decoder.sample_rate() as usize,
+                                self.sample_rate as usize,
+                            )
+                            .expect("valid sample rates")
+                        });
+                    let pcm = resampler.resample(&pcm);
+                    if enter_dtx {
+                        resampler.reset();
+                    }
+                    if let Some(enc) = self.encoder.as_mut() {
+                        enc.encode(&pcm)
+                    } else {
+                        audio_codec::samples_to_bytes(&pcm)
+                    }
+                    .into()
+                }
+                crate::dtx::DecodedAudio::Silence => {
+                    if let Some(resampler) = self
+                        .resamplers
+                        .get_mut(&(leg, decoder_type.payload_type()))
+                    {
+                        resampler.reset();
+                    }
+                    // Empty block advances the leg's RTP timeline through DTX
+                    // silence without writing CNG/PLC audio bytes.
+                    Bytes::new()
+                }
+                crate::dtx::DecodedAudio::Ignore => Bytes::new(),
+            };
         }
 
         let rtp_clock_rate = profile_audio_clock_rate
@@ -664,14 +710,11 @@ impl Recorder {
         }
 
         for (ts, data) in inserts {
-            match leg {
-                Leg::A => {
-                    self.buffer_a.insert(ts, data);
-                }
-                Leg::B => {
-                    self.buffer_b.insert(ts, data);
-                }
+            let buf = self.leg_buffer_mut(leg);
+            if data.is_empty() && buf.contains_key(&ts) {
+                continue;
             }
+            buf.insert(ts, data);
         }
     }
 

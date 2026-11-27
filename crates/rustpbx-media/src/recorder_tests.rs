@@ -1643,4 +1643,200 @@ mod recorder_advanced_tests {
 
         let _ = std::fs::remove_file(&temp_path);
     }
+
+    #[tokio::test]
+    async fn test_recorder_pt13_cn_and_4b_opus_never_spoof_dtmf_or_leak_plc() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_path = dir.path().join("test_pt13_opus_dtx.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::Opus).await.unwrap();
+        recorder.set_profile(NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::Opus,
+                payload_type: 111,
+                clock_rate: 48_000,
+                channels: 2,
+                fmtp: None,
+            }),
+            dtmf: Some(NegotiatedCodec {
+                codec: CodecType::TelephoneEvent,
+                payload_type: 101,
+                clock_rate: 48_000,
+                channels: 1,
+                fmtp: Some("0-16".into()),
+            }),
+            dtmf_pts: vec![101],
+            ..Default::default()
+        });
+
+        let mut opus_enc = audio_codec::create_encoder(CodecType::Opus);
+        let sine_48k: Vec<i16> = (0..960)
+            .map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 10_000.0) as i16)
+            .collect();
+        let speech = opus_enc.encode(&sine_48k);
+        let mk_frame = |pt: u8, seq: u16, ts: u32, data: Vec<u8>| {
+            MediaSample::Audio(AudioFrame {
+                data: bytes::Bytes::from(data),
+                rtp_timestamp: ts,
+                sequence_number: Some(seq),
+                payload_type: Some(pt),
+                clock_rate: 48_000,
+                marker: false,
+                raw_packet: None,
+                source_addr: None,
+                header_extension: None,
+            })
+        };
+
+        // 20 ms speech at t=0 (160 samples at 8 kHz WAV).
+        recorder
+            .write_sample_with_profile(Leg::A, &mk_frame(111, 1, 0, speech), None, None, None, None, 0)
+            .await
+            .unwrap();
+        // Opus DTX markers at t=20ms, 40ms, 60ms (must NOT inject opus-rs PLC noise).
+        for (idx, marker) in [(2u16, vec![0xF8]), (3, vec![0xFA, 0]), (4, vec![0xFB, 2])] {
+            recorder
+                .write_sample_with_profile(
+                    Leg::A,
+                    &mk_frame(111, idx, u32::from(idx - 1) * 960, marker),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        // 4-byte RFC 3389 PT 13 CN whose first byte matches digit '5' (previously spoofed DTMF).
+        recorder
+            .write_sample_with_profile(
+                Leg::A,
+                &mk_frame(13, 5, 4800, vec![5, 0x8a, 0x00, 0xA0]),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .await
+            .unwrap();
+        // 4-byte payload on the negotiated Opus PT whose first byte is digit '5'
+        // (must NOT trigger the 4-byte DTMF fallback).
+        recorder
+            .write_sample_with_profile(
+                Leg::A,
+                &mk_frame(111, 6, 9600, vec![5, 0x00, 0x00, 0x00]),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .await
+            .unwrap();
+        // Tail speech at t=300ms (ts = 14400 @ 48 kHz -> 2400 samples @ 8 kHz) so the
+        // intermediate DTX/CN window is flushed into the WAV.
+        let tail = opus_enc.encode(&sine_48k);
+        recorder
+            .write_sample_with_profile(Leg::A, &mk_frame(111, 7, 14_400, tail), None, None, None, None, 0)
+            .await
+            .unwrap();
+
+        recorder.finalize().await.unwrap();
+
+        let pcm_a = read_pcmu_wav_channel(path_str, 0);
+        assert!(pcm_a.len() >= 2560, "expected >= 320 ms WAV, got {} samples", pcm_a.len());
+        // The DTX + PT 13 CN window [160..1600] (20 ms..200 ms) must stay completely silent
+        // (no PLC ringing and no spoofed 200 ms DTMF '5' tone).
+        let dtx_peak = pcm_a[160..1600].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        assert_eq!(dtx_peak, 0, "Opus DTX and PT 13 CN window must be silent, got peak={dtx_peak}");
+    }
+
+    #[tokio::test]
+    async fn test_recorder_g729_sid_suppresses_cng_and_keeps_speech() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_path = dir.path().join("test_g729_dtx.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::G729).await.unwrap();
+        recorder.set_profile(NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec: CodecType::G729,
+                payload_type: 18,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            }),
+            dtmf: Some(NegotiatedCodec {
+                codec: CodecType::TelephoneEvent,
+                payload_type: 101,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: Some("0-16".into()),
+            }),
+            dtmf_pts: vec![101],
+            ..Default::default()
+        });
+
+        let mut enc = audio_codec::create_encoder(CodecType::G729);
+        let sine_8k: Vec<i16> = (0..160)
+            .map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / 8000.0).sin() * 12_000.0) as i16)
+            .collect();
+        let _ = enc.encode(&sine_8k); // warm up lookahead
+        let speech1 = enc.encode(&sine_8k);
+        let speech2 = enc.encode(&sine_8k);
+        let mut mixed_22 = speech2.clone();
+        mixed_22.extend_from_slice(&[0x12, 0x34]);
+        let speech3 = enc.encode(&sine_8k);
+
+        let mk_g729 = |seq: u16, ts: u32, data: Vec<u8>| {
+            MediaSample::Audio(AudioFrame {
+                data: bytes::Bytes::from(data),
+                rtp_timestamp: ts,
+                sequence_number: Some(seq),
+                payload_type: Some(18),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: None,
+                source_addr: None,
+                header_extension: None,
+            })
+        };
+
+        // Speech at 0..20 ms, mixed 22 B (20 ms speech + 10 ms SID) at 20..50 ms,
+        // standalone 2 B SIDs at 50 ms & 150 ms, resumed speech at 300 ms (ts=2400),
+        // and a terminal 2 B SID at 400 ms (ts=3200) to verify DTX preserves call duration.
+        for (seq, ts, payload) in [
+            (1u16, 0u32, speech1),
+            (2, 160, mixed_22),
+            (3, 400, vec![0x12, 0x34]),
+            (4, 1200, vec![0x12, 0x34]),
+            (5, 2400, speech3),
+            (6, 3200, vec![0x12, 0x34]),
+        ] {
+            recorder
+                .write_sample_with_profile(Leg::A, &mk_g729(seq, ts, payload), None, None, None, None, 0)
+                .await
+                .unwrap();
+        }
+        recorder.finalize().await.unwrap();
+
+        let pcm_a = read_pcmu_wav_channel(path_str, 0);
+        assert!(pcm_a.len() >= 3200, "terminal DTX SID must preserve 400 ms WAV duration, got {} samples", pcm_a.len());
+        assert!(
+            pcm_a[..320].iter().any(|s| s.unsigned_abs() > 1000),
+            "initial G.729 speech must be recorded"
+        );
+        // The stripped 10 ms SID tail + standalone SIDs [320..2400] must be pure silence.
+        let sid_peak = pcm_a[320..2400].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        assert_eq!(sid_peak, 0, "G.729B SID CNG must not leak into WAV, got peak={sid_peak}");
+        assert!(
+            pcm_a[2400..2560].iter().any(|s| s.unsigned_abs() > 1000),
+            "resumed G.729 speech must be recorded at its RTP position"
+        );
+        let tail_peak = pcm_a[2560..3200].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        assert_eq!(tail_peak, 0, "terminal G.729B SID tail must remain digital silence, got peak={tail_peak}");
+    }
 }
