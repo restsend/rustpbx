@@ -846,6 +846,7 @@ mod tests {
                 payload_type: 0,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             }),
             ..Default::default()
         }
@@ -1208,7 +1209,7 @@ mod tests {
         let path = dir.path().join("dtmf-capture.wav");
         let mut negotiated = profile();
         negotiated.dtmf = Some(NegotiatedCodec {
-            codec: CodecType::TelephoneEvent, payload_type: 101, clock_rate: 8000, channels: 1,
+            codec: CodecType::TelephoneEvent, payload_type: 101, clock_rate: 8000, channels: 1, fmtp: None,
         });
         let mut recorder = FileRecorder::new(RecorderOption {
             recorder_file: path.to_string_lossy().into_owned(), samplerate: Some(8000),

@@ -462,6 +462,7 @@ mod tests {
                 audio: Some(crate::negotiate::NegotiatedCodec {
                     codec, payload_type: codec.payload_type(),
                     clock_rate: if codec == CodecType::G722 { 8000 } else { rate }, channels: 1,
+                    fmtp: None,
                 }), ..Default::default()
             };
             let stream = LegPcmStream::attach(&pc, profile, LegId::from(id), CancellationToken::new()).unwrap();

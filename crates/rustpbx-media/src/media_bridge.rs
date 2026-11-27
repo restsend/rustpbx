@@ -437,7 +437,7 @@ impl MediaBridge {
         let (Some(ca), Some(cb)) = (pa.audio.as_ref(), pb.audio.as_ref()) else {
             return Ok(());
         };
-        let direct_audio = ca.codec == cb.codec && !self.force_transcode;
+        let direct_audio = ca.can_relay_to(cb) && !self.force_transcode;
         let pair_supports_rtx = direct_audio
             && pa.video.iter().any(|codec| codec.rtx_payload_type.is_some())
             && pb.video.iter().any(|codec| codec.rtx_payload_type.is_some());
@@ -506,15 +506,12 @@ impl MediaBridge {
             let a_video_mid = sdes_mid_for_kind(&la, rustrtc::MediaKind::Video);
             let b_video_mid = sdes_mid_for_kind(&lb, rustrtc::MediaKind::Video);
 
-            // RFC 4733 DTMF payload-type remap (only when the two legs
-            // negotiated different telephone-event payload types).
-            let dtmf_a_to_b = match (pa.dtmf.as_ref(), pb.dtmf.as_ref()) {
-                (Some(a), Some(b)) if a.payload_type != b.payload_type => {
-                    Some((a.payload_type, b.payload_type))
-                }
-                _ => None,
-            };
-            let dtmf_b_to_a = dtmf_a_to_b.map(|(a, b)| (b, a));
+            // RFC 4733 DTMF payload-type remaps: map any source telephone-event
+            // PT that the destination leg did not negotiate onto the destination's
+            // preferred telephone-event PT (covers differing PTs as well as
+            // multi-PT WebRTC legs sending 8 kHz PT 126 to a SIP leg on PT 101).
+            let dtmf_a_to_b = dtmf_relay_maps(&pa, &pb, ca.payload_type);
+            let dtmf_b_to_a = dtmf_relay_maps(&pb, &pa, cb.payload_type);
 
             // DTMF agreement check: a shared telephone-event PT is forwarded
             // raw (no remap possible), so the two legs must agree on its clock
@@ -557,15 +554,15 @@ impl MediaBridge {
             // audio/video source transports for non-BUNDLE.
             let audio_a_to_b = audio_relay_rules(
                 b_out_ssrc,
-                (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
-                dtmf_a_to_b,
+                (ca.payload_type, cb.payload_type),
+                &dtmf_a_to_b,
                 &b_audio_mid,
             );
             // ── B→A rules (mirror) ──
             let audio_b_to_a = audio_relay_rules(
                 a_out_ssrc,
-                (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
-                dtmf_b_to_a,
+                (cb.payload_type, ca.payload_type),
+                &dtmf_b_to_a,
                 &a_audio_mid,
             );
             let (video_a_to_b, video_b_to_a) = video_relay_rules(
@@ -1982,15 +1979,37 @@ fn strip_extensions_toward(destination: &TransportMode) -> bool {
     *destination != TransportMode::WebRtc
 }
 
-/// Rewrite rules for one direction of audio relay: the audio catch-all rule
-/// (rewrites every packet to the destination leg's outbound audio SSRC, remapping the
-/// payload type when the legs differ) plus, when the two legs negotiated
-/// different telephone-event payload types, a DTMF remap rule. Both stamp the
-/// destination leg's audio MID for browser attribution.
+/// Build `(src_pt, dst_pt)` remaps for source telephone-event PTs that the
+/// destination leg did not negotiate directly.
+fn dtmf_relay_maps(
+    src: &NegotiatedLegProfile,
+    dst: &NegotiatedLegProfile,
+    src_audio_pt: u8,
+) -> Vec<(u8, u8)> {
+    let Some(dst_dtmf) = dst.dtmf.as_ref() else {
+        return Vec::new();
+    };
+    let dst_pts = dst.dtmf_pts();
+    let mut src_pts: Vec<u8> = src.dtmf_pts().into_iter().collect();
+    src_pts.sort_unstable();
+    src_pts
+        .into_iter()
+        .filter(|&pt| pt != src_audio_pt && !dst_pts.contains(&pt))
+        .map(|pt| (pt, dst_dtmf.payload_type))
+        .collect()
+}
+
+/// Rewrite rules for one direction of audio relay.
+///
+/// The catch-all rule (`match_payload_type: None`) rewrites SSRC and SDES-MID
+/// only — **never** payload type — so RFC 3389 PT 13 Comfort Noise, same-PT
+/// DTMF, or secondary negotiated PTs are never overwritten with the destination
+/// voice PT when the two legs use different voice payload types (e.g. Opus
+/// PT 111 ↔ PT 96). Voice and DTMF payload-type remaps use exact PT matches.
 fn audio_relay_rules(
     out_ssrc: u32,
-    out_pt: Option<u8>,
-    dtmf_map: Option<(u8, u8)>,
+    (src_audio_pt, dst_audio_pt): (u8, u8),
+    dtmf_maps: &[(u8, u8)],
     mid: &Option<(u8, std::sync::Arc<str>)>,
 ) -> Vec<RtpRewriteRule> {
     let (mid_id, mid_val) = mid
@@ -2000,20 +2019,32 @@ fn audio_relay_rules(
     let mut rules = vec![RtpRewriteRule {
         match_payload_type: None,
         out_ssrc,
-        out_payload_type: out_pt,
+        out_payload_type: None,
         sdes_mid_extension_id: mid_id,
         sdes_mid: mid_val.clone(),
         rtx: None,
     }];
-    if let Some((src_pt, dst_pt)) = dtmf_map {
+    if src_audio_pt != dst_audio_pt {
         rules.push(RtpRewriteRule {
-            match_payload_type: Some(src_pt),
+            match_payload_type: Some(src_audio_pt),
             out_ssrc,
-            out_payload_type: Some(dst_pt),
+            out_payload_type: Some(dst_audio_pt),
             sdes_mid_extension_id: mid_id,
-            sdes_mid: mid_val,
+            sdes_mid: mid_val.clone(),
             rtx: None,
         });
+    }
+    for &(src_pt, dst_pt) in dtmf_maps {
+        if src_pt != dst_pt {
+            rules.push(RtpRewriteRule {
+                match_payload_type: Some(src_pt),
+                out_ssrc,
+                out_payload_type: Some(dst_pt),
+                sdes_mid_extension_id: mid_id,
+                sdes_mid: mid_val.clone(),
+                rtx: None,
+            });
+        }
     }
     rules
 }
@@ -3796,5 +3827,62 @@ mod tests {
         assert_eq!(webrtc_to_rtp.len(), 1);
         assert_eq!(webrtc_to_rtp[0].match_payload_type, Some(97));
         assert_eq!(webrtc_to_rtp[0].out_payload_type, Some(96));
+    }
+
+    #[test]
+    fn audio_relay_rules_preserve_cn_and_same_pt_dtmf_when_voice_pts_differ() {
+        let rules = audio_relay_rules(0xBEEF, (111, 96), &[], &None);
+        // Catch-all must NEVER overwrite payload types (protects PT 13 CN and
+        // same-PT DTMF 101 from being rewritten into Opus PT 96).
+        let catch_all = rules
+            .iter()
+            .find(|r| r.match_payload_type.is_none())
+            .expect("catch-all rule");
+        assert_eq!(catch_all.out_ssrc, 0xBEEF);
+        assert_eq!(catch_all.out_payload_type, None);
+
+        // Voice PT rewrite is scoped strictly to the source voice PT (111 -> 96).
+        let voice = rules
+            .iter()
+            .find(|r| r.match_payload_type == Some(111))
+            .expect("exact voice PT rule");
+        assert_eq!(voice.out_payload_type, Some(96));
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn dtmf_relay_maps_remaps_unmatched_and_multi_pt_webrtc_dtmf() {
+        let mk_dtmf = |pt: u8, clock_rate: u32| crate::negotiate::NegotiatedCodec {
+            codec: audio_codec::CodecType::TelephoneEvent,
+            payload_type: pt,
+            clock_rate,
+            channels: 1,
+            fmtp: None,
+        };
+        let webrtc_src = NegotiatedLegProfile {
+            dtmf: Some(mk_dtmf(110, 48000)),
+            dtmf_pts: vec![110, 126],
+            ..Default::default()
+        };
+        let sip_dst = NegotiatedLegProfile {
+            dtmf: Some(mk_dtmf(101, 8000)),
+            dtmf_pts: vec![101],
+            ..Default::default()
+        };
+        assert_eq!(
+            dtmf_relay_maps(&webrtc_src, &sip_dst, 111),
+            vec![(110, 101), (126, 101)]
+        );
+
+        // Shared PT (126) on both WebRTC legs stays untouched; only 110 -> 101 remaps.
+        let webrtc_dst = NegotiatedLegProfile {
+            dtmf: Some(mk_dtmf(101, 48000)),
+            dtmf_pts: vec![101, 126],
+            ..Default::default()
+        };
+        assert_eq!(
+            dtmf_relay_maps(&webrtc_src, &webrtc_dst, 111),
+            vec![(110, 101)]
+        );
     }
 }

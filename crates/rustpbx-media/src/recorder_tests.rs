@@ -1124,6 +1124,7 @@ mod recorder_advanced_tests {
                 payload_type: 96,
                 clock_rate: 48000,
                 channels: 2,
+                fmtp: None,
             }),
             video: Vec::new(),
             dtmf: Some(NegotiatedCodec {
@@ -1131,6 +1132,7 @@ mod recorder_advanced_tests {
                 payload_type: 101,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             }),
             dtmf_pts: vec![101],
             transport: crate::TransportMode::Rtp,
@@ -1460,12 +1462,14 @@ mod recorder_advanced_tests {
                 payload_type: 0,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             }),
             dtmf: Some(NegotiatedCodec {
                 codec: CodecType::TelephoneEvent,
                 payload_type: 101,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             }),
             ..Default::default()
         });
@@ -1531,12 +1535,14 @@ mod recorder_advanced_tests {
                     payload_type: 0,
                     clock_rate: 8000,
                     channels: 1,
+                    fmtp: None,
                 }),
                 dtmf: Some(NegotiatedCodec {
                     codec: CodecType::TelephoneEvent,
                     payload_type: 101,
                     clock_rate: 8000,
                     channels: 1,
+                    fmtp: None,
                 }),
                 ..Default::default()
             });
@@ -1570,6 +1576,7 @@ mod recorder_advanced_tests {
                 payload_type: 0,
                 clock_rate: 8000,
                 channels: 1,
+                fmtp: None,
             }),
             ..Default::default()
         };

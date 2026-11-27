@@ -193,6 +193,50 @@ pub struct ExtractedCodecs {
     pub dtmf: Vec<CodecInfo>,
 }
 
+/// Parse the `annexb` fmtp parameter for G.729 per RFC 3551 §4.5.6 / RFC 4856:
+/// omitted defaults to `true` (`annexb=yes`); only an explicit `annexb=no`
+/// disables Annex B VAD/DTX SID frames.
+pub fn g729_annexb_enabled(fmtp: Option<&str>) -> bool {
+    let Some(fmtp) = fmtp else {
+        return true;
+    };
+    for param in fmtp.split(';') {
+        if let Some((key, value)) = param.split_once('=')
+            && key.trim().eq_ignore_ascii_case("annexb")
+        {
+            return !value.trim().eq_ignore_ascii_case("no");
+        }
+    }
+    true
+}
+
+fn disable_g729_annexb(fmtp: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut replaced = false;
+    if let Some(raw) = fmtp {
+        for param in raw.split(';') {
+            let trimmed = param.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some((key, _)) = trimmed.split_once('=')
+                && key.trim().eq_ignore_ascii_case("annexb")
+            {
+                if !replaced {
+                    parts.push("annexb=no".to_string());
+                    replaced = true;
+                }
+            } else {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    if !replaced {
+        parts.push("annexb=no".to_string());
+    }
+    parts.join(";")
+}
+
 /// A single negotiated codec with its RTP parameters from SDP answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedCodec {
@@ -200,18 +244,37 @@ pub struct NegotiatedCodec {
     pub payload_type: u8,
     pub clock_rate: u32,
     pub channels: u16,
+    pub fmtp: Option<String>,
 }
 
 impl NegotiatedCodec {
-    /// Convert to a `CodecInfo` (no fmtp — answer codecs don't carry it).
+    /// Convert to a `CodecInfo`, preserving negotiated `fmtp` parameters
+    /// (such as G.729 `annexb=no`, Opus `fmtp`, and telephone-event ranges).
     pub fn to_codec_info(&self) -> CodecInfo {
         CodecInfo {
             payload_type: self.payload_type,
             codec: self.codec,
             clock_rate: self.clock_rate,
             channels: self.channels,
-            fmtp: None,
+            fmtp: self.fmtp.clone(),
         }
+    }
+
+    /// Whether packets of this audio codec can be relayed raw to `peer`
+    /// without transcoding.
+    ///
+    /// For G.729 (RFC 3551 §4.5.6), Annex B (`annexb=yes`, default when
+    /// omitted) emits 2-byte SID frames that an `annexb=no` decoder cannot
+    /// decode, so mismatched `annexb` states require transcoding.
+    pub fn can_relay_to(&self, peer: &Self) -> bool {
+        if self.codec != peer.codec {
+            return false;
+        }
+        if self.codec == CodecType::G729 {
+            return g729_annexb_enabled(self.fmtp.as_deref())
+                == g729_annexb_enabled(peer.fmtp.as_deref());
+        }
+        true
     }
 }
 
@@ -694,6 +757,7 @@ impl MediaNegotiator {
             payload_type: c.payload_type,
             clock_rate: c.clock_rate,
             channels: c.channels,
+            fmtp: c.fmtp.clone(),
         });
         let video = Self::extract_video_codecs(sdp);
         let dtmf = match extracted.dtmf.len() {
@@ -703,6 +767,7 @@ impl MediaNegotiator {
                 payload_type: c.payload_type,
                 clock_rate: c.clock_rate,
                 channels: c.channels,
+                fmtp: c.fmtp.clone(),
             }),
             _ => {
                 let preferred_rate = match audio.as_ref().map(|codec| codec.codec) {
@@ -719,6 +784,7 @@ impl MediaNegotiator {
                         payload_type: c.payload_type,
                         clock_rate: c.clock_rate,
                         channels: c.channels,
+                        fmtp: c.fmtp.clone(),
                     })
             }
         };
@@ -1253,16 +1319,17 @@ impl MediaNegotiator {
         previous_negotiated_codec: Option<CodecType>,
         allow_codecs: &[CodecType],
     ) -> Option<Vec<CodecInfo>> {
-        let preferred_audio_codecs: Vec<CodecType> = preferred_peer_sdp
-            .map(|sdp| {
-                Self::extract_codec_params(sdp)
-                    .audio
-                    .into_iter()
-                    .map(|codec| codec.codec)
-                    .collect()
-            })
+        let preferred_peer = preferred_peer_sdp.map(Self::extract_codec_params);
+        let preferred_audio_codecs: Vec<CodecType> = preferred_peer
+            .as_ref()
+            .map(|extracted| extracted.audio.iter().map(|codec| codec.codec).collect())
             .filter(|codecs: &Vec<CodecType>| !codecs.is_empty())
             .unwrap_or_else(|| allow_codecs.to_vec());
+        let peer_disables_g729_annexb = preferred_peer.as_ref().is_some_and(|peer| {
+            peer.audio.iter().any(|codec| {
+                codec.codec == CodecType::G729 && !g729_annexb_enabled(codec.fmtp.as_deref())
+            })
+        });
         let offered_audio_codecs = Self::extract_codec_params(offer_sdp);
         let previous_offered = previous_negotiated_codec.filter(|previous_codec| {
             offered_audio_codecs
@@ -1270,11 +1337,22 @@ impl MediaNegotiator {
                 .iter()
                 .any(|codec| codec.codec == *previous_codec)
         });
-        let selected_audio_codecs = if let Some(previous_codec) = previous_offered {
+        let mut selected_audio_codecs = if let Some(previous_codec) = previous_offered {
             Self::build_codec_list_from_offer(offer_sdp, &[previous_codec])
         } else {
             Self::build_codec_list_from_offer(offer_sdp, &preferred_audio_codecs)
         };
+        // Propagate G.729 `annexb=no` from the peer answer (RFC 3551 §4.5.6):
+        // if the callee disabled Annex B, the answer to the caller must also
+        // advertise `annexb=no` so the caller does not emit 2-byte SID frames
+        // toward a G.729A-only callee (and both legs stay eligible for pure relay).
+        if peer_disables_g729_annexb {
+            for codec in &mut selected_audio_codecs {
+                if codec.codec == CodecType::G729 {
+                    codec.fmtp = Some(disable_g729_annexb(codec.fmtp.as_deref()));
+                }
+            }
+        }
         if selected_audio_codecs.is_empty() {
             None
         } else {
@@ -3899,5 +3977,137 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(audio[0].codec, CodecType::PCMU);
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
+    }
+
+    #[test]
+    fn test_g729_annexb_enabled_and_can_relay_to() {
+        assert!(g729_annexb_enabled(None));
+        assert!(g729_annexb_enabled(Some("annexb=yes")));
+        assert!(!g729_annexb_enabled(Some("annexb=no")));
+        assert!(!g729_annexb_enabled(Some("foo=1; AnnexB = No")));
+
+        let g729 = |fmtp: Option<&str>| NegotiatedCodec {
+            codec: CodecType::G729,
+            payload_type: 18,
+            clock_rate: 8000,
+            channels: 1,
+            fmtp: fmtp.map(str::to_string),
+        };
+        assert!(g729(None).can_relay_to(&g729(Some("annexb=yes"))));
+        assert!(g729(Some("annexb=no")).can_relay_to(&g729(Some("AnnexB=No"))));
+        assert!(!g729(None).can_relay_to(&g729(Some("annexb=no"))));
+        assert!(!g729(Some("annexb=yes")).can_relay_to(&g729(Some("annexb=no"))));
+
+        // Opus `usedtx=1` is a directional receiver preference (RFC 7587):
+        // every Opus decoder must decode DTX, so mismatched `usedtx` still relays.
+        let opus_dtx = NegotiatedCodec {
+            codec: CodecType::Opus,
+            payload_type: 111,
+            clock_rate: 48000,
+            channels: 2,
+            fmtp: Some("useinbandfec=1;usedtx=1".to_string()),
+        };
+        let opus_plain = NegotiatedCodec {
+            codec: CodecType::Opus,
+            payload_type: 96,
+            clock_rate: 48000,
+            channels: 2,
+            fmtp: None,
+        };
+        assert!(opus_dtx.can_relay_to(&opus_plain));
+    }
+
+    #[test]
+    fn test_extract_leg_profile_and_to_codec_info_preserve_fmtp() {
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=fmtp:18 annexb=no\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=fmtp:101 0-15\r\n";
+        let profile = MediaNegotiator::extract_leg_profile(sdp);
+        let audio = profile.audio.expect("G729 audio");
+        let dtmf = profile.dtmf.expect("DTMF");
+        assert_eq!(audio.fmtp.as_deref(), Some("annexb=no"));
+        assert_eq!(dtmf.fmtp.as_deref(), Some("0-15"));
+        assert_eq!(audio.to_codec_info().fmtp.as_deref(), Some("annexb=no"));
+        assert_eq!(dtmf.to_codec_info().fmtp.as_deref(), Some("0-15"));
+    }
+
+    #[test]
+    fn test_select_answer_codecs_propagates_g729_annexb_no_from_peer() {
+        let caller_offer_yes = "v=0\r\n\
+            o=- 1 1 IN IP4 192.0.2.10\r\n\
+            s=-\r\n\
+            c=IN IP4 192.0.2.10\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=fmtp:18 annexb=yes\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+        let caller_offer_default = "v=0\r\n\
+            o=- 1 1 IN IP4 192.0.2.10\r\n\
+            s=-\r\n\
+            c=IN IP4 192.0.2.10\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+        let callee_answer_no = "v=0\r\n\
+            o=- 1 1 IN IP4 192.0.2.20\r\n\
+            s=-\r\n\
+            c=IN IP4 192.0.2.20\r\n\
+            t=0 0\r\n\
+            m=audio 20000 RTP/AVP 18 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=fmtp:18 annexb=no\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        for offer in [caller_offer_yes, caller_offer_default] {
+            let selected = MediaNegotiator::select_answer_codecs(
+                offer,
+                Some(callee_answer_no),
+                None,
+                &[CodecType::G729],
+            )
+            .expect("G729 selected");
+            let g729 = selected.iter().find(|c| c.codec == CodecType::G729).unwrap();
+            assert_eq!(
+                g729.fmtp.as_deref(),
+                Some("annexb=no"),
+                "callee annexb=no must propagate into caller answer"
+            );
+        }
+
+        // Caller offering annexb=no must NEVER be upgraded when peer omits fmtp.
+        let selected_keep_no = MediaNegotiator::select_answer_codecs(
+            callee_answer_no,
+            Some(caller_offer_default),
+            None,
+            &[CodecType::G729],
+        )
+        .expect("G729 selected");
+        let g729 = selected_keep_no
+            .iter()
+            .find(|c| c.codec == CodecType::G729)
+            .unwrap();
+        assert_eq!(g729.fmtp.as_deref(), Some("annexb=no"));
+
+        // Neither side disables Annex B -> omitted fmtp is not invented.
+        let selected_default = MediaNegotiator::select_answer_codecs(
+            caller_offer_default,
+            Some(caller_offer_default),
+            None,
+            &[CodecType::G729],
+        )
+        .expect("G729 selected");
+        let g729 = selected_default
+            .iter()
+            .find(|c| c.codec == CodecType::G729)
+            .unwrap();
+        assert_eq!(g729.fmtp, None);
     }
 }
