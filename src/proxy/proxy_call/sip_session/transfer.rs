@@ -154,7 +154,7 @@ impl BridgeReverseDecoder {
     /// Decode an inbound RTP payload and resample to `target_sample_rate`.
     ///
     /// Explicit DTX / comfort-noise packets (G.729 Annex B 2-byte SID, RFC 3389
-    /// PT 13 CN, Opus 1-byte TOC) return `Some(ReverseAudio::Silence)` so the
+    /// PT 13 CN, Opus short DTX markers) return `Some(ReverseAudio::Silence)` so the
     /// reverse loop's 20 ms silence timer fills digital zeros until active
     /// speech resumes. DTMF and unknown PTs return `None`.
     fn decode(&mut self, pt: u8, data: &[u8]) -> Option<ReverseAudio<'_>> {
@@ -163,13 +163,24 @@ impl BridgeReverseDecoder {
             return Some(ReverseAudio::Silence);
         }
         let codec = self.resolve_codec(pt)?;
-        if codec == audio_codec::CodecType::Opus && data.len() == 1 {
-            return Some(ReverseAudio::Silence);
-        }
+        let opus_dtx = codec == audio_codec::CodecType::Opus
+            && codec.is_silence_frame(data)
+            && short_opus_dtx(data)?;
         let decoder = self
             .decoders
             .entry(codec.payload_type())
             .or_insert_with(|| audio_codec::create_decoder(codec));
+        if opus_dtx {
+            // Keep the current channel count so an empty packet cannot reset the decoder.
+            let stereo_bit = u8::from(decoder.channels() == 2) << 2;
+            let marker = [
+                (data[0] & !0x04) | stereo_bit,
+                data.get(1).copied().unwrap_or(0),
+            ];
+            // Update decoder state when possible. Valid markers can exceed its 20 ms buffer.
+            let _ = decoder.decode_into(&marker[..data.len()], &mut self.decode_buf);
+            return Some(ReverseAudio::Silence);
+        }
         let mut written = decoder.decode_into(data, &mut self.decode_buf).ok()?;
         if decoder.channels() == 2 {
             // `OpusDecoder::decode_into` outputs interleaved stereo, whereas
@@ -352,13 +363,36 @@ async fn bridge_forward_loop<S>(
     }
 }
 
+/// Classify a short Opus packet from its framing (RFC 6716 §3.2).
+/// Invalid framing leaves the current DTX state alone.
+fn short_opus_dtx(data: &[u8]) -> Option<bool> {
+    let (&toc, rest) = data.split_first()?;
+    match (toc & 3, rest) {
+        (0, []) | (1, []) | (2, [0]) | (3, [0x81]) => Some(true),
+        // A coded byte may carry audio even when the whole packet is short.
+        (0, [_]) => Some(false),
+        (3, [count @ 1..=48]) => {
+            // Code 3 can carry multiple empty CBR frames, up to 120 ms total.
+            let config = (toc >> 3) as usize;
+            let frame_duration = match config {
+                0..=11 => [4, 8, 16, 24][config & 3],
+                12..=15 => [4, 8][config & 1],
+                _ => 1 << (config & 3),
+            };
+            (usize::from(*count) * frame_duration <= 48).then_some(true) // 2.5 ms units
+        }
+        _ => None,
+    }
+}
+
 /// Discard stale RTP samples already buffered in a receiver track (e.g. 183
 /// early-media ringtone or pre-bridge IVR/hold audio sitting in `rustrtc`'s
-/// 64-slot ring). Retain a G.729 DTX signal until a later audio packet clears it.
+/// 64-slot ring). Retain G.729 or Opus DTX until a later speech packet clears it.
 fn drain_audio_track(
     track: &dyn rustrtc::media::MediaStreamTrack,
     decoder: &BridgeReverseDecoder,
 ) -> (usize, bool) {
+    use audio_codec::CodecType;
     use rustrtc::media::MediaSample;
 
     let mut drained = 0usize;
@@ -369,10 +403,16 @@ fn drain_audio_track(
             && !frame.data.is_empty()
             && let Some(codec) = frame.payload_type.and_then(|pt| decoder.resolve_codec(pt))
         {
-            let is_g729 = codec == audio_codec::CodecType::G729;
-            let has_sid = is_g729 && codec.is_silence_frame(&frame.data);
-            if has_sid || !is_g729 || frame.data.len() >= 10 {
-                in_dtx = has_sid;
+            let data = frame.data.as_ref();
+            match codec {
+                CodecType::G729 if codec.is_silence_frame(data) => in_dtx = true,
+                CodecType::G729 if data.len() < 10 => {}
+                CodecType::Opus if codec.is_silence_frame(data) => {
+                    if let Some(opus_dtx) = short_opus_dtx(data) {
+                        in_dtx = opus_dtx;
+                    }
+                }
+                _ => in_dtx = false,
             }
         }
     }
@@ -5361,21 +5401,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_voip_bridge_drain_retains_queued_g729_sid() {
+    async fn test_voip_bridge_drain_retains_queued_dtx() {
         use rustrtc::media::frame::{AudioFrame, MediaKind};
         use rustrtc::media::track::sample_track;
 
         let (source, track, _fb) = sample_track(MediaKind::Audio, 64);
         let decoder = BridgeReverseDecoder::new(
             Some((96, audio_codec::CodecType::G729)),
-            BTreeMap::new(),
+            BTreeMap::from([(106, audio_codec::CodecType::Opus)]),
             16_000,
         );
-        let queue_audio = |pt, data: &'static [u8]| {
+        let queue_audio = |pt, data: &[u8]| {
             source
                 .send_audio(AudioFrame {
                     payload_type: Some(pt),
-                    data: bytes::Bytes::from_static(data),
+                    data: bytes::Bytes::copy_from_slice(data),
                     ..Default::default()
                 })
                 .unwrap();
@@ -5396,6 +5436,30 @@ mod tests {
 
         queue_audio(96, &[0; 22]);
         assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, true));
+
+        queue_audio(106, &[0xf8]);
+        queue_audio(106, &[0xfa]); // Code 2 requires a frame-length byte.
+        queue_audio(102, &[1, 0x0a, 0, 160]);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (3, true));
+
+        queue_audio(106, &[0xfa, 0]); // Two empty Opus frames.
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, true));
+
+        queue_audio(106, &[0xfb, 2]); // Two empty CBR frames.
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, true));
+
+        queue_audio(106, &[0xfb, 7]); // Seven 20 ms frames exceed 120 ms.
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, false));
+
+        queue_audio(106, &[0xf8, 0]); // One coded byte follows the TOC.
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, false));
+
+        let pcm = sine_pcm(48_000, 960, 440.0);
+        let speech = audio_codec::create_encoder(audio_codec::CodecType::Opus).encode(&pcm);
+        assert!(speech.len() > 2);
+        queue_audio(106, &[0xf8]);
+        queue_audio(106, &speech);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (2, false));
     }
 
     #[test]
@@ -5444,13 +5508,50 @@ mod tests {
         assert_eq!(&samples[441..], &[0; 221]);
         assert!(enter_silence);
 
-        // RFC 3389 PT 13 CN and Opus 1-byte TOC DTX both return Silence.
+        // RFC 3389 PT 13 CN and valid short Opus DTX both return Silence.
         assert_eq!(decoder.decode(13, &[40]), Some(ReverseAudio::Silence));
         assert_eq!(decoder.decode(106, &[0xF8]), Some(ReverseAudio::Silence));
+        // Two 20 ms empty frames exceed the decoder's buffer but still signal DTX.
+        assert_eq!(decoder.decode(106, &[0xFA, 0]), Some(ReverseAudio::Silence));
+        assert_eq!(decoder.decode(106, &[0xFB, 2]), Some(ReverseAudio::Silence));
+        assert!(decoder.decode(106, &[0xFA]).is_none());
+        assert!(decoder.decode(106, &[0xFB, 7]).is_none());
+        assert_ne!(decoder.decode(106, &[0xF8, 0]), Some(ReverseAudio::Silence));
 
         // Active speech resumes cleanly and clears enter_silence.
         let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &g729_20ms));
         assert_eq!(samples.len(), 320);
+        assert!(!enter_silence);
+    }
+
+    #[test]
+    fn test_voip_bridge_reverse_decoder_keeps_opus_state_through_dtx() {
+        let codec = audio_codec::CodecType::Opus;
+        let mut bridge = BridgeReverseDecoder::new(Some((106, codec)), BTreeMap::new(), 48_000);
+        let mut encoder = audio_codec::create_encoder(codec);
+        let speech = encoder.encode(&sine_pcm(48_000, 960, 440.0));
+        let resumed = encoder.encode(&sine_pcm(48_000, 960, 660.0));
+        let marker = [speech[0] & !3];
+
+        let mut reference = audio_codec::create_decoder(codec);
+        assert_eq!(reference.decode(&speech).len(), 960);
+        assert_eq!(reference.decode(&marker).len(), 960);
+        let expected = reference.decode(&resumed);
+
+        let mut without_marker = audio_codec::create_decoder(codec);
+        without_marker.decode(&speech);
+        assert_ne!(without_marker.decode(&resumed), expected);
+
+        let (samples, enter_silence) = unwrap_speech(bridge.decode(106, &speech));
+        assert_eq!(samples.len(), 960);
+        assert!(!enter_silence);
+        let other_channel_marker = [marker[0] ^ 0x04];
+        assert_eq!(
+            bridge.decode(106, &other_channel_marker),
+            Some(ReverseAudio::Silence)
+        );
+        let (samples, enter_silence) = unwrap_speech(bridge.decode(106, &resumed));
+        assert_eq!(samples, expected.as_slice());
         assert!(!enter_silence);
     }
 }
