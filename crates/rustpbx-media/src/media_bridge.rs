@@ -654,26 +654,28 @@ impl MediaBridge {
                 .ok_or_else(|| anyhow!("no audio receiver track on leg B"))?;
             let a_recv = get_audio_recv_track(la.pc())
                 .ok_or_else(|| anyhow!("no audio receiver track on leg A"))?;
-            // Use the DECODER's output sample rate (not the RTP clock rate) as
-            // the resampler source rate — e.g. G.722 clocks at 8 kHz in RTP but
-            // decodes to 16 kHz PCM. Wrong source rate ⇒ garbage resample.
+            // `EgressTask` derives the resampler source rate from
+            // `decoder.sample_rate()` (PCM rate, not RTP clock rate — e.g.
+            // G.722 clocks at 8 kHz in RTP but decodes to 16 kHz PCM).
             let b_decoder = create_decoder(cb.codec);
             let a_decoder = create_decoder(ca.codec);
-            let b_src_rate = b_decoder.sample_rate();
-            let a_src_rate = a_decoder.sample_rate();
+            let b_dtmf_pts: Vec<u8> = pb.dtmf_pts().into_iter().collect();
+            let a_dtmf_pts: Vec<u8> = pa.dtmf_pts().into_iter().collect();
             la.set_egress_source(EgressSource::TranscodePeer {
                 peer: b_recv,
                 decoder: b_decoder,
-                src_sample_rate: b_src_rate,
+                source_codec: cb.codec,
                 source_audio_payload_type: cb.payload_type,
+                source_dtmf_payload_types: b_dtmf_pts,
                 primed: false,
             })
             .await?;
             lb.set_egress_source(EgressSource::TranscodePeer {
                 peer: a_recv,
                 decoder: a_decoder,
-                src_sample_rate: a_src_rate,
+                source_codec: ca.codec,
                 source_audio_payload_type: ca.payload_type,
+                source_dtmf_payload_types: a_dtmf_pts,
                 primed: false,
             })
             .await?;

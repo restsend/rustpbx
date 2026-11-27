@@ -83,6 +83,18 @@ const PLAYBACK_EOF_TAIL_MS: u32 = 300;
 /// frames arrived behind the leg's timeline (~1 s at 20 ms ptime), the
 /// timestamp offset is re-established once. A single late frame never
 /// triggers it; only a rebuilt producer (new random timestamp base) does.
+/// Non-blocking `now_or_never` poll on a `MediaStreamTrack` using a noop waker
+/// so draining never registers `EgressTask`'s real waker on the peer track.
+fn try_recv_sample(
+    peer: &dyn MediaStreamTrack,
+) -> Option<rustrtc::media::MediaResult<MediaSample>> {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match peer.recv().as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(res) => Some(res),
+        std::task::Poll::Pending => None,
+    }
+}
+
 /// Callback fired when a [`EgressSource::Media`] source stops producing audio:
 /// natural EOF (`false`) or interrupted by switching away from Media / stop
 /// (`true`). Use to signal playback completion to the app/IVR layer.
@@ -139,14 +151,18 @@ pub enum EgressSource {
     TranscodePeer {
         peer: Arc<dyn MediaStreamTrack>,
         decoder: Box<dyn Decoder>,
-        /// The source leg's negotiated voice payload type. Other RTP packets
-        /// on this audio track are treated as telephone-event packets.
+        /// Source leg's negotiated audio codec (for DTX/SID classification and
+        /// codec-specific decoder state preservation).
+        source_codec: CodecType,
+        /// The source leg's negotiated voice payload type.
         source_audio_payload_type: u8,
-        /// Source codec sample rate (for auto-resampling to `EgressCodec`).
-        src_sample_rate: u32,
-        /// Once the first real audio frame has been decoded, timeouts fall
-        /// back to comfort-noise / PLC silence. Before that we emit nothing
-        /// so ICE/DTLS setup does not inflate the callee's silence_frames.
+        /// Negotiated RFC 4733 telephone-event payload types on the source leg.
+        /// Only packets carrying one of these PTs are forwarded as DTMF; RFC
+        /// 3389 PT 13 CN enters DTX silence and unknown PTs are ignored.
+        source_dtmf_payload_types: Vec<u8>,
+        /// Once the first real audio frame or explicit DTX signal has been
+        /// observed, empty ticks fall back to silence. Before that we emit
+        /// nothing so ICE/DTLS setup does not inflate the callee's silence_frames.
         primed: bool,
     },
 }
@@ -233,6 +249,8 @@ impl EgressPipeline {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
 
@@ -396,6 +414,15 @@ struct EgressTask {
     /// arriving a tick late merge into the buffer instead of punching CN
     /// holes; only a REAL network gap drains it to comfort-noise.
     transcode_armed: bool,
+    /// True while the `TranscodePeer` source is in explicit DTX silence (after
+    /// a G.729B SID, Opus short DTX marker, or RFC 3389 PT 13 CN). Drains any
+    /// trailing partial speech frame, suppresses SID/PLC bursts, and re-arms
+    /// `transcode_armed` for the next talkspurt.
+    transcode_in_dtx: bool,
+    /// True when a mixed G.729 speech+SID packet's 10 ms SID gap has not yet
+    /// been materialized (flushed to silence once speech finishes draining, or
+    /// inserted as 10 ms zeros if speech resumes before the tail drains).
+    transcode_sid_silence_pending: bool,
     /// TranscodePeer: decoded + resampled PCM carried over between ticks.
     /// Peers whose ptime does not divide evenly into this leg's ptime (e.g. a
     /// 10 ms opus peer into a 20 ms ptime leg) leave partial frames here that
@@ -504,7 +531,7 @@ impl EgressTask {
                         self.eof_tail_remaining = 0;
                         // Resample Media sources to the codec's sample rate
                         // before encoding (e.g. 24 kHz MP3 → 48 kHz opus).
-                        let s = match s {
+                        let mut s = match s {
                             EgressSource::Media {
                                 audio,
                                 loop_playback,
@@ -521,21 +548,51 @@ impl EgressTask {
                         // PCM sample rate (samplerate), NOT the RTP clock_rate —
                         // G.722 has clock_rate 8000 but samplerate 16000; using
                         // clock_rate skips the resampler and doubles the pitch.
-                        if let EgressSource::TranscodePeer { peer, src_sample_rate, .. } = &s {
+                        let mut startup_in_dtx = false;
+                        if let EgressSource::TranscodePeer {
+                            peer,
+                            decoder,
+                            source_codec,
+                            source_audio_payload_type,
+                            primed,
+                            ..
+                        } = &mut s
+                        {
                             // IVR/hold can leave incoming audio queued without a
                             // consumer. Start this live route at current audio,
                             // not at the oldest frame retained by the receiver.
                             // Drain here, between ticks, before this task starts
                             // consuming the new source; never wait for input.
-                            std::future::poll_fn(|cx| {
-                                while let std::task::Poll::Ready(Ok(_)) = peer.recv().as_mut().poll(cx) {}
-                                std::task::Poll::Ready(())
-                            }).await;
+                            // Retain an explicit DTX signal if the peer already
+                            // went quiet before the bridge formed so egress
+                            // keeps pacing silence instead of going dark.
+                            while let Some(Ok(sample)) = try_recv_sample(peer.as_ref()) {
+                                if let MediaSample::Audio(frame) = sample {
+                                    match crate::dtx::classify_rtp_audio_dtx(
+                                        *source_codec,
+                                        *source_audio_payload_type,
+                                        frame.payload_type,
+                                        &frame.data,
+                                    ) {
+                                        crate::dtx::PacketDtxSignal::EnterDtx => {
+                                            startup_in_dtx = true;
+                                        }
+                                        crate::dtx::PacketDtxSignal::Speech => {
+                                            startup_in_dtx = false;
+                                        }
+                                        crate::dtx::PacketDtxSignal::Ignore => {}
+                                    }
+                                }
+                            }
+                            if startup_in_dtx {
+                                *primed = true;
+                            }
+                            let src_sample_rate = decoder.sample_rate();
                             let dst_sample_rate = self.codec.codec.samplerate();
-                            if *src_sample_rate != dst_sample_rate {
+                            if src_sample_rate != dst_sample_rate {
                                 self.resampler = Some(
                                     BoxedResampler::new(
-                                        *src_sample_rate as usize,
+                                        src_sample_rate as usize,
                                         dst_sample_rate as usize,
                                     )
                                     .expect("valid sample rates"),
@@ -550,6 +607,8 @@ impl EgressTask {
                         // previous peer/source — never carry it across.
                         self.transcode_pending.clear();
                         self.transcode_armed = false;
+                        self.transcode_in_dtx = startup_in_dtx;
+                        self.transcode_sid_silence_pending = false;
                         // Re-anchor the pacing clock on a source switch. While
                         // the loop is parked (pre-answer gate / relay) the
                         // schedule keeps accumulating; dropping it here keeps
@@ -571,6 +630,8 @@ impl EgressTask {
                         // Pending PCM was decoded for the old codec rate.
                         self.transcode_pending.clear();
                         self.transcode_armed = false;
+                        self.transcode_in_dtx = false;
+                        self.transcode_sid_silence_pending = false;
                     }
                     None => break,
                 },
@@ -700,9 +761,10 @@ impl EgressTask {
             EgressSource::TranscodePeer {
                 peer,
                 decoder,
+                source_codec,
                 source_audio_payload_type,
+                source_dtmf_payload_types,
                 primed,
-                ..
             } => {
                 // Jitter-tolerant transcode pull. Per tick: non-blockingly
                 // drain EVERY frame the peer's receiver track already holds
@@ -713,65 +775,122 @@ impl EgressTask {
                 // jitter the old per-tick blocking `timeout(ptime, recv)`
                 // punched silent slots between speech frames (production
                 // incident 2026-11-13: broadband noise after hold/resume on
-                // G729↔PCMA calls). Only a REAL network gap (accumulator
-                // drained) falls back to comfort-noise here.
+                // G729↔PCMA calls). Only a REAL network gap or explicit DTX
+                // drains to silence here.
                 let frame_samples = self.pcm_buf.len();
                 let mut dtmf_input: Option<AudioFrame> = None;
-                std::future::poll_fn(|cx| {
-                    loop {
-                        // Cap first: trim the oldest surplus even when no new
-                        // frame arrives this round (burst guard).
-                        let excess =
-                            self.transcode_pending.len().saturating_sub(frame_samples * TRANSCODE_PENDING_MAX_FRAMES);
-                        if excess > 0 {
-                            self.transcode_pending.drain(..excess);
-                            self.transcode_overflow_samples += excess as u64;
-                        }
-                        if dtmf_input.is_some()
-                            || self.transcode_pending.len()
-                                >= frame_samples * TRANSCODE_PENDING_MAX_FRAMES
-                        {
-                            return std::task::Poll::Ready(());
-                        }
-                        match peer.recv().as_mut().poll(cx) {
-                            std::task::Poll::Ready(Ok(MediaSample::Audio(input))) => {
-                                if input
-                                    .payload_type
-                                    .is_none_or(|pt| pt == *source_audio_payload_type)
-                                {
-                                    let mut pcm = decoder.decode(&input.data);
-                                    if let Some(rs) = &mut self.resampler {
-                                        pcm = rs.resample(&pcm);
-                                    }
-                                    self.transcode_pending.extend_from_slice(&pcm);
-                                    *primed = true;
-                                } else {
-                                    // Telephone-event frame popped mid-drain:
-                                    // emit it on this tick, exactly like a
-                                    // DTMF frame arriving before the drain.
-                                    dtmf_input = Some(input);
-                                    return std::task::Poll::Ready(());
-                                }
-                            }
-                            std::task::Poll::Ready(Ok(_)) => {}
-                            std::task::Poll::Ready(Err(_)) => {
-                                return std::task::Poll::Ready(())
-                            }
-                            std::task::Poll::Pending => return std::task::Poll::Ready(()),
-                        }
+                let can_send_dtmf = self.codec.dtmf_payload_type.is_some();
+                let sid_dst_samples = (self.codec.codec.samplerate() as usize / 100).max(1);
+                loop {
+                    // Cap first: trim the oldest surplus even when no new
+                    // frame arrives this round (burst guard).
+                    let excess = self
+                        .transcode_pending
+                        .len()
+                        .saturating_sub(frame_samples * TRANSCODE_PENDING_MAX_FRAMES);
+                    if excess > 0 {
+                        self.transcode_pending.drain(..excess);
+                        self.transcode_overflow_samples += excess as u64;
                     }
-                })
-                .await;
-                if let Some(input) = dtmf_input {
-                    match self.build_dtmf_frame(&input) {
-                        Some(frame) => frame,
-                        // `primed` is already true here (a first audio frame
-                        // was decoded earlier), so a non-mappable event emits
-                        // silence instead of skipping the tick.
-                        None => {
-                            let encoded = self.encode_silence();
-                            self.build_frame(encoded)
+                    if dtmf_input.is_some()
+                        || self.transcode_pending.len()
+                            >= frame_samples * TRANSCODE_PENDING_MAX_FRAMES
+                    {
+                        break;
+                    }
+                    match try_recv_sample(peer.as_ref()) {
+                        Some(Ok(MediaSample::Audio(input))) => {
+                            if input.payload_type == Some(crate::dtx::COMFORT_NOISE_PT)
+                                && *source_audio_payload_type != crate::dtx::COMFORT_NOISE_PT
+                            {
+                                // RFC 3389 Comfort Noise (static PT 13):
+                                // enter DTX silence without treating CN as DTMF.
+                                self.transcode_in_dtx = true;
+                                self.transcode_sid_silence_pending = false;
+                                if let Some(rs) = &mut self.resampler {
+                                    rs.reset();
+                                }
+                                *primed = true;
+                            } else if input
+                                .payload_type
+                                .is_none_or(|pt| pt == *source_audio_payload_type)
+                            {
+                                match crate::dtx::decode_audio_packet(
+                                    *source_codec,
+                                    decoder.as_mut(),
+                                    &input.data,
+                                ) {
+                                    crate::dtx::DecodedAudio::Speech { mut pcm, enter_dtx } => {
+                                        if self.transcode_sid_silence_pending {
+                                            // A mixed G.729 speech+SID packet was followed
+                                            // by speech before its trailing silence flushed:
+                                            // preserve the 10 ms SID duration as zeros.
+                                            self.transcode_pending.resize(
+                                                self.transcode_pending.len() + sid_dst_samples,
+                                                0,
+                                            );
+                                            self.transcode_sid_silence_pending = false;
+                                        }
+                                        if let Some(rs) = &mut self.resampler {
+                                            pcm = rs.resample(&pcm);
+                                            if enter_dtx {
+                                                rs.reset();
+                                            }
+                                        }
+                                        self.transcode_pending.extend_from_slice(&pcm);
+                                        *primed = true;
+                                        self.transcode_in_dtx = enter_dtx;
+                                        self.transcode_sid_silence_pending = enter_dtx;
+                                    }
+                                    crate::dtx::DecodedAudio::Silence => {
+                                        self.transcode_in_dtx = true;
+                                        self.transcode_sid_silence_pending = false;
+                                        if let Some(rs) = &mut self.resampler {
+                                            rs.reset();
+                                        }
+                                        *primed = true;
+                                    }
+                                    crate::dtx::DecodedAudio::Ignore => {}
+                                }
+                            } else if can_send_dtmf
+                                && input.payload_type.is_some_and(|pt| {
+                                    source_dtmf_payload_types.contains(&pt)
+                                })
+                            {
+                                // Negotiated telephone-event frame popped mid-drain:
+                                // emit it on this tick, exactly like a DTMF frame
+                                // arriving before the drain.
+                                dtmf_input = Some(input);
+                                break;
+                            }
                         }
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) | None => break,
+                    }
+                }
+                if let Some(frame) = dtmf_input
+                    .as_ref()
+                    .and_then(|input| self.build_dtmf_frame(input))
+                {
+                    frame
+                } else if self.transcode_in_dtx {
+                    // Explicit DTX: drain any buffered speech (including a trailing
+                    // partial frame from a 12-byte G.729 speech+SID or a short
+                    // utterance before the 2-frame prebuffer armed), then re-arm
+                    // the jitter prebuffer for the next talkspurt and emit silence.
+                    if self.transcode_pending.len() >= frame_samples {
+                        let encoded = self.encode_pending_frame(frame_samples);
+                        self.build_frame(encoded)
+                    } else if !self.transcode_pending.is_empty() {
+                        self.transcode_sid_silence_pending = false;
+                        self.transcode_armed = false;
+                        let encoded = self.encode_pending_padded(frame_samples);
+                        self.build_frame(encoded)
+                    } else {
+                        self.transcode_sid_silence_pending = false;
+                        self.transcode_armed = false;
+                        let encoded = self.encode_silence();
+                        self.build_frame(encoded)
                     }
                 } else if !self.transcode_armed {
                     // Prebuffer: hold emitting until two full frames are on
@@ -861,10 +980,10 @@ impl EgressTask {
         self.encode_observed_pcm()
     }
 
-    /// Zero-fill the PCM buffer (silence).
-    fn encode_silence(&mut self) -> Bytes {
+    /// Fill `buf` with comfort noise (when enabled) or digital silence (zeros).
+    fn fill_silence(&mut self, buf: &mut [i16]) {
         if self.codec.comfort_noise && self.noise_amplitude > 0.0 {
-            for s in self.pcm_buf.iter_mut() {
+            for s in buf.iter_mut() {
                 // LCG uniform in (-1, 1).
                 self.noise_state = self
                     .noise_state
@@ -876,10 +995,15 @@ impl EgressTask {
                 *s = (self.noise_lp * self.noise_amplitude) as i16;
             }
         } else {
-            for s in self.pcm_buf.iter_mut() {
-                *s = 0;
-            }
+            buf.fill(0);
         }
+    }
+
+    /// Zero-fill (or CNG-fill) the PCM buffer (silence).
+    fn encode_silence(&mut self) -> Bytes {
+        let mut buf = std::mem::take(&mut self.pcm_buf);
+        self.fill_silence(&mut buf);
+        self.pcm_buf = buf;
         self.encode_observed_pcm()
     }
 
@@ -893,16 +1017,17 @@ impl EgressTask {
         self.encode_observed_pcm()
     }
 
-    /// Encode a zero-padded frame from a partial transcode accumulator
+    /// Encode a silence-padded frame from a partial transcode accumulator
     /// (fewer than one frame pending), consuming the samples: every sample
-    /// is emitted exactly once. Without the drain the partial would also be
-    /// folded into the next full frame — an audible repeat after any dry
-    /// tick on a short-ptime peer.
-    #[allow(dead_code)]
+    /// is emitted exactly once. Used when explicit DTX ends a talkspurt on a
+    /// partial frame (e.g. a 12-byte G.729 10 ms speech + 2 B SID packet) so
+    /// trailing speech is never stranded until the next talkspurt.
     fn encode_pending_padded(&mut self, frame_samples: usize) -> Bytes {
         let n = self.transcode_pending.len().min(frame_samples);
-        self.pcm_buf[..n].copy_from_slice(&self.transcode_pending[..n]);
-        self.pcm_buf[n..].fill(0);
+        let mut buf = std::mem::take(&mut self.pcm_buf);
+        buf[..n].copy_from_slice(&self.transcode_pending[..n]);
+        self.fill_silence(&mut buf[n..]);
+        self.pcm_buf = buf;
         self.transcode_pending.drain(..n);
         self.encode_observed_pcm()
     }
@@ -1089,6 +1214,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -1163,6 +1290,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1238,6 +1367,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1326,6 +1457,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1563,6 +1696,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1596,8 +1731,9 @@ mod tests {
         pipeline.set_source(EgressSource::TranscodePeer {
             peer: peer_track,
             decoder: audio_codec::create_decoder(CodecType::Opus),
+            source_codec: CodecType::Opus,
             source_audio_payload_type: 111,
-            src_sample_rate: 48_000,
+            source_dtmf_payload_types: vec![101],
             primed: false,
         }).await.unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), output_track.recv()).await.is_err(),
@@ -1696,8 +1832,9 @@ mod tests {
             source: EgressSource::TranscodePeer {
                 peer: peer_track,
                 decoder: audio_codec::create_decoder(CodecType::Opus),
+                source_codec: CodecType::Opus,
                 source_audio_payload_type: 111,
-                src_sample_rate: 48_000,
+                source_dtmf_payload_types: vec![101],
                 primed: true,
             },
             resampler: Some(BoxedResampler::new(48_000, 8000).expect("valid sample rates")),
@@ -1713,6 +1850,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -1826,6 +1965,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -2071,6 +2212,8 @@ mod tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         };
 
         let speech_ref: Bytes = create_encoder(CodecType::PCMU)
@@ -2198,8 +2341,9 @@ mod transcode_drain_tests {
             source: EgressSource::TranscodePeer {
                 peer,
                 decoder: create_decoder(CodecType::PCMU),
+                source_codec: CodecType::PCMU,
                 source_audio_payload_type: 0,
-                src_sample_rate: 8000,
+                source_dtmf_payload_types: vec![101],
                 primed: false,
             },
             resampler: None,
@@ -2215,6 +2359,8 @@ mod transcode_drain_tests {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
             transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
         }
     }
 
@@ -2530,5 +2676,469 @@ mod transcode_drain_tests {
         assert_eq!(task.transcode_pending.len(), 0);
         assert_eq!(task.transcode_overflow_samples, 0);
         assert_eq!(in_sender.drop_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod transcode_dtx_tests {
+    use super::*;
+    use audio_codec::{create_decoder, create_encoder};
+    use rustrtc::media::MediaKind;
+    use rustrtc::media::track::sample_track;
+
+    fn sine_pcm(sample_rate: u32, samples: usize, freq_hz: f32) -> Vec<i16> {
+        (0..samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                ((t * freq_hz * std::f32::consts::TAU).sin() * 12_000.0) as i16
+            })
+            .collect()
+    }
+
+    fn dst_codec(codec: CodecType, comfort_noise: bool) -> EgressCodec {
+        EgressCodec {
+            codec,
+            payload_type: codec.payload_type(),
+            clock_rate: codec.clock_rate(),
+            dtmf_payload_type: Some(101),
+            comfort_noise,
+            comfort_noise_level_db: -35.0,
+        }
+    }
+
+    fn make_task(
+        peer: Arc<dyn MediaStreamTrack>,
+        source_codec: CodecType,
+        source_audio_payload_type: u8,
+        source_dtmf_payload_types: Vec<u8>,
+        dst: EgressCodec,
+    ) -> EgressTask {
+        let (sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let decoder = create_decoder(source_codec);
+        let src_sample_rate = decoder.sample_rate();
+        let dst_sample_rate = dst.codec.samplerate();
+        let resampler = (src_sample_rate != dst_sample_rate)
+            .then(|| BoxedResampler::new(src_sample_rate as usize, dst_sample_rate as usize).unwrap());
+        EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
+            sender,
+            codec: dst,
+            encoder: create_egress_encoder(dst.codec),
+            source: EgressSource::TranscodePeer {
+                peer,
+                decoder,
+                source_codec,
+                source_audio_payload_type,
+                source_dtmf_payload_types,
+                primed: false,
+            },
+            resampler,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            marker_pending: false,
+            pcm_buf: vec![0i16; pcm_samples_per_frame(dst.codec, Duration::from_millis(20))],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(dst.comfort_noise_level_db / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
+            transcode_armed: false,
+            transcode_in_dtx: false,
+            transcode_sid_silence_pending: false,
+        }
+    }
+
+    fn raw_audio_sample(pt: u8, seq: u16, ts: u32, clock_rate: u32, payload: Vec<u8>) -> MediaSample {
+        let raw = rustrtc::rtp::RtpPacket::new(
+            rustrtc::rtp::RtpHeader::new(pt, seq, ts, 0xBEEF),
+            payload.clone(),
+        );
+        MediaSample::Audio(AudioFrame {
+            rtp_timestamp: ts,
+            clock_rate,
+            data: Bytes::from(payload),
+            sequence_number: Some(seq),
+            payload_type: Some(pt),
+            marker: false,
+            header_extension: None,
+            source_addr: None,
+            raw_packet: Some(raw),
+        })
+    }
+
+    /// RFC 3389 Comfort Noise (PT 13) — including 4-byte spectral CN that
+    /// matches the length of a DTMF packet — must enter DTX silence instead of
+    /// being misclassified and forwarded as PT 101 telephone-event DTMF.
+    /// Unknown non-DTMF PTs (e.g. unsolicited audio PT) must also never be
+    /// emitted as DTMF.
+    #[tokio::test(start_paused = true)]
+    async fn cn_and_unknown_pts_never_spoof_dtmf_in_transcode() {
+        let (in_sender, in_track, _) = sample_track(MediaKind::Audio, 32);
+        let mut task = make_task(
+            in_track,
+            CodecType::G729,
+            18,
+            vec![101],
+            dst_codec(CodecType::PCMU, false),
+        );
+        let pcmu_silence: Bytes = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]).into();
+
+        // 4-byte PT 13 CN (1 B noise level + 3 B spectral model): previously
+        // fell into `else` → `build_dtmf_frame` and was sent as PT 101 DTMF!
+        in_sender
+            .try_send(raw_audio_sample(13, 1, 160, 8000, vec![0x05, 0x0A, 0x00, 0xA0]))
+            .unwrap();
+        let frame = task.next_frame().await.expect("CN primes and emits silence");
+        assert_eq!(frame.payload_type, Some(0), "PT 13 CN must emit audio silence, never PT 101 DTMF");
+        assert_eq!(frame.data, pcmu_silence);
+        assert!(task.transcode_in_dtx);
+
+        // 1-byte PT 13 CN followed immediately by 2 speech frames in the same
+        // drain must not abort draining the queued speech behind it.
+        let speech = create_encoder(CodecType::G729).encode(&sine_pcm(8000, 160, 440.0));
+        in_sender
+            .try_send(raw_audio_sample(13, 2, 320, 8000, vec![40]))
+            .unwrap();
+        in_sender
+            .try_send(raw_audio_sample(18, 3, 480, 8000, speech.clone()))
+            .unwrap();
+        in_sender
+            .try_send(raw_audio_sample(18, 4, 640, 8000, speech.clone()))
+            .unwrap();
+        let resumed = task.next_frame().await.expect("resumed speech after CN");
+        assert_eq!(resumed.payload_type, Some(0));
+        assert_ne!(resumed.data, pcmu_silence, "queued speech behind CN must decode on this tick");
+        assert!(!task.transcode_in_dtx);
+        assert!(task.transcode_armed);
+
+        // Unsolicited unknown PT (e.g. 160-byte PCMU on PT 0, or PT 99 4-byte):
+        // must be ignored rather than re-tagged as PT 101 DTMF.
+        in_sender
+            .try_send(raw_audio_sample(0, 5, 800, 8000, vec![0x7f; 160]))
+            .unwrap();
+        in_sender
+            .try_send(raw_audio_sample(99, 6, 960, 8000, vec![1, 0x8a, 0, 160]))
+            .unwrap();
+        let after_unknown = task.next_frame().await.expect("buffered speech frame");
+        assert_eq!(after_unknown.payload_type, Some(0), "unknown PTs must never spoof DTMF");
+        assert_ne!(after_unknown.data, pcmu_silence);
+    }
+
+    /// G.729 Annex B DTX:
+    /// - 22-byte mixed packet (20 ms speech + 2 B SID) emits speech cleanly
+    ///   without stranding 80 CNG samples in `transcode_pending`.
+    /// - Repeated standalone 2-byte SIDs during DTX never accumulate into
+    ///   CNG bursts spliced into silence.
+    /// - Exiting DTX re-arms the 2-frame jitter absorber (`transcode_armed`).
+    #[tokio::test(start_paused = true)]
+    async fn g729_sid_and_mixed_22b_suppress_cng_and_rearm_jitter_buffer() {
+        let (in_sender, in_track, _) = sample_track(MediaKind::Audio, 32);
+        let mut task = make_task(
+            in_track,
+            CodecType::G729,
+            18,
+            vec![101],
+            dst_codec(CodecType::PCMU, false),
+        );
+        let mut enc = create_encoder(CodecType::G729);
+        let speech_a = enc.encode(&sine_pcm(8000, 160, 440.0));
+        let speech_b = enc.encode(&sine_pcm(8000, 160, 660.0));
+        assert_eq!(speech_a.len(), 20);
+        let pcmu_silence: Bytes = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]).into();
+
+        // Prime + arm with 2 speech frames.
+        in_sender.try_send(raw_audio_sample(18, 1, 160, 8000, speech_a.clone())).unwrap();
+        in_sender.try_send(raw_audio_sample(18, 2, 320, 8000, speech_a.clone())).unwrap();
+        let f1 = task.next_frame().await.expect("first speech");
+        assert_ne!(f1.data, pcmu_silence);
+        assert!(task.transcode_armed);
+        assert_eq!(task.transcode_pending.len(), 160);
+
+        // Send 22-byte mixed packet (20 ms speech + 2 B SID) and enter DTX.
+        let mut mixed_22 = speech_b.clone();
+        mixed_22.extend_from_slice(&[0x12, 0x34]);
+        in_sender.try_send(raw_audio_sample(18, 3, 480, 8000, mixed_22)).unwrap();
+
+        let f2 = task.next_frame().await.expect("buffered speech");
+        assert_ne!(f2.data, pcmu_silence);
+        assert!(task.transcode_in_dtx);
+        assert_eq!(task.transcode_pending.len(), 160, "SID CNG must not add 80 samples");
+
+        let f3 = task.next_frame().await.expect("mixed packet speech");
+        assert_ne!(f3.data, pcmu_silence);
+        assert_eq!(task.transcode_pending.len(), 0, "no stranded 80-sample SID tail");
+
+        // Next tick transitions to pure silence and resets transcode_armed.
+        let sil1 = task.next_frame().await.expect("DTX silence 1");
+        assert_eq!(sil1.data, pcmu_silence);
+        assert!(!task.transcode_armed, "DTX silence must reset jitter prebuffer");
+
+        // Four standalone 2-byte SIDs during DTX must never accumulate into CNG bursts.
+        for seq in 4..8u16 {
+            in_sender
+                .try_send(raw_audio_sample(18, seq, u32::from(seq) * 800, 8000, vec![0x12, 0x34]))
+                .unwrap();
+            let sil = task.next_frame().await.expect("SID tick must remain pure silence");
+            assert_eq!(sil.data, pcmu_silence, "standalone SID must not emit g729-sys CNG");
+            assert_eq!(task.transcode_pending.len(), 0);
+            assert!(task.transcode_in_dtx);
+        }
+
+        // Speech resumes: 1st packet prebuffers (transcode_armed was reset),
+        // 2nd packet re-arms and emits clean speech with zero 10 ms shift.
+        in_sender.try_send(raw_audio_sample(18, 8, 8000, 8000, speech_a.clone())).unwrap();
+        let prebuf = task.next_frame().await.expect("prebuffer tick on resume");
+        assert_eq!(prebuf.data, pcmu_silence);
+        assert!(!task.transcode_armed);
+        assert!(!task.transcode_in_dtx);
+        assert_eq!(task.transcode_pending.len(), 160);
+
+        in_sender.try_send(raw_audio_sample(18, 9, 8160, 8000, speech_b)).unwrap();
+        let resumed = task.next_frame().await.expect("re-armed speech");
+        assert_ne!(resumed.data, pcmu_silence);
+        assert!(task.transcode_armed);
+        assert_eq!(task.transcode_pending.len(), 160);
+    }
+
+    /// A 12-byte G.729 packet (10 ms speech + 2 B SID) entering DTX must flush
+    /// its trailing 10 ms of real speech (padded with 10 ms silence) instead of
+    /// stranding it in `transcode_pending` or stalling in the prebuffer.
+    #[tokio::test(start_paused = true)]
+    async fn g729_mixed_12b_flushes_trailing_speech_and_preserves_mid_stream_sid_gap() {
+        let (in_sender, in_track, _) = sample_track(MediaKind::Audio, 32);
+        let mut task = make_task(
+            in_track,
+            CodecType::G729,
+            18,
+            vec![],
+            dst_codec(CodecType::PCMU, false),
+        );
+        let mut enc = create_encoder(CodecType::G729);
+        // Warm up G.729's 5 ms lookahead + LPC predictor so the 10 ms slice
+        // carries steady-state tone energy rather than cold-start ramp-up.
+        let _ = enc.encode(&sine_pcm(8000, 160, 440.0));
+        let speech_20 = enc.encode(&sine_pcm(8000, 160, 440.0));
+        let mut mixed_12 = speech_20[..10].to_vec();
+        mixed_12.extend_from_slice(&[0x12, 0x34]);
+
+        // Case 1: Single 12 B utterance while unarmed must flush immediately.
+        in_sender.try_send(raw_audio_sample(18, 1, 160, 8000, mixed_12.clone())).unwrap();
+        let frame = task.next_frame().await.expect("12 B utterance must flush");
+        let decoded = create_decoder(CodecType::PCMU).decode(&frame.data);
+        assert_eq!(decoded.len(), 160);
+        assert!(decoded[..80].iter().any(|&s| s.unsigned_abs() > 100), "first 10 ms must be speech");
+        assert!(decoded[80..].iter().all(|&s| s == 0), "second 10 ms must be digital silence");
+        assert_eq!(task.transcode_pending.len(), 0);
+        assert!(task.transcode_in_dtx);
+
+        // Case 2: 12 B (10 ms speech + 2 B SID) followed immediately in the same
+        // drain by 20 B speech preserves the 10 ms SID silence gap and stays
+        // 20 ms aligned (80 speech + 80 silence + 160 speech = 320 = 2 frames).
+        in_sender.try_send(raw_audio_sample(18, 2, 320, 8000, mixed_12)).unwrap();
+        in_sender.try_send(raw_audio_sample(18, 3, 480, 8000, speech_20)).unwrap();
+        let first = task.next_frame().await.expect("12 B + 10 ms SID frame");
+        let second = task.next_frame().await.expect("following 20 B speech frame");
+        let d1 = create_decoder(CodecType::PCMU).decode(&first.data);
+        let d2 = create_decoder(CodecType::PCMU).decode(&second.data);
+        assert!(d1[..80].iter().any(|&s| s.unsigned_abs() > 100));
+        assert!(d1[80..].iter().all(|&s| s == 0), "10 ms SID gap must remain silent");
+        assert!(d2.iter().any(|&s| s.unsigned_abs() > 100));
+        assert_eq!(task.transcode_pending.len(), 0, "exact 20 ms alignment preserved");
+    }
+
+    /// Opus DTX (`usedtx=1`) in transcode:
+    /// - 1-byte TOC (`[0xF8]`) and 2-byte multi-frame DTX (`[0xFA, 0]`, `[0xFB, 2]`)
+    ///   emit clean silence rather than un-faded `opus-rs` PLC.
+    /// - A flipped TOC stereo bit on an Opus DTX marker never resets decoder state.
+    /// - Malformed short frames (`[0xFA]`, `[0xFB, 7]`) are ignored.
+    #[tokio::test(start_paused = true)]
+    async fn opus_dtx_suppresses_plc_and_preserves_decoder_channel_state() {
+        let (in_sender, in_track, _) = sample_track(MediaKind::Audio, 32);
+        let mut task = make_task(
+            in_track,
+            CodecType::Opus,
+            111,
+            vec![101],
+            dst_codec(CodecType::PCMU, false),
+        );
+        let mut enc = create_encoder(CodecType::Opus);
+        let speech1 = enc.encode(&sine_pcm(48_000, 960, 440.0));
+        let speech2 = enc.encode(&sine_pcm(48_000, 960, 550.0));
+        let resumed_pkt = enc.encode(&sine_pcm(48_000, 960, 660.0));
+        let pcmu_silence: Bytes = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]).into();
+
+        // Malformed short Opus packets before priming must be ignored (stay unprimed).
+        in_sender.try_send(raw_audio_sample(111, 1, 960, 48_000, vec![0xFA])).unwrap();
+        in_sender.try_send(raw_audio_sample(111, 2, 1920, 48_000, vec![0xFB, 7])).unwrap();
+        assert!(task.next_frame().await.is_none(), "malformed Opus must not prime");
+
+        // Prime + arm with 2 active Opus speech frames.
+        in_sender.try_send(raw_audio_sample(111, 3, 2880, 48_000, speech1.clone())).unwrap();
+        in_sender.try_send(raw_audio_sample(111, 4, 3840, 48_000, speech2.clone())).unwrap();
+        let f1 = task.next_frame().await.expect("speech1");
+        assert_ne!(f1.data, pcmu_silence);
+        assert!(task.transcode_armed);
+
+        // Enter Opus DTX with a flipped stereo bit in the 1-byte TOC marker.
+        let marker = [speech2[0] & !3];
+        let flipped_marker = [marker[0] ^ 0x04];
+        in_sender.try_send(raw_audio_sample(111, 5, 4800, 48_000, flipped_marker.to_vec())).unwrap();
+
+        // Drain the buffered speech2 frame first.
+        let f2 = task.next_frame().await.expect("speech2");
+        assert_ne!(f2.data, pcmu_silence);
+        assert!(task.transcode_in_dtx);
+        assert_eq!(task.transcode_pending.len(), 0);
+
+        // Next tick and subsequent 1-byte / 2-byte DTX markers must emit pure
+        // silence (NOT opus-rs PLC output) and keep transcode_pending empty.
+        for (seq, dtx) in [
+            (6u16, flipped_marker.to_vec()),
+            (7, vec![0xFA, 0]),
+            (8, vec![0xFB, 2]),
+        ] {
+            in_sender
+                .try_send(raw_audio_sample(111, seq, u32::from(seq) * 19_200, 48_000, dtx))
+                .unwrap();
+            let sil = task.next_frame().await.expect("Opus DTX silence");
+            assert_eq!(sil.data, pcmu_silence, "Opus DTX must emit clean silence, not PLC");
+            assert_eq!(task.transcode_pending.len(), 0);
+            assert!(!task.transcode_armed);
+        }
+
+        // Verify the internal Opus decoder kept its channel count (2, from stock
+        // create_encoder) and did not reset across the flipped-channel marker.
+        if let EgressSource::TranscodePeer { decoder, .. } = &task.source {
+            let expected_channels = if speech2[0] & 0x04 != 0 { 2 } else { 1 };
+            assert_eq!(decoder.channels(), expected_channels);
+        }
+
+        // Resumed speech clears DTX and produces audio once prebuffer re-arms.
+        in_sender.try_send(raw_audio_sample(111, 9, 200_000, 48_000, resumed_pkt.clone())).unwrap();
+        in_sender.try_send(raw_audio_sample(111, 10, 200_960, 48_000, resumed_pkt)).unwrap();
+        let resumed = task.next_frame().await.expect("resumed Opus speech");
+        assert_ne!(resumed.data, pcmu_silence);
+        assert!(!task.transcode_in_dtx);
+        assert!(task.transcode_armed);
+    }
+
+    /// Startup drain on `SetSource(TranscodePeer)` must retain a queued DTX
+    /// signal (G.729B SID, Opus DTX, or PT 13 CN) so egress paces silence
+    /// instead of going dark when the peer entered DTX before the bridge formed.
+    #[tokio::test]
+    async fn startup_drain_retains_queued_dtx_and_paces_silence() {
+        for (label, src_codec, src_pt, clock, queued_packets) in [
+            (
+                "g729_sid",
+                CodecType::G729,
+                18u8,
+                8000u32,
+                vec![
+                    (18u8, vec![0u8; 20]),
+                    (18, vec![0x12, 0x34]),
+                    (101, vec![1, 0x8a, 0, 160]), // trailing DTMF must not clear DTX
+                ],
+            ),
+            (
+                "g729_mixed_22b",
+                CodecType::G729,
+                18,
+                8000,
+                vec![(18, vec![0u8; 22])],
+            ),
+            (
+                "opus_dtx",
+                CodecType::Opus,
+                111,
+                48_000,
+                vec![
+                    (111, vec![0xF8]),
+                    (111, vec![0xFA]), // malformed short frame must not clear DTX
+                ],
+            ),
+            (
+                "pt13_cn",
+                CodecType::PCMU,
+                0,
+                8000,
+                vec![(0, vec![0xFF; 160]), (13, vec![40])],
+            ),
+        ] {
+            let (peer_sender, peer_track, _) = sample_track(MediaKind::Audio, 32);
+            let (sender, output_track, _) = sample_track(MediaKind::Audio, 32);
+            for (idx, (pt, data)) in queued_packets.into_iter().enumerate() {
+                peer_sender
+                    .try_send(raw_audio_sample(pt, idx as u16, idx as u32 * 160, clock, data))
+                    .unwrap();
+            }
+            let pipeline = EgressPipeline::start_with_gate(
+                sender,
+                dst_codec(CodecType::PCMA, false),
+                EgressSource::Silence,
+                Some(20),
+                None,
+            );
+            let dec = create_decoder(src_codec);
+            pipeline
+                .set_source(EgressSource::TranscodePeer {
+                    peer: peer_track,
+                    decoder: dec,
+                    source_codec: src_codec,
+                    source_audio_payload_type: src_pt,
+                    source_dtmf_payload_types: vec![101],
+                    primed: false,
+                })
+                .await
+                .unwrap();
+
+            let MediaSample::Audio(frame) =
+                tokio::time::timeout(Duration::from_millis(200), output_track.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("{label}: egress went dark instead of pacing DTX silence"))
+                    .unwrap()
+            else {
+                panic!("expected audio frame");
+            };
+            let pcma_silence: Bytes = create_encoder(CodecType::PCMA).encode(&vec![0i16; 160]).into();
+            assert_eq!(frame.payload_type, Some(8), "{label}: must emit PCMA");
+            assert_eq!(frame.data, pcma_silence, "{label}: must emit clean silence");
+            pipeline.stop();
+        }
+    }
+
+    /// Resampled transcode (G.729 8 kHz → Opus 48 kHz) must keep exact 960-sample
+    /// framing and flush the FIR resampler history across DTX boundaries.
+    #[tokio::test(start_paused = true)]
+    async fn g729_to_opus_resampled_dtx_keeps_alignment() {
+        let (in_sender, in_track, _) = sample_track(MediaKind::Audio, 32);
+        let mut task = make_task(
+            in_track,
+            CodecType::G729,
+            18,
+            vec![101],
+            dst_codec(CodecType::Opus, false),
+        );
+        let mut enc = create_encoder(CodecType::G729);
+        let speech = enc.encode(&sine_pcm(8000, 160, 440.0));
+        let mut mixed_12 = speech[..10].to_vec();
+        mixed_12.extend_from_slice(&[0x12, 0x34]);
+
+        in_sender.try_send(raw_audio_sample(18, 1, 160, 8000, speech.clone())).unwrap();
+        in_sender.try_send(raw_audio_sample(18, 2, 320, 8000, mixed_12)).unwrap();
+
+        // Drain 20 ms speech + 10 ms speech (padded to 20 ms) → 2 Opus frames, 0 pending.
+        let f1 = task.next_frame().await.expect("first 20 ms Opus frame");
+        let f2 = task.next_frame().await.expect("flushed 10 ms + silence Opus frame");
+        assert_eq!(f1.payload_type, Some(111));
+        assert_eq!(f2.payload_type, Some(111));
+        assert_eq!(task.transcode_pending.len(), 0);
+        assert!(task.transcode_in_dtx);
+        assert!(!task.transcode_armed);
+        // Resampler history was reset on DTX: resampling silence next emits all zeros.
+        let flushed = task.resampler.as_mut().unwrap().resample(&[0i16; 80]);
+        assert!(flushed.iter().all(|&s| s == 0), "FIR resampler history must be reset on DTX");
     }
 }

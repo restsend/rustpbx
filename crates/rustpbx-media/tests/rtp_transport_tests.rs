@@ -3703,3 +3703,156 @@ async fn video_relay_translates_rtx_repairs_between_negotiated_streams() {
         h.close();
     }
 }
+
+/// End-to-end MediaBridge transcode (G.729 + DTMF 101 ↔ PCMU + DTMF 101) under
+/// DTX:
+/// - G.729 speech → 22-byte speech+SID → standalone 2-byte SIDs → 4-byte RFC 3389
+///   PT 13 Comfort Noise → real PT 101 DTMF → resumed G.729 speech.
+/// - Verifies PT 13 CN (4 bytes) never spoofs PT 101 DTMF on leg B, real PT 101
+///   DTMF still relays, and leg B receives clean digital silence during DTX.
+#[tokio::test]
+async fn transcode_g729_dtx_and_cn_do_not_spoof_dtmf_or_leak_cng() {
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    let g729 = MediaNegotiator::codec_info_for_type(CodecType::G729);
+    let pcmu = MediaNegotiator::codec_info_for_type(CodecType::PCMU);
+    let dtmf = CodecInfo {
+        payload_type: 101,
+        codec: CodecType::TelephoneEvent,
+        clock_rate: 8000,
+        channels: 1,
+        fmtp: Some("0-16".into()),
+    };
+    let caps_for = |audio: &CodecInfo| {
+        let mut caps = rustrtc::config::MediaCapabilities::default();
+        caps.audio = vec![
+            audio.to_audio_capability().unwrap(),
+            dtmf.to_audio_capability().unwrap(),
+        ];
+        caps
+    };
+
+    let mut cfg_a = rtc_config(TransportMode::Rtp, &g729);
+    cfg_a.media_capabilities = Some(caps_for(&g729));
+    let mut cfg_b = rtc_config(TransportMode::Rtp, &pcmu);
+    cfg_b.media_capabilities = Some(caps_for(&pcmu));
+
+    // Disable comfort noise on leg B so DTX silence is exact PCMU digital silence (0xFF).
+    let leg_a = LegInner::from_rtc_config(
+        "a",
+        cfg_a,
+        vec![g729.clone(), dtmf.clone()],
+        false,
+        -35.0,
+        None,
+        None,
+    )
+    .unwrap();
+    let leg_b = LegInner::from_rtc_config(
+        "b",
+        cfg_b,
+        vec![pcmu.clone(), dtmf.clone()],
+        false,
+        -35.0,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let test_a = TestPeer::with_caps(TransportMode::Rtp, g729.clone(), caps_for(&g729));
+    let test_b = TestPeer::with_caps(TransportMode::Rtp, pcmu.clone(), caps_for(&pcmu));
+    negotiate(&test_a, &leg_a).await;
+    negotiate(&test_b, &leg_b).await;
+
+    let mut mb = MediaBridge::new("transcode-dtx-e2e");
+    mb.replace_leg(LegSide::A, leg_a).await;
+    mb.replace_leg(LegSide::B, leg_b).await;
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(!mb.leg(LegSide::B).unwrap().egress_is_relay());
+
+    let pcmu_silence: Vec<u8> = audio_codec::create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
+    let tone: Vec<i16> = (0..160)
+        .map(|i| ((i as f32 * 440.0 * std::f32::consts::TAU / 8000.0).sin() * 12_000.0) as i16)
+        .collect();
+    let g729_speech = audio_codec::create_encoder(CodecType::G729).encode(&tone);
+    assert_eq!(g729_speech.len(), 20);
+    let mut g729_mixed = g729_speech.clone();
+    g729_mixed.extend_from_slice(&[0x12, 0x34]);
+
+    let ssrc = test_a
+        .pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.sender())
+        .unwrap()
+        .ssrc();
+    let send_raw = |pt: u8, seq: u16, ts: u32, payload: Vec<u8>| {
+        let pc = test_a.pc.clone();
+        async move {
+            pc.send_raw_rtp(RtpPacket::new(RtpHeader::new(pt, seq, ts, ssrc), payload))
+                .await
+                .unwrap();
+        }
+    };
+
+    // 1. Send 3 speech packets + 22 B mixed speech+SID to prime, arm, and enter DTX.
+    send_raw(18, 1, 160, g729_speech.clone()).await;
+    send_raw(18, 2, 320, g729_speech.clone()).await;
+    send_raw(18, 3, 480, g729_speech.clone()).await;
+    send_raw(18, 4, 640, g729_mixed).await;
+
+    // 2. Send standalone 2 B SIDs and a 4-byte RFC 3389 PT 13 CN packet (event-like
+    //    byte 0 = 5, length = 4) that previously spoofed PT 101 DTMF digit '5'.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    send_raw(18, 5, 1120, vec![0x12, 0x34]).await;
+    send_raw(13, 6, 1280, vec![5, 0x8a, 0x00, 0xA0]).await;
+    send_raw(18, 7, 1440, vec![0x12, 0x34]).await;
+
+    // Wait for transcoded speech and subsequent DTX silence on leg B; assert
+    // zero spoofed PT 101 packets before we send a real digit.
+    let mut saw_speech = false;
+    let mut consecutive_silence = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && !(saw_speech && consecutive_silence >= 4) {
+        if let Some(frame) = test_b.recv_audio(150).await {
+            assert_eq!(
+                frame.payload_type,
+                Some(0),
+                "PT 13 CN must never be emitted as PT 101 DTMF; got PT {:?}",
+                frame.payload_type
+            );
+            if frame.data.as_ref() == pcmu_silence.as_slice() {
+                if saw_speech {
+                    consecutive_silence += 1;
+                }
+            } else {
+                saw_speech = true;
+                consecutive_silence = 0;
+            }
+        }
+    }
+    assert!(saw_speech, "leg B must receive transcoded G.729 speech");
+    assert!(
+        consecutive_silence >= 4,
+        "leg B must receive clean digital silence during G.729B/CN DTX, got {consecutive_silence}"
+    );
+
+    // 3. Real negotiated PT 101 DTMF still crosses transcode cleanly.
+    send_raw(101, 8, 2400, vec![7, 0x8a, 0x00, 0xA0]).await;
+    let mut saw_real_dtmf = false;
+    let dtmf_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < dtmf_deadline {
+        if let Some(frame) = test_b.recv_audio(150).await
+            && frame.payload_type == Some(101)
+            && frame.data.first() == Some(&7)
+        {
+            saw_real_dtmf = true;
+            break;
+        }
+    }
+    assert!(saw_real_dtmf, "negotiated PT 101 DTMF must still relay across transcode");
+
+    mb.close();
+}
