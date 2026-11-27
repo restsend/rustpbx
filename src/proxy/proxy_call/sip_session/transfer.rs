@@ -92,8 +92,8 @@ fn take_bridge_pcm_frame(
 /// Decoded result of one inbound RTP packet in `voip_bridge`'s reverse loop.
 #[derive(Debug, PartialEq, Eq)]
 enum ReverseAudio<'a> {
-    /// Active speech PCM at `target_sample_rate`. `enter_silence` is true when
-    /// a trailing G.729B 2-byte SID ended the packet (DTX begins right after).
+    /// Active speech PCM at `target_sample_rate`. When `enter_silence` is true,
+    /// the last 10 ms is a G.729 Annex B SID rendered as zeros.
     Speech {
         samples: &'a [i16],
         enter_silence: bool,
@@ -182,20 +182,15 @@ impl BridgeReverseDecoder {
             }
             written = mono_len;
         }
-        // RFC 3551 §4.5.6: a G.729 payload whose length is `10*N + 2` ends with
-        // a 2-byte Annex B SID frame (decoded to 80 samples / 10 ms of CNG).
-        // `decode_into` above keeps the decoder state synced; strip the trailing
-        // CNG samples and signal DTX silence instead.
-        let has_g729_sid = codec == audio_codec::CodecType::G729 && data.len() % 10 == 2;
-        if has_g729_sid {
-            written = written.saturating_sub(80);
-            if written == 0 {
-                return Some(ReverseAudio::Silence);
-            }
+        // RFC 3551 §4.5.6: an Annex B SID follows any speech frames and
+        // decodes to 80 samples (10 ms). Keep that duration in mixed packets.
+        let has_g729_sid = codec == audio_codec::CodecType::G729 && codec.is_silence_frame(data);
+        let sid_samples = if has_g729_sid { 80 } else { 0 };
+        if written <= sid_samples {
+            return has_g729_sid.then_some(ReverseAudio::Silence);
         }
-        if written == 0 {
-            return None;
-        }
+        let speech_samples = written - sid_samples;
+        self.decode_buf[speech_samples..written].fill(0);
 
         let src_rate = decoder.sample_rate();
         if src_rate == self.target_sample_rate {
@@ -219,9 +214,17 @@ impl BridgeReverseDecoder {
         if self.resample_buf.len() < needed {
             self.resample_buf.resize(needed, 0);
         }
-        let out_len = resampler
-            .resample_into(decoded, &mut self.resample_buf)
+        let (speech, silence) = decoded.split_at(speech_samples);
+        let mut out_len = resampler
+            .resample_into(speech, &mut self.resample_buf)
             .ok()?;
+        if has_g729_sid {
+            // Advance the FIR phase through the SID and mute any filter tail.
+            let tail = &mut self.resample_buf[out_len..];
+            let silence_len = resampler.resample_into(silence, tail).ok()?;
+            tail[..silence_len].fill(0);
+            out_len += silence_len;
+        }
         Some(ReverseAudio::Speech {
             samples: &self.resample_buf[..out_len],
             enter_silence: has_g729_sid,
@@ -351,13 +354,29 @@ async fn bridge_forward_loop<S>(
 
 /// Discard stale RTP samples already buffered in a receiver track (e.g. 183
 /// early-media ringtone or pre-bridge IVR/hold audio sitting in `rustrtc`'s
-/// 64-slot ring) so the live consumer starts at current audio.
-fn drain_audio_track(track: &dyn rustrtc::media::MediaStreamTrack) -> usize {
+/// 64-slot ring). Retain a G.729 DTX signal until a later audio packet clears it.
+fn drain_audio_track(
+    track: &dyn rustrtc::media::MediaStreamTrack,
+    decoder: &BridgeReverseDecoder,
+) -> (usize, bool) {
+    use rustrtc::media::MediaSample;
+
     let mut drained = 0usize;
-    while let Some(Ok(_)) = track.recv().now_or_never() {
+    let mut in_dtx = false;
+    while let Some(Ok(sample)) = track.recv().now_or_never() {
         drained += 1;
+        if let MediaSample::Audio(frame) = sample
+            && !frame.data.is_empty()
+            && let Some(codec) = frame.payload_type.and_then(|pt| decoder.resolve_codec(pt))
+        {
+            let is_g729 = codec == audio_codec::CodecType::G729;
+            let has_sid = is_g729 && codec.is_silence_frame(&frame.data);
+            if has_sid || !is_g729 || frame.data.len() >= 10 {
+                in_dtx = has_sid;
+            }
+        }
     }
-    drained
+    (drained, in_dtx)
 }
 
 /// Raw return-app specification extracted from a transfer target's query
@@ -3942,7 +3961,7 @@ impl SipSession {
                     }
                 };
 
-                let drained = drain_audio_track(track.as_ref());
+                let (drained, mut in_dtx) = drain_audio_track(track.as_ref(), &reverse_decoder);
                 if drained > 0 {
                     tracing::debug!(
                         session_id = %session_id,
@@ -3956,7 +3975,6 @@ impl SipSession {
                 let silence_frame = bytes::Bytes::from(vec![0u8; frame_samples * 2]);
                 let mut silence_interval = tokio::time::interval(Duration::from_millis(20));
                 silence_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let mut in_dtx = false;
 
                 loop {
                     let outbound = tokio::select! {
@@ -3975,24 +3993,12 @@ impl SipSession {
                                 .and_then(|pt| reverse_decoder.decode(pt, &frame.data))
                             {
                                 Some(ReverseAudio::Speech { samples, enter_silence }) => {
-                                    let bytes: bytes::Bytes =
-                                        if enter_silence && samples.len() < frame_samples {
-                                            // 12-byte G.729 (10 ms speech + 2 B SID): pad to 20 ms.
-                                            let mut padded = vec![0i16; frame_samples];
-                                            padded[..samples.len()].copy_from_slice(samples);
-                                            bytes::Bytes::from(
-                                                bytemuck::cast_slice::<i16, u8>(&padded).to_vec(),
-                                            )
-                                        } else {
-                                            bytes::Bytes::from(
-                                                bytemuck::cast_slice::<i16, u8>(samples).to_vec(),
-                                            )
-                                        };
+                                    let bytes = bytemuck::cast_slice::<i16, u8>(samples).to_vec();
                                     in_dtx = enter_silence;
                                     if in_dtx {
                                         silence_interval.reset();
                                     }
-                                    Some((Message::Binary(bytes), "Bridge reverse audio write failed"))
+                                    Some((Message::Binary(bytes.into()), "Bridge reverse audio write failed"))
                                 }
                                 Some(ReverseAudio::Silence) => {
                                     if !in_dtx {
@@ -5321,7 +5327,8 @@ mod tests {
         use rustrtc::media::track::sample_track;
 
         let (source, track, _fb) = sample_track(MediaKind::Audio, 64);
-        assert_eq!(drain_audio_track(track.as_ref()), 0);
+        let decoder = BridgeReverseDecoder::new(None, BTreeMap::new(), 16_000);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (0, false));
 
         for seq in 0u16..10 {
             source
@@ -5333,8 +5340,8 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(drain_audio_track(track.as_ref()), 10);
-        assert_eq!(drain_audio_track(track.as_ref()), 0);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (10, false));
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (0, false));
 
         source
             .send_audio(AudioFrame {
@@ -5350,7 +5357,45 @@ mod tests {
         assert_eq!(frame.sequence_number, Some(10));
 
         drop(source);
-        assert_eq!(drain_audio_track(track.as_ref()), 0);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (0, false));
+    }
+
+    #[tokio::test]
+    async fn test_voip_bridge_drain_retains_queued_g729_sid() {
+        use rustrtc::media::frame::{AudioFrame, MediaKind};
+        use rustrtc::media::track::sample_track;
+
+        let (source, track, _fb) = sample_track(MediaKind::Audio, 64);
+        let decoder = BridgeReverseDecoder::new(
+            Some((96, audio_codec::CodecType::G729)),
+            BTreeMap::new(),
+            16_000,
+        );
+        let queue_audio = |pt, data: &'static [u8]| {
+            source
+                .send_audio(AudioFrame {
+                    payload_type: Some(pt),
+                    data: bytes::Bytes::from_static(data),
+                    ..Default::default()
+                })
+                .unwrap();
+        };
+
+        queue_audio(96, &[0; 20]);
+        queue_audio(96, &[0x12, 0x34]);
+        queue_audio(102, &[1, 0x0a, 0, 160]);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (3, true));
+
+        queue_audio(96, &[0x12, 0x34]);
+        queue_audio(96, &[0; 20]);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (2, false));
+
+        queue_audio(96, &[0; 22]);
+        queue_audio(0, &[0x7f; 160]);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (2, false));
+
+        queue_audio(96, &[0; 22]);
+        assert_eq!(drain_audio_track(track.as_ref(), &decoder), (1, true));
     }
 
     #[test]
@@ -5376,18 +5421,27 @@ mod tests {
         let sid = [0x12u8, 0x34u8];
         assert_eq!(decoder.decode(18, &sid), Some(ReverseAudio::Silence));
 
-        // 12-byte G.729 (10 B speech + 2 B SID) yields 10 ms speech + enter_silence.
+        // The mixed packet preserves the SID's 10 ms as zeros.
         let mut speech_10ms_plus_sid = g729_20ms[..10].to_vec();
         speech_10ms_plus_sid.extend_from_slice(&sid);
         let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &speech_10ms_plus_sid));
-        assert_eq!(samples.len(), 160);
+        assert_eq!(samples.len(), 320);
+        assert_eq!(&samples[160..], &[0; 160]);
         assert!(enter_silence);
 
-        // 22-byte G.729 (20 B speech + 2 B SID) yields 20 ms speech + enter_silence.
         let mut speech_20ms_plus_sid = g729_20ms.clone();
         speech_20ms_plus_sid.extend_from_slice(&sid);
         let (samples, enter_silence) = unwrap_speech(decoder.decode(18, &speech_20ms_plus_sid));
-        assert_eq!(samples.len(), 320);
+        assert_eq!(samples.len(), 480);
+        assert_eq!(&samples[320..], &[0; 160]);
+        assert!(enter_silence);
+
+        // At 22,050 Hz the first 10 ms SID spans 221 samples on the FIR grid.
+        let mut fractional_rate_decoder = BridgeReverseDecoder::new(None, BTreeMap::new(), 22_050);
+        let (samples, enter_silence) =
+            unwrap_speech(fractional_rate_decoder.decode(18, &speech_20ms_plus_sid));
+        assert_eq!(samples.len(), 662);
+        assert_eq!(&samples[441..], &[0; 221]);
         assert!(enter_silence);
 
         // RFC 3389 PT 13 CN and Opus 1-byte TOC DTX both return Silence.
